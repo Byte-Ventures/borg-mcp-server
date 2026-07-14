@@ -25,7 +25,8 @@
     "check": "npm run typecheck && npm test && npm run build",
     "test": "vitest run",
     "test:watch": "vitest",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "verify:artifact": "node scripts/verify-packed-artifact.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.20.1",

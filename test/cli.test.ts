@@ -33,10 +33,10 @@ describe("runCli", () => {
   it("delegates explicit start to the service boundary", async () => {
     const service: ServerService = { start: vi.fn().mockResolvedValue(undefined) };
 
-    const exitCode = await runCli(["start"], service, createIo());
+    const exitCode = await runCli(["start", "--lan"], service, createIo());
 
     expect(exitCode).toBe(0);
-    expect(service.start).toHaveBeenCalledOnce();
+    expect(service.start).toHaveBeenCalledWith(["--lan"]);
   });
 
   it("prints help without starting the service", async () => {

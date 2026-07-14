@@ -1,0 +1,249 @@
+import type { IncomingMessage, ServerResponse } from "node:http";
+import { createServer, type Server as HttpsServer } from "node:https";
+import type { AddressInfo } from "node:net";
+import { X509Certificate } from "node:crypto";
+
+import { resolveBindOptions, type BindOptionsInput } from "./network-policy.js";
+
+export interface ProtocolInfoDocument {
+  readonly protocol_version: string;
+  readonly package: {
+    readonly name: "@borgmcp/shared";
+    readonly version: string;
+  };
+  readonly capabilities: readonly string[];
+  readonly limits: {
+    readonly max_request_bytes: number;
+    readonly max_log_message_bytes: number;
+    readonly max_read_page_size: number;
+    readonly max_replay_page_size: number;
+  };
+}
+
+export interface ServiceLimits {
+  readonly maxConnections: number;
+  readonly maxHeaderBytes: number;
+  readonly maxRequestBodyBytes: number;
+  readonly maxRequestsPerSocket: number;
+  readonly requestTimeoutMs: number;
+  readonly headersTimeoutMs: number;
+  readonly keepAliveTimeoutMs: number;
+}
+
+export const DEFAULT_SERVICE_LIMITS: ServiceLimits = {
+  maxConnections: 100,
+  maxHeaderBytes: 16_384,
+  maxRequestBodyBytes: 65_536,
+  maxRequestsPerSocket: 100,
+  requestTimeoutMs: 15_000,
+  headersTimeoutMs: 10_000,
+  keepAliveTimeoutMs: 5_000,
+};
+
+export interface HttpsServerOptions {
+  readonly bind?: BindOptionsInput;
+  readonly tls: {
+    readonly key: string | Buffer;
+    readonly cert: string | Buffer;
+  };
+  readonly protocolInfo: ProtocolInfoDocument;
+  readonly authorizeProtocol: (authorization: string | undefined) => Promise<boolean>;
+  readonly limits?: ServiceLimits;
+}
+
+export interface RunningServer {
+  readonly origin: string;
+  readonly limits: ServiceLimits;
+  readonly close: () => Promise<void>;
+}
+
+export async function startHttpsServer(options: HttpsServerOptions): Promise<RunningServer> {
+  const bind = resolveBindOptions(options.bind ?? {});
+  const limits = options.limits ?? DEFAULT_SERVICE_LIMITS;
+  validateLimits(limits);
+  validateTlsCertificate(options.tls.cert, bind.host);
+
+  const server = createServer(
+    {
+      key: options.tls.key,
+      cert: options.tls.cert,
+      minVersion: "TLSv1.3",
+      maxHeaderSize: limits.maxHeaderBytes,
+      requestTimeout: limits.requestTimeoutMs,
+      headersTimeout: limits.headersTimeoutMs,
+      keepAliveTimeout: limits.keepAliveTimeoutMs,
+    },
+    (request, response) => {
+      void handleRequest(request, response, options, limits).catch(() => {
+        sendEmpty(response, 500, true);
+      });
+    },
+  );
+
+  applyServerLimits(server, limits);
+  server.on("secureConnection", (socket) => socket.disableRenegotiation());
+  server.on("tlsClientError", (_error, socket) => socket.destroy());
+  server.on("clientError", (_error, socket) => socket.end("HTTP/1.1 400 Bad Request\r\n\r\n"));
+  server.on("checkContinue", (_request, response) => sendEmpty(response, 417, true));
+
+  await listen(server, bind.port, bind.host);
+  const address = server.address() as AddressInfo;
+  const displayHost = address.family === "IPv6" ? `[${address.address}]` : address.address;
+
+  return {
+    origin: `https://${displayHost}:${address.port}`,
+    limits,
+    close: () => close(server),
+  };
+}
+
+async function handleRequest(
+  request: IncomingMessage,
+  response: ServerResponse,
+  options: HttpsServerOptions,
+  limits: ServiceLimits,
+): Promise<void> {
+  if (request.headers.origin !== undefined) {
+    request.resume();
+    sendEmpty(response, 403, true);
+    return;
+  }
+
+  const bodyStatus = await consumeRequestBody(request, limits.maxRequestBodyBytes);
+  if (bodyStatus !== "empty") {
+    sendEmpty(response, bodyStatus === "oversized" ? 413 : 400, true);
+    return;
+  }
+
+  const path = parseRequestPath(request.url);
+
+  if (path === "/healthz") {
+    sendEmpty(response, request.method === "GET" ? 204 : 405);
+    return;
+  }
+
+  if (path === "/api/protocol") {
+    const authorized = await options.authorizeProtocol(request.headers.authorization);
+    if (!authorized) {
+      sendEmpty(response, 401);
+      return;
+    }
+    if (request.method !== "GET") {
+      sendEmpty(response, 405);
+      return;
+    }
+    sendJson(response, 200, options.protocolInfo);
+    return;
+  }
+
+  sendEmpty(response, 404);
+}
+
+async function consumeRequestBody(
+  request: IncomingMessage,
+  maxBytes: number,
+): Promise<"empty" | "present" | "oversized"> {
+  const declaredLength = request.headers["content-length"];
+  if (declaredLength !== undefined) {
+    if (!/^\d+$/u.test(declaredLength)) {
+      request.resume();
+      return "present";
+    }
+    if (Number(declaredLength) > maxBytes) {
+      request.resume();
+      return "oversized";
+    }
+  }
+
+  let bytes = 0;
+  for await (const chunk of request) {
+    bytes += Buffer.byteLength(chunk);
+    if (bytes > maxBytes) {
+      request.resume();
+      return "oversized";
+    }
+  }
+  return bytes === 0 ? "empty" : "present";
+}
+
+function parseRequestPath(value: string | undefined): string | null {
+  if (value === undefined || !value.startsWith("/") || value.startsWith("//")) return null;
+  try {
+    return new URL(value, "https://local.invalid").pathname;
+  } catch {
+    return null;
+  }
+}
+
+function sendEmpty(response: ServerResponse, status: number, closeConnection = false): void {
+  if (response.headersSent || response.destroyed) return;
+  response.writeHead(status, {
+    "cache-control": "no-store",
+    ...(closeConnection ? { connection: "close" } : {}),
+    "content-length": "0",
+  });
+  response.end();
+}
+
+function sendJson(response: ServerResponse, status: number, value: unknown): void {
+  const body = JSON.stringify(value);
+  response.writeHead(status, {
+    "cache-control": "no-store",
+    "content-length": Buffer.byteLength(body).toString(),
+    "content-type": "application/json; charset=utf-8",
+    "x-content-type-options": "nosniff",
+  });
+  response.end(body);
+}
+
+function applyServerLimits(server: HttpsServer, limits: ServiceLimits): void {
+  server.maxConnections = limits.maxConnections;
+  server.maxRequestsPerSocket = limits.maxRequestsPerSocket;
+  server.requestTimeout = limits.requestTimeoutMs;
+  server.headersTimeout = limits.headersTimeoutMs;
+  server.keepAliveTimeout = limits.keepAliveTimeoutMs;
+}
+
+function validateLimits(limits: ServiceLimits): void {
+  for (const [name, value] of Object.entries(limits)) {
+    if (!Number.isSafeInteger(value) || value <= 0) {
+      throw new Error(`${name} must be a positive safe integer.`);
+    }
+  }
+  if (limits.headersTimeoutMs > limits.requestTimeoutMs) {
+    throw new Error("headersTimeoutMs must not exceed requestTimeoutMs.");
+  }
+}
+
+function validateTlsCertificate(certificate: string | Buffer, host: string): void {
+  const parsed = new X509Certificate(certificate);
+  if (parsed.checkIP(host) === undefined) {
+    throw new Error("TLS certificate does not cover the bind address.");
+  }
+}
+
+function listen(server: HttpsServer, port: number, host: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const onError = (error: Error): void => {
+      server.off("listening", onListening);
+      reject(error);
+    };
+    const onListening = (): void => {
+      server.off("error", onError);
+      resolve();
+    };
+    server.once("error", onError);
+    server.once("listening", onListening);
+    server.listen(port, host);
+  });
+}
+
+function close(server: HttpsServer): Promise<void> {
+  return new Promise((resolve, reject) => {
+    server.close((error) => {
+      if (error !== undefined) reject(error);
+      else resolve();
+    });
+    server.closeAllConnections();
+  });
+}

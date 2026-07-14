@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { runCli } from "./cli.js";
-import { foundationService } from "./service.js";
+import { nodeServerService } from "./service.js";
 
 const io = {
   stdout: (message: string): void => console.log(message),
@@ -9,7 +9,7 @@ const io = {
 };
 
 try {
-  process.exitCode = await runCli(process.argv.slice(2), foundationService, io);
+  process.exitCode = await runCli(process.argv.slice(2), nodeServerService, io);
 } catch {
   io.stderr("Server command failed.");
   process.exitCode = 1;

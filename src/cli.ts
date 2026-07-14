@@ -5,12 +5,20 @@ export interface CliIo {
   readonly stderr: (message: string) => void;
 }
 
-const usage = `Usage: borg-mcp-server <command>
+const usage = `Usage: borg-mcp-server <command> [options]
 
 Commands:
   setup    Prepare an offline server installation
   start    Start the server process
-  help     Show this help`;
+  help     Show this help
+
+Start options:
+  --host <ip>      Explicit bind address (default: 127.0.0.1)
+  --port <number>  Listen port (default: 7443)
+  --lan            Consent to this start on a private LAN address
+
+TLS files:
+  BORG_SERVER_TLS_KEY_FILE and BORG_SERVER_TLS_CERT_FILE`;
 
 export async function runCli(
   args: readonly string[],
@@ -19,7 +27,7 @@ export async function runCli(
 ): Promise<number> {
   const [command, ...extraArgs] = args;
 
-  if (extraArgs.length > 0) {
+  if (command !== "start" && extraArgs.length > 0) {
     io.stderr("This command does not accept arguments yet.");
     return 1;
   }
@@ -31,7 +39,7 @@ export async function runCli(
       );
       return 1;
     case "start":
-      await service.start();
+      await service.start(extraArgs);
       return 0;
     case "help":
     case "--help":

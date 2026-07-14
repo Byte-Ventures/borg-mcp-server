@@ -5,6 +5,9 @@ export function isExactVersion(value) {
 }
 
 function packageNameFromLockPath(path, lockName) {
+  if (path.includes('\\') || path.startsWith('/') || /^[A-Za-z]:/u.test(path)) {
+    throw new Error(`Invalid ${lockName} package path: ${path}`);
+  }
   const segments = path.split('/');
   let packageName = '';
   for (let index = 0; index < segments.length;) {
@@ -13,15 +16,24 @@ function packageNameFromLockPath(path, lockName) {
     if (!first) throw new Error(`Invalid ${lockName} package path: ${path}`);
     if (first.startsWith('@')) {
       const second = segments[index + 2];
-      if (!second) throw new Error(`Invalid ${lockName} package path: ${path}`);
+      if (!isCanonicalNameComponent(first.slice(1), true) || !isCanonicalNameComponent(second, true)) {
+        throw new Error(`Invalid ${lockName} package path: ${path}`);
+      }
       packageName = `${first}/${second}`;
       index += 3;
     } else {
+      if (!isCanonicalNameComponent(first, false)) throw new Error(`Invalid ${lockName} package path: ${path}`);
       packageName = first;
       index += 2;
     }
+    if (packageName.length > 214) throw new Error(`Invalid ${lockName} package path: ${path}`);
   }
   return packageName;
+}
+
+function isCanonicalNameComponent(value, scoped) {
+  return typeof value === 'string' && value !== '.' && value !== '..' &&
+    /^[a-z0-9._~-]+$/u.test(value) && (scoped || !/^[._]/u.test(value));
 }
 
 function canonicalRegistryTarball(name, version) {

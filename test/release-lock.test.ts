@@ -63,6 +63,40 @@ describe("release source lock", () => {
     );
   });
 
+  it.each([
+    "node_modules/../node_modules/evil",
+    "node_modules/./node_modules/evil",
+    "node_modules/@../x/node_modules/evil",
+    "node_modules/@scope/../node_modules/evil",
+    "node_modules//evil",
+    "node_modules\\evil",
+    "/node_modules/evil",
+    "C:/node_modules/evil",
+    "node_modules/@scope",
+  ])("rejects malformed or traversing package path %s", async (path) => {
+    const { manifest, lockfile } = fixture();
+    lockfile.packages[path] = {
+      version: "1.0.0",
+      resolved: "https://registry.npmjs.org/evil/-/evil-1.0.0.tgz",
+      integrity: VALID_INTEGRITY,
+    };
+
+    await expect(verifyLockfile(manifest, lockfile, sourceOptions(vi.fn()))).rejects.toThrow(
+      `Invalid package-lock.json package path: ${path}`,
+    );
+  });
+
+  it("accepts repeated valid nested scoped and unscoped package paths", async () => {
+    const { manifest, lockfile } = fixture();
+    lockfile.packages["node_modules/@scope/parent/node_modules/child/node_modules/trusted"] = {
+      ...lockfile.packages["node_modules/trusted"],
+    };
+    const fetchImpl = officialFetch("trusted", "1.0.0", VALID_INTEGRITY);
+
+    await expect(verifyLockfile(manifest, lockfile, sourceOptions(fetchImpl))).resolves.toBeUndefined();
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
   it("rejects lock metadata that differs from the official registry", async () => {
     const { manifest, lockfile } = fixture();
     const fetchImpl = officialFetch("other", "1.0.0", VALID_INTEGRITY);

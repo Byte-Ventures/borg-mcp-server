@@ -26,6 +26,7 @@ export async function exercisePackedArtifact(tarballPath, options = {}) {
     })}\n`);
     await execute('npm', [
       'install', '--prefix', localPrefix, '--ignore-scripts', '--omit=dev', '--no-audit', '--no-fund',
+      '--registry=https://registry.npmjs.org',
     ]);
     await writeFile(join(localPrefix, 'probe.mjs'), 'await import("borgmcp-server");\n');
     await execute('node', ['probe.mjs'], { cwd: localPrefix });
@@ -42,7 +43,8 @@ export async function exercisePackedArtifact(tarballPath, options = {}) {
     await execute('npm', ['ls', '--prefix', localPrefix, '--omit=dev', '--all']);
 
     await execute('npm', [
-      'install', '--global', '--prefix', globalPrefix, '--ignore-scripts', '--omit=dev', '--no-audit', '--no-fund', tarball,
+      'install', '--global', '--prefix', globalPrefix, '--ignore-scripts', '--omit=dev', '--no-audit', '--no-fund',
+      '--registry=https://registry.npmjs.org', tarball,
     ]);
     const globalHelp = await execute(join(globalPrefix, 'bin', 'borg-mcp-server'), ['--help']);
     if (!globalHelp.stdout.includes('Usage: borg-mcp-server')) throw new Error('Packaged global bin did not return help.');

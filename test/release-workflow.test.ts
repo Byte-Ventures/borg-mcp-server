@@ -38,7 +38,10 @@ describe("server release lane", () => {
     expect(dependencyInstall).toBeGreaterThan(sourceLockVerification);
     expect(workflow).toContain("npm publish \"./release/${{ needs.verify.outputs.tarball }}\"");
     expect(workflow.match(/npm publish \"\.\/release\//g)).toHaveLength(2);
+    expect(verification).not.toContain("NODE_AUTH_TOKEN");
     expect(workflow.match(/NODE_AUTH_TOKEN/g)).toHaveLength(1);
+    expect(publication).toContain("NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}");
+    expect(workflow).not.toContain("registry-url:");
     expect(workflow).not.toContain("npm install --global");
     expect(workflow).not.toMatch(/uses: [^\n]+@(v|main|master)\b/u);
     for (const job of [verification, publication]) {
@@ -55,8 +58,10 @@ describe("server release lane", () => {
       expect(job.slice(bootstrap, job.indexOf("\n", bootstrap))).toContain(
         "--registry=https://registry.npmjs.org npm@11.18.0",
       );
-      expect(job).toContain('npm_config_userconfig="${bootstrap_config}/user.npmrc"');
-      expect(job).toContain('npm_config_globalconfig="${bootstrap_config}/global.npmrc"');
+      expect(job).toContain('NPM_CONFIG_USERCONFIG="${bootstrap_config}/user.npmrc"');
+      expect(job).toContain('NPM_CONFIG_GLOBALCONFIG="${bootstrap_config}/global.npmrc"');
+      expect(job).toContain('"NPM_CONFIG_USERCONFIG=${NPM_CONFIG_USERCONFIG}"');
+      expect(job).toContain('"NPM_CONFIG_REGISTRY=${NPM_CONFIG_REGISTRY}" >> "${GITHUB_ENV}"');
       expect(job).toContain('config get registry)" = "https://registry.npmjs.org/"');
     }
   });
@@ -81,7 +86,7 @@ describe("server release lane", () => {
     await expect(execute("bash", ["-c", guard!], { env: environment })).rejects.toBeDefined();
   });
 
-  it("rejects repository npm config before setup-generated config", async () => {
+  it("rejects hostile source config and keeps trusted bootstrap config outside the workspace", async () => {
     const workflow = await readFile(".github/workflows/release.yml", "utf8");
     const guard = workflow.match(/test ! -e \.npmrc/u)?.[0];
     expect(guard).toBeDefined();
@@ -96,10 +101,20 @@ describe("server release lane", () => {
       await expect(access(marker)).rejects.toBeDefined();
 
       await rm(join(directory, ".npmrc"));
-      await expect(execute("bash", ["-c", `set -e\n${guard}\nprintf generated > .npmrc`], {
+      await expect(execute("bash", ["-c", [
+        "set -e",
+        guard,
+        'mkdir -p "${RUNNER_TEMP}/config"',
+        'printf trusted > "${RUNNER_TEMP}/config/user.npmrc"',
+        "test ! -e .npmrc",
+        "printf reached > bootstrap-reached",
+      ].join("\n")], {
         cwd: directory,
+        env: { ...process.env, RUNNER_TEMP: join(directory, "runner") },
       })).resolves.toBeDefined();
-      await expect(readFile(join(directory, ".npmrc"), "utf8")).resolves.toBe("generated");
+      await expect(access(join(directory, ".npmrc"))).rejects.toBeDefined();
+      await expect(readFile(join(directory, "runner", "config", "user.npmrc"), "utf8")).resolves.toBe("trusted");
+      await expect(readFile(marker, "utf8")).resolves.toBe("reached");
     } finally {
       await rm(directory, { recursive: true, force: true });
     }

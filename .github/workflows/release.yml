@@ -41,7 +41,6 @@ jobs:
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22.22.2
-          registry-url: https://registry.npmjs.org
 
       - name: Set up exact npm without mutating the runner installation
         shell: bash
@@ -52,15 +51,20 @@ jobs:
           mkdir "${bootstrap_config}"
           : > "${bootstrap_config}/user.npmrc"
           : > "${bootstrap_config}/global.npmrc"
-          export npm_config_userconfig="${bootstrap_config}/user.npmrc"
-          export npm_config_globalconfig="${bootstrap_config}/global.npmrc"
-          export npm_config_cache="${RUNNER_TEMP}/npm-bootstrap-cache"
-          export npm_config_registry="https://registry.npmjs.org/"
+          export NPM_CONFIG_USERCONFIG="${bootstrap_config}/user.npmrc"
+          export NPM_CONFIG_GLOBALCONFIG="${bootstrap_config}/global.npmrc"
+          export NPM_CONFIG_CACHE="${RUNNER_TEMP}/npm-bootstrap-cache"
+          export NPM_CONFIG_REGISTRY="https://registry.npmjs.org/"
           cd "${RUNNER_TEMP}"
           npm install --prefix "${npm_prefix}" --ignore-scripts --no-save --registry=https://registry.npmjs.org npm@11.18.0
           test "$("${npm_prefix}/node_modules/.bin/npm" --version)" = "11.18.0"
           test "$("${npm_prefix}/node_modules/.bin/npm" config get registry)" = "https://registry.npmjs.org/"
           echo "${npm_prefix}/node_modules/.bin" >> "${GITHUB_PATH}"
+          printf '%s\n' \
+            "NPM_CONFIG_USERCONFIG=${NPM_CONFIG_USERCONFIG}" \
+            "NPM_CONFIG_GLOBALCONFIG=${NPM_CONFIG_GLOBALCONFIG}" \
+            "NPM_CONFIG_CACHE=${NPM_CONFIG_CACHE}" \
+            "NPM_CONFIG_REGISTRY=${NPM_CONFIG_REGISTRY}" >> "${GITHUB_ENV}"
 
       - name: Verify immutable release source and all external gates
         id: release
@@ -98,12 +102,12 @@ jobs:
         run: node scripts/verify-source-lock.mjs
 
       - name: Install locked dependencies without lifecycle scripts
-        run: npm ci --ignore-scripts
+        run: npm ci --ignore-scripts --registry=https://registry.npmjs.org
 
       - name: Audit production and complete dependency trees
         run: |
-          npm audit --omit=dev --audit-level=high
-          npm audit --audit-level=high
+          npm audit --omit=dev --audit-level=high --registry=https://registry.npmjs.org
+          npm audit --audit-level=high --registry=https://registry.npmjs.org
 
       - name: Check, test, and build
         run: npm run check
@@ -127,7 +131,7 @@ jobs:
         run: node scripts/verify-packed-artifact.mjs "release/${{ steps.pack.outputs.tarball }}" > release/artifact-report.json
 
       - name: Generate dependency SBOM from the locked release tree
-        run: npm sbom --sbom-format cyclonedx > "release/borgmcp-server-${{ steps.release.outputs.version }}.cdx.json"
+        run: npm sbom --sbom-format cyclonedx --registry=https://registry.npmjs.org > "release/borgmcp-server-${{ steps.release.outputs.version }}.cdx.json"
 
       - name: Record exact artifact checksums
         working-directory: release
@@ -180,7 +184,6 @@ jobs:
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22.22.2
-          registry-url: https://registry.npmjs.org
 
       - name: Set up exact npm without mutating the runner installation
         shell: bash
@@ -191,15 +194,20 @@ jobs:
           mkdir "${bootstrap_config}"
           : > "${bootstrap_config}/user.npmrc"
           : > "${bootstrap_config}/global.npmrc"
-          export npm_config_userconfig="${bootstrap_config}/user.npmrc"
-          export npm_config_globalconfig="${bootstrap_config}/global.npmrc"
-          export npm_config_cache="${RUNNER_TEMP}/npm-bootstrap-cache"
-          export npm_config_registry="https://registry.npmjs.org/"
+          export NPM_CONFIG_USERCONFIG="${bootstrap_config}/user.npmrc"
+          export NPM_CONFIG_GLOBALCONFIG="${bootstrap_config}/global.npmrc"
+          export NPM_CONFIG_CACHE="${RUNNER_TEMP}/npm-bootstrap-cache"
+          export NPM_CONFIG_REGISTRY="https://registry.npmjs.org/"
           cd "${RUNNER_TEMP}"
           npm install --prefix "${npm_prefix}" --ignore-scripts --no-save --registry=https://registry.npmjs.org npm@11.18.0
           test "$("${npm_prefix}/node_modules/.bin/npm" --version)" = "11.18.0"
           test "$("${npm_prefix}/node_modules/.bin/npm" config get registry)" = "https://registry.npmjs.org/"
           echo "${npm_prefix}/node_modules/.bin" >> "${GITHUB_PATH}"
+          printf '%s\n' \
+            "NPM_CONFIG_USERCONFIG=${NPM_CONFIG_USERCONFIG}" \
+            "NPM_CONFIG_GLOBALCONFIG=${NPM_CONFIG_GLOBALCONFIG}" \
+            "NPM_CONFIG_CACHE=${NPM_CONFIG_CACHE}" \
+            "NPM_CONFIG_REGISTRY=${NPM_CONFIG_REGISTRY}" >> "${GITHUB_ENV}"
 
       - name: Download security-audited artifact
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
@@ -228,7 +236,17 @@ jobs:
           NPM_TOKEN_PRESENT: ${{ secrets.NPM_TOKEN != '' }}
 
       - name: Publish the exact audited tarball with provenance
-        run: npm publish "./release/${{ needs.verify.outputs.tarball }}" --ignore-scripts --access public --provenance --registry=https://registry.npmjs.org
+        shell: bash
+        run: |
+          set -euo pipefail
+          auth_config="${RUNNER_TEMP}/npm-publish-auth.npmrc"
+          trap 'rm -f "${auth_config}"' EXIT
+          : > "${auth_config}"
+          token_name="$(printf '%s_%s_%s' NODE AUTH TOKEN)"
+          if [[ -n "${!token_name}" ]]; then
+            printf '//registry.npmjs.org/:_authToken=%s\n' "${!token_name}" > "${auth_config}"
+          fi
+          NPM_CONFIG_USERCONFIG="${auth_config}" npm publish "./release/${{ needs.verify.outputs.tarball }}" --ignore-scripts --access public --provenance --registry=https://registry.npmjs.org
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
@@ -242,5 +260,5 @@ jobs:
         run: |
           set -euo pipefail
           mkdir registry-verification
-          npm install --prefix registry-verification --ignore-scripts --save-exact "borgmcp-server@${{ needs.verify.outputs.version }}"
-          npm audit signatures --prefix registry-verification
+          npm install --prefix registry-verification --ignore-scripts --save-exact --registry=https://registry.npmjs.org "borgmcp-server@${{ needs.verify.outputs.version }}"
+          npm audit signatures --prefix registry-verification --registry=https://registry.npmjs.org

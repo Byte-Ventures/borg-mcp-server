@@ -38,6 +38,22 @@ describe("packed release artifact", () => {
     ], { cwd: fixture })).resolves.toBeDefined();
   });
 
+  it("accepts the artifact with trusted npm config isolated outside the workspace", async () => {
+    const fixture = await packageFixture();
+    const configDirectory = await mkdtemp(join(tmpdir(), "borg-release-npm-config-"));
+    directories.push(configDirectory);
+    const config = join(configDirectory, "user.npmrc");
+    await writeFile(config, "registry=https://registry.npmjs.org/\n");
+    const previous = process.env["NPM_CONFIG_USERCONFIG"];
+    process.env["NPM_CONFIG_USERCONFIG"] = config;
+    try {
+      await expect(verifyPackedArtifact(await pack(fixture))).resolves.toBeDefined();
+    } finally {
+      if (previous === undefined) delete process.env["NPM_CONFIG_USERCONFIG"];
+      else process.env["NPM_CONFIG_USERCONFIG"] = previous;
+    }
+  });
+
   it("installs, imports, and executes the exact packed artifact", async () => {
     const fixture = await packageFixture();
     const npmVersion = (await execute("npm", ["--version"])).stdout.trim();

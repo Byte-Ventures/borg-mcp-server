@@ -1,9 +1,15 @@
+import { execFile } from "node:child_process";
+import { realpath } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { pathToFileURL } from "node:url";
+import { promisify } from "node:util";
 import { describe, expect, it, vi } from "vitest";
 
 import { verifyLockfile } from "../scripts/verify-lock-registry.mjs";
 
 const VALID_INTEGRITY = `sha512-${Buffer.alloc(64).toString("base64")}`;
 const OTHER_INTEGRITY = `sha512-${Buffer.alloc(64, 1).toString("base64")}`;
+const execute = promisify(execFile);
 
 describe("release source lock", () => {
   it("binds every canonical entry to official registry metadata", async () => {
@@ -73,6 +79,8 @@ describe("release source lock", () => {
     "/node_modules/evil",
     "C:/node_modules/evil",
     "node_modules/@scope",
+    "node_modules/@scope/.pkg",
+    "node_modules/@scope/..pkg",
   ])("rejects malformed or traversing package path %s", async (path) => {
     const { manifest, lockfile } = fixture();
     lockfile.packages[path] = {
@@ -95,6 +103,31 @@ describe("release source lock", () => {
 
     await expect(verifyLockfile(manifest, lockfile, sourceOptions(fetchImpl))).resolves.toBeUndefined();
     expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    "node_modules/@.scope/pkg/node_modules/trusted",
+    "node_modules/@scope/_pkg/node_modules/trusted",
+  ])("preserves npm-valid scoped ancestor path %s", async (path) => {
+    const { manifest, lockfile } = fixture();
+    lockfile.packages[path] = { ...lockfile.packages["node_modules/trusted"] };
+    const fetchImpl = officialFetch("trusted", "1.0.0", VALID_INTEGRITY);
+
+    await expect(verifyLockfile(manifest, lockfile, sourceOptions(fetchImpl))).resolves.toBeUndefined();
+  });
+
+  it("matches the active npm validate-npm-package-name scoped-prefix semantics", async () => {
+    const npmCommand = (await execute("sh", ["-c", "command -v npm"])).stdout.trim();
+    const npmCli = await realpath(npmCommand);
+    const validatorPath = join(dirname(npmCli), "..", "node_modules", "validate-npm-package-name", "lib", "index.js");
+    const validatorModule = await import(pathToFileURL(validatorPath).href) as {
+      default: (name: string) => { readonly validForNewPackages: boolean };
+    };
+
+    expect(validatorModule.default("@scope/.pkg").validForNewPackages).toBe(false);
+    expect(validatorModule.default("@scope/..pkg").validForNewPackages).toBe(false);
+    expect(validatorModule.default("@.scope/pkg").validForNewPackages).toBe(true);
+    expect(validatorModule.default("@scope/_pkg").validForNewPackages).toBe(true);
   });
 
   it("rejects lock metadata that differs from the official registry", async () => {

@@ -16,13 +16,16 @@ function packageNameFromLockPath(path, lockName) {
     if (!first) throw new Error(`Invalid ${lockName} package path: ${path}`);
     if (first.startsWith('@')) {
       const second = segments[index + 2];
-      if (!isCanonicalNameComponent(first.slice(1), true) || !isCanonicalNameComponent(second, true)) {
+      if (!isCanonicalNameComponent(first.slice(1), 'scope') ||
+          !isCanonicalNameComponent(second, 'scoped-package')) {
         throw new Error(`Invalid ${lockName} package path: ${path}`);
       }
       packageName = `${first}/${second}`;
       index += 3;
     } else {
-      if (!isCanonicalNameComponent(first, false)) throw new Error(`Invalid ${lockName} package path: ${path}`);
+      if (!isCanonicalNameComponent(first, 'unscoped-package')) {
+        throw new Error(`Invalid ${lockName} package path: ${path}`);
+      }
       packageName = first;
       index += 2;
     }
@@ -31,9 +34,10 @@ function packageNameFromLockPath(path, lockName) {
   return packageName;
 }
 
-function isCanonicalNameComponent(value, scoped) {
+function isCanonicalNameComponent(value, kind) {
   return typeof value === 'string' && value !== '.' && value !== '..' &&
-    /^[a-z0-9._~-]+$/u.test(value) && (scoped || !/^[._]/u.test(value));
+    /^[a-z0-9._~-]+$/u.test(value) &&
+    (kind === 'scope' || (kind === 'scoped-package' ? !value.startsWith('.') : !/^[._]/u.test(value)));
 }
 
 function canonicalRegistryTarball(name, version) {

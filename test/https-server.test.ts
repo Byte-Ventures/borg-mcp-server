@@ -4,6 +4,7 @@ import { generate } from "selfsigned";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import {
+  createRequestHandlerContext,
   startHttpsServer,
   type ProtocolInfoDocument,
   type RunningServer,
@@ -32,6 +33,7 @@ interface TestResponse {
 
 describe("HTTPS service", () => {
   let certificate: string;
+  let key: string;
   let server: RunningServer;
 
   beforeAll(async () => {
@@ -46,9 +48,10 @@ describe("HTTPS service", () => {
       ],
     });
     certificate = material.cert;
+    key = material.private;
     server = await startHttpsServer({
       bind: { port: 0 },
-      tls: { key: material.private, cert: certificate },
+      tls: { key, cert: certificate },
       protocolInfo,
       authorizeProtocol: async (authorization) => authorization === "Bearer accepted-test-token",
       limits: {
@@ -59,6 +62,7 @@ describe("HTTPS service", () => {
         requestTimeoutMs: 2_000,
         headersTimeoutMs: 1_000,
         keepAliveTimeoutMs: 500,
+        handlerTimeoutMs: 250,
       },
     });
   });
@@ -142,29 +146,136 @@ describe("HTTPS service", () => {
       requestTimeoutMs: 2_000,
       headersTimeoutMs: 1_000,
       keepAliveTimeoutMs: 500,
+      handlerTimeoutMs: 250,
     });
+  });
+
+  it("aborts a stalled authorizer and releases the connection within the handler deadline", async () => {
+    let authorizationSignal: AbortSignal | undefined;
+    const stalled = await startHttpsServer({
+      bind: { port: 0 },
+      tls: { key, cert: certificate },
+      protocolInfo,
+      authorizeProtocol: async (_authorization, signal) => {
+        authorizationSignal = signal;
+        return new Promise<boolean>(() => undefined);
+      },
+      limits: {
+        maxConnections: 1,
+        maxHeaderBytes: 8_192,
+        maxRequestBodyBytes: 8,
+        maxRequestsPerSocket: 2,
+        requestTimeoutMs: 200,
+        headersTimeoutMs: 100,
+        keepAliveTimeoutMs: 50,
+        handlerTimeoutMs: 30,
+      },
+    });
+
+    try {
+      const startedAt = Date.now();
+      const response = await request(stalled.origin, certificate, "/api/protocol", {
+        authorization: "Bearer stalled-test-token",
+      });
+
+      expect(response).toMatchObject({ status: 503, body: "" });
+      expect(response.headers.connection).toBe("close");
+      expect(Date.now() - startedAt).toBeLessThan(500);
+      expect(authorizationSignal?.aborted).toBe(true);
+    } finally {
+      await stalled.close();
+    }
+  });
+
+  it("constructs a route context without retaining TLS material", async () => {
+    const authorizeProtocol = async (): Promise<boolean> => false;
+    const context = createRequestHandlerContext({
+      tls: { key, cert: certificate },
+      protocolInfo,
+      authorizeProtocol,
+    });
+
+    expect(context).toEqual({ protocolInfo, authorizeProtocol });
+    expect("tls" in context).toBe(false);
   });
 
   it("refuses a certificate that does not cover the bind address", async () => {
-    const material = await generate([{ name: "commonName", value: "mismatch" }], {
-      algorithm: "sha256",
-      keyType: "ec",
-      extensions: [
-        { name: "basicConstraints", cA: false, critical: true },
-        { name: "keyUsage", digitalSignature: true, keyAgreement: true, critical: true },
-        { name: "extKeyUsage", serverAuth: true },
-        { name: "subjectAltName", altNames: [{ type: 7, ip: "127.0.0.2" }] },
-      ],
-    });
+    await expectCertificateRejected(
+      await certificateMaterial({ ip: "127.0.0.2" }),
+      "TLS certificate does not cover the bind address.",
+    );
+  });
 
-    await expect(startHttpsServer({
-      bind: { port: 0 },
-      tls: { key: material.private, cert: material.cert },
-      protocolInfo,
-      authorizeProtocol: async () => false,
-    })).rejects.toThrow("TLS certificate does not cover the bind address.");
+  it("refuses expired and not-yet-valid certificates", async () => {
+    const now = Date.now();
+    await expectCertificateRejected(
+      await certificateMaterial({
+        notBeforeDate: new Date(now - 172_800_000),
+        notAfterDate: new Date(now - 86_400_000),
+      }),
+      "TLS certificate is outside its validity period.",
+    );
+    await expectCertificateRejected(
+      await certificateMaterial({
+        notBeforeDate: new Date(now + 86_400_000),
+        notAfterDate: new Date(now + 172_800_000),
+      }),
+      "TLS certificate is outside its validity period.",
+    );
+  });
+
+  it("refuses CA certificates and leaf certificates without server-auth EKU", async () => {
+    await expectCertificateRejected(
+      await certificateMaterial({ ca: true }),
+      "TLS certificate must be a non-CA leaf certificate.",
+    );
+    await expectCertificateRejected(
+      await certificateMaterial({ serverAuth: false }),
+      "TLS certificate does not permit server authentication.",
+    );
   });
 });
+
+interface CertificateOptions {
+  readonly ip?: string;
+  readonly ca?: boolean;
+  readonly serverAuth?: boolean;
+  readonly notBeforeDate?: Date;
+  readonly notAfterDate?: Date;
+}
+
+async function certificateMaterial(options: CertificateOptions = {}) {
+  const ca = options.ca ?? false;
+  const serverAuth = options.serverAuth ?? true;
+  return generate([{ name: "commonName", value: "test-server" }], {
+    algorithm: "sha256",
+    keyType: "ec",
+    ...(options.notBeforeDate === undefined ? {} : { notBeforeDate: options.notBeforeDate }),
+    ...(options.notAfterDate === undefined ? {} : { notAfterDate: options.notAfterDate }),
+    extensions: [
+      { name: "basicConstraints", cA: ca, critical: true },
+      ca
+        ? { name: "keyUsage", digitalSignature: true, keyCertSign: true, critical: true }
+        : { name: "keyUsage", digitalSignature: true, keyAgreement: true, critical: true },
+      serverAuth
+        ? { name: "extKeyUsage", serverAuth: true }
+        : { name: "extKeyUsage", clientAuth: true },
+      { name: "subjectAltName", altNames: [{ type: 7, ip: options.ip ?? "127.0.0.1" }] },
+    ],
+  });
+}
+
+async function expectCertificateRejected(
+  material: Awaited<ReturnType<typeof generate>>,
+  message: string,
+): Promise<void> {
+  await expect(startHttpsServer({
+    bind: { port: 0 },
+    tls: { key: material.private, cert: material.cert },
+    protocolInfo,
+    authorizeProtocol: async () => false,
+  })).rejects.toThrow(message);
+}
 
 function request(
   origin: string,

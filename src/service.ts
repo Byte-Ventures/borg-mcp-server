@@ -36,17 +36,20 @@ export function createNodeServerService(dependencies: ServiceDependencies): Serv
         throw new Error("TLS key and certificate files must be configured.");
       }
 
-      const [key, cert] = await Promise.all([
-        dependencies.readFile(keyPath),
-        dependencies.readFile(certificatePath),
-      ]);
-      const running = await dependencies.startServer({
-        bind,
-        tls: { key, cert },
-        limits: DEFAULT_SERVICE_LIMITS,
-        protocolInfo: createPart2ProtocolInfo(DEFAULT_SERVICE_LIMITS),
-        authorizeProtocol: async () => false,
-      });
+      const key = await dependencies.readFile(keyPath);
+      let running: RunningServer;
+      try {
+        const cert = await dependencies.readFile(certificatePath);
+        running = await dependencies.startServer({
+          bind,
+          tls: { key, cert },
+          limits: DEFAULT_SERVICE_LIMITS,
+          protocolInfo: createPart2ProtocolInfo(DEFAULT_SERVICE_LIMITS),
+          authorizeProtocol: async () => false,
+        });
+      } finally {
+        key.fill(0);
+      }
       dependencies.onStarted(running.origin);
       await dependencies.waitForShutdown(running);
     },

@@ -6,7 +6,9 @@ import { createNodeServerService, selectServerEnvironment } from "../src/service
 describe("node server service", () => {
   it("loads configured TLS files and starts with a fail-closed protocol authorizer", async () => {
     const close = vi.fn().mockResolvedValue(undefined);
-    const readFile = vi.fn(async (path: string) => Buffer.from(path));
+    const keyBuffer = Buffer.from("test-key-material");
+    const readFile = vi.fn(async (path: string) =>
+      path.endsWith(".key") ? keyBuffer : Buffer.from("test-certificate"));
     const startServer = vi.fn(async (_options: HttpsServerOptions): Promise<RunningServer> => ({
       origin: "https://127.0.0.1:7443",
       limits: {
@@ -17,6 +19,7 @@ describe("node server service", () => {
         requestTimeoutMs: 1,
         headersTimeoutMs: 1,
         keepAliveTimeoutMs: 1,
+        handlerTimeoutMs: 1,
       },
       close,
     }));
@@ -43,9 +46,30 @@ describe("node server service", () => {
       "transport.tls",
       "authority.no-cloud-fallback",
     ]);
-    await expect(options?.authorizeProtocol("Bearer not-yet-supported")).resolves.toBe(false);
+    await expect(
+      options?.authorizeProtocol("Bearer not-yet-supported", AbortSignal.abort()),
+    ).resolves.toBe(false);
     expect(onStarted).toHaveBeenCalledWith("https://127.0.0.1:7443");
     expect(waitForShutdown).toHaveBeenCalledOnce();
+    expect(keyBuffer.every((byte) => byte === 0)).toBe(true);
+  });
+
+  it("wipes the key buffer when server startup fails", async () => {
+    const keyBuffer = Buffer.from("test-key-material");
+    const service = createNodeServerService({
+      environment: {
+        BORG_SERVER_TLS_KEY_FILE: "/private/server.key",
+        BORG_SERVER_TLS_CERT_FILE: "/private/server.crt",
+      },
+      readFile: vi.fn(async (path: string) =>
+        path.endsWith(".key") ? keyBuffer : Buffer.from("test-certificate")),
+      startServer: vi.fn().mockRejectedValue(new Error("startup failed")),
+      onStarted: vi.fn(),
+      waitForShutdown: vi.fn(),
+    });
+
+    await expect(service.start([])).rejects.toThrow("startup failed");
+    expect(keyBuffer.every((byte) => byte === 0)).toBe(true);
   });
 
   it("fails before opening a listener when TLS paths are missing", async () => {

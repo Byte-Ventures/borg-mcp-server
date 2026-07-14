@@ -28,6 +28,7 @@ export interface ServiceLimits {
   readonly requestTimeoutMs: number;
   readonly headersTimeoutMs: number;
   readonly keepAliveTimeoutMs: number;
+  readonly handlerTimeoutMs: number;
 }
 
 export const DEFAULT_SERVICE_LIMITS: ServiceLimits = {
@@ -38,7 +39,16 @@ export const DEFAULT_SERVICE_LIMITS: ServiceLimits = {
   requestTimeoutMs: 15_000,
   headersTimeoutMs: 10_000,
   keepAliveTimeoutMs: 5_000,
+  handlerTimeoutMs: 5_000,
 };
+
+export interface RequestHandlerContext {
+  readonly protocolInfo: ProtocolInfoDocument;
+  readonly authorizeProtocol: (
+    authorization: string | undefined,
+    signal: AbortSignal,
+  ) => Promise<boolean>;
+}
 
 export interface HttpsServerOptions {
   readonly bind?: BindOptionsInput;
@@ -47,7 +57,7 @@ export interface HttpsServerOptions {
     readonly cert: string | Buffer;
   };
   readonly protocolInfo: ProtocolInfoDocument;
-  readonly authorizeProtocol: (authorization: string | undefined) => Promise<boolean>;
+  readonly authorizeProtocol: RequestHandlerContext["authorizeProtocol"];
   readonly limits?: ServiceLimits;
 }
 
@@ -62,6 +72,7 @@ export async function startHttpsServer(options: HttpsServerOptions): Promise<Run
   const limits = options.limits ?? DEFAULT_SERVICE_LIMITS;
   validateLimits(limits);
   validateTlsCertificate(options.tls.cert, bind.host);
+  const handlerContext = createRequestHandlerContext(options);
 
   const server = createServer(
     {
@@ -73,11 +84,7 @@ export async function startHttpsServer(options: HttpsServerOptions): Promise<Run
       headersTimeout: limits.headersTimeoutMs,
       keepAliveTimeout: limits.keepAliveTimeoutMs,
     },
-    (request, response) => {
-      void handleRequest(request, response, options, limits).catch(() => {
-        sendEmpty(response, 500, true);
-      });
-    },
+    createRequestListener(handlerContext, limits),
   );
 
   applyServerLimits(server, limits);
@@ -97,11 +104,49 @@ export async function startHttpsServer(options: HttpsServerOptions): Promise<Run
   };
 }
 
+export function createRequestHandlerContext(
+  options: HttpsServerOptions,
+): RequestHandlerContext {
+  return Object.freeze({
+    protocolInfo: options.protocolInfo,
+    authorizeProtocol: options.authorizeProtocol,
+  });
+}
+
+function createRequestListener(
+  context: RequestHandlerContext,
+  limits: ServiceLimits,
+): (request: IncomingMessage, response: ServerResponse) => void {
+  return (request, response) => {
+    const controller = new AbortController();
+    let timer: NodeJS.Timeout | undefined;
+    const deadline = new Promise<"deadline">((resolve) => {
+      timer = setTimeout(() => {
+        controller.abort();
+        resolve("deadline");
+      }, limits.handlerTimeoutMs);
+      timer.unref();
+    });
+    const handled = handleRequest(request, response, context, limits, controller.signal)
+      .then(() => "handled" as const);
+
+    void Promise.race([handled, deadline])
+      .then((outcome) => {
+        if (outcome === "deadline") sendEmpty(response, 503, true);
+      })
+      .catch(() => sendEmpty(response, 500, true))
+      .finally(() => {
+        if (timer !== undefined) clearTimeout(timer);
+      });
+  };
+}
+
 async function handleRequest(
   request: IncomingMessage,
   response: ServerResponse,
-  options: HttpsServerOptions,
+  context: RequestHandlerContext,
   limits: ServiceLimits,
+  signal: AbortSignal,
 ): Promise<void> {
   if (request.headers.origin !== undefined) {
     request.resume();
@@ -123,7 +168,7 @@ async function handleRequest(
   }
 
   if (path === "/api/protocol") {
-    const authorized = await options.authorizeProtocol(request.headers.authorization);
+    const authorized = await context.authorizeProtocol(request.headers.authorization, signal);
     if (!authorized) {
       sendEmpty(response, 401);
       return;
@@ -132,7 +177,7 @@ async function handleRequest(
       sendEmpty(response, 405);
       return;
     }
-    sendJson(response, 200, options.protocolInfo);
+    sendJson(response, 200, context.protocolInfo);
     return;
   }
 
@@ -202,6 +247,10 @@ function applyServerLimits(server: HttpsServer, limits: ServiceLimits): void {
   server.requestTimeout = limits.requestTimeoutMs;
   server.headersTimeout = limits.headersTimeoutMs;
   server.keepAliveTimeout = limits.keepAliveTimeoutMs;
+  server.setTimeout(
+    Math.min(limits.handlerTimeoutMs * 2, 2_147_483_647),
+    (socket) => socket.destroy(),
+  );
 }
 
 function validateLimits(limits: ServiceLimits): void {
@@ -217,8 +266,19 @@ function validateLimits(limits: ServiceLimits): void {
 
 function validateTlsCertificate(certificate: string | Buffer, host: string): void {
   const parsed = new X509Certificate(certificate);
+  const now = Date.now();
+  if (now < parsed.validFromDate.getTime() || now > parsed.validToDate.getTime()) {
+    throw new Error("TLS certificate is outside its validity period.");
+  }
+  if (parsed.ca) {
+    throw new Error("TLS certificate must be a non-CA leaf certificate.");
+  }
   if (parsed.checkIP(host) === undefined) {
     throw new Error("TLS certificate does not cover the bind address.");
+  }
+  const serverAuthOid = "1.3.6.1.5.5.7.3.1";
+  if (parsed.keyUsage.length > 0 && !parsed.keyUsage.includes(serverAuthOid)) {
+    throw new Error("TLS certificate does not permit server authentication.");
   }
 }
 

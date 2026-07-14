@@ -8,7 +8,7 @@ import { resolveBindOptions, type BindOptionsInput } from "./network-policy.js";
 export interface ProtocolInfoDocument {
   readonly protocol_version: string;
   readonly package: {
-    readonly name: "@borgmcp/shared";
+    readonly name: "borgmcp-shared";
     readonly version: string;
   };
   readonly capabilities: readonly string[];

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { chmod, lstat, mkdir, open } from "node:fs/promises";
-import { dirname } from "node:path";
+import { dirname, join, parse, relative, resolve, sep } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
 import { applyMigrations } from "./migrations.js";
@@ -68,6 +68,7 @@ export interface MaintenanceStore {
     readonly cubeId: string;
     readonly access: CubeAccess;
   }) => void;
+  readonly removeClientCubeGrant: (clientId: string, cubeId: string) => void;
   readonly createRole: (input: {
     readonly id: string;
     readonly cubeId: string;
@@ -124,8 +125,8 @@ interface ScopePredicate {
 }
 
 export async function openStore(options: OpenStoreOptions): Promise<StoreRuntime> {
-  await prepareDatabasePath(options.path);
-  const database = new DatabaseSync(options.path, {
+  const databasePath = await prepareDatabasePath(options.path);
+  const database = new DatabaseSync(databasePath, {
     enableForeignKeyConstraints: true,
     enableDoubleQuotedStringLiterals: false,
   });
@@ -253,9 +254,7 @@ class SqliteScopedStore implements ScopedStore {
   #scope(access: CubeAccess): ScopePredicate {
     if (this.#principal.kind === "operator") return { sql: "1 = 1", parameters: [] };
     if (this.#principal.kind === "client") {
-      const allowed = access === "read"
-        ? ["read", "write", "manage"]
-        : access === "write" ? ["write", "manage"] : ["manage"];
+      const allowed = allowedGrantAccess(access);
       const placeholders = allowed.map(() => "?").join(", ");
       return {
         sql: `EXISTS (
@@ -272,12 +271,17 @@ class SqliteScopedStore implements ScopedStore {
       };
     }
     if (access === "manage") return { sql: "0 = 1", parameters: [] };
+    const allowed = allowedGrantAccess(access);
+    const placeholders = allowed.map(() => "?").join(", ");
     return {
       sql: `EXISTS (
         SELECT 1
         FROM drone_sessions AS authorized_session
         JOIN clients AS authorized_client
           ON authorized_client.id = authorized_session.client_id
+        JOIN client_cube_grants AS parent_grant
+          ON parent_grant.client_id = authorized_session.client_id
+          AND parent_grant.cube_id = authorized_session.cube_id
         JOIN drones AS authorized_drone
           ON authorized_drone.id = authorized_session.drone_id
           AND authorized_drone.client_id = authorized_session.client_id
@@ -291,6 +295,7 @@ class SqliteScopedStore implements ScopedStore {
           AND authorized_session.expires_at > ?
           AND authorized_client.revoked_at IS NULL
           AND authorized_drone.evicted_at IS NULL
+          AND parent_grant.access IN (${placeholders})
       )`,
       parameters: [
         this.#principal.id,
@@ -298,6 +303,7 @@ class SqliteScopedStore implements ScopedStore {
         this.#principal.cubeId,
         this.#principal.droneId,
         this.#now(),
+        ...allowed,
       ],
     };
   }
@@ -354,6 +360,14 @@ class SqliteMaintenanceStore implements MaintenanceStore {
       VALUES (?, ?, ?, ?)
       ON CONFLICT (client_id, cube_id) DO UPDATE SET access = excluded.access
     `).run(input.clientId, input.cubeId, input.access, this.#now());
+  }
+
+  removeClientCubeGrant(clientId: string, cubeId: string): void {
+    assertCanonicalUuid(clientId, "Client id");
+    assertCanonicalUuid(cubeId, "Cube id");
+    this.#database.prepare(
+      "DELETE FROM client_cube_grants WHERE client_id = ? AND cube_id = ?",
+    ).run(clientId, cubeId);
   }
 
   createRole(input: {
@@ -432,26 +446,64 @@ class SqliteMaintenanceStore implements MaintenanceStore {
   }
 }
 
-async function prepareDatabasePath(path: string): Promise<void> {
+async function prepareDatabasePath(path: string): Promise<string> {
   if (path === ":memory:") throw new Error("The server store requires a file-backed database.");
-  const directory = dirname(path);
-  await mkdir(directory, { recursive: true, mode: 0o700 });
-  const directoryMetadata = await lstat(directory);
-  if (!directoryMetadata.isDirectory() || directoryMetadata.isSymbolicLink()) {
-    throw new Error("Database directory must be a regular directory.");
-  }
+  const databasePath = resolve(path);
+  const directory = dirname(databasePath);
+  await ensureDirectoryTree(directory);
   await chmod(directory, 0o700);
   try {
-    const handle = await open(path, "ax", 0o600);
+    const handle = await open(databasePath, "ax", 0o600);
     await handle.close();
   } catch (error) {
     if (!isAlreadyExists(error)) throw error;
-    const metadata = await lstat(path);
+    const metadata = await lstat(databasePath);
     if (!metadata.isFile() || metadata.isSymbolicLink()) {
-      throw new Error("Database path must be a regular file.");
+      throw new Error("Database path must not contain symbolic links.");
     }
   }
-  await chmod(path, 0o600);
+  await assertDirectoryTreeHasNoSymlinks(directory);
+  await chmod(databasePath, 0o600);
+  return databasePath;
+}
+
+async function ensureDirectoryTree(directory: string): Promise<void> {
+  const { root } = parse(directory);
+  let current = root;
+  for (const component of relative(root, directory).split(sep).filter(Boolean)) {
+    current = join(current, component);
+    try {
+      await assertDirectoryComponent(current);
+    } catch (error) {
+      if (!isMissing(error)) throw error;
+      try {
+        await mkdir(current, { mode: 0o700 });
+      } catch (mkdirError) {
+        if (!isAlreadyExists(mkdirError)) throw mkdirError;
+      }
+      await assertDirectoryComponent(current);
+    }
+  }
+  await assertDirectoryTreeHasNoSymlinks(directory);
+}
+
+async function assertDirectoryTreeHasNoSymlinks(directory: string): Promise<void> {
+  const { root } = parse(directory);
+  let current = root;
+  for (const component of relative(root, directory).split(sep).filter(Boolean)) {
+    current = join(current, component);
+    await assertDirectoryComponent(current);
+  }
+}
+
+async function assertDirectoryComponent(path: string): Promise<void> {
+  const metadata = await lstat(path);
+  if (metadata.isSymbolicLink()) {
+    throw new Error("Database path must not contain symbolic links.");
+  }
+  if (!metadata.isDirectory()) {
+    throw new Error("Database parent path must contain only directories.");
+  }
 }
 
 function configureDatabase(database: DatabaseSync): void {
@@ -556,6 +608,12 @@ function validateName(value: string): void {
   }
 }
 
+function allowedGrantAccess(access: CubeAccess): readonly CubeAccess[] {
+  return access === "read"
+    ? ["read", "write", "manage"]
+    : access === "write" ? ["write", "manage"] : ["manage"];
+}
+
 function validateDirective(value: string): void {
   if (Buffer.byteLength(value) > 100_000) {
     throw new Error("Cube directive exceeds 100000 bytes.");
@@ -571,4 +629,8 @@ function validateTimestamp(value: string): void {
 
 function isAlreadyExists(error: unknown): boolean {
   return error instanceof Error && "code" in error && error.code === "EEXIST";
+}
+
+function isMissing(error: unknown): boolean {
+  return error instanceof Error && "code" in error && error.code === "ENOENT";
 }

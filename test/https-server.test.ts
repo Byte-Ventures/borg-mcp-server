@@ -13,7 +13,7 @@ import {
 const protocolInfo: ProtocolInfoDocument = {
   protocol_version: "1",
   package: {
-    name: "@borgmcp/shared",
+    name: "borgmcp-shared",
     version: "0.2.0-draft",
   },
   capabilities: ["transport.tls", "authority.no-cloud-fallback"],

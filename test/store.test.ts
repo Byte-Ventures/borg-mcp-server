@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -25,7 +25,7 @@ let directory: string;
 let runtime: StoreRuntime;
 
 beforeEach(async () => {
-  directory = await mkdtemp(join(tmpdir(), "borg-server-scope-"));
+  directory = await realpath(await mkdtemp(join(tmpdir(), "borg-server-scope-")));
   runtime = await openStore({
     path: join(directory, "borg.db"),
     clock: () => new Date("2026-07-14T12:00:00.000Z"),
@@ -120,6 +120,29 @@ describe("Principal to ScopedStore isolation", () => {
     const entry = drone.appendActivity(ids.cubeA, "session-scoped append");
     expect(entry.droneId).toBe(ids.droneA);
     expect(drone.readActivity(ids.cubeA, 10)).toEqual([entry]);
+  });
+
+  it("immediately constrains a live session when its parent grant is downgraded or removed", () => {
+    const drone = runtime.forPrincipal(droneSessionPrincipal({
+      id: ids.sessionA,
+      clientId: ids.clientA,
+      cubeId: ids.cubeA,
+      droneId: ids.droneA,
+    }));
+
+    runtime.maintenance.grantClientCube({
+      clientId: ids.clientA,
+      cubeId: ids.cubeA,
+      access: "read",
+    });
+    expect(drone.listCubes().map((cube) => cube.id)).toEqual([ids.cubeA]);
+    expect(() => drone.appendActivity(ids.cubeA, "must inherit read-only")).toThrowError(
+      expect.objectContaining({ code: "NOT_FOUND" }),
+    );
+
+    runtime.maintenance.removeClientCubeGrant(ids.clientA, ids.cubeA);
+    expect(drone.listCubes()).toEqual([]);
+    expect(drone.getCube(ids.cubeA)).toBeNull();
   });
 
   it("rejects read-only writes and expired drone sessions", () => {

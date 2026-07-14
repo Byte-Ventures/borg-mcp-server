@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -34,7 +34,9 @@ describe("Principal", () => {
   });
 
   it("does not accept a structurally forged operator principal", async () => {
-    const directory = await mkdtemp(join(tmpdir(), "borg-principal-forgery-"));
+    const directory = await realpath(
+      await mkdtemp(join(tmpdir(), "borg-principal-forgery-")),
+    );
     const path = join(directory, "borg.db");
     const runtime = await openStore({ path });
     try {

@@ -1,4 +1,13 @@
-import { access, mkdtemp, rm, stat, symlink, writeFile } from "node:fs/promises";
+import {
+  access,
+  mkdir,
+  mkdtemp,
+  realpath,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -99,13 +108,28 @@ describe("SQLite migrations", () => {
     await symlink(target, link);
 
     await expect(openStore({ path: link })).rejects.toThrow(
-      "Database path must be a regular file.",
+      "Database path must not contain symbolic links.",
     );
+  });
+
+  it("refuses a symbolic-link ancestor without following it", async () => {
+    const directory = await temporaryDirectory();
+    const safe = join(directory, "safe");
+    const attacker = join(directory, "attacker");
+    await mkdir(safe);
+    await mkdir(join(attacker, "nested"), { recursive: true });
+    await symlink(attacker, join(safe, "link"));
+
+    await expect(openStore({
+      path: join(safe, "link", "nested", "borg.db"),
+    })).rejects.toThrow("Database path must not contain symbolic links.");
+    await expect(access(join(attacker, "nested", "borg.db"))).rejects.toThrow();
   });
 });
 
 async function temporaryDirectory(): Promise<string> {
   const directory = await mkdtemp(join(tmpdir(), "borg-server-store-"));
-  temporaryDirectories.push(directory);
-  return directory;
+  const canonicalDirectory = await realpath(directory);
+  temporaryDirectories.push(canonicalDirectory);
+  return canonicalDirectory;
 }

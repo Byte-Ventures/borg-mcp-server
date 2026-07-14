@@ -14,6 +14,7 @@ const ALLOWED_ROOTS = new Set(['LICENSE', 'README.md', 'dist', 'npm-shrinkwrap.j
 const FORBIDDEN_HOOKS = [
   'preinstall', 'install', 'postinstall', 'prepublish', 'preprepare', 'prepare',
   'postprepare', 'prepack', 'postpack', 'prepublishOnly', 'publish', 'postpublish',
+  'dependencies',
 ];
 const FORBIDDEN_CONTENT = [
   { pattern: /-----BEGIN [A-Z ]*PRIVATE KEY-----/u, description: 'private key material' },

@@ -43,6 +43,13 @@ describe("packed release artifact", () => {
     );
   });
 
+  it("rejects the dependencies lifecycle hook", async () => {
+    const fixture = await packageFixture({ scripts: { dependencies: "node unsafe.js" } });
+    await expect(verifyPackedArtifact(await pack(fixture))).rejects.toThrow(
+      "Forbidden consumer lifecycle hook: dependencies",
+    );
+  });
+
   it("scans generated output for credential material", async () => {
     const fixture = await packageFixture();
     await writeFile(join(fixture, "dist", "leak.js"), "const key = '-----BEGIN PRIVATE KEY-----';\n");

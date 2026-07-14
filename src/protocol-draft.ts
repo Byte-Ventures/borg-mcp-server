@@ -8,6 +8,7 @@ export function createPart2ProtocolInfo(limits: ServiceLimits): ProtocolInfoDocu
       version: "0.2.0",
     },
     capabilities: [
+      "coordination.core",
       "auth.bearer",
       "auth.revocation",
       "scope.cube-isolation",

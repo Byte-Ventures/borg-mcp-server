@@ -84,6 +84,7 @@ export interface RoleRecord {
   readonly short_description: string;
   readonly is_default: boolean;
   readonly is_human_seat: boolean;
+  readonly role_class: "queen" | "worker";
   readonly created_at: string;
 }
 
@@ -129,6 +130,14 @@ export interface StoredSecretDigest extends DigestPair {
   readonly revokedAt?: string | null;
 }
 
+export interface StoredDroneSessionDigest extends StoredSecretDigest {
+  readonly sessionId: string;
+  readonly clientId: string;
+  readonly cubeId: string;
+  readonly droneId: string;
+  readonly expiresAt: string;
+}
+
 export interface CredentialStore {
   readonly createRecoveryCredential: (id: string, digest: DigestPair) => void;
   readonly findRecoveryCredential: (lookup: Buffer) => StoredSecretDigest | null;
@@ -142,6 +151,7 @@ export interface CredentialStore {
     readonly credentialDigest: DigestPair;
   }) => boolean;
   readonly findClientCredential: (lookup: Buffer) => StoredSecretDigest | null;
+  readonly findDroneSessionCredential: (lookup: Buffer) => StoredDroneSessionDigest | null;
   readonly rotateClientCredential: (input: {
     readonly clientId: string;
     readonly credentialId: string;
@@ -175,6 +185,40 @@ export interface ScopedStore {
     cubeId: string,
     listener: (entry: EnrichedActivityRecord) => void,
   ) => (() => void);
+  readonly attachSeat: (input: SeatAttachInput) => SeatAttachRecord;
+}
+
+export interface SeatAttachInput {
+  readonly cubeId: string;
+  readonly roleId: string;
+  readonly retryKey: string;
+  readonly droneId: string;
+  readonly sessionId: string;
+  readonly credentialId: string;
+  readonly credentialDigest: DigestPair;
+  readonly expiresAt: string;
+}
+
+export interface SeatAttachRecord {
+  readonly cube: {
+    readonly id: string;
+    readonly name: string;
+  };
+  readonly role: {
+    readonly id: string;
+    readonly name: string;
+    readonly role_class: "queen" | "worker";
+    readonly is_human_seat: boolean;
+  };
+  readonly drone: {
+    readonly id: string;
+    readonly label: string;
+  };
+  readonly sessionId: string;
+  readonly expiresAt: string;
+  readonly generation: number;
+  readonly reattached: boolean;
+  readonly revokedSessionIds: readonly string[];
 }
 
 export interface MaintenanceStore {
@@ -195,6 +239,8 @@ export interface MaintenanceStore {
     readonly id: string;
     readonly cubeId: string;
     readonly name: string;
+    readonly roleClass?: "queen" | "worker";
+    readonly isHumanSeat?: boolean;
   }) => void;
   readonly createDrone: (input: {
     readonly id: string;
@@ -230,6 +276,15 @@ export class CursorExpiredError extends Error {
   constructor() {
     super("The activity cursor has expired.");
     this.name = "CursorExpiredError";
+  }
+}
+
+export class AttachConflictError extends Error {
+  readonly code = "ATTACH_CONFLICT";
+
+  constructor() {
+    super("The attach request conflicts with an existing attachment.");
+    this.name = "AttachConflictError";
   }
 }
 
@@ -373,7 +428,8 @@ class SqliteScopedStore implements ScopedStore {
   listRoles(cubeId: string): RoleRecord[] {
     this.#requireCube(cubeId, "read");
     const rows = this.#database.prepare(`
-      SELECT id, cube_id, name, short_description, is_default, is_human_seat, created_at
+      SELECT id, cube_id, name, short_description, is_default, is_human_seat,
+             role_class, created_at
       FROM roles WHERE cube_id = ? ORDER BY name, id
     `).all(cubeId);
     return rows.map(roleRecord);
@@ -552,6 +608,140 @@ class SqliteScopedStore implements ScopedStore {
       SELECT id, cube_id, topic, decision, rationale, ratified_by, status, supersedes, created_at
       FROM decisions WHERE cube_id = ? AND status = 'active' ORDER BY topic, created_at, id
     `).all(cubeId).map(decisionRecord);
+  }
+
+  attachSeat(input: SeatAttachInput): SeatAttachRecord {
+    if (this.#principal.kind !== "client") throw new ScopedStoreError();
+    assertCanonicalUuid(input.cubeId, "Cube id");
+    assertCanonicalUuid(input.roleId, "Role id");
+    assertCanonicalUuid(input.retryKey, "Retry key");
+    assertCanonicalUuid(input.droneId, "Drone id");
+    assertCanonicalUuid(input.sessionId, "Drone session id");
+    assertCanonicalUuid(input.credentialId, "Drone session credential id");
+    validateDigest(input.credentialDigest);
+    validateTimestamp(input.expiresAt);
+    const scope = this.#scope("read");
+    const now = this.#now();
+    this.#database.exec("BEGIN IMMEDIATE");
+    try {
+      const roleRow = this.#database.prepare(`
+        SELECT c.id AS cube_id, c.name AS cube_name, role.id AS role_id,
+               role.name AS role_name, role.role_class, role.is_human_seat
+        FROM cubes AS c
+        JOIN roles AS role ON role.cube_id = c.id
+        WHERE c.id = ? AND role.id = ? AND ${scope.sql}
+      `).get(input.cubeId, input.roleId, ...scope.parameters);
+      if (roleRow === undefined) throw new ScopedStoreError();
+
+      const prior = this.#database.prepare(`
+        SELECT id, cube_id, role_id, label, attach_generation, evicted_at
+        FROM drones
+        WHERE client_id = ? AND retry_key = ?
+      `).get(this.#principal.id, input.retryKey);
+      let droneId: string;
+      let droneLabel: string;
+      let reattached: boolean;
+      let generation: number;
+      if (prior === undefined) {
+        droneId = input.droneId;
+        droneLabel = seatLabel(requiredText(roleRow, "role_name"), droneId);
+        this.#database.prepare(`
+          INSERT INTO drones (
+            id, cube_id, role_id, client_id, label, created_at, last_seen, retry_key,
+            attach_generation
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
+        `).run(
+          droneId,
+          input.cubeId,
+          input.roleId,
+          this.#principal.id,
+          droneLabel,
+          now,
+          now,
+          input.retryKey,
+        );
+        reattached = false;
+        generation = 1;
+      } else {
+        if (optionalText(prior, "evicted_at") != null) throw new ScopedStoreError();
+        if (requiredText(prior, "cube_id") !== input.cubeId ||
+            requiredText(prior, "role_id") !== input.roleId) {
+          throw new AttachConflictError();
+        }
+        droneId = requiredText(prior, "id");
+        droneLabel = requiredText(prior, "label");
+        generation = requiredInteger(prior, "attach_generation") + 1;
+        this.#database.prepare(`
+          UPDATE drones SET last_seen = ?, attach_generation = ? WHERE id = ?
+        `).run(now, generation, droneId);
+        reattached = true;
+      }
+
+      const oldSessions = this.#database.prepare(
+        "SELECT id FROM drone_sessions WHERE drone_id = ? AND client_id = ? AND cube_id = ?",
+      ).all(droneId, this.#principal.id, input.cubeId)
+        .map((row) => requiredText(row, "id"));
+      if (oldSessions.length > 0) {
+        const placeholders = oldSessions.map(() => "?").join(", ");
+        this.#database.prepare(`
+          UPDATE drone_session_credentials SET revoked_at = ?
+          WHERE session_id IN (${placeholders}) AND revoked_at IS NULL
+        `).run(now, ...oldSessions);
+        this.#database.prepare(`
+          UPDATE drone_sessions SET revoked_at = ?
+          WHERE id IN (${placeholders}) AND revoked_at IS NULL
+        `).run(now, ...oldSessions);
+      }
+      this.#database.prepare(`
+        INSERT INTO drone_sessions (
+          id, client_id, cube_id, drone_id, created_at, expires_at
+        ) VALUES (?, ?, ?, ?, ?, ?)
+      `).run(
+        input.sessionId,
+        this.#principal.id,
+        input.cubeId,
+        droneId,
+        now,
+        input.expiresAt,
+      );
+      this.#database.prepare(`
+        INSERT INTO drone_session_credentials (
+          id, session_id, lookup_digest, verifier_digest, created_at
+        ) VALUES (?, ?, ?, ?, ?)
+      `).run(
+        input.credentialId,
+        input.sessionId,
+        input.credentialDigest.lookup,
+        input.credentialDigest.verifier,
+        now,
+      );
+      const roleClass = requiredText(roleRow, "role_class");
+      if (roleClass !== "queen" && roleClass !== "worker") {
+        throw new Error("Database contains invalid role class.");
+      }
+      this.#database.exec("COMMIT");
+      return {
+        cube: {
+          id: requiredText(roleRow, "cube_id"),
+          name: requiredText(roleRow, "cube_name"),
+        },
+        role: {
+          id: requiredText(roleRow, "role_id"),
+          name: requiredText(roleRow, "role_name"),
+          role_class: roleClass,
+          is_human_seat: requiredInteger(roleRow, "is_human_seat") === 1,
+        },
+        drone: { id: droneId, label: droneLabel },
+        sessionId: input.sessionId,
+        expiresAt: input.expiresAt,
+        generation,
+        reattached,
+        revokedSessionIds: oldSessions,
+      };
+    } catch (error) {
+      try { this.#database.exec("ROLLBACK"); } catch { /* Preserve the original failure. */ }
+      throw error;
+    }
   }
 
   subscribeActivity(cubeId: string, listener: (entry: EnrichedActivityRecord) => void): () => void {
@@ -781,13 +971,26 @@ class SqliteMaintenanceStore implements MaintenanceStore {
     readonly id: string;
     readonly cubeId: string;
     readonly name: string;
+    readonly roleClass?: "queen" | "worker";
+    readonly isHumanSeat?: boolean;
   }): void {
     assertCanonicalUuid(input.id, "Role id");
     assertCanonicalUuid(input.cubeId, "Cube id");
     validateName(input.name);
-    this.#database.prepare(
-      "INSERT INTO roles (id, cube_id, name, created_at) VALUES (?, ?, ?, ?)",
-    ).run(input.id, input.cubeId, input.name, this.#now());
+    const roleClass = input.roleClass ?? "worker";
+    if (roleClass !== "queen" && roleClass !== "worker") throw new Error("Unknown role class.");
+    this.#database.prepare(`
+      INSERT INTO roles (
+        id, cube_id, name, is_human_seat, role_class, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?)
+    `).run(
+      input.id,
+      input.cubeId,
+      input.name,
+      input.isHumanSeat === true ? 1 : 0,
+      roleClass,
+      this.#now(),
+    );
   }
 
   createDrone(input: {
@@ -1002,6 +1205,26 @@ class SqliteCredentialStore implements CredentialStore {
       WHERE credential.lookup_digest = ?
     `).get(lookup);
     return row === undefined ? null : storedDigest(row);
+  }
+
+  findDroneSessionCredential(lookup: Buffer): StoredDroneSessionDigest | null {
+    validateLookup(lookup);
+    const row = this.#database.prepare(`
+      SELECT credential.id, credential.lookup_digest, credential.verifier_digest,
+             credential.session_id, session.client_id, session.cube_id, session.drone_id,
+             session.expires_at,
+             COALESCE(
+               credential.revoked_at, session.revoked_at, client.revoked_at, drone.evicted_at
+             ) AS revoked_at
+      FROM drone_session_credentials AS credential
+      JOIN drone_sessions AS session ON session.id = credential.session_id
+      JOIN clients AS client ON client.id = session.client_id
+      JOIN drones AS drone ON drone.id = session.drone_id
+        AND drone.client_id = session.client_id
+        AND drone.cube_id = session.cube_id
+      WHERE credential.lookup_digest = ?
+    `).get(lookup);
+    return row === undefined ? null : storedDroneSessionDigest(row);
   }
 
   rotateClientCredential(input: {
@@ -1266,6 +1489,10 @@ function decisionRecord(row: Record<string, unknown>): DecisionRecord {
 }
 
 function roleRecord(row: Record<string, unknown>): RoleRecord {
+  const roleClass = requiredText(row, "role_class");
+  if (roleClass !== "queen" && roleClass !== "worker") {
+    throw new Error("Database contains invalid role class.");
+  }
   return {
     id: requiredText(row, "id"),
     cube_id: requiredText(row, "cube_id"),
@@ -1273,6 +1500,7 @@ function roleRecord(row: Record<string, unknown>): RoleRecord {
     short_description: requiredText(row, "short_description"),
     is_default: requiredInteger(row, "is_default") === 1,
     is_human_seat: requiredInteger(row, "is_human_seat") === 1,
+    role_class: roleClass,
     created_at: requiredText(row, "created_at"),
   };
 }
@@ -1325,6 +1553,18 @@ function storedDigest(row: Record<string, unknown>): StoredSecretDigest {
   };
 }
 
+function storedDroneSessionDigest(row: Record<string, unknown>): StoredDroneSessionDigest {
+  const digest = storedDigest(row);
+  return {
+    ...digest,
+    sessionId: requiredText(row, "session_id"),
+    clientId: requiredText(row, "client_id"),
+    cubeId: requiredText(row, "cube_id"),
+    droneId: requiredText(row, "drone_id"),
+    expiresAt: requiredText(row, "expires_at"),
+  };
+}
+
 function requiredBuffer(row: Record<string, unknown>, key: string): Buffer {
   const value = row[key];
   if (!(value instanceof Uint8Array)) throw new Error(`Database contains invalid ${key}.`);
@@ -1355,6 +1595,11 @@ function validateBoundedText(value: string, name: string, maxBytes: number): voi
   if (value.length === 0 || Buffer.byteLength(value) > maxBytes) {
     throw new Error(`${name} must contain 1 to ${maxBytes} bytes.`);
   }
+}
+
+function seatLabel(roleName: string, droneId: string): string {
+  const role = roleName.toLowerCase().replace(/[^a-z0-9]+/gu, "-").replace(/^-|-$/gu, "") || "seat";
+  return `${role.slice(0, 80)}-${droneId.slice(0, 8)}`;
 }
 
 function allowedGrantAccess(access: CubeAccess): readonly CubeAccess[] {

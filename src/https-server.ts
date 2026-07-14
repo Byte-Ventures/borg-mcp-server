@@ -402,7 +402,8 @@ function parseCursorParameter(
 }
 
 function isCoordinationPath(path: string | null): path is string {
-  return path === "/api/cubes" || path?.startsWith("/api/cubes/") === true;
+  return path === "/api/client/attach" || path === "/api/cubes" ||
+    path?.startsWith("/api/cubes/") === true;
 }
 
 function applyServerLimits(server: HttpsServer, limits: ServiceLimits): void {

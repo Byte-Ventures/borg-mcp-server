@@ -46,6 +46,7 @@ describe("node server service", () => {
     const options = startServer.mock.calls[0]?.[0];
     expect(options?.bind).toEqual({});
     expect(options?.protocolInfo.capabilities).toEqual([
+      "coordination.core",
       "auth.bearer",
       "auth.revocation",
       "scope.cube-isolation",

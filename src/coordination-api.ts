@@ -1,7 +1,8 @@
-import type { ClientPrincipal } from "./principal.js";
+import type { Principal } from "./principal.js";
 import type { CredentialAuthority } from "./credentials.js";
 import {
   CursorExpiredError,
+  AttachConflictError,
   ScopedStoreError,
   type EnrichedActivityRecord,
   type LogCursor,
@@ -65,6 +66,44 @@ export class CoordinationApi {
         ? "AUTH_MISSING"
         : authentication === "revoked" ? "SESSION_REVOKED" : "AUTH_INVALID";
       return failure(401, code, "Authentication failed.");
+    }
+
+    if (request.path === "/api/client/attach" && request.method === "POST") {
+      const requestId = safeRequestId(request.body);
+      try {
+        const envelope = decodeEnvelope(request.body);
+        exactKeys(envelope.payload, ["cube_id", "role_id", "retry_key"]);
+        const attachment = this.#authority.attachSeat(
+          this.#runtime.forPrincipal(authentication),
+          {
+            cubeId: requiredUuid(envelope.payload, "cube_id"),
+            roleId: requiredUuid(envelope.payload, "role_id"),
+            retryKey: requiredUuid(envelope.payload, "retry_key"),
+          },
+        );
+        return success(201, envelope.requestId, {
+          cube: attachment.cube,
+          role: attachment.role,
+          drone: attachment.drone,
+          session: {
+            token: attachment.credential,
+            expires_at: attachment.expiresAt,
+            generation: attachment.generation,
+          },
+          reattached: attachment.reattached,
+        });
+      } catch (error) {
+        if (error instanceof AttachConflictError) {
+          return failure(409, "INVALID_INPUT", "The attach request conflicts.", requestId);
+        }
+        if (error instanceof ScopedStoreError) {
+          return failure(404, "NOT_FOUND", error.message, requestId);
+        }
+        if (error instanceof InputError || error instanceof TypeError || error instanceof RangeError) {
+          return failure(400, "INVALID_INPUT", "Invalid protocol request.", requestId);
+        }
+        throw error;
+      }
     }
 
     if (request.path === "/api/cubes" && request.method === "GET") {
@@ -181,13 +220,13 @@ export class CoordinationApi {
   }
 
   async #openStream(
-    principal: ClientPrincipal,
+    principal: Principal,
     cubeId: string,
     cursor: LogCursor | null,
     requestSignal: AbortSignal,
   ): Promise<CoordinationResponse> {
     const store = this.#runtime.forPrincipal(principal);
-    const session = this.#authority.registerLiveSession(principal.id);
+    const session = this.#authority.registerLiveSession(principal);
     const signal = AbortSignal.any([requestSignal, session.signal]);
     let unsubscribe = (): void => undefined;
     const queue = new AsyncStringQueue(() => {

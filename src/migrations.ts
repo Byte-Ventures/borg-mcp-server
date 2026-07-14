@@ -191,6 +191,32 @@ export const STORE_MIGRATIONS: readonly Migration[] = Object.freeze([
         ON decisions (cube_id, status, created_at, id);
     `,
   },
+  {
+    version: 4,
+    name: "seat_attach_credentials",
+    sql: `
+      ALTER TABLE drones ADD COLUMN retry_key TEXT;
+      ALTER TABLE drones ADD COLUMN attach_generation INTEGER NOT NULL DEFAULT 0
+        CHECK (attach_generation >= 0);
+      ALTER TABLE roles ADD COLUMN role_class TEXT NOT NULL DEFAULT 'worker'
+        CHECK (role_class IN ('queen', 'worker'));
+
+      CREATE UNIQUE INDEX drones_client_retry_key_idx
+        ON drones (client_id, retry_key) WHERE retry_key IS NOT NULL;
+
+      CREATE TABLE drone_session_credentials (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL REFERENCES drone_sessions(id) ON DELETE CASCADE,
+        lookup_digest BLOB NOT NULL UNIQUE,
+        verifier_digest BLOB NOT NULL,
+        created_at TEXT NOT NULL,
+        revoked_at TEXT
+      ) STRICT;
+
+      CREATE INDEX drone_session_credentials_session_idx
+        ON drone_session_credentials (session_id, revoked_at);
+    `,
+  },
 ]);
 
 interface AppliedMigrationRow {

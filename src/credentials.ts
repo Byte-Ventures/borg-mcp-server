@@ -5,11 +5,21 @@ import {
   timingSafeEqual,
 } from "node:crypto";
 
-import { clientPrincipal, type ClientPrincipal } from "./principal.js";
-import type { CredentialStore, DigestPair } from "./store.js";
+import {
+  clientPrincipal,
+  droneSessionPrincipal,
+  type Principal,
+} from "./principal.js";
+import type {
+  CredentialStore,
+  DigestPair,
+  ScopedStore,
+  SeatAttachRecord,
+} from "./store.js";
 
 const tokenPattern = /^[A-Za-z0-9_-]{43,1024}$/u;
 const dummyVerifier = Buffer.alloc(32);
+type CredentialPurpose = "recovery" | "invitation" | "client" | "drone-session";
 
 export interface EnrollmentRequest {
   readonly invitation: string;
@@ -22,6 +32,10 @@ export interface EnrollmentResponse {
   readonly credentialExpiresAt: null;
 }
 
+export interface SeatAttachResponse extends SeatAttachRecord {
+  readonly credential: string;
+}
+
 export class CredentialDigester {
   readonly #key: Buffer;
 
@@ -30,7 +44,7 @@ export class CredentialDigester {
     this.#key = Buffer.from(key);
   }
 
-  digest(secret: string, purpose: "recovery" | "invitation" | "client"): DigestPair {
+  digest(secret: string, purpose: CredentialPurpose): DigestPair {
     if (!tokenPattern.test(secret)) throw new Error("Credential must be unpadded base64url.");
     const lookup = createHmac("sha256", this.#key)
       .update(`lookup:${purpose}:`)
@@ -44,7 +58,7 @@ export class CredentialDigester {
     return { lookup, verifier };
   }
 
-  verify(secret: string, purpose: "recovery" | "invitation" | "client", stored?: Buffer): boolean {
+  verify(secret: string, purpose: CredentialPurpose, stored?: Buffer): boolean {
     let candidate: Buffer;
     let valid = true;
     try {
@@ -64,30 +78,48 @@ export class CredentialDigester {
 
 export class LiveCredentialRegistry {
   readonly #sessions = new Map<string, Set<AbortController>>();
+  readonly #keys = new Map<AbortController, readonly string[]>();
 
-  register(clientId: string): { readonly signal: AbortSignal; readonly release: () => void } {
+  register(identities: string | readonly string[]): {
+    readonly signal: AbortSignal;
+    readonly release: () => void;
+  } {
     const controller = new AbortController();
-    const sessions = this.#sessions.get(clientId) ?? new Set<AbortController>();
-    sessions.add(controller);
-    this.#sessions.set(clientId, sessions);
+    const keys = [...new Set(typeof identities === "string" ? [identities] : identities)];
+    this.#keys.set(controller, keys);
+    for (const key of keys) {
+      const sessions = this.#sessions.get(key) ?? new Set<AbortController>();
+      sessions.add(controller);
+      this.#sessions.set(key, sessions);
+    }
     return {
       signal: controller.signal,
-      release: () => {
-        sessions.delete(controller);
-        if (sessions.size === 0) this.#sessions.delete(clientId);
-      },
+      release: () => this.#release(controller),
     };
   }
 
-  invalidate(clientId: string): void {
-    const sessions = this.#sessions.get(clientId);
+  invalidate(identity: string): void {
+    const sessions = this.#sessions.get(identity);
     if (sessions === undefined) return;
-    for (const controller of sessions) controller.abort();
-    this.#sessions.delete(clientId);
+    for (const controller of [...sessions]) {
+      this.#release(controller);
+      controller.abort();
+    }
   }
 
   activeSessionCount(clientId: string): number {
     return this.#sessions.get(clientId)?.size ?? 0;
+  }
+
+  #release(controller: AbortController): void {
+    const keys = this.#keys.get(controller);
+    if (keys === undefined) return;
+    this.#keys.delete(controller);
+    for (const key of keys) {
+      const sessions = this.#sessions.get(key);
+      sessions?.delete(controller);
+      if (sessions?.size === 0) this.#sessions.delete(key);
+    }
   }
 }
 
@@ -165,22 +197,57 @@ export class CredentialAuthority {
     return consumed ? { clientId, credential, credentialExpiresAt: null } : null;
   }
 
-  authenticate(authorization: string | undefined): ClientPrincipal | null {
+  authenticate(authorization: string | undefined): Principal | null {
     const result = this.authenticateStatus(authorization);
     return typeof result === "object" ? result : null;
   }
 
   authenticateStatus(
     authorization: string | undefined,
-  ): ClientPrincipal | "missing" | "invalid" | "revoked" {
+  ): Principal | "missing" | "invalid" | "revoked" {
     if (authorization === undefined) return "missing";
     const secret = bearerSecret(authorization);
-    const digest = safeDigest(this.#digester, secret, "client");
-    const stored = this.#store.findClientCredential(digest.lookup);
-    if (!this.#digester.verify(secret, "client", stored?.verifier) ||
-        stored?.clientId === undefined) return "invalid";
-    if (stored.revokedAt != null) return "revoked";
-    return clientPrincipal(stored.clientId);
+    const clientDigest = safeDigest(this.#digester, secret, "client");
+    const droneDigest = safeDigest(this.#digester, secret, "drone-session");
+    const client = this.#store.findClientCredential(clientDigest.lookup);
+    const drone = this.#store.findDroneSessionCredential(droneDigest.lookup);
+    const clientValid = this.#digester.verify(secret, "client", client?.verifier) &&
+      client?.clientId !== undefined;
+    const droneValid = this.#digester.verify(secret, "drone-session", drone?.verifier) &&
+      drone !== null;
+    if (clientValid) {
+      if (client!.revokedAt != null) return "revoked";
+      return clientPrincipal(client!.clientId!);
+    }
+    if (droneValid) {
+      if (drone!.revokedAt != null || drone!.expiresAt <= this.#clock().toISOString()) {
+        return "revoked";
+      }
+      return droneSessionPrincipal({
+        id: drone!.sessionId,
+        clientId: drone!.clientId,
+        cubeId: drone!.cubeId,
+        droneId: drone!.droneId,
+      });
+    }
+    return "invalid";
+  }
+
+  attachSeat(
+    store: ScopedStore,
+    request: { readonly cubeId: string; readonly roleId: string; readonly retryKey: string },
+  ): SeatAttachResponse {
+    const credential = generateSecret();
+    const record = store.attachSeat({
+      ...request,
+      droneId: randomUUID(),
+      sessionId: randomUUID(),
+      credentialId: randomUUID(),
+      credentialDigest: this.#digester.digest(credential, "drone-session"),
+      expiresAt: new Date(this.#clock().getTime() + 86_400_000).toISOString(),
+    });
+    for (const sessionId of record.revokedSessionIds) this.#registry.invalidate(sessionId);
+    return { ...record, credential };
   }
 
   rotateClient(clientId: string): string {
@@ -199,8 +266,13 @@ export class CredentialAuthority {
     this.#registry.invalidate(clientId);
   }
 
-  registerLiveSession(clientId: string) {
-    return this.#registry.register(clientId);
+  registerLiveSession(principal: string | Principal) {
+    if (typeof principal === "string") return this.#registry.register(principal);
+    return this.#registry.register(
+      principal.kind === "drone-session"
+        ? [principal.id, principal.clientId]
+        : principal.id,
+    );
   }
 }
 
@@ -217,7 +289,7 @@ function bearerSecret(authorization: string | undefined): string {
 function safeDigest(
   digester: CredentialDigester,
   secret: string,
-  purpose: "recovery" | "invitation" | "client",
+  purpose: CredentialPurpose,
 ): DigestPair {
   try {
     return digester.digest(secret, purpose);

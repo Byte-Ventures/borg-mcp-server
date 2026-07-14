@@ -68,15 +68,7 @@ describe("offline operator flow", () => {
         access: "manage",
       });
       const roleId = "00000000-0000-4000-8000-000000000012";
-      const droneId = "00000000-0000-4000-8000-000000000013";
       runtime.maintenance.createRole({ id: roleId, cubeId, name: "Builder" });
-      runtime.maintenance.createDrone({
-        id: droneId,
-        cubeId,
-        roleId,
-        clientId: payload.client_id,
-        label: "one-of-one-builder",
-      });
 
       expect((await request(
         server.origin,
@@ -84,6 +76,34 @@ describe("offline operator flow", () => {
         "/api/protocol",
         undefined,
         `Bearer ${payload.credential}`,
+      )).status).toBe(200);
+
+      const attachment = await request(
+        server.origin,
+        await readFile(bootstrap.paths.caCertificate),
+        "/api/client/attach",
+        JSON.stringify({
+          protocol_version: "1",
+          request_id: "attach-1234",
+          payload: {
+            cube_id: cubeId,
+            role_id: roleId,
+            retry_key: "00000000-0000-4000-8000-000000000013",
+          },
+        }),
+        `Bearer ${payload.credential}`,
+      );
+      expect(attachment.status).toBe(201);
+      const attached = (JSON.parse(attachment.body) as {
+        payload: { session: { token: string; generation: number } };
+      }).payload;
+      expect(attached.session.generation).toBe(1);
+      expect((await request(
+        server.origin,
+        await readFile(bootstrap.paths.caCertificate),
+        "/api/protocol",
+        undefined,
+        `Bearer ${attached.session.token}`,
       )).status).toBe(200);
 
       for (const path of [

@@ -4,6 +4,7 @@ import type { AddressInfo } from "node:net";
 import { X509Certificate } from "node:crypto";
 
 import { resolveBindOptions, type BindOptionsInput } from "./network-policy.js";
+import type { CoordinationRequest, CoordinationResponse } from "./coordination-api.js";
 
 export interface ProtocolInfoDocument {
   readonly protocol_version: string;
@@ -47,10 +48,11 @@ export interface RequestHandlerContext {
   readonly authorizeProtocol: (
     authorization: string | undefined,
     signal: AbortSignal,
-  ) => Promise<boolean>;
+  ) => Promise<boolean | "missing" | "invalid" | "revoked">;
   readonly exchangeEnrollment?: (
     body: unknown,
   ) => Promise<{ readonly status: 201 | 400 | 401; readonly body?: unknown }>;
+  readonly handleCoordination?: (request: CoordinationRequest) => Promise<CoordinationResponse>;
 }
 
 export interface HttpsServerOptions {
@@ -62,6 +64,7 @@ export interface HttpsServerOptions {
   readonly protocolInfo: ProtocolInfoDocument;
   readonly authorizeProtocol: RequestHandlerContext["authorizeProtocol"];
   readonly exchangeEnrollment?: RequestHandlerContext["exchangeEnrollment"];
+  readonly handleCoordination?: RequestHandlerContext["handleCoordination"];
   readonly limits?: ServiceLimits;
 }
 
@@ -117,6 +120,9 @@ export function createRequestHandlerContext(
     ...(options.exchangeEnrollment === undefined
       ? {}
       : { exchangeEnrollment: options.exchangeEnrollment }),
+    ...(options.handleCoordination === undefined
+      ? {}
+      : { handleCoordination: options.handleCoordination }),
   });
 }
 
@@ -126,6 +132,7 @@ function createRequestListener(
 ): (request: IncomingMessage, response: ServerResponse) => void {
   return (request, response) => {
     const controller = new AbortController();
+    response.once("close", () => controller.abort());
     let timer: NodeJS.Timeout | undefined;
     const deadline = new Promise<"deadline">((resolve) => {
       timer = setTimeout(() => {
@@ -161,13 +168,17 @@ async function handleRequest(
     return;
   }
 
+  const path = parseRequestPath(request.url);
+
   const requestBody = await readRequestBody(request, limits.maxRequestBodyBytes);
   if (requestBody === "oversized") {
-    sendEmpty(response, 413, true);
+    if (isCoordinationPath(path)) {
+      sendJson(response, 413, protocolError("CONTENT_TOO_LARGE", "Request body is too large."), true);
+    } else {
+      sendEmpty(response, 413, true);
+    }
     return;
   }
-
-  const path = parseRequestPath(request.url);
 
   if (path === "/healthz") {
     if (requestBody.length !== 0) return sendEmpty(response, 400, true);
@@ -178,15 +189,24 @@ async function handleRequest(
   if (path === "/api/protocol") {
     if (requestBody.length !== 0) return sendEmpty(response, 400, true);
     const authorized = await context.authorizeProtocol(request.headers.authorization, signal);
-    if (!authorized) {
-      sendEmpty(response, 401);
+    if (authorized !== true) {
+      const code = authorized === "revoked"
+        ? "SESSION_REVOKED"
+        : authorized === "missing" || request.headers.authorization === undefined
+          ? "AUTH_MISSING"
+          : "AUTH_INVALID";
+      sendJson(response, 401, protocolError(code, "Authentication failed."));
       return;
     }
     if (request.method !== "GET") {
       sendEmpty(response, 405);
       return;
     }
-    sendJson(response, 200, context.protocolInfo);
+    sendJson(response, 200, {
+      protocol_version: "1",
+      request_id: "protocol-info",
+      payload: context.protocolInfo,
+    });
     return;
   }
 
@@ -210,6 +230,37 @@ async function handleRequest(
     else if (result.status === 400) sendJson(response, 400, result.body, true);
     else if (result.status === 401) sendJson(response, 401, result.body);
     else sendJson(response, 201, result.body);
+    return;
+  }
+
+  if (isCoordinationPath(path) && context.handleCoordination !== undefined) {
+    let decoded: unknown;
+    if (requestBody.length === 0) {
+      decoded = undefined;
+    } else {
+      try {
+        decoded = JSON.parse(requestBody.toString("utf8"));
+      } catch {
+        decoded = undefined;
+      }
+    }
+    const authorization = request.headers.authorization;
+    const cursor = parseCursorParameter(request.url);
+    const result = await context.handleCoordination({
+      method: request.method ?? "",
+      path,
+      ...(authorization === undefined ? {} : { authorization }),
+      ...(decoded === undefined ? {} : { body: decoded }),
+      ...(cursor === undefined ? {} : { cursor }),
+      signal,
+    });
+    if (result.stream !== undefined) {
+      startEventStream(response, result.stream);
+    } else if (result.body === undefined) {
+      sendEmpty(response, result.status);
+    } else {
+      sendJson(response, result.status, result.body, result.status === 400 || result.status === 413);
+    }
     return;
   }
 
@@ -280,6 +331,61 @@ function sendJson(
     "x-content-type-options": "nosniff",
   });
   response.end(body);
+}
+
+function startEventStream(response: ServerResponse, stream: AsyncIterable<string>): void {
+  response.writeHead(200, {
+    "cache-control": "no-store",
+    connection: "keep-alive",
+    "content-type": "text/event-stream; charset=utf-8",
+    "x-accel-buffering": "no",
+    "x-content-type-options": "nosniff",
+  });
+  void (async () => {
+    try {
+      for await (const chunk of stream) {
+        if (response.destroyed || response.writableEnded) break;
+        if (!response.write(chunk)) await waitForDrain(response);
+      }
+    } catch {
+      // Stream failures terminate the connection without exposing internals.
+    } finally {
+      if (!response.destroyed && !response.writableEnded) response.end();
+    }
+  })();
+}
+
+function waitForDrain(response: ServerResponse): Promise<void> {
+  return new Promise((resolve) => {
+    const finish = (): void => {
+      response.off("drain", finish);
+      response.off("close", finish);
+      response.off("error", finish);
+      resolve();
+    };
+    response.once("drain", finish);
+    response.once("close", finish);
+    response.once("error", finish);
+  });
+}
+
+function protocolError(code: string, message: string): object {
+  return { protocol_version: "1", error: { code, message } };
+}
+
+function parseCursorParameter(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  try {
+    const parsed = new URL(value, "https://local.invalid");
+    const values = parsed.searchParams.getAll("cursor");
+    return values.length === 1 ? values[0] : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function isCoordinationPath(path: string | null): path is string {
+  return path === "/api/cubes" || path?.startsWith("/api/cubes/") === true;
 }
 
 function applyServerLimits(server: HttpsServer, limits: ServiceLimits): void {

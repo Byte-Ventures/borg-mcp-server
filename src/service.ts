@@ -9,6 +9,7 @@ import {
   type BootstrapResult,
 } from "./bootstrap.js";
 import { CredentialAuthority, CredentialDigester } from "./credentials.js";
+import { CoordinationApi } from "./coordination-api.js";
 import { createEnrollmentExchange } from "./enrollment.js";
 import {
   DEFAULT_SERVICE_LIMITS,
@@ -62,23 +63,31 @@ export function createNodeServerService(dependencies: ServiceDependencies): Serv
       try {
         const cert = await dependencies.readFile(certificatePath);
         let authority: CredentialAuthority | undefined;
+        let coordinationApi: CoordinationApi | undefined;
         if (dataDirectory !== undefined) {
           authRuntime = await openStore({ path: join(dataDirectory, "borg.db") });
           const digestKey = await loadDigestKey(join(dataDirectory, "credential-digest.key"));
           digester = new CredentialDigester(digestKey);
           digestKey.fill(0);
           authority = new CredentialAuthority(authRuntime.credentials, digester);
+          coordinationApi = new CoordinationApi(authRuntime, authority);
         }
         running = await dependencies.startServer({
           bind,
           tls: { key, cert },
           limits: DEFAULT_SERVICE_LIMITS,
           protocolInfo: createPart2ProtocolInfo(DEFAULT_SERVICE_LIMITS),
-          authorizeProtocol: async (authorization) =>
-            authority !== undefined && authority.authenticate(authorization) !== null,
+          authorizeProtocol: async (authorization) => {
+            if (authority === undefined) return false;
+            const result = authority.authenticateStatus(authorization);
+            return typeof result === "object" ? true : result;
+          },
           ...(authority === undefined
             ? {}
             : { exchangeEnrollment: createEnrollmentExchange(authority) }),
+          ...(coordinationApi === undefined
+            ? {}
+            : { handleCoordination: (request) => coordinationApi.handle(request) }),
         });
       } catch (error) {
         digester?.destroy();

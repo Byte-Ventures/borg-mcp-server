@@ -162,11 +162,20 @@ export class CredentialAuthority {
   }
 
   authenticate(authorization: string | undefined): ClientPrincipal | null {
+    const result = this.authenticateStatus(authorization);
+    return typeof result === "object" ? result : null;
+  }
+
+  authenticateStatus(
+    authorization: string | undefined,
+  ): ClientPrincipal | "missing" | "invalid" | "revoked" {
+    if (authorization === undefined) return "missing";
     const secret = bearerSecret(authorization);
     const digest = safeDigest(this.#digester, secret, "client");
     const stored = this.#store.findClientCredential(digest.lookup);
     if (!this.#digester.verify(secret, "client", stored?.verifier) ||
-        stored?.clientId === undefined) return null;
+        stored?.clientId === undefined) return "invalid";
+    if (stored.revokedAt != null) return "revoked";
     return clientPrincipal(stored.clientId);
   }
 

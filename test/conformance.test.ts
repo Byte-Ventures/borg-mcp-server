@@ -1,0 +1,253 @@
+import { randomUUID } from "node:crypto";
+import { mkdtemp, realpath, rm } from "node:fs/promises";
+import { request as httpsRequest } from "node:https";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  runAdapterConformance,
+  type ConformanceEnvironment,
+  type ConformanceHttpResponse,
+} from "borgmcp-shared/conformance";
+import type { LogCursor } from "borgmcp-shared/protocol";
+import { generate } from "selfsigned";
+import { afterEach, describe, expect, it } from "vitest";
+
+import { CoordinationApi } from "../src/coordination-api.js";
+import { CredentialAuthority, CredentialDigester } from "../src/credentials.js";
+import { createEnrollmentExchange } from "../src/enrollment.js";
+import { DEFAULT_SERVICE_LIMITS, startHttpsServer, type RunningServer } from "../src/https-server.js";
+import { createPart2ProtocolInfo } from "../src/protocol-draft.js";
+import { openStore, type StoreRuntime } from "../src/store.js";
+
+const directories: string[] = [];
+
+afterEach(async () => {
+  await Promise.all(directories.splice(0).map((directory) => rm(directory, {
+    recursive: true,
+    force: true,
+  })));
+});
+
+describe("borgmcp-shared server adapter", () => {
+  it("passes the full forward conformance suite", async () => {
+    const fixture = await conformanceEnvironment();
+    try {
+      const report = await runAdapterConformance(fixture.environment, {
+        streamDeadlineMs: 2_000,
+        pendingProbeMs: 10,
+      });
+
+      expect(report.results.filter((result) => !result.ok)).toEqual([]);
+      expect(report.ok).toBe(true);
+      expect(report.results).toHaveLength(13);
+    } finally {
+      await fixture.server.close();
+      fixture.digester.destroy();
+      fixture.runtime.close();
+    }
+  });
+});
+
+async function conformanceEnvironment(): Promise<{
+  readonly environment: ConformanceEnvironment;
+  readonly runtime: StoreRuntime;
+  readonly digester: CredentialDigester;
+  readonly server: RunningServer;
+}> {
+  const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-conformance-")));
+  directories.push(directory);
+  const runtime = await openStore({ path: join(directory, "borg.db") });
+  const digester = new CredentialDigester(Buffer.alloc(32, 7));
+  const authority = new CredentialAuthority(runtime.credentials, digester);
+  const api = new CoordinationApi(runtime, authority);
+  const exchangeEnrollment = createEnrollmentExchange(authority);
+  const principalCubes = new Map<string, string>();
+  const invitations = new Map<string, string>();
+  const enrolledClients = new Map<string, string>();
+  const material = await generate([{ name: "commonName", value: "localhost" }], {
+    algorithm: "sha256",
+    keyType: "ec",
+    extensions: [
+      { name: "basicConstraints", cA: false, critical: true },
+      { name: "keyUsage", digitalSignature: true, keyAgreement: true, critical: true },
+      { name: "extKeyUsage", serverAuth: true },
+      { name: "subjectAltName", altNames: [{ type: 7, ip: "127.0.0.1" }] },
+    ],
+  });
+  const server = await startHttpsServer({
+    bind: { port: 0 },
+    tls: { key: material.private, cert: material.cert },
+    protocolInfo: createPart2ProtocolInfo(DEFAULT_SERVICE_LIMITS),
+    authorizeProtocol: async (authorization) => {
+      const result = authority.authenticateStatus(authorization);
+      return typeof result === "object" ? true : result;
+    },
+    exchangeEnrollment,
+    handleCoordination: (request) => api.handle(request),
+  });
+  const transport = new HttpsConformanceTransport(server.origin, material.cert);
+
+  const environment: ConformanceEnvironment = {
+    admin: {
+      reset: async () => undefined,
+      createPrincipal: async () => ({ id: randomUUID() }),
+      createCube: async (name) => {
+        const id = randomUUID();
+        runtime.maintenance.createCube({ id, name, directive: "" });
+        return { id };
+      },
+      grantCube: async (principal, cube) => {
+        principalCubes.set(principal.id, cube.id);
+      },
+      issueSingleUseInvitation: async (principal) => {
+        const invitation = authority.createBootstrapInvitation(60_000);
+        invitations.set(invitation, principal.id);
+        return invitation;
+      },
+      revokePrincipal: async (principal) => {
+        const clientId = enrolledClients.get(principal.id);
+        if (clientId !== undefined) authority.revokeClient(clientId);
+      },
+      expireCursor: async (cube, cursor) => {
+        runtime.maintenance.expireActivityCursor(cube.id, cursor);
+      },
+      armReplayTransition: () => api.armReplayTransition(),
+    },
+    operations: {
+      health: async () => transport.request("GET", "/healthz"),
+      protocol: async (credential) => transport.request("GET", "/api/protocol", undefined, credential),
+      enroll: async (request) => {
+        const result = await transport.request(
+          "POST",
+          "/api/enrollment/exchange",
+          JSON.stringify(request),
+        );
+        if (result.status === 201) {
+          const record = request as {
+            payload: { invitation: string };
+          };
+          const body = result.body as {
+            payload: { client_id: string };
+          };
+          const principalId = invitations.get(record.payload.invitation);
+          const cubeId = principalId === undefined ? undefined : principalCubes.get(principalId);
+          if (principalId !== undefined && cubeId !== undefined) {
+            enrolledClients.set(principalId, body.payload.client_id);
+            runtime.maintenance.grantClientCube({
+              clientId: body.payload.client_id,
+              cubeId,
+              access: "manage",
+            });
+          }
+        }
+        return result;
+      },
+      append: async (credential, cube, request) =>
+        transport.request("POST", `/api/cubes/${cube.id}/logs`, JSON.stringify(request), credential),
+      appendRaw: async (credential, cube, body) =>
+        transport.request("POST", `/api/cubes/${cube.id}/logs`, body, credential),
+      read: async (credential, cube, request) =>
+        transport.request("PUT", `/api/cubes/${cube.id}/logs`, JSON.stringify(request), credential),
+      ack: async (credential, cube, request) =>
+        transport.request("POST", `/api/cubes/${cube.id}/acks`, JSON.stringify(request), credential),
+      recordDecision: async (credential, cube, request) =>
+        transport.request("POST", `/api/cubes/${cube.id}/decisions`, JSON.stringify(request), credential),
+      listDecisions: async (credential, cube, request) =>
+        transport.request("PUT", `/api/cubes/${cube.id}/decisions`, JSON.stringify(request), credential),
+      openStream: async (credential, cube, cursor) => transport.stream(
+        `/api/cubes/${cube.id}/stream${cursor === null ? "" : `?cursor=${opaqueCursor(cursor)}`}`,
+        credential,
+      ),
+    },
+  };
+  return { environment, runtime, digester, server };
+}
+
+function opaqueCursor(cursor: LogCursor): string {
+  return encodeURIComponent(Buffer.from(JSON.stringify(cursor)).toString("base64url"));
+}
+
+class HttpsConformanceTransport {
+  readonly #origin: string;
+  readonly #ca: string;
+
+  constructor(origin: string, ca: string) {
+    this.#origin = origin;
+    this.#ca = ca;
+  }
+
+  request(
+    method: string,
+    path: string,
+    body?: string,
+    credential?: string | null,
+  ): Promise<ConformanceHttpResponse> {
+    return new Promise((resolve, reject) => {
+      const url = new URL(path, this.#origin);
+      const outgoing = httpsRequest({
+        hostname: url.hostname,
+        port: url.port,
+        path: `${url.pathname}${url.search}`,
+        method,
+        ca: this.#ca,
+        headers: {
+          ...(body === undefined ? {} : {
+            "content-type": "application/json",
+            "content-length": Buffer.byteLength(body),
+          }),
+          ...(credential == null ? {} : { authorization: `Bearer ${credential}` }),
+        },
+        agent: false,
+      }, (response) => {
+        response.setEncoding("utf8");
+        let responseBody = "";
+        response.on("data", (chunk: string) => { responseBody += chunk; });
+        response.on("end", () => resolve({
+          status: response.statusCode ?? 0,
+          body: responseBody.length === 0 ? "" : JSON.parse(responseBody),
+        }));
+      });
+      outgoing.on("error", reject);
+      outgoing.end(body);
+    });
+  }
+
+  stream(path: string, credential: string): Promise<{
+    readonly status: number;
+    readonly body: unknown;
+    readonly stream: AsyncIterable<string> | null;
+  }> {
+    return new Promise((resolve, reject) => {
+      const url = new URL(path, this.#origin);
+      const outgoing = httpsRequest({
+        hostname: url.hostname,
+        port: url.port,
+        path: `${url.pathname}${url.search}`,
+        method: "GET",
+        ca: this.#ca,
+        headers: { authorization: `Bearer ${credential}` },
+        agent: false,
+      }, (response) => {
+        response.setEncoding("utf8");
+        const status = response.statusCode ?? 0;
+        if (status === 200) {
+          resolve({ status, body: "", stream: stringStream(response) });
+          return;
+        }
+        let body = "";
+        response.on("data", (chunk: string) => { body += chunk; });
+        response.on("end", () => resolve({
+          status,
+          body: body.length === 0 ? "" : JSON.parse(body),
+          stream: null,
+        }));
+      });
+      outgoing.on("error", reject);
+      outgoing.end();
+    });
+  }
+}
+
+async function* stringStream(stream: AsyncIterable<unknown>): AsyncIterable<string> {
+  for await (const chunk of stream) yield String(chunk);
+}

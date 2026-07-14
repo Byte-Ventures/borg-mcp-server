@@ -5,7 +5,7 @@ export function createPart2ProtocolInfo(limits: ServiceLimits): ProtocolInfoDocu
     protocol_version: "1",
     package: {
       name: "borgmcp-shared",
-      version: "0.2.0-draft",
+      version: "0.2.0",
     },
     capabilities: [
       "auth.bearer",
@@ -13,6 +13,12 @@ export function createPart2ProtocolInfo(limits: ServiceLimits): ProtocolInfoDocu
       "scope.cube-isolation",
       "transport.tls",
       "authority.no-cloud-fallback",
+      "log.cursor",
+      "stream.sse",
+      "stream.replay",
+      "acks",
+      "claims",
+      "decisions",
     ],
     limits: {
       max_request_bytes: limits.maxRequestBodyBytes,

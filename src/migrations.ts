@@ -138,6 +138,59 @@ export const STORE_MIGRATIONS: readonly Migration[] = Object.freeze([
         ON client_credentials (client_id, revoked_at);
     `,
   },
+  {
+    version: 3,
+    name: "coordination_protocol",
+    sql: `
+      ALTER TABLE cubes ADD COLUMN owner_id TEXT NOT NULL
+        DEFAULT '00000000-0000-4000-8000-000000000000';
+      ALTER TABLE roles ADD COLUMN short_description TEXT NOT NULL DEFAULT '';
+      ALTER TABLE roles ADD COLUMN detailed_description TEXT NOT NULL DEFAULT '';
+      ALTER TABLE roles ADD COLUMN is_default INTEGER NOT NULL DEFAULT 0
+        CHECK (is_default IN (0, 1));
+      ALTER TABLE roles ADD COLUMN is_human_seat INTEGER NOT NULL DEFAULT 0
+        CHECK (is_human_seat IN (0, 1));
+      ALTER TABLE drones ADD COLUMN last_seen TEXT;
+      ALTER TABLE drones ADD COLUMN hostname TEXT;
+      ALTER TABLE activity_log ADD COLUMN visibility TEXT NOT NULL DEFAULT 'broadcast'
+        CHECK (visibility IN ('broadcast', 'direct'));
+      ALTER TABLE activity_acks ADD COLUMN claimant_drone_id TEXT;
+
+      CREATE TABLE activity_log_recipients (
+        entry_id TEXT NOT NULL REFERENCES activity_log(id) ON DELETE CASCADE,
+        drone_id TEXT NOT NULL REFERENCES drones(id) ON DELETE CASCADE,
+        PRIMARY KEY (entry_id, drone_id)
+      ) STRICT, WITHOUT ROWID;
+
+      CREATE TABLE expired_activity_cursors (
+        cube_id TEXT NOT NULL REFERENCES cubes(id) ON DELETE CASCADE,
+        entry_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (cube_id, entry_id, created_at)
+      ) STRICT, WITHOUT ROWID;
+
+      CREATE TABLE decisions (
+        id TEXT PRIMARY KEY,
+        cube_id TEXT NOT NULL REFERENCES cubes(id) ON DELETE CASCADE,
+        topic TEXT NOT NULL CHECK (length(topic) BETWEEN 1 AND 120),
+        decision TEXT NOT NULL CHECK (length(decision) BETWEEN 1 AND 100000),
+        rationale TEXT CHECK (rationale IS NULL OR length(rationale) <= 100000),
+        ratified_by TEXT,
+        status TEXT NOT NULL CHECK (status IN ('active', 'superseded', 'removed')),
+        supersedes TEXT REFERENCES decisions(id),
+        created_at TEXT NOT NULL
+      ) STRICT;
+
+      CREATE INDEX activity_log_recipients_drone_idx
+        ON activity_log_recipients (drone_id, entry_id);
+      CREATE INDEX activity_acks_claim_idx
+        ON activity_acks (kind, entry_id, created_at);
+      CREATE UNIQUE INDEX decisions_active_topic_idx
+        ON decisions (cube_id, topic) WHERE status = 'active';
+      CREATE INDEX decisions_cube_status_idx
+        ON decisions (cube_id, status, created_at, id);
+    `,
+  },
 ]);
 
 interface AppliedMigrationRow {

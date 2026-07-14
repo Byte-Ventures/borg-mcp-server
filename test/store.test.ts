@@ -8,7 +8,12 @@ import {
   droneSessionPrincipal,
   operatorPrincipal,
 } from "../src/principal.js";
-import { ScopedStoreError, type StoreRuntime, openStore } from "../src/store.js";
+import {
+  CursorExpiredError,
+  ScopedStoreError,
+  type StoreRuntime,
+  openStore,
+} from "../src/store.js";
 
 const ids = {
   clientA: "00000000-0000-4000-8000-000000000001",
@@ -217,5 +222,80 @@ describe("Principal to ScopedStore isolation", () => {
     const reopened = runtime.forPrincipal(clientPrincipal(ids.clientA));
 
     expect(reopened.readActivity(ids.cubeA, 10)).toContainEqual(entry);
+  });
+
+  it("paginates monotonic tuple cursors and keeps claims outside the log cursor", () => {
+    const client = runtime.forPrincipal(clientPrincipal(ids.clientA));
+    const alpha = client.appendLog(ids.cubeA, { message: "alpha" });
+    const beta = client.appendLog(ids.cubeA, { message: "beta" });
+    const gamma = client.appendLog(ids.cubeA, { message: "gamma" });
+
+    expect([alpha.created_at, beta.created_at, gamma.created_at]).toEqual([
+      "2026-07-14T12:00:00.000Z",
+      "2026-07-14T12:00:00.001Z",
+      "2026-07-14T12:00:00.002Z",
+    ]);
+    const first = client.readLog(ids.cubeA, null, 2);
+    expect(first.entries.map((entry) => entry.message)).toEqual(["alpha", "beta"]);
+    expect(first.cursor).toEqual({ id: beta.id, created_at: beta.created_at });
+    expect(first).toMatchObject({ behind_by: 1, has_more: true });
+
+    client.acknowledge(ids.cubeA, beta.id, "claim");
+    client.acknowledge(ids.cubeA, beta.id, "claim");
+    const after = client.readLog(ids.cubeA, { id: gamma.id, created_at: gamma.created_at }, 10);
+    expect(after.entries).toEqual([]);
+    expect(after.cursor).toEqual({ id: gamma.id, created_at: gamma.created_at });
+    expect(after.claims).toEqual([expect.objectContaining({
+      log_entry_id: beta.id,
+      claimant_drone_id: ids.clientA,
+    })]);
+  });
+
+  it("returns indistinguishable not-found errors for cross-cube log access", () => {
+    const clientB = runtime.forPrincipal(clientPrincipal(ids.clientB));
+
+    expect(() => clientB.readLog(ids.cubeA, null, 10)).toThrow(ScopedStoreError);
+    expect(() => clientB.acknowledge(
+      ids.cubeA,
+      "00000000-0000-4000-8000-000000000099",
+      "ack",
+    )).toThrow(ScopedStoreError);
+  });
+
+  it("classifies explicitly expired cursors without weakening cube scope", () => {
+    const client = runtime.forPrincipal(clientPrincipal(ids.clientA));
+    const entry = client.appendLog(ids.cubeA, { message: "retained" });
+    const cursor = { id: entry.id, created_at: entry.created_at };
+    runtime.maintenance.expireActivityCursor(ids.cubeA, cursor);
+
+    expect(() => client.readLog(ids.cubeA, cursor, 10)).toThrow(CursorExpiredError);
+    expect(() => runtime.forPrincipal(clientPrincipal(ids.clientB)).readLog(
+      ids.cubeA,
+      cursor,
+      10,
+    )).toThrow(ScopedStoreError);
+  });
+
+  it("atomically supersedes decisions while drone sessions remain non-managing", () => {
+    const client = runtime.forPrincipal(clientPrincipal(ids.clientA));
+    const first = client.recordDecision(ids.cubeA, { topic: "runtime", decision: "first" });
+    const second = client.recordDecision(ids.cubeA, {
+      topic: "runtime",
+      decision: "second",
+      rationale: "new evidence",
+    });
+
+    expect(second.supersedes).toBe(first.id);
+    expect(client.listDecisions(ids.cubeA)).toEqual([second]);
+    const drone = runtime.forPrincipal(droneSessionPrincipal({
+      id: ids.sessionA,
+      clientId: ids.clientA,
+      cubeId: ids.cubeA,
+      droneId: ids.droneA,
+    }));
+    expect(() => drone.recordDecision(ids.cubeA, {
+      topic: "runtime",
+      decision: "role label cannot escalate",
+    })).toThrow(ScopedStoreError);
   });
 });

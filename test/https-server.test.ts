@@ -105,16 +105,16 @@ describe("HTTPS service", () => {
     expect(response.headers["x-powered-by"]).toBeUndefined();
   });
 
-  it("returns the same empty 401 for missing and invalid protocol authorization", async () => {
+  it("returns canonical 401 errors for missing and invalid protocol authorization", async () => {
     const missing = await request(server.origin, certificate, "/api/protocol");
     const invalid = await request(server.origin, certificate, "/api/protocol", {
       authorization: "Bearer invalid-test-token",
     });
 
-    expect(missing).toMatchObject({ status: 401, body: "" });
-    expect(invalid).toMatchObject({ status: 401, body: "" });
-    expect(missing.headers["content-length"]).toBe("0");
-    expect(invalid.headers["content-length"]).toBe("0");
+    expect(missing.status).toBe(401);
+    expect(invalid.status).toBe(401);
+    expect(JSON.parse(missing.body).error.code).toBe("AUTH_MISSING");
+    expect(JSON.parse(invalid.body).error.code).toBe("AUTH_INVALID");
   });
 
   it("returns protocol readiness and capabilities only after authorization", async () => {
@@ -123,7 +123,11 @@ describe("HTTPS service", () => {
     });
 
     expect(response.status).toBe(200);
-    expect(JSON.parse(response.body)).toEqual(protocolInfo);
+    expect(JSON.parse(response.body)).toEqual({
+      protocol_version: "1",
+      request_id: "protocol-info",
+      payload: protocolInfo,
+    });
     expect(response.headers["cache-control"]).toBe("no-store");
   });
 

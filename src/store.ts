@@ -14,6 +14,7 @@ export type CubeAccess = "read" | "write" | "manage";
 
 export interface CubeRecord {
   readonly id: string;
+  readonly ownerId: string;
   readonly name: string;
   readonly directive: string;
   readonly createdAt: string;
@@ -28,6 +29,72 @@ export interface ActivityRecord {
   readonly actorId: string;
   readonly message: string;
   readonly createdAt: string;
+}
+
+export interface LogCursor {
+  readonly id: string;
+  readonly created_at: string;
+}
+
+export interface EnrichedActivityRecord {
+  readonly id: string;
+  readonly cube_id: string;
+  readonly drone_id: string | null;
+  readonly message: string;
+  readonly visibility: "broadcast" | "direct";
+  readonly created_at: string;
+  readonly drone_label: string | null;
+  readonly role_name: string | null;
+  readonly recipient_drone_ids: string[];
+}
+
+export interface ClaimRecord {
+  readonly log_entry_id: string;
+  readonly claimant_drone_id: string;
+  readonly claimant_label: string | null;
+  readonly claimant_role: string | null;
+  readonly claimed_at: string;
+  readonly stale: false;
+}
+
+export interface ActivityPage {
+  readonly entries: EnrichedActivityRecord[];
+  readonly cursor: LogCursor | null;
+  readonly behind_by: number;
+  readonly has_more: boolean;
+  readonly claims: ClaimRecord[];
+}
+
+export interface DecisionRecord {
+  readonly id: string;
+  readonly cube_id: string;
+  readonly topic: string;
+  readonly decision: string;
+  readonly rationale: string | null;
+  readonly ratified_by: string | null;
+  readonly status: "active" | "superseded" | "removed";
+  readonly supersedes: string | null;
+  readonly created_at: string;
+}
+
+export interface RoleRecord {
+  readonly id: string;
+  readonly cube_id: string;
+  readonly name: string;
+  readonly short_description: string;
+  readonly is_default: boolean;
+  readonly is_human_seat: boolean;
+  readonly created_at: string;
+}
+
+export interface DroneRecord {
+  readonly id: string;
+  readonly cube_id: string;
+  readonly role_id: string;
+  readonly label: string;
+  readonly last_seen: string;
+  readonly hostname: string | null;
+  readonly created_at: string;
 }
 
 export interface StoreDiagnostics {
@@ -89,12 +156,32 @@ export interface ScopedStore {
   readonly updateDirective: (cubeId: string, directive: string) => void;
   readonly appendActivity: (cubeId: string, message: string) => ActivityRecord;
   readonly readActivity: (cubeId: string, limit: number) => ActivityRecord[];
+  readonly listRoles: (cubeId: string) => RoleRecord[];
+  readonly listDrones: (cubeId: string) => DroneRecord[];
+  readonly appendLog: (cubeId: string, input: {
+    readonly message: string;
+    readonly visibility?: "broadcast" | "direct";
+    readonly recipientDroneIds?: readonly string[];
+  }) => EnrichedActivityRecord;
+  readonly readLog: (cubeId: string, cursor: LogCursor | null, limit: number) => ActivityPage;
+  readonly acknowledge: (cubeId: string, entryId: string, kind: "ack" | "claim") => void;
+  readonly recordDecision: (cubeId: string, input: {
+    readonly topic: string;
+    readonly decision: string;
+    readonly rationale?: string;
+  }) => DecisionRecord;
+  readonly listDecisions: (cubeId: string) => DecisionRecord[];
+  readonly subscribeActivity: (
+    cubeId: string,
+    listener: (entry: EnrichedActivityRecord) => void,
+  ) => (() => void);
 }
 
 export interface MaintenanceStore {
   readonly createClient: (input: { readonly id: string; readonly name: string }) => void;
   readonly createCube: (input: {
     readonly id: string;
+    readonly ownerId?: string;
     readonly name: string;
     readonly directive: string;
   }) => void;
@@ -125,6 +212,7 @@ export interface MaintenanceStore {
   }) => void;
   readonly revokeClient: (clientId: string) => void;
   readonly revokeDroneSession: (sessionId: string) => void;
+  readonly expireActivityCursor: (cubeId: string, cursor: LogCursor) => void;
 }
 
 export class ScopedStoreError extends Error {
@@ -136,8 +224,18 @@ export class ScopedStoreError extends Error {
   }
 }
 
+export class CursorExpiredError extends Error {
+  readonly code = "CURSOR_EXPIRED";
+
+  constructor() {
+    super("The activity cursor has expired.");
+    this.name = "CursorExpiredError";
+  }
+}
+
 interface CubeRow {
   readonly id: string;
+  readonly owner_id: string;
   readonly name: string;
   readonly directive: string;
   readonly created_at: string;
@@ -176,10 +274,11 @@ export async function openStore(options: OpenStoreOptions): Promise<StoreRuntime
 
   const maintenance = new SqliteMaintenanceStore(database, clock);
   const credentials = new SqliteCredentialStore(database, clock);
+  const activityHub = new ActivityHub();
   return Object.freeze({
     forPrincipal: (principal: Principal) => {
       assertServerDerivedPrincipal(principal);
-      return new SqliteScopedStore(database, principal, clock);
+      return new SqliteScopedStore(database, principal, clock, activityHub);
     },
     maintenance,
     credentials,
@@ -192,17 +291,24 @@ class SqliteScopedStore implements ScopedStore {
   readonly #database: DatabaseSync;
   readonly #principal: Principal;
   readonly #clock: () => Date;
+  readonly #activityHub: ActivityHub;
 
-  constructor(database: DatabaseSync, principal: Principal, clock: () => Date) {
+  constructor(
+    database: DatabaseSync,
+    principal: Principal,
+    clock: () => Date,
+    activityHub: ActivityHub,
+  ) {
     this.#database = database;
     this.#principal = principal;
     this.#clock = clock;
+    this.#activityHub = activityHub;
   }
 
   listCubes(): CubeRecord[] {
     const scope = this.#scope("read");
     const rows = this.#database.prepare(`
-      SELECT c.id, c.name, c.directive, c.created_at, c.updated_at
+      SELECT c.id, c.owner_id, c.name, c.directive, c.created_at, c.updated_at
       FROM cubes AS c
       WHERE ${scope.sql}
       ORDER BY c.id
@@ -214,7 +320,7 @@ class SqliteScopedStore implements ScopedStore {
     assertCanonicalUuid(cubeId, "Cube id");
     const scope = this.#scope("read");
     const row = this.#database.prepare(`
-      SELECT c.id, c.name, c.directive, c.created_at, c.updated_at
+      SELECT c.id, c.owner_id, c.name, c.directive, c.created_at, c.updated_at
       FROM cubes AS c
       WHERE c.id = ? AND ${scope.sql}
     `).get(cubeId, ...scope.parameters);
@@ -234,40 +340,16 @@ class SqliteScopedStore implements ScopedStore {
   }
 
   appendActivity(cubeId: string, message: string): ActivityRecord {
-    assertCanonicalUuid(cubeId, "Cube id");
-    if (message.length === 0 || Buffer.byteLength(message) > 10_240) {
-      throw new Error("Activity message must contain 1 to 10240 bytes.");
-    }
-    const scope = this.#scope("write");
-    const id = randomUUID();
-    const createdAt = this.#now();
+    const entry = this.appendLog(cubeId, { message });
     const droneId = this.#principal.kind === "drone-session" ? this.#principal.droneId : null;
-    const result = this.#database.prepare(`
-      INSERT INTO activity_log (
-        id, cube_id, drone_id, actor_kind, actor_id, message, created_at
-      )
-      SELECT ?, c.id, ?, ?, ?, ?, ?
-      FROM cubes AS c
-      WHERE c.id = ? AND ${scope.sql}
-    `).run(
-      id,
-      droneId,
-      this.#principal.kind,
-      this.#principal.id,
-      message,
-      createdAt,
-      cubeId,
-      ...scope.parameters,
-    );
-    if (result.changes !== 1) throw new ScopedStoreError();
     return {
-      id,
-      cubeId,
+      id: entry.id,
+      cubeId: entry.cube_id,
       droneId,
       actorKind: this.#principal.kind,
       actorId: this.#principal.id,
-      message,
-      createdAt,
+      message: entry.message,
+      createdAt: entry.created_at,
     };
   }
 
@@ -286,6 +368,285 @@ class SqliteScopedStore implements ScopedStore {
       LIMIT ?
     `).all(cubeId, ...scope.parameters, limit);
     return rows.map((row) => activityRecord(activityRow(row)));
+  }
+
+  listRoles(cubeId: string): RoleRecord[] {
+    this.#requireCube(cubeId, "read");
+    const rows = this.#database.prepare(`
+      SELECT id, cube_id, name, short_description, is_default, is_human_seat, created_at
+      FROM roles WHERE cube_id = ? ORDER BY name, id
+    `).all(cubeId);
+    return rows.map(roleRecord);
+  }
+
+  listDrones(cubeId: string): DroneRecord[] {
+    this.#requireCube(cubeId, "read");
+    const rows = this.#database.prepare(`
+      SELECT id, cube_id, role_id, label, COALESCE(last_seen, created_at) AS last_seen,
+             hostname, created_at
+      FROM drones WHERE cube_id = ? AND evicted_at IS NULL ORDER BY label, id
+    `).all(cubeId);
+    return rows.map(droneRecord);
+  }
+
+  appendLog(cubeId: string, input: {
+    readonly message: string;
+    readonly visibility?: "broadcast" | "direct";
+    readonly recipientDroneIds?: readonly string[];
+  }): EnrichedActivityRecord {
+    assertCanonicalUuid(cubeId, "Cube id");
+    if (input.message.length === 0 || Buffer.byteLength(input.message) > 10_240) {
+      throw new Error("Activity message must contain 1 to 10240 bytes.");
+    }
+    const visibility = input.visibility ?? "broadcast";
+    if (visibility !== "broadcast" && visibility !== "direct") {
+      throw new Error("Unknown activity visibility.");
+    }
+    const recipients = [...new Set(input.recipientDroneIds ?? [])];
+    if (recipients.length > 100 || recipients.some((id) => {
+      try { assertCanonicalUuid(id, "Recipient drone id"); return false; } catch { return true; }
+    })) {
+      throw new Error("Activity recipients must contain at most 100 valid drone ids.");
+    }
+    if (visibility === "broadcast" && recipients.length !== 0) {
+      throw new Error("Broadcast activity cannot name direct recipients.");
+    }
+    if (visibility === "direct" && recipients.length === 0) {
+      throw new Error("Direct activity requires at least one recipient.");
+    }
+
+    const scope = this.#scope("write");
+    const id = randomUUID();
+    const createdAt = this.#nextActivityTimestamp(cubeId);
+    const droneId = this.#principal.kind === "drone-session" ? this.#principal.droneId : null;
+    this.#database.exec("BEGIN IMMEDIATE");
+    try {
+      const inserted = this.#database.prepare(`
+        INSERT INTO activity_log (
+          id, cube_id, drone_id, actor_kind, actor_id, message, created_at, visibility
+        )
+        SELECT ?, c.id, ?, ?, ?, ?, ?, ?
+        FROM cubes AS c
+        WHERE c.id = ? AND ${scope.sql}
+      `).run(
+        id, droneId, this.#principal.kind, this.#principal.id, input.message,
+        createdAt, visibility, cubeId, ...scope.parameters,
+      );
+      if (inserted.changes !== 1) throw new ScopedStoreError();
+      if (recipients.length > 0) {
+        const valid = this.#database.prepare(`
+          SELECT COUNT(*) AS count FROM drones
+          WHERE cube_id = ? AND evicted_at IS NULL
+            AND id IN (${recipients.map(() => "?").join(", ")})
+        `).get(cubeId, ...recipients);
+        if (valid === undefined) throw new Error("Recipient count query returned no row.");
+        if (requiredInteger(valid, "count") !== recipients.length) throw new ScopedStoreError();
+        const addRecipient = this.#database.prepare(
+          "INSERT INTO activity_log_recipients (entry_id, drone_id) VALUES (?, ?)",
+        );
+        for (const recipient of recipients) addRecipient.run(id, recipient);
+      }
+      this.#database.exec("COMMIT");
+    } catch (error) {
+      try { this.#database.exec("ROLLBACK"); } catch { /* Preserve the original failure. */ }
+      throw error;
+    }
+    const entry = this.#enrichedEntry(cubeId, id);
+    this.#activityHub.publish(cubeId, entry);
+    return entry;
+  }
+
+  readLog(cubeId: string, cursor: LogCursor | null, limit: number): ActivityPage {
+    this.#requireCube(cubeId, "read");
+    if (!Number.isInteger(limit) || limit < 1 || limit > 500) {
+      throw new Error("Activity read limit must be an integer from 1 to 500.");
+    }
+    this.#validateCursor(cubeId, cursor);
+    const cursorSql = cursor === null
+      ? { sql: "1 = 1", parameters: [] as string[] }
+      : {
+          sql: "(l.created_at > ? OR (l.created_at = ? AND l.id > ?))",
+          parameters: [cursor.created_at, cursor.created_at, cursor.id],
+        };
+    const rows = this.#database.prepare(`
+      SELECT l.id
+      FROM activity_log AS l
+      WHERE l.cube_id = ? AND ${cursorSql.sql}
+      ORDER BY l.created_at, l.id
+      LIMIT ?
+    `).all(cubeId, ...cursorSql.parameters, limit + 1);
+    const selected = rows.slice(0, limit);
+    const entries = selected.map((row) => this.#enrichedEntry(cubeId, requiredText(row, "id")));
+    const nextCursor = entries.length === 0
+      ? cursor
+      : { id: entries.at(-1)!.id, created_at: entries.at(-1)!.created_at };
+    const behind = nextCursor === null ? this.#countAfter(cubeId, null) : this.#countAfter(cubeId, nextCursor);
+    return {
+      entries,
+      cursor: nextCursor,
+      behind_by: behind,
+      has_more: behind > 0,
+      claims: this.#claims(cubeId),
+    };
+  }
+
+  acknowledge(cubeId: string, entryId: string, kind: "ack" | "claim"): void {
+    this.#requireCube(cubeId, "write");
+    assertCanonicalUuid(entryId, "Activity entry id");
+    if (kind !== "ack" && kind !== "claim") throw new Error("Unknown acknowledgement kind.");
+    const exists = this.#database.prepare(
+      "SELECT 1 AS present FROM activity_log WHERE id = ? AND cube_id = ?",
+    ).get(entryId, cubeId);
+    if (exists === undefined) throw new ScopedStoreError();
+    const claimant = this.#principal.kind === "drone-session"
+      ? this.#principal.droneId
+      : this.#principal.id;
+    this.#database.prepare(`
+      INSERT OR IGNORE INTO activity_acks (
+        entry_id, principal_kind, principal_id, kind, created_at, claimant_drone_id
+      ) VALUES (?, ?, ?, ?, ?, ?)
+    `).run(entryId, this.#principal.kind, this.#principal.id, kind, this.#now(), claimant);
+  }
+
+  recordDecision(cubeId: string, input: {
+    readonly topic: string;
+    readonly decision: string;
+    readonly rationale?: string;
+  }): DecisionRecord {
+    this.#requireCube(cubeId, "manage");
+    validateBoundedText(input.topic, "Decision topic", 120);
+    validateBoundedText(input.decision, "Decision", 100_000);
+    if (input.rationale !== undefined) validateBoundedText(input.rationale, "Decision rationale", 100_000);
+    const id = randomUUID();
+    const now = this.#now();
+    this.#database.exec("BEGIN IMMEDIATE");
+    try {
+      const previous = this.#database.prepare(`
+        SELECT id FROM decisions WHERE cube_id = ? AND topic = ? AND status = 'active'
+      `).get(cubeId, input.topic);
+      const supersedes = previous === undefined ? null : requiredText(previous, "id");
+      if (supersedes !== null) {
+        this.#database.prepare("UPDATE decisions SET status = 'superseded' WHERE id = ?")
+          .run(supersedes);
+      }
+      this.#database.prepare(`
+        INSERT INTO decisions (
+          id, cube_id, topic, decision, rationale, ratified_by, status, supersedes, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?)
+      `).run(
+        id, cubeId, input.topic, input.decision, input.rationale ?? null,
+        this.#principal.kind === "drone-session" ? this.#principal.droneId : null,
+        supersedes, now,
+      );
+      this.#database.exec("COMMIT");
+    } catch (error) {
+      try { this.#database.exec("ROLLBACK"); } catch { /* Preserve the original failure. */ }
+      throw error;
+    }
+    return this.#decision(id);
+  }
+
+  listDecisions(cubeId: string): DecisionRecord[] {
+    this.#requireCube(cubeId, "read");
+    return this.#database.prepare(`
+      SELECT id, cube_id, topic, decision, rationale, ratified_by, status, supersedes, created_at
+      FROM decisions WHERE cube_id = ? AND status = 'active' ORDER BY topic, created_at, id
+    `).all(cubeId).map(decisionRecord);
+  }
+
+  subscribeActivity(cubeId: string, listener: (entry: EnrichedActivityRecord) => void): () => void {
+    this.#requireCube(cubeId, "read");
+    return this.#activityHub.subscribe(cubeId, listener);
+  }
+
+  #requireCube(cubeId: string, access: CubeAccess): void {
+    assertCanonicalUuid(cubeId, "Cube id");
+    const scope = this.#scope(access);
+    const row = this.#database.prepare(`
+      SELECT 1 AS present FROM cubes AS c WHERE c.id = ? AND ${scope.sql}
+    `).get(cubeId, ...scope.parameters);
+    if (row === undefined) throw new ScopedStoreError();
+  }
+
+  #nextActivityTimestamp(cubeId: string): string {
+    const now = this.#clock().getTime();
+    const latest = this.#database.prepare(`
+      SELECT created_at FROM activity_log WHERE cube_id = ? ORDER BY created_at DESC, id DESC LIMIT 1
+    `).get(cubeId);
+    if (latest === undefined) return new Date(now).toISOString();
+    return new Date(Math.max(now, Date.parse(requiredText(latest, "created_at")) + 1)).toISOString();
+  }
+
+  #validateCursor(cubeId: string, cursor: LogCursor | null): void {
+    if (cursor === null) return;
+    assertCanonicalUuid(cursor.id, "Activity cursor id");
+    validateTimestamp(cursor.created_at);
+    const expired = this.#database.prepare(`
+      SELECT 1 AS present FROM expired_activity_cursors
+      WHERE cube_id = ? AND entry_id = ? AND created_at = ?
+    `).get(cubeId, cursor.id, cursor.created_at);
+    if (expired !== undefined) throw new CursorExpiredError();
+    const valid = this.#database.prepare(`
+      SELECT 1 AS present FROM activity_log WHERE cube_id = ? AND id = ? AND created_at = ?
+    `).get(cubeId, cursor.id, cursor.created_at);
+    if (valid === undefined) throw new ScopedStoreError();
+  }
+
+  #countAfter(cubeId: string, cursor: LogCursor | null): number {
+    const row = cursor === null
+      ? this.#database.prepare(
+          "SELECT COUNT(*) AS count FROM activity_log WHERE cube_id = ?",
+        ).get(cubeId)
+      : this.#database.prepare(`
+          SELECT COUNT(*) AS count FROM activity_log
+          WHERE cube_id = ? AND (created_at > ? OR (created_at = ? AND id > ?))
+        `).get(cubeId, cursor.created_at, cursor.created_at, cursor.id);
+    if (row === undefined) throw new Error("Activity count query returned no row.");
+    return requiredInteger(row, "count");
+  }
+
+  #enrichedEntry(cubeId: string, entryId: string): EnrichedActivityRecord {
+    const row = this.#database.prepare(`
+      SELECT l.id, l.cube_id, l.drone_id, l.message, l.visibility, l.created_at,
+             d.label AS drone_label, r.name AS role_name
+      FROM activity_log AS l
+      LEFT JOIN drones AS d ON d.id = l.drone_id AND d.cube_id = l.cube_id
+      LEFT JOIN roles AS r ON r.id = d.role_id AND r.cube_id = d.cube_id
+      WHERE l.cube_id = ? AND l.id = ?
+    `).get(cubeId, entryId);
+    if (row === undefined) throw new ScopedStoreError();
+    const recipientRows = this.#database.prepare(`
+      SELECT drone_id FROM activity_log_recipients WHERE entry_id = ? ORDER BY drone_id
+    `).all(entryId);
+    return enrichedActivityRecord(row, recipientRows.map((recipient) => requiredText(recipient, "drone_id")));
+  }
+
+  #claims(cubeId: string): ClaimRecord[] {
+    return this.#database.prepare(`
+      SELECT acknowledgement.entry_id AS log_entry_id,
+             acknowledgement.claimant_drone_id,
+             drone.label AS claimant_label,
+             role.name AS claimant_role,
+             acknowledgement.created_at AS claimed_at
+      FROM activity_acks AS acknowledgement
+      JOIN activity_log AS entry ON entry.id = acknowledgement.entry_id
+      LEFT JOIN drones AS drone ON drone.id = acknowledgement.claimant_drone_id
+        AND drone.cube_id = entry.cube_id
+      LEFT JOIN roles AS role ON role.id = drone.role_id AND role.cube_id = drone.cube_id
+      WHERE entry.cube_id = ? AND acknowledgement.kind = 'claim'
+        AND acknowledgement.claimant_drone_id IS NOT NULL
+      ORDER BY acknowledgement.created_at, acknowledgement.entry_id,
+               acknowledgement.claimant_drone_id
+    `).all(cubeId).map(claimRecord);
+  }
+
+  #decision(id: string): DecisionRecord {
+    const row = this.#database.prepare(`
+      SELECT id, cube_id, topic, decision, rationale, ratified_by, status, supersedes, created_at
+      FROM decisions WHERE id = ?
+    `).get(id);
+    if (row === undefined) throw new ScopedStoreError();
+    return decisionRecord(row);
   }
 
   #scope(access: CubeAccess): ScopePredicate {
@@ -369,17 +730,26 @@ class SqliteMaintenanceStore implements MaintenanceStore {
 
   createCube(input: {
     readonly id: string;
+    readonly ownerId?: string;
     readonly name: string;
     readonly directive: string;
   }): void {
     assertCanonicalUuid(input.id, "Cube id");
+    if (input.ownerId !== undefined) assertCanonicalUuid(input.ownerId, "Cube owner id");
     validateName(input.name);
     validateDirective(input.directive);
     const now = this.#now();
     this.#database.prepare(`
-      INSERT INTO cubes (id, name, directive, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?)
-    `).run(input.id, input.name, input.directive, now, now);
+      INSERT INTO cubes (id, owner_id, name, directive, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(
+      input.id,
+      input.ownerId ?? "00000000-0000-4000-8000-000000000000",
+      input.name,
+      input.directive,
+      now,
+      now,
+    );
   }
 
   grantClientCube(input: {
@@ -478,8 +848,46 @@ class SqliteMaintenanceStore implements MaintenanceStore {
     ).run(this.#now(), sessionId);
   }
 
+  expireActivityCursor(cubeId: string, cursor: LogCursor): void {
+    assertCanonicalUuid(cubeId, "Cube id");
+    assertCanonicalUuid(cursor.id, "Activity cursor id");
+    validateTimestamp(cursor.created_at);
+    const entry = this.#database.prepare(`
+      SELECT 1 AS present FROM activity_log WHERE cube_id = ? AND id = ? AND created_at = ?
+    `).get(cubeId, cursor.id, cursor.created_at);
+    if (entry === undefined) throw new ScopedStoreError();
+    this.#database.prepare(`
+      INSERT OR IGNORE INTO expired_activity_cursors (cube_id, entry_id, created_at)
+      VALUES (?, ?, ?)
+    `).run(cubeId, cursor.id, cursor.created_at);
+  }
+
   #now(): string {
     return this.#clock().toISOString();
+  }
+}
+
+class ActivityHub {
+  readonly #listeners = new Map<string, Set<(entry: EnrichedActivityRecord) => void>>();
+
+  subscribe(cubeId: string, listener: (entry: EnrichedActivityRecord) => void): () => void {
+    const listeners = this.#listeners.get(cubeId) ?? new Set();
+    listeners.add(listener);
+    this.#listeners.set(cubeId, listeners);
+    return () => {
+      listeners.delete(listener);
+      if (listeners.size === 0) this.#listeners.delete(cubeId);
+    };
+  }
+
+  publish(cubeId: string, entry: EnrichedActivityRecord): void {
+    for (const listener of this.#listeners.get(cubeId) ?? []) {
+      try {
+        listener(entry);
+      } catch {
+        // A live subscriber cannot roll back or alter a committed append.
+      }
+    }
   }
 }
 
@@ -587,12 +995,11 @@ class SqliteCredentialStore implements CredentialStore {
     validateLookup(lookup);
     const row = this.#database.prepare(`
       SELECT credential.id, credential.client_id, credential.lookup_digest,
-             credential.verifier_digest, credential.revoked_at
+             credential.verifier_digest,
+             COALESCE(credential.revoked_at, client.revoked_at) AS revoked_at
       FROM client_credentials AS credential
       JOIN clients AS client ON client.id = credential.client_id
       WHERE credential.lookup_digest = ?
-        AND credential.revoked_at IS NULL
-        AND client.revoked_at IS NULL
     `).get(lookup);
     return row === undefined ? null : storedDigest(row);
   }
@@ -757,6 +1164,7 @@ function readPragma(database: DatabaseSync, name: "journal_mode" | "foreign_keys
 function cubeRecord(row: CubeRow): CubeRecord {
   return {
     id: row.id,
+    ownerId: row.owner_id,
     name: row.name,
     directive: row.directive,
     createdAt: row.created_at,
@@ -779,6 +1187,7 @@ function activityRecord(row: ActivityRow): ActivityRecord {
 function cubeRow(row: Record<string, unknown>): CubeRow {
   return {
     id: requiredText(row, "id"),
+    owner_id: requiredText(row, "owner_id"),
     name: requiredText(row, "name"),
     directive: requiredText(row, "directive"),
     created_at: requiredText(row, "created_at"),
@@ -804,6 +1213,86 @@ function activityRow(row: Record<string, unknown>): ActivityRow {
     message: requiredText(row, "message"),
     created_at: requiredText(row, "created_at"),
   };
+}
+
+function enrichedActivityRecord(
+  row: Record<string, unknown>,
+  recipientDroneIds: string[],
+): EnrichedActivityRecord {
+  const visibility = requiredText(row, "visibility");
+  if (visibility !== "broadcast" && visibility !== "direct") {
+    throw new Error("Database contains invalid activity visibility.");
+  }
+  return {
+    id: requiredText(row, "id"),
+    cube_id: requiredText(row, "cube_id"),
+    drone_id: nullableText(row, "drone_id"),
+    message: requiredText(row, "message"),
+    visibility,
+    created_at: requiredText(row, "created_at"),
+    drone_label: nullableText(row, "drone_label"),
+    role_name: nullableText(row, "role_name"),
+    recipient_drone_ids: recipientDroneIds,
+  };
+}
+
+function claimRecord(row: Record<string, unknown>): ClaimRecord {
+  return {
+    log_entry_id: requiredText(row, "log_entry_id"),
+    claimant_drone_id: requiredText(row, "claimant_drone_id"),
+    claimant_label: nullableText(row, "claimant_label"),
+    claimant_role: nullableText(row, "claimant_role"),
+    claimed_at: requiredText(row, "claimed_at"),
+    stale: false,
+  };
+}
+
+function decisionRecord(row: Record<string, unknown>): DecisionRecord {
+  const status = requiredText(row, "status");
+  if (status !== "active" && status !== "superseded" && status !== "removed") {
+    throw new Error("Database contains invalid decision status.");
+  }
+  return {
+    id: requiredText(row, "id"),
+    cube_id: requiredText(row, "cube_id"),
+    topic: requiredText(row, "topic"),
+    decision: requiredText(row, "decision"),
+    rationale: nullableText(row, "rationale"),
+    ratified_by: nullableText(row, "ratified_by"),
+    status,
+    supersedes: nullableText(row, "supersedes"),
+    created_at: requiredText(row, "created_at"),
+  };
+}
+
+function roleRecord(row: Record<string, unknown>): RoleRecord {
+  return {
+    id: requiredText(row, "id"),
+    cube_id: requiredText(row, "cube_id"),
+    name: requiredText(row, "name"),
+    short_description: requiredText(row, "short_description"),
+    is_default: requiredInteger(row, "is_default") === 1,
+    is_human_seat: requiredInteger(row, "is_human_seat") === 1,
+    created_at: requiredText(row, "created_at"),
+  };
+}
+
+function droneRecord(row: Record<string, unknown>): DroneRecord {
+  return {
+    id: requiredText(row, "id"),
+    cube_id: requiredText(row, "cube_id"),
+    role_id: requiredText(row, "role_id"),
+    label: requiredText(row, "label"),
+    last_seen: requiredText(row, "last_seen"),
+    hostname: nullableText(row, "hostname"),
+    created_at: requiredText(row, "created_at"),
+  };
+}
+
+function nullableText(row: Record<string, unknown>, key: string): string | null {
+  const value = row[key];
+  if (value === null || typeof value === "string") return value;
+  throw new Error(`Database contains invalid ${key}.`);
 }
 
 function requiredText(row: Record<string, unknown>, key: string): string {
@@ -859,6 +1348,12 @@ function optionalNonNullText(row: Record<string, unknown>, key: string): string 
 function validateName(value: string): void {
   if (value.length < 1 || value.length > 120) {
     throw new Error("Name must contain 1 to 120 characters.");
+  }
+}
+
+function validateBoundedText(value: string, name: string, maxBytes: number): void {
+  if (value.length === 0 || Buffer.byteLength(value) > maxBytes) {
+    throw new Error(`${name} must contain 1 to ${maxBytes} bytes.`);
   }
 }
 

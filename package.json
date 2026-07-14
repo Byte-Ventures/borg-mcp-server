@@ -29,6 +29,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.20.1",
+    "borgmcp-shared": "git+ssh://git@github.com/Byte-Ventures/borg-mcp-shared.git#ff8b92503358f407ce15d8a9c1e65b573f851569",
     "typescript": "^7.0.2",
     "vitest": "^4.1.10"
   },

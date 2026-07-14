@@ -51,6 +51,12 @@ describe("node server service", () => {
       "scope.cube-isolation",
       "transport.tls",
       "authority.no-cloud-fallback",
+      "log.cursor",
+      "stream.sse",
+      "stream.replay",
+      "acks",
+      "claims",
+      "decisions",
     ]);
     await expect(
       options?.authorizeProtocol("Bearer not-yet-supported", AbortSignal.abort()),

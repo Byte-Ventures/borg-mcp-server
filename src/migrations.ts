@@ -101,6 +101,43 @@ export const STORE_MIGRATIONS: readonly Migration[] = Object.freeze([
         ON activity_log (cube_id, created_at, id);
     `,
   },
+  {
+    version: 2,
+    name: "credential_authority",
+    sql: `
+      CREATE TABLE recovery_credentials (
+        id TEXT PRIMARY KEY,
+        lookup_digest BLOB NOT NULL UNIQUE,
+        verifier_digest BLOB NOT NULL,
+        created_at TEXT NOT NULL,
+        revoked_at TEXT
+      ) STRICT;
+
+      CREATE TABLE enrollment_invitations (
+        id TEXT PRIMARY KEY,
+        lookup_digest BLOB NOT NULL UNIQUE,
+        verifier_digest BLOB NOT NULL,
+        expires_at TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        consumed_at TEXT
+      ) STRICT;
+
+      CREATE TABLE client_credentials (
+        id TEXT PRIMARY KEY,
+        client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+        lookup_digest BLOB NOT NULL UNIQUE,
+        verifier_digest BLOB NOT NULL,
+        created_at TEXT NOT NULL,
+        revoked_at TEXT
+      ) STRICT;
+
+      CREATE INDEX enrollment_invitations_expiry_idx
+        ON enrollment_invitations (expires_at)
+        WHERE consumed_at IS NULL;
+      CREATE INDEX client_credentials_client_idx
+        ON client_credentials (client_id, revoked_at);
+    `,
+  },
 ]);
 
 interface AppliedMigrationRow {

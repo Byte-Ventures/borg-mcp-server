@@ -43,6 +43,9 @@ describe("node server service", () => {
     const options = startServer.mock.calls[0]?.[0];
     expect(options?.bind).toEqual({});
     expect(options?.protocolInfo.capabilities).toEqual([
+      "auth.bearer",
+      "auth.revocation",
+      "scope.cube-isolation",
       "transport.tls",
       "authority.no-cloud-fallback",
     ]);
@@ -83,7 +86,7 @@ describe("node server service", () => {
     });
 
     await expect(service.start([])).rejects.toThrow(
-      "TLS key and certificate files must be configured.",
+      "Server data directory or TLS files must be configured.",
     );
     expect(startServer).not.toHaveBeenCalled();
   });

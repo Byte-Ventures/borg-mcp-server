@@ -48,6 +48,9 @@ export interface RequestHandlerContext {
     authorization: string | undefined,
     signal: AbortSignal,
   ) => Promise<boolean>;
+  readonly exchangeEnrollment?: (
+    body: unknown,
+  ) => Promise<{ readonly status: 201 | 400 | 401; readonly body?: unknown }>;
 }
 
 export interface HttpsServerOptions {
@@ -58,6 +61,7 @@ export interface HttpsServerOptions {
   };
   readonly protocolInfo: ProtocolInfoDocument;
   readonly authorizeProtocol: RequestHandlerContext["authorizeProtocol"];
+  readonly exchangeEnrollment?: RequestHandlerContext["exchangeEnrollment"];
   readonly limits?: ServiceLimits;
 }
 
@@ -110,6 +114,9 @@ export function createRequestHandlerContext(
   return Object.freeze({
     protocolInfo: options.protocolInfo,
     authorizeProtocol: options.authorizeProtocol,
+    ...(options.exchangeEnrollment === undefined
+      ? {}
+      : { exchangeEnrollment: options.exchangeEnrollment }),
   });
 }
 
@@ -154,20 +161,22 @@ async function handleRequest(
     return;
   }
 
-  const bodyStatus = await consumeRequestBody(request, limits.maxRequestBodyBytes);
-  if (bodyStatus !== "empty") {
-    sendEmpty(response, bodyStatus === "oversized" ? 413 : 400, true);
+  const requestBody = await readRequestBody(request, limits.maxRequestBodyBytes);
+  if (requestBody === "oversized") {
+    sendEmpty(response, 413, true);
     return;
   }
 
   const path = parseRequestPath(request.url);
 
   if (path === "/healthz") {
+    if (requestBody.length !== 0) return sendEmpty(response, 400, true);
     sendEmpty(response, request.method === "GET" ? 204 : 405);
     return;
   }
 
   if (path === "/api/protocol") {
+    if (requestBody.length !== 0) return sendEmpty(response, 400, true);
     const authorized = await context.authorizeProtocol(request.headers.authorization, signal);
     if (!authorized) {
       sendEmpty(response, 401);
@@ -181,18 +190,38 @@ async function handleRequest(
     return;
   }
 
+  if (path === "/api/enrollment/exchange") {
+    if (request.method !== "POST" || context.exchangeEnrollment === undefined ||
+        requestBody.length === 0) {
+      sendEmpty(response, 405);
+      return;
+    }
+    let decoded: unknown;
+    try {
+      decoded = JSON.parse(requestBody.toString("utf8"));
+    } catch {
+      sendEmpty(response, 400, true);
+      return;
+    }
+    const result = await context.exchangeEnrollment(decoded);
+    if (result.status === 400) sendEmpty(response, 400, true);
+    else if (result.status === 401 || result.body === undefined) sendEmpty(response, 401);
+    else sendJson(response, 201, result.body);
+    return;
+  }
+
   sendEmpty(response, 404);
 }
 
-async function consumeRequestBody(
+async function readRequestBody(
   request: IncomingMessage,
   maxBytes: number,
-): Promise<"empty" | "present" | "oversized"> {
+): Promise<Buffer | "oversized"> {
   const declaredLength = request.headers["content-length"];
   if (declaredLength !== undefined) {
     if (!/^\d+$/u.test(declaredLength)) {
       request.resume();
-      return "present";
+      return "oversized";
     }
     if (Number(declaredLength) > maxBytes) {
       request.resume();
@@ -201,14 +230,17 @@ async function consumeRequestBody(
   }
 
   let bytes = 0;
+  const chunks: Buffer[] = [];
   for await (const chunk of request) {
-    bytes += Buffer.byteLength(chunk);
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    bytes += buffer.length;
     if (bytes > maxBytes) {
       request.resume();
       return "oversized";
     }
+    chunks.push(buffer);
   }
-  return bytes === 0 ? "empty" : "present";
+  return Buffer.concat(chunks, bytes);
 }
 
 function parseRequestPath(value: string | undefined): string | null {

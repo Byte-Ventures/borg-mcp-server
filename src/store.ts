@@ -44,8 +44,43 @@ export interface OpenStoreOptions {
 export interface StoreRuntime {
   readonly forPrincipal: (principal: Principal) => ScopedStore;
   readonly maintenance: MaintenanceStore;
+  readonly credentials: CredentialStore;
   readonly diagnostics: () => StoreDiagnostics;
   readonly close: () => void;
+}
+
+export interface DigestPair {
+  readonly lookup: Buffer;
+  readonly verifier: Buffer;
+}
+
+export interface StoredSecretDigest extends DigestPair {
+  readonly id: string;
+  readonly expiresAt?: string;
+  readonly consumedAt?: string | null;
+  readonly clientId?: string;
+  readonly revokedAt?: string | null;
+}
+
+export interface CredentialStore {
+  readonly createRecoveryCredential: (id: string, digest: DigestPair) => void;
+  readonly findRecoveryCredential: (lookup: Buffer) => StoredSecretDigest | null;
+  readonly createInvitation: (id: string, digest: DigestPair, expiresAt: string) => void;
+  readonly findInvitation: (lookup: Buffer) => StoredSecretDigest | null;
+  readonly consumeInvitation: (input: {
+    readonly invitationId: string;
+    readonly clientId: string;
+    readonly clientName: string;
+    readonly credentialId: string;
+    readonly credentialDigest: DigestPair;
+  }) => boolean;
+  readonly findClientCredential: (lookup: Buffer) => StoredSecretDigest | null;
+  readonly rotateClientCredential: (input: {
+    readonly clientId: string;
+    readonly credentialId: string;
+    readonly credentialDigest: DigestPair;
+  }) => void;
+  readonly revokeClientCredentials: (clientId: string) => void;
 }
 
 export interface ScopedStore {
@@ -140,12 +175,14 @@ export async function openStore(options: OpenStoreOptions): Promise<StoreRuntime
   }
 
   const maintenance = new SqliteMaintenanceStore(database, clock);
+  const credentials = new SqliteCredentialStore(database, clock);
   return Object.freeze({
     forPrincipal: (principal: Principal) => {
       assertServerDerivedPrincipal(principal);
       return new SqliteScopedStore(database, principal, clock);
     },
     maintenance,
+    credentials,
     diagnostics: () => diagnostics(database),
     close: () => database.close(),
   });
@@ -446,6 +483,185 @@ class SqliteMaintenanceStore implements MaintenanceStore {
   }
 }
 
+class SqliteCredentialStore implements CredentialStore {
+  readonly #database: DatabaseSync;
+  readonly #clock: () => Date;
+
+  constructor(database: DatabaseSync, clock: () => Date) {
+    this.#database = database;
+    this.#clock = clock;
+  }
+
+  createRecoveryCredential(id: string, digest: DigestPair): void {
+    assertCanonicalUuid(id, "Recovery credential id");
+    validateDigest(digest);
+    this.#database.prepare(`
+      INSERT INTO recovery_credentials (
+        id, lookup_digest, verifier_digest, created_at
+      ) VALUES (?, ?, ?, ?)
+    `).run(id, digest.lookup, digest.verifier, this.#now());
+  }
+
+  findRecoveryCredential(lookup: Buffer): StoredSecretDigest | null {
+    validateLookup(lookup);
+    const row = this.#database.prepare(`
+      SELECT id, lookup_digest, verifier_digest, revoked_at
+      FROM recovery_credentials
+      WHERE lookup_digest = ? AND revoked_at IS NULL
+    `).get(lookup);
+    return row === undefined ? null : storedDigest(row);
+  }
+
+  createInvitation(id: string, digest: DigestPair, expiresAt: string): void {
+    assertCanonicalUuid(id, "Invitation id");
+    validateDigest(digest);
+    validateTimestamp(expiresAt);
+    this.#database.prepare(`
+      INSERT INTO enrollment_invitations (
+        id, lookup_digest, verifier_digest, expires_at, created_at
+      ) VALUES (?, ?, ?, ?, ?)
+    `).run(id, digest.lookup, digest.verifier, expiresAt, this.#now());
+  }
+
+  findInvitation(lookup: Buffer): StoredSecretDigest | null {
+    validateLookup(lookup);
+    const row = this.#database.prepare(`
+      SELECT id, lookup_digest, verifier_digest, expires_at, consumed_at
+      FROM enrollment_invitations
+      WHERE lookup_digest = ?
+    `).get(lookup);
+    return row === undefined ? null : storedDigest(row);
+  }
+
+  consumeInvitation(input: {
+    readonly invitationId: string;
+    readonly clientId: string;
+    readonly clientName: string;
+    readonly credentialId: string;
+    readonly credentialDigest: DigestPair;
+  }): boolean {
+    assertCanonicalUuid(input.invitationId, "Invitation id");
+    assertCanonicalUuid(input.clientId, "Client id");
+    assertCanonicalUuid(input.credentialId, "Credential id");
+    validateName(input.clientName);
+    validateDigest(input.credentialDigest);
+    this.#database.exec("BEGIN IMMEDIATE");
+    try {
+      const now = this.#now();
+      const consumed = this.#database.prepare(`
+        UPDATE enrollment_invitations
+        SET consumed_at = ?
+        WHERE id = ? AND consumed_at IS NULL AND expires_at > ?
+      `).run(now, input.invitationId, now);
+      if (consumed.changes !== 1) {
+        this.#database.exec("ROLLBACK");
+        return false;
+      }
+      this.#database.prepare(
+        "INSERT INTO clients (id, name, created_at) VALUES (?, ?, ?)",
+      ).run(input.clientId, input.clientName, now);
+      this.#database.prepare(`
+        INSERT INTO client_credentials (
+          id, client_id, lookup_digest, verifier_digest, created_at
+        ) VALUES (?, ?, ?, ?, ?)
+      `).run(
+        input.credentialId,
+        input.clientId,
+        input.credentialDigest.lookup,
+        input.credentialDigest.verifier,
+        now,
+      );
+      this.#database.exec("COMMIT");
+      return true;
+    } catch (error) {
+      try {
+        this.#database.exec("ROLLBACK");
+      } catch {
+        // Preserve the originating storage failure.
+      }
+      throw error;
+    }
+  }
+
+  findClientCredential(lookup: Buffer): StoredSecretDigest | null {
+    validateLookup(lookup);
+    const row = this.#database.prepare(`
+      SELECT credential.id, credential.client_id, credential.lookup_digest,
+             credential.verifier_digest, credential.revoked_at
+      FROM client_credentials AS credential
+      JOIN clients AS client ON client.id = credential.client_id
+      WHERE credential.lookup_digest = ?
+        AND credential.revoked_at IS NULL
+        AND client.revoked_at IS NULL
+    `).get(lookup);
+    return row === undefined ? null : storedDigest(row);
+  }
+
+  rotateClientCredential(input: {
+    readonly clientId: string;
+    readonly credentialId: string;
+    readonly credentialDigest: DigestPair;
+  }): void {
+    assertCanonicalUuid(input.clientId, "Client id");
+    assertCanonicalUuid(input.credentialId, "Credential id");
+    validateDigest(input.credentialDigest);
+    this.#database.exec("BEGIN IMMEDIATE");
+    try {
+      const now = this.#now();
+      this.#database.prepare(`
+        UPDATE client_credentials SET revoked_at = ?
+        WHERE client_id = ? AND revoked_at IS NULL
+      `).run(now, input.clientId);
+      this.#database.prepare(`
+        INSERT INTO client_credentials (
+          id, client_id, lookup_digest, verifier_digest, created_at
+        ) VALUES (?, ?, ?, ?, ?)
+      `).run(
+        input.credentialId,
+        input.clientId,
+        input.credentialDigest.lookup,
+        input.credentialDigest.verifier,
+        now,
+      );
+      this.#database.exec("COMMIT");
+    } catch (error) {
+      try {
+        this.#database.exec("ROLLBACK");
+      } catch {
+        // Preserve the originating storage failure.
+      }
+      throw error;
+    }
+  }
+
+  revokeClientCredentials(clientId: string): void {
+    assertCanonicalUuid(clientId, "Client id");
+    this.#database.exec("BEGIN IMMEDIATE");
+    try {
+      const now = this.#now();
+      this.#database.prepare(
+        "UPDATE clients SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL",
+      ).run(now, clientId);
+      this.#database.prepare(`
+        UPDATE client_credentials SET revoked_at = ?
+        WHERE client_id = ? AND revoked_at IS NULL
+      `).run(now, clientId);
+      this.#database.exec("COMMIT");
+    } catch (error) {
+      try {
+        this.#database.exec("ROLLBACK");
+      } catch {
+        // Preserve the originating storage failure.
+      }
+      throw error;
+    }
+  }
+
+  #now(): string {
+    return this.#clock().toISOString();
+  }
+}
+
 async function prepareDatabasePath(path: string): Promise<string> {
   if (path === ":memory:") throw new Error("The server store requires a file-backed database.");
   const databasePath = resolve(path);
@@ -602,6 +818,44 @@ function requiredInteger(row: Record<string, unknown>, key: string): number {
   return value as number;
 }
 
+function storedDigest(row: Record<string, unknown>): StoredSecretDigest {
+  const lookup = requiredBuffer(row, "lookup_digest");
+  const verifier = requiredBuffer(row, "verifier_digest");
+  const expiresAt = optionalNonNullText(row, "expires_at");
+  const consumedAt = optionalText(row, "consumed_at");
+  const clientId = optionalNonNullText(row, "client_id");
+  const revokedAt = optionalText(row, "revoked_at");
+  return {
+    id: requiredText(row, "id"),
+    lookup,
+    verifier,
+    ...(expiresAt === undefined ? {} : { expiresAt }),
+    ...(consumedAt === undefined ? {} : { consumedAt }),
+    ...(clientId === undefined ? {} : { clientId }),
+    ...(revokedAt === undefined ? {} : { revokedAt }),
+  };
+}
+
+function requiredBuffer(row: Record<string, unknown>, key: string): Buffer {
+  const value = row[key];
+  if (!(value instanceof Uint8Array)) throw new Error(`Database contains invalid ${key}.`);
+  return Buffer.from(value);
+}
+
+function optionalText(row: Record<string, unknown>, key: string): string | null | undefined {
+  const value = row[key];
+  if (value === undefined) return undefined;
+  if (value === null || typeof value === "string") return value;
+  throw new Error(`Database contains invalid ${key}.`);
+}
+
+function optionalNonNullText(row: Record<string, unknown>, key: string): string | undefined {
+  const value = row[key];
+  if (value === undefined) return undefined;
+  if (typeof value === "string") return value;
+  throw new Error(`Database contains invalid ${key}.`);
+}
+
 function validateName(value: string): void {
   if (value.length < 1 || value.length > 120) {
     throw new Error("Name must contain 1 to 120 characters.");
@@ -618,6 +872,15 @@ function validateDirective(value: string): void {
   if (Buffer.byteLength(value) > 100_000) {
     throw new Error("Cube directive exceeds 100000 bytes.");
   }
+}
+
+function validateDigest(digest: DigestPair): void {
+  validateLookup(digest.lookup);
+  if (digest.verifier.length !== 32) throw new Error("Verifier digest must contain 32 bytes.");
+}
+
+function validateLookup(lookup: Buffer): void {
+  if (lookup.length !== 16) throw new Error("Lookup digest must contain 16 bytes.");
 }
 
 function validateTimestamp(value: string): void {

@@ -7,7 +7,13 @@ export function createPart2ProtocolInfo(limits: ServiceLimits): ProtocolInfoDocu
       name: "borgmcp-shared",
       version: "0.2.0-draft",
     },
-    capabilities: ["transport.tls", "authority.no-cloud-fallback"],
+    capabilities: [
+      "auth.bearer",
+      "auth.revocation",
+      "scope.cube-isolation",
+      "transport.tls",
+      "authority.no-cloud-fallback",
+    ],
     limits: {
       max_request_bytes: limits.maxRequestBodyBytes,
       max_log_message_bytes: 10_240,

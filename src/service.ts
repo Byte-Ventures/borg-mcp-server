@@ -1,5 +1,10 @@
 import { readFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join } from "node:path";
 
+import { bootstrapServer, loadDigestKey, type BootstrapResult } from "./bootstrap.js";
+import { CredentialAuthority, CredentialDigester } from "./credentials.js";
+import { createEnrollmentExchange } from "./enrollment.js";
 import {
   DEFAULT_SERVICE_LIMITS,
   startHttpsServer,
@@ -7,15 +12,20 @@ import {
   type RunningServer,
 } from "./https-server.js";
 import { createPart2ProtocolInfo } from "./protocol-draft.js";
+import { resolveBindOptions } from "./network-policy.js";
 import { parseStartOptions } from "./start-options.js";
+import { openStore } from "./store.js";
 
 export interface ServerService {
   readonly start: (args: readonly string[]) => Promise<void>;
+  readonly setup?: () => Promise<BootstrapResult>;
 }
 
 export interface ServerEnvironment {
   readonly BORG_SERVER_TLS_KEY_FILE?: string;
   readonly BORG_SERVER_TLS_CERT_FILE?: string;
+  readonly BORG_SERVER_DATA_DIR?: string;
+  readonly BORG_SERVER_BIND_HOST?: string;
 }
 
 interface ServiceDependencies {
@@ -30,28 +40,54 @@ export function createNodeServerService(dependencies: ServiceDependencies): Serv
   return {
     async start(args): Promise<void> {
       const bind = parseStartOptions(args);
-      const keyPath = dependencies.environment.BORG_SERVER_TLS_KEY_FILE;
-      const certificatePath = dependencies.environment.BORG_SERVER_TLS_CERT_FILE;
+      const dataDirectory = dependencies.environment.BORG_SERVER_DATA_DIR;
+      const keyPath = dependencies.environment.BORG_SERVER_TLS_KEY_FILE ??
+        (dataDirectory === undefined ? undefined : join(dataDirectory, "server.key"));
+      const certificatePath = dependencies.environment.BORG_SERVER_TLS_CERT_FILE ??
+        (dataDirectory === undefined ? undefined : join(dataDirectory, "server.crt"));
       if (keyPath === undefined || certificatePath === undefined) {
-        throw new Error("TLS key and certificate files must be configured.");
+        throw new Error("Server data directory or TLS files must be configured.");
       }
 
       const key = await dependencies.readFile(keyPath);
       let running: RunningServer;
+      let authRuntime: Awaited<ReturnType<typeof openStore>> | undefined;
+      let digester: CredentialDigester | undefined;
       try {
         const cert = await dependencies.readFile(certificatePath);
+        let authority: CredentialAuthority | undefined;
+        if (dataDirectory !== undefined) {
+          authRuntime = await openStore({ path: join(dataDirectory, "borg.db") });
+          const digestKey = await loadDigestKey(join(dataDirectory, "credential-digest.key"));
+          digester = new CredentialDigester(digestKey);
+          digestKey.fill(0);
+          authority = new CredentialAuthority(authRuntime.credentials, digester);
+        }
         running = await dependencies.startServer({
           bind,
           tls: { key, cert },
           limits: DEFAULT_SERVICE_LIMITS,
           protocolInfo: createPart2ProtocolInfo(DEFAULT_SERVICE_LIMITS),
-          authorizeProtocol: async () => false,
+          authorizeProtocol: async (authorization) =>
+            authority !== undefined && authority.authenticate(authorization) !== null,
+          ...(authority === undefined
+            ? {}
+            : { exchangeEnrollment: createEnrollmentExchange(authority) }),
         });
+      } catch (error) {
+        digester?.destroy();
+        authRuntime?.close();
+        throw error;
       } finally {
         key.fill(0);
       }
       dependencies.onStarted(running.origin);
-      await dependencies.waitForShutdown(running);
+      try {
+        await dependencies.waitForShutdown(running);
+      } finally {
+        digester?.destroy();
+        authRuntime?.close();
+      }
     },
   };
 }
@@ -59,21 +95,37 @@ export function createNodeServerService(dependencies: ServiceDependencies): Serv
 export function selectServerEnvironment(environment: NodeJS.ProcessEnv): ServerEnvironment {
   const keyFile = environment["BORG_SERVER_TLS_KEY_FILE"];
   const certificateFile = environment["BORG_SERVER_TLS_CERT_FILE"];
+  const dataDirectory = environment["BORG_SERVER_DATA_DIR"];
+  const bindHost = environment["BORG_SERVER_BIND_HOST"];
   return {
     ...(keyFile === undefined ? {} : { BORG_SERVER_TLS_KEY_FILE: keyFile }),
     ...(certificateFile === undefined
       ? {}
       : { BORG_SERVER_TLS_CERT_FILE: certificateFile }),
+    ...(dataDirectory === undefined ? {} : { BORG_SERVER_DATA_DIR: dataDirectory }),
+    ...(bindHost === undefined ? {} : { BORG_SERVER_BIND_HOST: bindHost }),
   };
 }
 
-export const nodeServerService = createNodeServerService({
-  environment: selectServerEnvironment(process.env),
+const serverEnvironment = selectServerEnvironment(process.env);
+const dataDirectory = serverEnvironment.BORG_SERVER_DATA_DIR ?? join(homedir(), ".borg", "server");
+const setupBindHost = resolveBindOptions({
+  ...(serverEnvironment.BORG_SERVER_BIND_HOST === undefined
+    ? {}
+    : { host: serverEnvironment.BORG_SERVER_BIND_HOST }),
+  lanConsent: true,
+}).host;
+const startOnlyService = createNodeServerService({
+  environment: { ...serverEnvironment, BORG_SERVER_DATA_DIR: dataDirectory },
   readFile,
   startServer: startHttpsServer,
   onStarted: (origin) => console.error(`Borg server listening on ${origin}`),
   waitForShutdown,
 });
+export const nodeServerService: ServerService = {
+  start: startOnlyService.start,
+  setup: () => bootstrapServer(dataDirectory, setupBindHost),
+};
 
 function waitForShutdown(server: RunningServer): Promise<void> {
   return new Promise((resolve, reject) => {

@@ -193,6 +193,7 @@ describe("Principal to ScopedStore isolation", () => {
   it("exposes named stores without a raw database or generic admin escape hatch", () => {
     expect(Object.keys(runtime).sort()).toEqual([
       "close",
+      "credentials",
       "diagnostics",
       "forPrincipal",
       "maintenance",

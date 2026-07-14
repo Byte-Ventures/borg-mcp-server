@@ -18,6 +18,7 @@ Start options:
   --lan            Consent to this start on a private LAN address
 
 TLS files:
+  BORG_SERVER_DATA_DIR (default: ~/.borg/server), or explicit
   BORG_SERVER_TLS_KEY_FILE and BORG_SERVER_TLS_CERT_FILE`;
 
 export async function runCli(
@@ -34,10 +35,13 @@ export async function runCli(
 
   switch (command) {
     case "setup":
-      io.stderr(
-        "Server setup is not implemented in this foundation build; no listener was started.",
-      );
-      return 1;
+      if (service.setup === undefined) {
+        io.stderr("Server setup is unavailable.");
+        return 1;
+      }
+      const result = await service.setup();
+      io.stdout(`Server setup complete.\nRecovery credential (shown once): ${result.recoveryCredential}\nInitial enrollment invitation (shown once): ${result.initialInvitation}`);
+      return 0;
     case "start":
       await service.start(extraArgs);
       return 0;

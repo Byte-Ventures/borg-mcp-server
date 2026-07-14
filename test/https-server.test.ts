@@ -18,7 +18,7 @@ const protocolInfo: ProtocolInfoDocument = {
   },
   capabilities: ["transport.tls", "authority.no-cloud-fallback"],
   limits: {
-    max_request_bytes: 8,
+    max_request_bytes: 1_024,
     max_log_message_bytes: 10_240,
     max_read_page_size: 500,
     max_replay_page_size: 200,
@@ -54,10 +54,14 @@ describe("HTTPS service", () => {
       tls: { key, cert: certificate },
       protocolInfo,
       authorizeProtocol: async (authorization) => authorization === "Bearer accepted-test-token",
+      exchangeEnrollment: async () => ({
+        status: 201,
+        body: { protocol_version: "1", request_id: "request-1234", payload: { ok: true } },
+      }),
       limits: {
         maxConnections: 4,
         maxHeaderBytes: 8_192,
-        maxRequestBodyBytes: 8,
+        maxRequestBodyBytes: 1_024,
         maxRequestsPerSocket: 10,
         requestTimeoutMs: 2_000,
         headersTimeoutMs: 1_000,
@@ -118,11 +122,29 @@ describe("HTTPS service", () => {
       certificate,
       "/api/protocol",
       { authorization: "Bearer accepted-test-token" },
-      "123456789",
+      "x".repeat(1_025),
       "POST",
     );
 
     expect(response).toMatchObject({ status: 413, body: "" });
+  });
+
+  it("serves invitation-authorized enrollment through the bounded JSON route", async () => {
+    const response = await request(
+      server.origin,
+      certificate,
+      "/api/enrollment/exchange",
+      { "content-type": "application/json" },
+      JSON.stringify({ protocol_version: "1", request_id: "request-1234", payload: {} }),
+      "POST",
+    );
+
+    expect(response.status).toBe(201);
+    expect(JSON.parse(response.body)).toEqual({
+      protocol_version: "1",
+      request_id: "request-1234",
+      payload: { ok: true },
+    });
   });
 
   it("rejects oversized request headers at the parser boundary", async () => {
@@ -141,7 +163,7 @@ describe("HTTPS service", () => {
     expect(server.limits).toEqual({
       maxConnections: 4,
       maxHeaderBytes: 8_192,
-      maxRequestBodyBytes: 8,
+      maxRequestBodyBytes: 1_024,
       maxRequestsPerSocket: 10,
       requestTimeoutMs: 2_000,
       headersTimeoutMs: 1_000,

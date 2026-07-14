@@ -189,23 +189,24 @@ export class CoordinationApi {
     const store = this.#runtime.forPrincipal(principal);
     const session = this.#authority.registerLiveSession(principal.id);
     const signal = AbortSignal.any([requestSignal, session.signal]);
+    let unsubscribe = (): void => undefined;
     const queue = new AsyncStringQueue(() => {
       unsubscribe();
       session.release();
     });
     const pending: EnrichedActivityRecord[] = [];
     let live = false;
-    const unsubscribe = store.subscribeActivity(cubeId, (entry) => {
-      if (store.getCube(cubeId) === null) {
-        queue.close();
-        return;
-      }
-      if (live) queue.push(encodeLogEvent(entry));
-      else if (pending.length >= 200) queue.close();
-      else pending.push(entry);
-    });
-    signal.addEventListener("abort", () => queue.close(), { once: true });
     try {
+      unsubscribe = store.subscribeActivity(cubeId, (entry) => {
+        if (store.getCube(cubeId) === null) {
+          queue.close();
+          return;
+        }
+        if (live) queue.push(encodeLogEvent(entry));
+        else if (pending.length >= 200) queue.close();
+        else pending.push(entry);
+      });
+      signal.addEventListener("abort", () => queue.close(), { once: true });
       const replay = store.readLog(cubeId, cursor, 200).entries;
       const barrier = this.#replayBarrier;
       this.#replayBarrier = undefined;
@@ -229,8 +230,7 @@ export class CoordinationApi {
       live = true;
       return { status: 200, stream: queue };
     } catch (error) {
-      unsubscribe();
-      session.release();
+      queue.close();
       if (error instanceof CursorExpiredError) return failure(410, "CURSOR_EXPIRED", error.message);
       if (error instanceof ScopedStoreError) return failure(404, "NOT_FOUND", error.message);
       throw error;

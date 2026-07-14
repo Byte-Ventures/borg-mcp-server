@@ -245,7 +245,11 @@ async function handleRequest(
       }
     }
     const authorization = request.headers.authorization;
-    const cursor = parseCursorParameter(request.url);
+    const cursor = parseCursorParameter(request.url, path);
+    if (cursor === INVALID_COORDINATION_QUERY) {
+      sendJson(response, 400, protocolError("INVALID_INPUT", "Invalid query parameters."), true);
+      return;
+    }
     const result = await context.handleCoordination({
       method: request.method ?? "",
       path,
@@ -373,14 +377,27 @@ function protocolError(code: string, message: string): object {
   return { protocol_version: "1", error: { code, message } };
 }
 
-function parseCursorParameter(value: string | undefined): string | undefined {
+const INVALID_COORDINATION_QUERY = Symbol("invalid-coordination-query");
+
+function parseCursorParameter(
+  value: string | undefined,
+  path: string,
+): string | undefined | typeof INVALID_COORDINATION_QUERY {
   if (value === undefined) return undefined;
   try {
     const parsed = new URL(value, "https://local.invalid");
+    const keys = [...parsed.searchParams.keys()];
+    if (!path.endsWith("/stream")) {
+      return keys.length === 0 ? undefined : INVALID_COORDINATION_QUERY;
+    }
+    if (keys.some((key) => key !== "cursor")) return INVALID_COORDINATION_QUERY;
     const values = parsed.searchParams.getAll("cursor");
-    return values.length === 1 ? values[0] : undefined;
+    if (values.length === 0) return undefined;
+    return values.length === 1 && values[0]!.length > 0
+      ? values[0]
+      : INVALID_COORDINATION_QUERY;
   } catch {
-    return undefined;
+    return INVALID_COORDINATION_QUERY;
   }
 }
 

@@ -85,6 +85,10 @@ export class LiveCredentialRegistry {
     for (const controller of sessions) controller.abort();
     this.#sessions.delete(clientId);
   }
+
+  activeSessionCount(clientId: string): number {
+    return this.#sessions.get(clientId)?.size ?? 0;
+  }
 }
 
 export class CredentialAuthority {

@@ -35,6 +35,7 @@ describe("HTTPS service", () => {
   let certificate: string;
   let key: string;
   let server: RunningServer;
+  let coordinationCalls = 0;
 
   beforeAll(async () => {
     const material = await generate([{ name: "commonName", value: "localhost" }], {
@@ -78,6 +79,10 @@ describe("HTTPS service", () => {
           status: 201,
           body: { protocol_version: "1", request_id: "request-1234", payload: { ok: true } },
         };
+      },
+      handleCoordination: async () => {
+        coordinationCalls += 1;
+        return { status: 200, body: { protocol_version: "1", request_id: "unexpected" } };
       },
       limits: {
         maxConnections: 4,
@@ -205,6 +210,24 @@ describe("HTTPS service", () => {
       request_id: "request-1234",
       error: { code: "AUTH_INVALID", message: "Enrollment authentication failed." },
     });
+  });
+
+  it.each([
+    "?cursor=first&cursor=second",
+    "?cursor=first&unknown=value",
+    "?unknown=value",
+  ])("rejects ambiguous stream queries before invoking the handler: %s", async (query) => {
+    coordinationCalls = 0;
+    const response = await request(
+      server.origin,
+      certificate,
+      `/api/cubes/00000000-0000-4000-8000-000000000001/stream${query}`,
+      { authorization: "Bearer accepted-test-token" },
+    );
+
+    expect(response.status).toBe(400);
+    expect(JSON.parse(response.body).error.code).toBe("INVALID_INPUT");
+    expect(coordinationCalls).toBe(0);
   });
 
   it("rejects oversized request headers at the parser boundary", async () => {
@@ -374,7 +397,7 @@ function request(
       {
         hostname: url.hostname,
         port: url.port,
-        path: url.pathname,
+        path: `${url.pathname}${url.search}`,
         method,
         headers: { ...headers, ...(body === "" ? {} : { "content-length": byteLength(body) }) },
         ca,

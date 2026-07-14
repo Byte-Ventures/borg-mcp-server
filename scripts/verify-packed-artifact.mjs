@@ -4,6 +4,7 @@ import { access, lstat, mkdtemp, readFile, readdir, rm, stat } from 'node:fs/pro
 import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { isDeepStrictEqual } from 'node:util';
 
 const MAX_PACKED_BYTES = 2 * 1024 * 1024;
 const MAX_UNPACKED_BYTES = 8 * 1024 * 1024;
@@ -45,6 +46,65 @@ function isInside(root, candidate) {
 
 function isExactVersion(value) {
   return typeof value === 'string' && /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/u.test(value);
+}
+
+function packageNameFromLockPath(path) {
+  const segments = path.split('/');
+  let packageName = '';
+  for (let index = 0; index < segments.length;) {
+    if (segments[index] !== 'node_modules') throw new Error(`Invalid npm-shrinkwrap.json package path: ${path}`);
+    const first = segments[index + 1];
+    if (!first) throw new Error(`Invalid npm-shrinkwrap.json package path: ${path}`);
+    if (first.startsWith('@')) {
+      const second = segments[index + 2];
+      if (!second) throw new Error(`Invalid npm-shrinkwrap.json package path: ${path}`);
+      packageName = `${first}/${second}`;
+      index += 3;
+    } else {
+      packageName = first;
+      index += 2;
+    }
+  }
+  return packageName;
+}
+
+function canonicalRegistryTarball(name, version) {
+  const basename = name.includes('/') ? name.slice(name.indexOf('/') + 1) : name;
+  return `https://registry.npmjs.org/${name}/-/${basename}-${version}.tgz`;
+}
+
+function isSha512Integrity(value) {
+  if (typeof value !== 'string' || !/^sha512-[A-Za-z0-9+/]{86}==$/u.test(value)) return false;
+  const encoded = value.slice('sha512-'.length);
+  const digest = Buffer.from(encoded, 'base64');
+  return digest.byteLength === 64 && digest.toString('base64') === encoded;
+}
+
+async function verifyOfficialRegistryMetadata(entries) {
+  const unique = new Map();
+  for (const entry of entries) {
+    const key = `${entry.name}@${entry.version}`;
+    const previous = unique.get(key);
+    if (previous && (previous.resolved !== entry.resolved || previous.integrity !== entry.integrity)) {
+      throw new Error(`npm-shrinkwrap.json contains divergent duplicate metadata: ${key}`);
+    }
+    unique.set(key, entry);
+  }
+  const uniqueEntries = [...unique.values()];
+  for (let index = 0; index < uniqueEntries.length; index += 8) {
+    await Promise.all(uniqueEntries.slice(index, index + 8).map(async (entry) => {
+      const endpoint = `https://registry.npmjs.org/${encodeURIComponent(entry.name)}/${encodeURIComponent(entry.version)}`;
+      const response = await fetch(endpoint, {
+        headers: { accept: 'application/json' },
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (!response.ok) throw new Error(`Official registry metadata lookup failed: ${entry.name}@${entry.version}`);
+      const metadata = await response.json();
+      if (metadata?.dist?.tarball !== entry.resolved || metadata?.dist?.integrity !== entry.integrity) {
+        throw new Error(`npm-shrinkwrap.json metadata differs from the official registry: ${entry.name}@${entry.version}`);
+      }
+    }));
+  }
 }
 
 export async function verifyPackedArtifact(tarballPath) {
@@ -126,6 +186,15 @@ export async function verifyPackedArtifact(tarballPath) {
     if (JSON.stringify(manifest.publishConfig) !== JSON.stringify({ access: 'public' })) {
       throw new Error('publishConfig must contain only access=public; registry redirects are forbidden.');
     }
+    if (!isDeepStrictEqual(manifest.bin, { 'borg-mcp-server': './dist/main.js' }) ||
+        !isDeepStrictEqual(manifest.exports, {
+          '.': { types: './dist/index.d.ts', import: './dist/index.js' },
+        })) {
+      throw new Error('Package bin and exports must match the reviewed public entrypoints.');
+    }
+    for (const entrypoint of ['dist/main.js', 'dist/index.js', 'dist/index.d.ts']) {
+      if (!relativeFiles.has(entrypoint)) throw new Error(`Package entrypoint is not shipped: ${entrypoint}`);
+    }
     for (const hook of FORBIDDEN_HOOKS) {
       if (manifest.scripts?.[hook]) throw new Error(`Forbidden consumer lifecycle hook: ${hook}`);
     }
@@ -134,33 +203,59 @@ export async function verifyPackedArtifact(tarballPath) {
         if (!isExactVersion(version)) throw new Error(`Dependency must be an exact registry version: ${name}@${version}`);
       }
     }
-    if ((manifest.bundledDependencies ?? []).length > 0) throw new Error('Bundled dependencies are forbidden.');
+    for (const field of ['bundleDependencies', 'bundledDependencies']) {
+      if (Object.hasOwn(manifest, field)) throw new Error(`Bundled dependencies are forbidden: ${field}.`);
+    }
 
     const shrinkwrap = JSON.parse(await readFile(join(root, 'npm-shrinkwrap.json'), 'utf8'));
     if (shrinkwrap.name !== manifest.name || shrinkwrap.version !== manifest.version ||
         shrinkwrap.lockfileVersion !== 3 || typeof shrinkwrap.packages !== 'object') {
       throw new Error('npm-shrinkwrap.json does not bind the exact package identity and lock format.');
     }
-    const rootDependencies = shrinkwrap.packages['']?.dependencies ?? {};
-    if (JSON.stringify(rootDependencies) !== JSON.stringify(manifest.dependencies ?? {})) {
-      throw new Error('npm-shrinkwrap.json root dependencies do not match package.json.');
+    const rootPackage = shrinkwrap.packages[''];
+    if (rootPackage === null || typeof rootPackage !== 'object' || Array.isArray(rootPackage)) {
+      throw new Error('npm-shrinkwrap.json is missing its root package entry.');
     }
-    for (const [path, dependency] of Object.entries(shrinkwrap.packages)) {
-      if (path === '') continue;
-      if (dependency.link === true || dependency.hasInstallScript === true ||
-          !isExactVersion(dependency.version) ||
-          !dependency.resolved?.startsWith('https://registry.npmjs.org/') ||
-          !dependency.integrity?.startsWith('sha512-')) {
-        throw new Error(`npm-shrinkwrap.json contains an untrusted dependency entry: ${path}`);
+    for (const field of ['dependencies', 'optionalDependencies', 'peerDependencies', 'peerDependenciesMeta']) {
+      if (!isDeepStrictEqual(rootPackage[field] ?? {}, manifest[field] ?? {})) {
+        throw new Error(`npm-shrinkwrap.json root ${field} do not match package.json.`);
       }
     }
+    const registryEntries = [];
+    for (const [path, dependency] of Object.entries(shrinkwrap.packages)) {
+      if (path === '') continue;
+      const name = packageNameFromLockPath(path);
+      const expectedTarball = canonicalRegistryTarball(name, dependency.version);
+      if (dependency.link === true || dependency.hasInstallScript === true ||
+          !isExactVersion(dependency.version) ||
+          (dependency.name !== undefined && dependency.name !== name) ||
+          dependency.resolved !== expectedTarball ||
+          !isSha512Integrity(dependency.integrity)) {
+        throw new Error(`npm-shrinkwrap.json contains an untrusted dependency entry: ${path}`);
+      }
+      registryEntries.push({
+        name,
+        version: dependency.version,
+        resolved: dependency.resolved,
+        integrity: dependency.integrity,
+      });
+    }
+    await verifyOfficialRegistryMetadata(registryEntries);
 
     for (const path of relativeFiles) {
       if (!path.endsWith('.map')) continue;
       const mapPath = join(root, ...path.split('/'));
       const sourceMap = JSON.parse(await readFile(mapPath, 'utf8'));
-      if (sourceMap.sourcesContent !== undefined) throw new Error(`Source map embeds sourcesContent: ${path}`);
-      for (const source of sourceMap.sources ?? []) {
+      if (sourceMap === null || typeof sourceMap !== 'object' || Array.isArray(sourceMap) || sourceMap.version !== 3) {
+        throw new Error(`Invalid source map v3 shape: ${path}`);
+      }
+      if (Object.hasOwn(sourceMap, 'sections')) throw new Error(`Indexed source maps are forbidden: ${path}`);
+      if (Object.hasOwn(sourceMap, 'sourcesContent')) throw new Error(`Source map embeds sourcesContent: ${path}`);
+      if (!Array.isArray(sourceMap.sources) || sourceMap.sources.some((source) => typeof source !== 'string') ||
+          (sourceMap.sourceRoot !== undefined && typeof sourceMap.sourceRoot !== 'string')) {
+        throw new Error(`Invalid source map sources: ${path}`);
+      }
+      for (const source of sourceMap.sources) {
         const target = resolve(dirname(mapPath), sourceMap.sourceRoot ?? '', source);
         if (!isInside(root, target) || !relativeFiles.has(relative(root, target).split(sep).join('/'))) {
           throw new Error(`Source map target is not shipped: ${path} -> ${source}`);

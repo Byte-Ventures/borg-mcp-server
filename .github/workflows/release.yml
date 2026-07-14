@@ -40,9 +40,21 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          test "${GITHUB_RUN_ATTEMPT}" = "1"
+          test ! -e .npmrc
+          bootstrap_config="${RUNNER_TEMP}/npm-bootstrap-config"
           npm_prefix="${RUNNER_TEMP}/npm-11.18.0"
-          npm install --prefix "${npm_prefix}" --ignore-scripts --no-save npm@11.18.0
+          mkdir "${bootstrap_config}"
+          : > "${bootstrap_config}/user.npmrc"
+          : > "${bootstrap_config}/global.npmrc"
+          export npm_config_userconfig="${bootstrap_config}/user.npmrc"
+          export npm_config_globalconfig="${bootstrap_config}/global.npmrc"
+          export npm_config_cache="${RUNNER_TEMP}/npm-bootstrap-cache"
+          export npm_config_registry="https://registry.npmjs.org/"
+          cd "${RUNNER_TEMP}"
+          npm install --prefix "${npm_prefix}" --ignore-scripts --no-save --registry=https://registry.npmjs.org npm@11.18.0
           test "$("${npm_prefix}/node_modules/.bin/npm" --version)" = "11.18.0"
+          test "$("${npm_prefix}/node_modules/.bin/npm" config get registry)" = "https://registry.npmjs.org/"
           echo "${npm_prefix}/node_modules/.bin" >> "${GITHUB_PATH}"
 
       - name: Verify immutable release source and all external gates
@@ -50,6 +62,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          test "${GITHUB_RUN_ATTEMPT}" = "1"
           test "$(node --version)" = "v22.22.2"
           test "$(npm --version)" = "11.18.0"
           test "${REPOSITORY_PRIVATE}" = "false"
@@ -93,6 +106,12 @@ jobs:
         run: |
           set -euo pipefail
           mkdir release
+          printf '%s\n' \
+            "run_id=${GITHUB_RUN_ID}" \
+            "run_attempt=${GITHUB_RUN_ATTEMPT}" \
+            "event=${GITHUB_EVENT_NAME}" \
+            "ref=${GITHUB_REF}" \
+            "sha=${GITHUB_SHA}" > release/run-evidence.txt
           npm pack --ignore-scripts --json --pack-destination release > release/pack-result.json
           node -e 'const fs=require("node:fs");const [r]=JSON.parse(fs.readFileSync("release/pack-result.json","utf8"));fs.appendFileSync(process.env.GITHUB_OUTPUT,`tarball=${r.filename}\n`);'
 
@@ -109,6 +128,9 @@ jobs:
       - name: Exercise publish metadata without publishing
         run: npm publish "./release/${{ steps.pack.outputs.tarball }}" --dry-run --ignore-scripts --access public --registry=https://registry.npmjs.org
 
+      - name: Exercise exact tarball in clean consumer prefixes
+        run: node scripts/exercise-packed-artifact.mjs "./release/${{ steps.pack.outputs.tarball }}"
+
       - name: Upload exact artifact for security audit
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -118,6 +140,7 @@ jobs:
             release/artifact-report.json
             release/borgmcp-server-${{ steps.release.outputs.version }}.cdx.json
             release/SHA512SUMS
+            release/run-evidence.txt
           if-no-files-found: error
           retention-days: 7
 
@@ -148,9 +171,21 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          test "${GITHUB_RUN_ATTEMPT}" = "1"
+          test ! -e .npmrc
+          bootstrap_config="${RUNNER_TEMP}/npm-bootstrap-config"
           npm_prefix="${RUNNER_TEMP}/npm-11.18.0"
-          npm install --prefix "${npm_prefix}" --ignore-scripts --no-save npm@11.18.0
+          mkdir "${bootstrap_config}"
+          : > "${bootstrap_config}/user.npmrc"
+          : > "${bootstrap_config}/global.npmrc"
+          export npm_config_userconfig="${bootstrap_config}/user.npmrc"
+          export npm_config_globalconfig="${bootstrap_config}/global.npmrc"
+          export npm_config_cache="${RUNNER_TEMP}/npm-bootstrap-cache"
+          export npm_config_registry="https://registry.npmjs.org/"
+          cd "${RUNNER_TEMP}"
+          npm install --prefix "${npm_prefix}" --ignore-scripts --no-save --registry=https://registry.npmjs.org npm@11.18.0
           test "$("${npm_prefix}/node_modules/.bin/npm" --version)" = "11.18.0"
+          test "$("${npm_prefix}/node_modules/.bin/npm" config get registry)" = "https://registry.npmjs.org/"
           echo "${npm_prefix}/node_modules/.bin" >> "${GITHUB_PATH}"
 
       - name: Download security-audited artifact

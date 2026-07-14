@@ -71,8 +71,10 @@ separate exact-artifact CR/SR/Release Quality gates before any preview.
 4. The tag-push workflow verifies the remote annotated tag object through an isolated ref, binds its
    peeled commit to `GITHUB_SHA`, and requires that commit to be on `origin/main`.
 5. Both jobs reject workflow reruns and repository npm configuration before bootstrapping exact npm
-   from the official registry with isolated configuration. The unprivileged `verify` job installs with
-   scripts disabled, audits dependencies, runs all checks, creates one npm tarball, binds its lock
+   from the official registry with isolated configuration. Before `npm ci` or any repository build
+   tool runs, a builtins-only verifier binds every source-lock dependency to its exact official
+   registry metadata. The unprivileged `verify` job then installs with scripts disabled, audits
+   dependencies, runs all checks, creates one npm tarball, binds its lock
    entries to official registry metadata, verifies its allowlist and entrypoints, installs/imports/runs
    that exact tarball in clean consumer prefixes, generates a CycloneDX SBOM, records run evidence and
    SHA-512, performs an npm dry run, and uploads the exact files. It has no environment, publish token,

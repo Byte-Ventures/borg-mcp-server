@@ -32,6 +32,10 @@ describe("server release lane", () => {
     expect(workflow).toContain("git merge-base --is-ancestor");
     expect(workflow).toContain("Download security-audited artifact");
     expect(workflow).toContain('node scripts/exercise-packed-artifact.mjs "./release/${{ steps.pack.outputs.tarball }}"');
+    const sourceLockVerification = verification.indexOf("node scripts/verify-source-lock.mjs");
+    const dependencyInstall = verification.indexOf("npm ci --ignore-scripts");
+    expect(sourceLockVerification).toBeGreaterThan(-1);
+    expect(dependencyInstall).toBeGreaterThan(sourceLockVerification);
     expect(workflow).toContain("npm publish \"./release/${{ needs.verify.outputs.tarball }}\"");
     expect(workflow.match(/npm publish \"\.\/release\//g)).toHaveLength(2);
     expect(workflow.match(/NODE_AUTH_TOKEN/g)).toHaveLength(1);
@@ -54,6 +58,15 @@ describe("server release lane", () => {
       expect(job).toContain('npm_config_userconfig="${bootstrap_config}/user.npmrc"');
       expect(job).toContain('npm_config_globalconfig="${bootstrap_config}/global.npmrc"');
       expect(job).toContain('config get registry)" = "https://registry.npmjs.org/"');
+    }
+  });
+
+  it("keeps pre-install source-lock verification builtin-only", async () => {
+    for (const path of ["scripts/verify-source-lock.mjs", "scripts/verify-lock-registry.mjs"]) {
+      const source = await readFile(path, "utf8");
+      const imports = [...source.matchAll(/^import .* from ['"]([^'"]+)['"];$/gmu)].map((match) => match[1]);
+      expect(imports.every((specifier) => specifier?.startsWith("node:") || specifier === "./verify-lock-registry.mjs"))
+        .toBe(true);
     }
   });
 

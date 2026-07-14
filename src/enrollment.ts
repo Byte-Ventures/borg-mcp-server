@@ -18,7 +18,14 @@ export function createEnrollmentExchange(authority: CredentialAuthority) {
     try {
       envelope = decodeEnrollmentEnvelope(body);
     } catch {
-      return { status: 400 };
+      return {
+        status: 400,
+        body: errorEnvelope(
+          "INVALID_INPUT",
+          "Invalid enrollment request.",
+          safeRequestId(body),
+        ),
+      };
     }
     const response = authority.exchangeInvitation({
       invitation: envelope.payload.invitation,
@@ -26,7 +33,16 @@ export function createEnrollmentExchange(authority: CredentialAuthority) {
         ? {}
         : { clientName: envelope.payload.client_name }),
     });
-    if (response === null) return { status: 401 };
+    if (response === null) {
+      return {
+        status: 401,
+        body: errorEnvelope(
+          "AUTH_INVALID",
+          "Enrollment authentication failed.",
+          envelope.request_id,
+        ),
+      };
+    }
     return {
       status: 201,
       body: {
@@ -40,6 +56,22 @@ export function createEnrollmentExchange(authority: CredentialAuthority) {
       },
     };
   };
+}
+
+function errorEnvelope(code: "INVALID_INPUT" | "AUTH_INVALID", message: string, requestId?: string) {
+  return {
+    protocol_version: "1" as const,
+    ...(requestId === undefined ? {} : { request_id: requestId }),
+    error: { code, message },
+  };
+}
+
+function safeRequestId(value: unknown): string | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const requestId = (value as Record<string, unknown>)["request_id"];
+  return typeof requestId === "string" && /^[A-Za-z0-9._-]{8,128}$/u.test(requestId)
+    ? requestId
+    : undefined;
 }
 
 export function decodeEnrollmentEnvelope(value: unknown): EnrollmentEnvelope {

@@ -191,21 +191,24 @@ async function handleRequest(
   }
 
   if (path === "/api/enrollment/exchange") {
-    if (request.method !== "POST" || context.exchangeEnrollment === undefined ||
-        requestBody.length === 0) {
+    if (request.method !== "POST" || context.exchangeEnrollment === undefined) {
       sendEmpty(response, 405);
       return;
     }
     let decoded: unknown;
-    try {
-      decoded = JSON.parse(requestBody.toString("utf8"));
-    } catch {
-      sendEmpty(response, 400, true);
-      return;
+    if (requestBody.length === 0) {
+      decoded = undefined;
+    } else {
+      try {
+        decoded = JSON.parse(requestBody.toString("utf8"));
+      } catch {
+        decoded = undefined;
+      }
     }
     const result = await context.exchangeEnrollment(decoded);
-    if (result.status === 400) sendEmpty(response, 400, true);
-    else if (result.status === 401 || result.body === undefined) sendEmpty(response, 401);
+    if (result.body === undefined) sendEmpty(response, result.status, result.status === 400);
+    else if (result.status === 400) sendJson(response, 400, result.body, true);
+    else if (result.status === 401) sendJson(response, 401, result.body);
     else sendJson(response, 201, result.body);
     return;
   }
@@ -262,10 +265,16 @@ function sendEmpty(response: ServerResponse, status: number, closeConnection = f
   response.end();
 }
 
-function sendJson(response: ServerResponse, status: number, value: unknown): void {
+function sendJson(
+  response: ServerResponse,
+  status: number,
+  value: unknown,
+  closeConnection = false,
+): void {
   const body = JSON.stringify(value);
   response.writeHead(status, {
     "cache-control": "no-store",
+    ...(closeConnection ? { connection: "close" } : {}),
     "content-length": Buffer.byteLength(body).toString(),
     "content-type": "application/json; charset=utf-8",
     "x-content-type-options": "nosniff",

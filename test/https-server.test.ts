@@ -54,10 +54,31 @@ describe("HTTPS service", () => {
       tls: { key, cert: certificate },
       protocolInfo,
       authorizeProtocol: async (authorization) => authorization === "Bearer accepted-test-token",
-      exchangeEnrollment: async () => ({
-        status: 201,
-        body: { protocol_version: "1", request_id: "request-1234", payload: { ok: true } },
-      }),
+      exchangeEnrollment: async (body) => {
+        if (body === undefined) {
+          return {
+            status: 400,
+            body: {
+              protocol_version: "1",
+              error: { code: "INVALID_INPUT", message: "Invalid enrollment request." },
+            },
+          };
+        }
+        if ((body as { denied?: boolean }).denied === true) {
+          return {
+            status: 401,
+            body: {
+              protocol_version: "1",
+              request_id: "request-1234",
+              error: { code: "AUTH_INVALID", message: "Enrollment authentication failed." },
+            },
+          };
+        }
+        return {
+          status: 201,
+          body: { protocol_version: "1", request_id: "request-1234", payload: { ok: true } },
+        };
+      },
       limits: {
         maxConnections: 4,
         maxHeaderBytes: 8_192,
@@ -144,6 +165,41 @@ describe("HTTPS service", () => {
       protocol_version: "1",
       request_id: "request-1234",
       payload: { ok: true },
+    });
+  });
+
+  it("returns the protocol error envelope for malformed enrollment JSON", async () => {
+    const response = await request(
+      server.origin,
+      certificate,
+      "/api/enrollment/exchange",
+      { "content-type": "application/json" },
+      "{",
+      "POST",
+    );
+
+    expect(response.status).toBe(400);
+    expect(JSON.parse(response.body)).toEqual({
+      protocol_version: "1",
+      error: { code: "INVALID_INPUT", message: "Invalid enrollment request." },
+    });
+  });
+
+  it("returns the protocol error envelope for rejected enrollment authentication", async () => {
+    const response = await request(
+      server.origin,
+      certificate,
+      "/api/enrollment/exchange",
+      { "content-type": "application/json" },
+      JSON.stringify({ denied: true }),
+      "POST",
+    );
+
+    expect(response.status).toBe(401);
+    expect(JSON.parse(response.body)).toEqual({
+      protocol_version: "1",
+      request_id: "request-1234",
+      error: { code: "AUTH_INVALID", message: "Enrollment authentication failed." },
     });
   });
 

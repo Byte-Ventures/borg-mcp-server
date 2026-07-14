@@ -1,10 +1,10 @@
-import { chmod, mkdtemp, readFile, realpath, rm, stat } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, realpath, rm, stat, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { X509Certificate } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { bootstrapServer, loadDigestKey } from "../src/bootstrap.js";
+import { bootstrapServer, loadDigestKey, loadTlsPrivateKey } from "../src/bootstrap.js";
 
 const directories: string[] = [];
 
@@ -59,6 +59,28 @@ describe("offline bootstrap", () => {
     await expect(loadDigestKey(result.paths.digestKey)).rejects.toThrow(
       "Credential digest key is invalid or not private.",
     );
+  });
+
+  it("refuses a group-readable TLS private key", async () => {
+    const parent = await temporaryDirectory();
+    const result = await bootstrapServer(join(parent, "server"));
+    await chmod(result.paths.serverKey, 0o644);
+
+    await expect(loadTlsPrivateKey(result.paths.serverKey)).rejects.toThrow(
+      "TLS private key is invalid or not private.",
+    );
+  });
+
+  it.each([
+    ["credential digest key", "digestKey", loadDigestKey],
+    ["TLS private key", "serverKey", loadTlsPrivateKey],
+  ] as const)("refuses a symlinked %s", async (_label, pathName, load) => {
+    const parent = await temporaryDirectory();
+    const result = await bootstrapServer(join(parent, "server"));
+    const link = join(parent, `${pathName}.link`);
+    await symlink(result.paths[pathName], link);
+
+    await expect(load(link)).rejects.toThrow("invalid or not private");
   });
 });
 

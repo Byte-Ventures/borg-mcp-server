@@ -53,8 +53,46 @@ describe("enrollment wire adapter", () => {
     });
   });
 
-  it("maps malformed envelopes to a bodyless-safe 400 result", async () => {
+  it("maps malformed envelopes to the canonical INVALID_INPUT result", async () => {
     const exchange = createEnrollmentExchange({ exchangeInvitation: vi.fn() } as never);
-    await expect(exchange({ invitation })).resolves.toEqual({ status: 400 });
+    await expect(exchange({ invitation })).resolves.toEqual({
+      status: 400,
+      body: {
+        protocol_version: "1",
+        error: { code: "INVALID_INPUT", message: "Invalid enrollment request." },
+      },
+    });
+  });
+
+  it("retains a valid request ID in malformed-request errors", async () => {
+    const exchange = createEnrollmentExchange({ exchangeInvitation: vi.fn() } as never);
+    await expect(exchange({
+      protocol_version: "1",
+      request_id: "request-1234",
+      payload: { invitation: "weak" },
+    })).resolves.toMatchObject({
+      status: 400,
+      body: { request_id: "request-1234" },
+    });
+  });
+
+  it("returns the canonical AUTH_INVALID envelope for invalid or reused invitations", async () => {
+    const exchange = createEnrollmentExchange({
+      exchangeInvitation: vi.fn().mockReturnValue(null),
+    } as never);
+    const result = await exchange({
+      protocol_version: "1",
+      request_id: "request-1234",
+      payload: { invitation },
+    });
+
+    expect(result).toEqual({
+      status: 401,
+      body: {
+        protocol_version: "1",
+        request_id: "request-1234",
+        error: { code: "AUTH_INVALID", message: "Enrollment authentication failed." },
+      },
+    });
   });
 });

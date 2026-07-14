@@ -2,7 +2,12 @@ import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-import { bootstrapServer, loadDigestKey, type BootstrapResult } from "./bootstrap.js";
+import {
+  bootstrapServer,
+  loadDigestKey,
+  loadTlsPrivateKey,
+  type BootstrapResult,
+} from "./bootstrap.js";
 import { CredentialAuthority, CredentialDigester } from "./credentials.js";
 import { createEnrollmentExchange } from "./enrollment.js";
 import {
@@ -31,6 +36,7 @@ export interface ServerEnvironment {
 interface ServiceDependencies {
   readonly environment: ServerEnvironment;
   readonly readFile: (path: string) => Promise<Buffer>;
+  readonly readPrivateKey: (path: string) => Promise<Buffer>;
   readonly startServer: (options: HttpsServerOptions) => Promise<RunningServer>;
   readonly onStarted: (origin: string) => void;
   readonly waitForShutdown: (server: RunningServer) => Promise<void>;
@@ -49,7 +55,7 @@ export function createNodeServerService(dependencies: ServiceDependencies): Serv
         throw new Error("Server data directory or TLS files must be configured.");
       }
 
-      const key = await dependencies.readFile(keyPath);
+      const key = await dependencies.readPrivateKey(keyPath);
       let running: RunningServer;
       let authRuntime: Awaited<ReturnType<typeof openStore>> | undefined;
       let digester: CredentialDigester | undefined;
@@ -118,6 +124,7 @@ const setupBindHost = resolveBindOptions({
 const startOnlyService = createNodeServerService({
   environment: { ...serverEnvironment, BORG_SERVER_DATA_DIR: dataDirectory },
   readFile,
+  readPrivateKey: loadTlsPrivateKey,
   startServer: startHttpsServer,
   onStarted: (origin) => console.error(`Borg server listening on ${origin}`),
   waitForShutdown,

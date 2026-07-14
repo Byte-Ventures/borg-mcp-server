@@ -7,8 +7,8 @@ describe("node server service", () => {
   it("loads configured TLS files and starts with a fail-closed protocol authorizer", async () => {
     const close = vi.fn().mockResolvedValue(undefined);
     const keyBuffer = Buffer.from("test-key-material");
-    const readFile = vi.fn(async (path: string) =>
-      path.endsWith(".key") ? keyBuffer : Buffer.from("test-certificate"));
+    const readFile = vi.fn().mockResolvedValue(Buffer.from("test-certificate"));
+    const readPrivateKey = vi.fn().mockResolvedValue(keyBuffer);
     const startServer = vi.fn(async (_options: HttpsServerOptions): Promise<RunningServer> => ({
       origin: "https://127.0.0.1:7443",
       limits: {
@@ -31,6 +31,7 @@ describe("node server service", () => {
         BORG_SERVER_TLS_CERT_FILE: "/private/server.crt",
       },
       readFile,
+      readPrivateKey,
       startServer,
       onStarted,
       waitForShutdown,
@@ -38,7 +39,9 @@ describe("node server service", () => {
 
     await service.start([]);
 
-    expect(readFile).toHaveBeenCalledTimes(2);
+    expect(readPrivateKey).toHaveBeenCalledWith("/private/server.key");
+    expect(readFile).toHaveBeenCalledOnce();
+    expect(readFile).toHaveBeenCalledWith("/private/server.crt");
     expect(startServer).toHaveBeenCalledOnce();
     const options = startServer.mock.calls[0]?.[0];
     expect(options?.bind).toEqual({});
@@ -66,6 +69,7 @@ describe("node server service", () => {
       },
       readFile: vi.fn(async (path: string) =>
         path.endsWith(".key") ? keyBuffer : Buffer.from("test-certificate")),
+      readPrivateKey: vi.fn().mockResolvedValue(keyBuffer),
       startServer: vi.fn().mockRejectedValue(new Error("startup failed")),
       onStarted: vi.fn(),
       waitForShutdown: vi.fn(),
@@ -80,6 +84,7 @@ describe("node server service", () => {
     const service = createNodeServerService({
       environment: {},
       readFile: vi.fn(),
+      readPrivateKey: vi.fn(),
       startServer,
       onStarted: vi.fn(),
       waitForShutdown: vi.fn(),

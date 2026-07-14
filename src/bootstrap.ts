@@ -1,5 +1,5 @@
 import { createHash, randomBytes, randomUUID, X509Certificate } from "node:crypto";
-import { readFile, stat, writeFile } from "node:fs/promises";
+import { lstat, readFile, stat, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { generate } from "selfsigned";
 
@@ -106,10 +106,22 @@ async function writePrivate(path: string, value: string | Buffer): Promise<void>
 }
 
 export async function loadDigestKey(path: string): Promise<Buffer> {
-  const key = await readFile(path);
-  if (key.length !== 32 || ((await stat(path)).mode & 0o077) !== 0) {
+  const key = await loadPrivateFile(path, "Credential digest key");
+  if (key.length !== 32) {
     key.fill(0);
     throw new Error("Credential digest key is invalid or not private.");
   }
   return key;
+}
+
+export async function loadTlsPrivateKey(path: string): Promise<Buffer> {
+  return loadPrivateFile(path, "TLS private key");
+}
+
+async function loadPrivateFile(path: string, label: string): Promise<Buffer> {
+  const metadata = await lstat(path);
+  if (!metadata.isFile() || (metadata.mode & 0o077) !== 0) {
+    throw new Error(`${label} is invalid or not private.`);
+  }
+  return readFile(path);
 }

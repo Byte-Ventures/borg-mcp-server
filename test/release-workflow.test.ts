@@ -24,6 +24,7 @@ describe("server release lane", () => {
     expect(workflow).toContain("SERVER_FSL_COUNSEL_LICENSE_SHA256");
     expect(workflow).toContain("SERVER_PUBLIC_REVIEW_APPROVED_SHA");
     expect(workflow).toContain("SERVER_RELEASE_AUTHORIZATION");
+    expect(workflow).toContain('test "${REPOSITORY_PRIVATE}" = "false"');
     expect(workflow).toContain('test "${GITHUB_RUN_ATTEMPT}" = "1"');
     expect(workflow).toContain("release/run-evidence.txt");
     expect(publication).toContain("ARTIFACT_SR_SHA512");
@@ -39,11 +40,14 @@ describe("server release lane", () => {
     for (const job of [verification, publication]) {
       const attemptGuard = job.indexOf('test "${GITHUB_RUN_ATTEMPT}" = "1"');
       const guard = job.indexOf("test ! -e .npmrc");
+      const setupNode = job.indexOf("uses: actions/setup-node@");
       const bootstrap = job.indexOf('npm install --prefix "${npm_prefix}"');
       expect(attemptGuard).toBeGreaterThan(-1);
-      expect(guard).toBeGreaterThan(attemptGuard);
       expect(guard).toBeGreaterThan(-1);
-      expect(bootstrap).toBeGreaterThan(guard);
+      expect(guard).toBeGreaterThan(attemptGuard);
+      expect(setupNode).toBeGreaterThan(attemptGuard);
+      expect(setupNode).toBeGreaterThan(guard);
+      expect(bootstrap).toBeGreaterThan(setupNode);
       expect(job.slice(bootstrap, job.indexOf("\n", bootstrap))).toContain(
         "--registry=https://registry.npmjs.org npm@11.18.0",
       );
@@ -64,7 +68,7 @@ describe("server release lane", () => {
     await expect(execute("bash", ["-c", guard!], { env: environment })).rejects.toBeDefined();
   });
 
-  it("rejects a repository npm config before bootstrap", async () => {
+  it("rejects repository npm config before setup-generated config", async () => {
     const workflow = await readFile(".github/workflows/release.yml", "utf8");
     const guard = workflow.match(/test ! -e \.npmrc/u)?.[0];
     expect(guard).toBeDefined();
@@ -77,6 +81,12 @@ describe("server release lane", () => {
         cwd: directory,
       })).rejects.toBeDefined();
       await expect(access(marker)).rejects.toBeDefined();
+
+      await rm(join(directory, ".npmrc"));
+      await expect(execute("bash", ["-c", `set -e\n${guard}\nprintf generated > .npmrc`], {
+        cwd: directory,
+      })).resolves.toBeDefined();
+      await expect(readFile(join(directory, ".npmrc"), "utf8")).resolves.toBe("generated");
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
@@ -96,5 +106,7 @@ describe("server release lane", () => {
     ]) {
       expect(runbook).toContain(gate);
     }
+    expect(runbook).toContain("The repository is public; visibility is complete");
+    expect(runbook).not.toContain("The repository remains private");
   });
 });

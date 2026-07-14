@@ -30,6 +30,13 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Reject reruns and repository npm configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${GITHUB_RUN_ATTEMPT}" = "1"
+          test ! -e .npmrc
+
       - name: Set up exact Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
@@ -40,8 +47,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "${GITHUB_RUN_ATTEMPT}" = "1"
-          test ! -e .npmrc
           bootstrap_config="${RUNNER_TEMP}/npm-bootstrap-config"
           npm_prefix="${RUNNER_TEMP}/npm-11.18.0"
           mkdir "${bootstrap_config}"
@@ -161,6 +166,13 @@ jobs:
       - name: Check out tagged verification code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
+      - name: Reject reruns and repository npm configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${GITHUB_RUN_ATTEMPT}" = "1"
+          test ! -e .npmrc
+
       - name: Set up exact Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
@@ -171,8 +183,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "${GITHUB_RUN_ATTEMPT}" = "1"
-          test ! -e .npmrc
           bootstrap_config="${RUNNER_TEMP}/npm-bootstrap-config"
           npm_prefix="${RUNNER_TEMP}/npm-11.18.0"
           mkdir "${bootstrap_config}"

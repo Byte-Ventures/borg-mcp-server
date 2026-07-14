@@ -91,10 +91,11 @@ separate exact-artifact CR/SR/Release Quality gates before any preview.
 
 ## Current audit state
 
-The repository remains private, has no protected environment, and has no available branch/tag
-rulesets or code scanning under its current private plan. Vulnerability alerts and automated security
-updates are enabled. Actions are restricted to GitHub-owned actions with full-SHA pinning required;
-the workflow token defaults to read-only and cannot approve pull requests. The repository does not
-yet contain the final FSL license or standalone public documentation. `package.json` remains private
-at version `0.0.0`, uses a Git+SSH development dependency, and has non-exact runtime dependency
-ranges. Those facts intentionally make release verification fail closed.
+The repository is public; visibility is complete and is no longer a release blocker. The protected
+publish environment, required branch/tag rulesets, and scanning controls still require live
+verification before a tag is authorized. Vulnerability alerts and automated security updates are
+enabled. Actions are restricted to GitHub-owned actions with full-SHA pinning required; the workflow
+token defaults to read-only and cannot approve pull requests. The repository does not yet contain the
+final FSL license or standalone public documentation. `package.json` remains private at version
+`0.0.0`, uses a Git+SSH development dependency, and has non-exact runtime dependency ranges. Those
+remaining facts intentionally make release verification fail closed.

@@ -211,8 +211,10 @@ describe("main operator errors", () => {
   });
 
   it("rejects constructor-recovery attacks against the built operator-error module", async () => {
-    const built = await import("../dist/operator-error.js");
-    const builtMain = await import("../dist/main.js");
+    const operatorModulePath = "../dist/operator-error.js";
+    const mainModulePath = "../dist/main.js";
+    const built = await import(operatorModulePath);
+    const builtMain = await import(mainModulePath);
     const secret = "built-secret-/private/operator-path";
     const legitimate = built.operatorErrors.RUNTIME_ACTIVE;
     const Recovered = Object.getPrototypeOf(legitimate).constructor as new (...args: unknown[]) => unknown;

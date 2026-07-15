@@ -398,8 +398,10 @@ describe("node server service", () => {
   });
 
   it("rejects constructor-recovery attacks against built fatal teardown errors", async () => {
-    const builtService = await import("../dist/service.js");
-    const builtMain = await import("../dist/main.js");
+    const serviceModulePath = "../dist/service.js";
+    const mainModulePath = "../dist/main.js";
+    const builtService = await import(serviceModulePath);
+    const builtMain = await import(mainModulePath);
     const primary = new Error("primary");
     const closeFailure = new Error("secret-built-close-detail");
     const service = builtService.createNodeServerService({

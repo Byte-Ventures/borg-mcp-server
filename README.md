@@ -7,12 +7,16 @@ HTTPS.
 ## Release status
 
 The `0.1.0` release preparation remains gated on the `#5` owner-enrollment and
-cube bootstrap work. The current setup command prepares local identity and
-storage and prints one-time recovery and enrollment secrets, but it does not
-create a cube or provide the supported owner-enrollment, client-onboarding,
-idempotent cube-creation, or multi-cube workflow. Supported client onboarding
-and local dogfooding are unavailable until `#5` has been implemented,
-security-reviewed, and dogfooded and this notice has been removed.
+cube bootstrap work. The server-side source implements purpose-bound owner
+enrollment and idempotent multi-cube creation against an exact development pin
+of the unreleased `borgmcp-shared` 0.3 contract. It is not release-ready until
+that contract has an audited registry release and the coordinated client flow
+has been security-reviewed and dogfooded.
+
+Setup prepares local identity and storage and prints one-time recovery and
+owner-enrollment secrets; it creates no cube. Supported client onboarding and
+local dogfooding remain unavailable until the coordinated `#5` gates pass and
+this notice is removed.
 
 ## Requirements
 
@@ -62,15 +66,21 @@ summary.
 
 ## Offline credential administration
 
-Stop the server before rotating or revoking client credentials:
+Stop the server before all offline client administration:
 
 ```sh
 borg-mcp-server client-rotate <client-id>
 borg-mcp-server client-revoke <client-id>
+borg-mcp-server client-invite
+borg-mcp-server owner-invite
+borg-mcp-server client-grant <client-id> <cube-id> <read|write|manage>
+borg-mcp-server client-ungrant <client-id> <cube-id>
 ```
 
-Rotation prints the replacement credential once. Treat setup, enrollment, and
-rotation output as secrets; do not paste it into issues, logs, or chat.
+Invitation commands read the recovery credential from a private hidden terminal
+prompt, never argv or environment. Rotation and invitation commands print their
+replacement secret once. Treat setup, enrollment, invitation, and rotation
+output as secrets; do not paste it into issues, logs, or chat.
 
 ## Capacity controls
 
@@ -82,6 +92,8 @@ variables:
 - `BORG_SERVER_MIN_FREE_DISK_BYTES`
 
 Invalid values fail closed before the server starts.
+Cube creation is additionally bounded to 100 cubes per creating client and
+1,000 cubes per server. Exact idempotent retries do not consume quota twice.
 
 ## Library entry point
 

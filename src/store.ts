@@ -110,7 +110,19 @@ export interface OpenStoreOptions {
   readonly clock?: () => Date;
   readonly storageLimits?: StorageLimits;
   readonly capacityProbe?: () => StorageCapacity;
+  readonly cubeLimits?: CubeLimits;
+  readonly mutationHook?: (phase: string) => void;
 }
+
+export interface CubeLimits {
+  readonly maxCubesPerClient: number;
+  readonly maxCubesTotal: number;
+}
+
+export const DEFAULT_CUBE_LIMITS: CubeLimits = Object.freeze({
+  maxCubesPerClient: 100,
+  maxCubesTotal: 1_000,
+});
 
 export interface StorageLimits {
   readonly maxActivityEntriesPerCube: number;
@@ -150,6 +162,17 @@ export interface StoredSecretDigest extends DigestPair {
   readonly revokedAt?: string | null;
 }
 
+export interface StoredInvitationDigest extends StoredSecretDigest {
+  readonly purpose: "owner" | "client";
+  readonly ownerEpoch: number | null;
+}
+
+export interface EnrollmentClaimResult {
+  readonly purpose: "owner" | "client";
+  readonly clientId: string;
+  readonly serverCapabilities: readonly [] | readonly ["create_cube"];
+}
+
 export interface StoredDroneSessionDigest extends StoredSecretDigest {
   readonly sessionId: string;
   readonly clientId: string;
@@ -161,15 +184,21 @@ export interface StoredDroneSessionDigest extends StoredSecretDigest {
 export interface CredentialStore {
   readonly createRecoveryCredential: (id: string, digest: DigestPair) => void;
   readonly findRecoveryCredential: (lookup: Buffer) => StoredSecretDigest | null;
-  readonly createInvitation: (id: string, digest: DigestPair, expiresAt: string) => void;
-  readonly findInvitation: (lookup: Buffer) => StoredSecretDigest | null;
-  readonly consumeInvitation: (input: {
+  readonly createInvitation: (input: {
+    readonly id: string;
+    readonly digest: DigestPair;
+    readonly expiresAt: string;
+    readonly purpose: "owner" | "client";
+  }) => void;
+  readonly findInvitation: (lookup: Buffer) => StoredInvitationDigest | null;
+  readonly claimInvitation: (input: {
     readonly invitationId: string;
     readonly clientId: string;
-    readonly clientName: string;
+    readonly requestedClientName: string | null;
+    readonly retryKey: string;
     readonly credentialId: string;
     readonly credentialDigest: DigestPair;
-  }) => boolean;
+  }) => EnrollmentClaimResult | null;
   readonly findClientCredential: (lookup: Buffer) => StoredSecretDigest | null;
   readonly clientExists: (clientId: string) => boolean;
   readonly clientIsActive: (clientId: string) => boolean;
@@ -183,6 +212,7 @@ export interface CredentialStore {
 }
 
 export interface ScopedStore {
+  readonly createCube: (input: CreateCubeInput) => CreateCubeRecord;
   readonly listCubes: () => CubeRecord[];
   readonly getCube: (cubeId: string) => CubeRecord | null;
   readonly updateDirective: (cubeId: string, directive: string) => void;
@@ -208,6 +238,19 @@ export interface ScopedStore {
     listener: (entry: EnrichedActivityRecord) => void,
   ) => (() => void);
   readonly attachSeat: (input: SeatAttachInput) => SeatAttachRecord;
+}
+
+export interface CreateCubeInput {
+  readonly retryKey: string;
+  readonly name: string;
+  readonly template: "default";
+}
+
+export interface CreateCubeRecord {
+  readonly cubeId: string;
+  readonly humanSeatRoleId: string;
+  readonly defaultWorkerRoleId: string;
+  readonly access: "manage";
 }
 
 export interface SeatAttachInput {
@@ -256,7 +299,29 @@ export interface MaintenanceStore {
     readonly cubeId: string;
     readonly access: CubeAccess;
   }) => void;
-  readonly removeClientCubeGrant: (clientId: string, cubeId: string) => void;
+  readonly removeClientCubeGrant: (clientId: string, cubeId: string) => boolean;
+  readonly grantCreateCubeCapability: (clientId: string) => void;
+  readonly resetAuthorityState: () => void;
+  readonly observeAuthorityState: () => {
+    readonly enrolled_clients: number;
+    readonly enrollment_claims: number;
+    readonly cubes: number;
+    readonly roles: number;
+    readonly grants: number;
+    readonly server_capabilities: number;
+    readonly cube_create_bindings: number;
+  };
+  readonly inspectCreatedCube: (clientId: string, record: CreateCubeRecord) => {
+    readonly cube_exists: boolean;
+    readonly creator_has_grant: boolean;
+    readonly grant_count: number;
+    readonly role_count: number;
+    readonly human_seat_role_matches: boolean;
+    readonly default_worker_role_matches: boolean;
+  };
+  readonly inspectEnrollmentPrincipal: (clientId: string) => {
+    readonly active_credential_bindings: number;
+  };
   readonly createRole: (input: {
     readonly id: string;
     readonly cubeId: string;
@@ -317,6 +382,16 @@ export class StorageCapacityError extends Error {
     super("Storage capacity is unavailable.");
     this.name = "StorageCapacityError";
   }
+}
+
+export class AccessDeniedError extends Error {
+  readonly code = "ACCESS_DENIED";
+  constructor() { super("Access denied."); this.name = "AccessDeniedError"; }
+}
+
+export class CreateCubeConflictError extends Error {
+  readonly code = "INVALID_INPUT";
+  constructor() { super("The cube creation request conflicts with an existing retry."); this.name = "CreateCubeConflictError"; }
 }
 
 interface CubeRow {
@@ -383,7 +458,9 @@ class StorageCapacityGuard {
 export async function openStore(options: OpenStoreOptions): Promise<StoreRuntime> {
   const databasePath = await prepareDatabasePath(options.path);
   const storageLimits = options.storageLimits ?? DEFAULT_STORAGE_LIMITS;
+  const cubeLimits = options.cubeLimits ?? DEFAULT_CUBE_LIMITS;
   validateStorageLimits(storageLimits);
+  validateStorageLimits(cubeLimits);
   const capacityProbe = options.capacityProbe ?? (() => storageCapacity(databasePath));
   const database = new DatabaseSync(databasePath, {
     enableForeignKeyConstraints: true,
@@ -409,7 +486,7 @@ export async function openStore(options: OpenStoreOptions): Promise<StoreRuntime
     requiredInteger(pageRow, "page_size"),
   );
   const maintenance = new SqliteMaintenanceStore(database, clock);
-  const credentials = new SqliteCredentialStore(database, clock, capacityGuard);
+  const credentials = new SqliteCredentialStore(database, clock, capacityGuard, options.mutationHook);
   const activityHub = new ActivityHub();
   return Object.freeze({
     forPrincipal: (principal: Principal) => {
@@ -421,6 +498,8 @@ export async function openStore(options: OpenStoreOptions): Promise<StoreRuntime
         activityHub,
         storageLimits,
         capacityGuard,
+        cubeLimits,
+        options.mutationHook,
       );
     },
     maintenance,
@@ -437,6 +516,8 @@ class SqliteScopedStore implements ScopedStore {
   readonly #activityHub: ActivityHub;
   readonly #storageLimits: StorageLimits;
   readonly #capacityGuard: StorageCapacityGuard;
+  readonly #cubeLimits: CubeLimits;
+  readonly #mutationHook: ((phase: string) => void) | undefined;
 
   constructor(
     database: DatabaseSync,
@@ -445,6 +526,8 @@ class SqliteScopedStore implements ScopedStore {
     activityHub: ActivityHub,
     storageLimits: StorageLimits,
     capacityGuard: StorageCapacityGuard,
+    cubeLimits: CubeLimits,
+    mutationHook: ((phase: string) => void) | undefined,
   ) {
     this.#database = database;
     this.#principal = principal;
@@ -452,6 +535,90 @@ class SqliteScopedStore implements ScopedStore {
     this.#activityHub = activityHub;
     this.#storageLimits = storageLimits;
     this.#capacityGuard = capacityGuard;
+    this.#cubeLimits = cubeLimits;
+    this.#mutationHook = mutationHook;
+  }
+
+  createCube(input: CreateCubeInput): CreateCubeRecord {
+    if (this.#principal.kind !== "client") throw new AccessDeniedError();
+    assertCanonicalUuid(input.retryKey, "Cube creation retry key");
+    validatePresentationName(input.name);
+    if (input.template !== "default") throw new Error("Unsupported cube template.");
+    this.#database.exec("BEGIN IMMEDIATE");
+    try {
+      const authorized = this.#database.prepare(`
+        SELECT 1 FROM clients AS client
+        JOIN client_server_capabilities AS capability ON capability.client_id = client.id
+        WHERE client.id = ? AND client.revoked_at IS NULL AND capability.capability = 'create_cube'
+      `).get(this.#principal.id);
+      if (authorized === undefined) throw new AccessDeniedError();
+      const existing = this.#database.prepare(`
+        SELECT name, template, cube_id, human_seat_role_id, default_worker_role_id
+        FROM cube_create_bindings WHERE client_id = ? AND retry_key = ?
+      `).get(this.#principal.id, input.retryKey);
+      if (existing !== undefined) {
+        if (requiredText(existing, "name") !== input.name || requiredText(existing, "template") !== input.template) {
+          throw new CreateCubeConflictError();
+        }
+        const result = createCubeRecord(existing);
+        this.#database.exec("COMMIT");
+        return result;
+      }
+      const clientCount = requiredInteger(this.#database.prepare(
+        "SELECT COUNT(*) AS count FROM cube_create_bindings WHERE client_id = ?",
+      ).get(this.#principal.id)!, "count");
+      const totalCount = requiredInteger(this.#database.prepare(
+        "SELECT COUNT(*) AS count FROM cubes",
+      ).get()!, "count");
+      if (clientCount >= this.#cubeLimits.maxCubesPerClient || totalCount >= this.#cubeLimits.maxCubesTotal) {
+        throw new StorageCapacityError();
+      }
+      this.#capacityGuard.assertCanGrow(Buffer.byteLength(input.name) + 16_384);
+      const now = this.#now();
+      const cubeId = randomUUID();
+      const humanSeatRoleId = randomUUID();
+      const defaultWorkerRoleId = randomUUID();
+      this.#database.prepare(`
+        INSERT INTO cubes (id, owner_id, name, directive, created_at, updated_at)
+        VALUES (?, ?, ?, '', ?, ?)
+      `).run(cubeId, this.#principal.id, input.name, now, now);
+      this.#mutationHook?.("cube.insert-cube");
+      this.#database.prepare(`
+        INSERT INTO roles (
+          id, cube_id, name, short_description, detailed_description,
+          is_default, is_human_seat, role_class, created_at
+        ) VALUES (?, ?, 'Coordinator', 'Human coordination seat', '', 0, 1, 'queen', ?)
+      `).run(humanSeatRoleId, cubeId, now);
+      this.#mutationHook?.("cube.insert-human-role");
+      this.#database.prepare(`
+        INSERT INTO roles (
+          id, cube_id, name, short_description, detailed_description,
+          is_default, is_human_seat, role_class, created_at
+        ) VALUES (?, ?, 'Builder', 'Default implementation worker', '', 1, 0, 'worker', ?)
+      `).run(defaultWorkerRoleId, cubeId, now);
+      this.#mutationHook?.("cube.insert-worker-role");
+      this.#database.prepare(`
+        INSERT INTO client_cube_grants (client_id, cube_id, access, created_at)
+        VALUES (?, ?, 'manage', ?)
+      `).run(this.#principal.id, cubeId, now);
+      this.#mutationHook?.("cube.insert-grant");
+      this.#database.prepare(`
+        INSERT INTO cube_create_bindings (
+          client_id, retry_key, name, template, cube_id,
+          human_seat_role_id, default_worker_role_id, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        this.#principal.id, input.retryKey, input.name, input.template, cubeId,
+        humanSeatRoleId, defaultWorkerRoleId, now,
+      );
+      this.#mutationHook?.("cube.insert-binding");
+      this.#database.exec("COMMIT");
+      this.#mutationHook?.("cube.after-commit");
+      return { cubeId, humanSeatRoleId, defaultWorkerRoleId, access: "manage" };
+    } catch (error) {
+      try { this.#database.exec("ROLLBACK"); } catch { /* Preserve the original failure. */ }
+      throw error;
+    }
   }
 
   listCubes(): CubeRecord[] {
@@ -1097,12 +1264,91 @@ class SqliteMaintenanceStore implements MaintenanceStore {
     `).run(input.clientId, input.cubeId, input.access, this.#now());
   }
 
-  removeClientCubeGrant(clientId: string, cubeId: string): void {
+  removeClientCubeGrant(clientId: string, cubeId: string): boolean {
     assertCanonicalUuid(clientId, "Client id");
     assertCanonicalUuid(cubeId, "Cube id");
-    this.#database.prepare(
+    const result = this.#database.prepare(
       "DELETE FROM client_cube_grants WHERE client_id = ? AND cube_id = ?",
     ).run(clientId, cubeId);
+    return result.changes === 1;
+  }
+
+  grantCreateCubeCapability(clientId: string): void {
+    assertCanonicalUuid(clientId, "Client id");
+    this.#database.prepare(`
+      INSERT OR IGNORE INTO client_server_capabilities (client_id, capability, created_at)
+      VALUES (?, 'create_cube', ?)
+    `).run(clientId, this.#now());
+  }
+
+  resetAuthorityState(): void {
+    this.#database.exec("BEGIN IMMEDIATE");
+    try {
+      for (const table of [
+        "cube_create_bindings", "activity_acks", "activity_log_recipients", "activity_log",
+        "decisions", "expired_activity_cursors", "drone_session_credentials", "drone_sessions",
+        "drones", "roles", "client_cube_grants", "cubes", "client_server_capabilities",
+        "enrollment_claims", "client_credentials", "owner_enrollment_state", "clients",
+        "enrollment_invitations",
+      ]) this.#database.exec(`DELETE FROM ${table}`);
+      this.#database.exec("COMMIT");
+    } catch (error) {
+      try { this.#database.exec("ROLLBACK"); } catch { /* Preserve the original failure. */ }
+      throw error;
+    }
+  }
+
+  observeAuthorityState() {
+    const count = (table: string): number => requiredInteger(
+      this.#database.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get()!,
+      "count",
+    );
+    return {
+      enrolled_clients: count("clients"),
+      enrollment_claims: count("enrollment_claims"),
+      cubes: count("cubes"),
+      roles: count("roles"),
+      grants: count("client_cube_grants"),
+      server_capabilities: count("client_server_capabilities"),
+      cube_create_bindings: count("cube_create_bindings"),
+    };
+  }
+
+  inspectCreatedCube(clientId: string, record: CreateCubeRecord) {
+    assertCanonicalUuid(clientId, "Client id");
+    const cube = this.#database.prepare("SELECT 1 FROM cubes WHERE id = ?").get(record.cubeId);
+    const grant = this.#database.prepare(`
+      SELECT access FROM client_cube_grants WHERE client_id = ? AND cube_id = ?
+    `).get(clientId, record.cubeId);
+    const roles = requiredInteger(this.#database.prepare(
+      "SELECT COUNT(*) AS count FROM roles WHERE cube_id = ?",
+    ).get(record.cubeId)!, "count");
+    const human = this.#database.prepare(`
+      SELECT 1 FROM roles WHERE id = ? AND cube_id = ? AND is_human_seat = 1 AND role_class = 'queen'
+    `).get(record.humanSeatRoleId, record.cubeId);
+    const worker = this.#database.prepare(`
+      SELECT 1 FROM roles WHERE id = ? AND cube_id = ? AND is_default = 1 AND role_class = 'worker'
+    `).get(record.defaultWorkerRoleId, record.cubeId);
+    const grants = requiredInteger(this.#database.prepare(
+      "SELECT COUNT(*) AS count FROM client_cube_grants WHERE cube_id = ?",
+    ).get(record.cubeId)!, "count");
+    return {
+      cube_exists: cube !== undefined,
+      creator_has_grant: grant !== undefined && requiredText(grant, "access") === "manage",
+      grant_count: grants,
+      role_count: roles,
+      human_seat_role_matches: human !== undefined,
+      default_worker_role_matches: worker !== undefined,
+    };
+  }
+
+  inspectEnrollmentPrincipal(clientId: string) {
+    assertCanonicalUuid(clientId, "Client id");
+    const count = requiredInteger(this.#database.prepare(`
+      SELECT COUNT(*) AS count FROM client_credentials
+      WHERE client_id = ? AND revoked_at IS NULL
+    `).get(clientId)!, "count");
+    return { active_credential_bindings: count };
   }
 
   createRole(input: {
@@ -1236,11 +1482,18 @@ class SqliteCredentialStore implements CredentialStore {
   readonly #database: DatabaseSync;
   readonly #clock: () => Date;
   readonly #capacityGuard: StorageCapacityGuard;
+  readonly #mutationHook: ((phase: string) => void) | undefined;
 
-  constructor(database: DatabaseSync, clock: () => Date, capacityGuard: StorageCapacityGuard) {
+  constructor(
+    database: DatabaseSync,
+    clock: () => Date,
+    capacityGuard: StorageCapacityGuard,
+    mutationHook?: (phase: string) => void,
+  ) {
     this.#database = database;
     this.#clock = clock;
     this.#capacityGuard = capacityGuard;
+    this.#mutationHook = mutationHook;
   }
 
   createRecoveryCredential(id: string, digest: DigestPair): void {
@@ -1263,55 +1516,134 @@ class SqliteCredentialStore implements CredentialStore {
     return row === undefined ? null : storedDigest(row);
   }
 
-  createInvitation(id: string, digest: DigestPair, expiresAt: string): void {
-    assertCanonicalUuid(id, "Invitation id");
-    validateDigest(digest);
-    validateTimestamp(expiresAt);
-    this.#database.prepare(`
-      INSERT INTO enrollment_invitations (
-        id, lookup_digest, verifier_digest, expires_at, created_at
-      ) VALUES (?, ?, ?, ?, ?)
-    `).run(id, digest.lookup, digest.verifier, expiresAt, this.#now());
+  createInvitation(input: {
+    readonly id: string;
+    readonly digest: DigestPair;
+    readonly expiresAt: string;
+    readonly purpose: "owner" | "client";
+  }): void {
+    assertCanonicalUuid(input.id, "Invitation id");
+    validateDigest(input.digest);
+    validateTimestamp(input.expiresAt);
+    this.#database.exec("BEGIN IMMEDIATE");
+    try {
+      let ownerEpoch: number | null = null;
+      if (input.purpose === "owner") {
+        const state = this.#database.prepare(
+          "SELECT epoch, claimed_client_id FROM owner_enrollment_state WHERE singleton = 1",
+        ).get();
+        if (state === undefined) {
+          ownerEpoch = 1;
+          this.#database.prepare(`
+            INSERT INTO owner_enrollment_state (singleton, epoch) VALUES (1, 1)
+          `).run();
+        } else {
+          if (nullableText(state, "claimed_client_id") !== null) throw new AccessDeniedError();
+          ownerEpoch = requiredInteger(state, "epoch") + 1;
+          this.#database.prepare(`
+            UPDATE enrollment_invitations SET revoked_at = ?
+            WHERE purpose = 'owner' AND consumed_at IS NULL AND revoked_at IS NULL
+          `).run(this.#now());
+          this.#database.prepare(`
+            UPDATE owner_enrollment_state SET epoch = ? WHERE singleton = 1
+          `).run(ownerEpoch);
+        }
+      }
+      this.#database.prepare(`
+        INSERT INTO enrollment_invitations (
+          id, lookup_digest, verifier_digest, expires_at, created_at, purpose, owner_epoch
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        input.id, input.digest.lookup, input.digest.verifier, input.expiresAt,
+        this.#now(), input.purpose, ownerEpoch,
+      );
+      this.#database.exec("COMMIT");
+    } catch (error) {
+      try { this.#database.exec("ROLLBACK"); } catch { /* Preserve the original failure. */ }
+      throw error;
+    }
   }
 
-  findInvitation(lookup: Buffer): StoredSecretDigest | null {
+  findInvitation(lookup: Buffer): StoredInvitationDigest | null {
     validateLookup(lookup);
     const row = this.#database.prepare(`
-      SELECT id, lookup_digest, verifier_digest, expires_at, consumed_at
+      SELECT id, lookup_digest, verifier_digest, expires_at, consumed_at, revoked_at,
+             purpose, owner_epoch
       FROM enrollment_invitations
       WHERE lookup_digest = ?
     `).get(lookup);
-    return row === undefined ? null : storedDigest(row);
+    return row === undefined ? null : storedInvitationDigest(row);
   }
 
-  consumeInvitation(input: {
+  claimInvitation(input: {
     readonly invitationId: string;
     readonly clientId: string;
-    readonly clientName: string;
+    readonly requestedClientName: string | null;
+    readonly retryKey: string;
     readonly credentialId: string;
     readonly credentialDigest: DigestPair;
-  }): boolean {
+  }): EnrollmentClaimResult | null {
     assertCanonicalUuid(input.invitationId, "Invitation id");
     assertCanonicalUuid(input.clientId, "Client id");
     assertCanonicalUuid(input.credentialId, "Credential id");
-    validateName(input.clientName);
+    assertCanonicalUuid(input.retryKey, "Enrollment retry key");
+    if (input.requestedClientName !== null) validatePresentationName(input.requestedClientName);
     validateDigest(input.credentialDigest);
-    this.#capacityGuard.assertCanGrow(Buffer.byteLength(input.clientName) + 4_096);
     this.#database.exec("BEGIN IMMEDIATE");
     try {
       const now = this.#now();
-      const consumed = this.#database.prepare(`
-        UPDATE enrollment_invitations
-        SET consumed_at = ?
-        WHERE id = ? AND consumed_at IS NULL AND expires_at > ?
-      `).run(now, input.invitationId, now);
-      if (consumed.changes !== 1) {
+      const invitation = this.#database.prepare(`
+        SELECT purpose, owner_epoch, expires_at, consumed_at, revoked_at
+        FROM enrollment_invitations WHERE id = ?
+      `).get(input.invitationId);
+      if (invitation === undefined) {
         this.#database.exec("ROLLBACK");
-        return false;
+        return null;
       }
+      const purpose = requiredText(invitation, "purpose");
+      if (purpose !== "owner" && purpose !== "client") throw new Error("Invalid invitation purpose.");
+      const existing = this.#database.prepare(`
+        SELECT retry_key, client_id, requested_client_name, credential_lookup_digest,
+               credential_verifier_digest, purpose, owner_epoch
+        FROM enrollment_claims WHERE invitation_id = ?
+      `).get(input.invitationId);
+      if (existing !== undefined) {
+        const exact = requiredText(existing, "retry_key") === input.retryKey &&
+          nullableText(existing, "requested_client_name") === input.requestedClientName &&
+          requiredText(existing, "purpose") === purpose &&
+          Buffer.from(requiredBuffer(existing, "credential_lookup_digest")).equals(input.credentialDigest.lookup) &&
+          Buffer.from(requiredBuffer(existing, "credential_verifier_digest")).equals(input.credentialDigest.verifier);
+        if (!exact) {
+          this.#database.exec("ROLLBACK");
+          return null;
+        }
+        const result = enrollmentClaimResult(purpose, requiredText(existing, "client_id"));
+        this.#database.exec("COMMIT");
+        return result;
+      }
+      if (nullableText(invitation, "consumed_at") !== null || nullableText(invitation, "revoked_at") !== null ||
+          requiredText(invitation, "expires_at") <= now) {
+        this.#database.exec("ROLLBACK");
+        return null;
+      }
+      const ownerEpoch = invitation["owner_epoch"] === null
+        ? null
+        : requiredInteger(invitation, "owner_epoch");
+      if (purpose === "owner") {
+        const state = this.#database.prepare(`
+          SELECT epoch, claimed_client_id FROM owner_enrollment_state WHERE singleton = 1
+        `).get();
+        if (state === undefined || requiredInteger(state, "epoch") !== ownerEpoch ||
+            nullableText(state, "claimed_client_id") !== null) {
+          this.#database.exec("ROLLBACK");
+          return null;
+        }
+      }
+      this.#capacityGuard.assertCanGrow(Buffer.byteLength(input.requestedClientName ?? "") + 8_192);
       this.#database.prepare(
         "INSERT INTO clients (id, name, created_at) VALUES (?, ?, ?)",
-      ).run(input.clientId, input.clientName, now);
+      ).run(input.clientId, input.requestedClientName ?? "Local client", now);
+      this.#mutationHook?.("enrollment.insert-client");
       this.#database.prepare(`
         INSERT INTO client_credentials (
           id, client_id, lookup_digest, verifier_digest, created_at
@@ -1323,8 +1655,41 @@ class SqliteCredentialStore implements CredentialStore {
         input.credentialDigest.verifier,
         now,
       );
+      this.#mutationHook?.("enrollment.insert-credential");
+      if (purpose === "owner") {
+        this.#database.prepare(`
+          INSERT INTO client_server_capabilities (client_id, capability, created_at)
+          VALUES (?, 'create_cube', ?)
+        `).run(input.clientId, now);
+        this.#mutationHook?.("enrollment.insert-capability");
+      }
+      this.#database.prepare(`
+        INSERT INTO enrollment_claims (
+          invitation_id, retry_key, client_id, requested_client_name,
+          credential_lookup_digest, credential_verifier_digest, purpose, owner_epoch, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        input.invitationId, input.retryKey, input.clientId, input.requestedClientName,
+        input.credentialDigest.lookup, input.credentialDigest.verifier, purpose, ownerEpoch, now,
+      );
+      this.#mutationHook?.("enrollment.insert-claim");
+      const consumed = this.#database.prepare(`
+        UPDATE enrollment_invitations SET consumed_at = ?
+        WHERE id = ? AND consumed_at IS NULL AND revoked_at IS NULL AND expires_at > ?
+      `).run(now, input.invitationId, now);
+      if (consumed.changes !== 1) throw new Error("Invitation claim raced.");
+      this.#mutationHook?.("enrollment.consume-invitation");
+      if (purpose === "owner") {
+        const claimed = this.#database.prepare(`
+          UPDATE owner_enrollment_state SET claimed_client_id = ?, claimed_at = ?
+          WHERE singleton = 1 AND epoch = ? AND claimed_client_id IS NULL
+        `).run(input.clientId, now, ownerEpoch);
+        if (claimed.changes !== 1) throw new Error("Owner claim raced.");
+        this.#mutationHook?.("enrollment.claim-owner");
+      }
       this.#database.exec("COMMIT");
-      return true;
+      this.#mutationHook?.("enrollment.after-commit");
+      return enrollmentClaimResult(purpose, input.clientId);
     } catch (error) {
       try {
         this.#database.exec("ROLLBACK");
@@ -1666,6 +2031,15 @@ function roleRecord(row: Record<string, unknown>): RoleRecord {
   };
 }
 
+function createCubeRecord(row: Record<string, unknown>): CreateCubeRecord {
+  return {
+    cubeId: requiredText(row, "cube_id"),
+    humanSeatRoleId: requiredText(row, "human_seat_role_id"),
+    defaultWorkerRoleId: requiredText(row, "default_worker_role_id"),
+    access: "manage",
+  };
+}
+
 function droneRecord(row: Record<string, unknown>): DroneRecord {
   return {
     id: requiredText(row, "id"),
@@ -1714,6 +2088,26 @@ function storedDigest(row: Record<string, unknown>): StoredSecretDigest {
   };
 }
 
+function storedInvitationDigest(row: Record<string, unknown>): StoredInvitationDigest {
+  const digest = storedDigest(row);
+  const purpose = requiredText(row, "purpose");
+  if (purpose !== "owner" && purpose !== "client") {
+    throw new Error("Database contains invalid invitation purpose.");
+  }
+  const epochValue = row["owner_epoch"];
+  const ownerEpoch = epochValue === null ? null : requiredInteger(row, "owner_epoch");
+  return { ...digest, purpose, ownerEpoch };
+}
+
+function enrollmentClaimResult(
+  purpose: "owner" | "client",
+  clientId: string,
+): EnrollmentClaimResult {
+  return purpose === "owner"
+    ? { purpose, clientId, serverCapabilities: ["create_cube"] }
+    : { purpose, clientId, serverCapabilities: [] };
+}
+
 function storedDroneSessionDigest(row: Record<string, unknown>): StoredDroneSessionDigest {
   const digest = storedDigest(row);
   return {
@@ -1749,6 +2143,13 @@ function optionalNonNullText(row: Record<string, unknown>, key: string): string 
 function validateName(value: string): void {
   if (value.length < 1 || value.length > 120) {
     throw new Error("Name must contain 1 to 120 characters.");
+  }
+}
+
+function validatePresentationName(value: string): void {
+  if (Buffer.byteLength(value) < 1 || Buffer.byteLength(value) > 120 ||
+      !/^[A-Za-z0-9][A-Za-z0-9 ._-]*$/u.test(value)) {
+    throw new Error("Presentation name is invalid.");
   }
 }
 
@@ -1791,7 +2192,7 @@ function validateTimestamp(value: string): void {
   }
 }
 
-function validateStorageLimits(limits: StorageLimits): void {
+function validateStorageLimits(limits: StorageLimits | CubeLimits): void {
   for (const [name, value] of Object.entries(limits)) {
     if (!Number.isSafeInteger(value) || value <= 0) {
       throw new Error(`${name} must be a positive safe integer.`);

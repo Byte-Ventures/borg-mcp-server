@@ -5,6 +5,7 @@ import { X509Certificate } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { bootstrapServer, loadDigestKey, loadTlsPrivateKey } from "../src/bootstrap.js";
+import { openStore } from "../src/store.js";
 
 const directories: string[] = [];
 
@@ -41,6 +42,14 @@ describe("offline bootstrap", () => {
     const databaseBytes = await readFile(result.paths.database);
     expect(databaseBytes.includes(Buffer.from(result.recoveryCredential))).toBe(false);
     expect(databaseBytes.includes(Buffer.from(result.initialInvitation))).toBe(false);
+    const runtime = await openStore({ path: result.paths.database });
+    expect(runtime.maintenance.observeAuthorityState()).toMatchObject({
+      cubes: 0,
+      roles: 0,
+      grants: 0,
+      enrolled_clients: 0,
+    });
+    runtime.close();
   });
 
   it("fails closed instead of replacing existing trust material", async () => {

@@ -4,6 +4,8 @@ import type { CredentialAuthority } from "./credentials.js";
 import {
   CursorExpiredError,
   AttachConflictError,
+  AccessDeniedError,
+  CreateCubeConflictError,
   ScopedStoreError,
   StorageCapacityError,
   type EnrichedActivityRecord,
@@ -116,6 +118,41 @@ export class CoordinationApi {
         updated_at: cube.updatedAt,
       }));
       return success(200, "cubes-read", { cubes });
+    }
+
+    if (request.path === "/api/cubes" && request.method === "POST") {
+      const requestId = safeRequestId(request.body);
+      try {
+        const envelope = decodeEnvelope(request.body);
+        exactKeys(envelope.payload, ["retry_key", "name", "template"]);
+        const template = envelope.payload["template"];
+        if (template !== "default") throw new InputError();
+        const created = this.#runtime.forPrincipal(authentication).createCube({
+          retryKey: requiredUuid(envelope.payload, "retry_key"),
+          name: requiredPresentationName(envelope.payload, "name"),
+          template,
+        });
+        return success(201, envelope.requestId, {
+          cube_id: created.cubeId,
+          human_seat_role_id: created.humanSeatRoleId,
+          default_worker_role_id: created.defaultWorkerRoleId,
+          access: created.access,
+        });
+      } catch (error) {
+        if (error instanceof AccessDeniedError) {
+          return failure(403, "ACCESS_DENIED", error.message, requestId);
+        }
+        if (error instanceof CreateCubeConflictError) {
+          return failure(409, "INVALID_INPUT", "The cube creation request conflicts.", requestId);
+        }
+        if (error instanceof StorageCapacityError) {
+          return failure(507, "CAPACITY_EXCEEDED", error.message, requestId);
+        }
+        if (error instanceof InputError || error instanceof TypeError || error instanceof RangeError) {
+          return failure(400, "INVALID_INPUT", "Invalid protocol request.", requestId);
+        }
+        throw error;
+      }
     }
 
     const match = /^\/api\/cubes\/([0-9a-f-]{36})(?:\/(roles|drones|logs|acks|decisions|stream))?$/u
@@ -356,6 +393,12 @@ function requiredString(record: Record<string, unknown>, key: string, maxBytes: 
   return value;
 }
 
+function requiredPresentationName(record: Record<string, unknown>, key: string): string {
+  const value = requiredString(record, key, 120);
+  if (!/^[A-Za-z0-9][A-Za-z0-9 ._-]*$/u.test(value)) throw new InputError();
+  return value;
+}
+
 function optionalString(
   record: Record<string, unknown>,
   key: string,
@@ -369,7 +412,7 @@ function optionalString(
 function requiredUuid(record: Record<string, unknown>, key: string): string {
   const value = record[key];
   if (typeof value !== "string" || !uuidPattern.test(value)) throw new InputError();
-  return value;
+  return value.toLowerCase();
 }
 
 function optionalVisibility(value: unknown): "broadcast" | "direct" | undefined {
@@ -457,5 +500,5 @@ function afterCursor(entry: EnrichedActivityRecord, cursor: LogCursor | null): b
     (entry.created_at === cursor.created_at && entry.id > cursor.id);
 }
 
-const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
+const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const timestampPattern = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u;

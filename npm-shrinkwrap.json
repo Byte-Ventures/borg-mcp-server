@@ -16,7 +16,7 @@
       },
       "devDependencies": {
         "@types/node": "22.20.1",
-        "borgmcp-shared": "0.2.2",
+        "borgmcp-shared": "git+https://github.com/Byte-Ventures/borg-mcp-shared.git#0720fa7befae686d0016de47173e5713759ba316",
         "typescript": "7.0.2",
         "vitest": "4.1.10"
       },
@@ -1060,8 +1060,8 @@
     },
     "node_modules/borgmcp-shared": {
       "version": "0.2.2",
-      "resolved": "https://registry.npmjs.org/borgmcp-shared/-/borgmcp-shared-0.2.2.tgz",
-      "integrity": "sha512-Xl3/3zHsyU2sYwVPmlUVWPA1hrnwMQJEyKHqUi1MQKjbERU+BFPU/vPVQajNbZEqrz92PEFH3aw7W5yxdQuLzQ==",
+      "resolved": "git+ssh://git@github.com/Byte-Ventures/borg-mcp-shared.git#0720fa7befae686d0016de47173e5713759ba316",
+      "integrity": "sha512-msIgTHSXte6RXNDdZM/YGuwB1uumC9La0duaFt2IPxf/PqRLc3hUiabP7fxCNE8RRm3lOGumzl73L2GbJSjwhQ==",
       "dev": true,
       "license": "Apache-2.0",
       "engines": {

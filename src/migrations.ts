@@ -217,6 +217,64 @@ export const STORE_MIGRATIONS: readonly Migration[] = Object.freeze([
         ON drone_session_credentials (session_id, revoked_at);
     `,
   },
+  {
+    version: 5,
+    name: "owner_enrollment_and_cube_creation",
+    sql: `
+      ALTER TABLE enrollment_invitations ADD COLUMN purpose TEXT NOT NULL DEFAULT 'client'
+        CHECK (purpose IN ('owner', 'client'));
+      ALTER TABLE enrollment_invitations ADD COLUMN owner_epoch INTEGER
+        CHECK (owner_epoch IS NULL OR owner_epoch > 0);
+      ALTER TABLE enrollment_invitations ADD COLUMN revoked_at TEXT;
+
+      CREATE TABLE owner_enrollment_state (
+        singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+        epoch INTEGER NOT NULL CHECK (epoch > 0),
+        claimed_client_id TEXT REFERENCES clients(id),
+        claimed_at TEXT,
+        CHECK ((claimed_client_id IS NULL) = (claimed_at IS NULL))
+      ) STRICT;
+
+      CREATE TABLE enrollment_claims (
+        invitation_id TEXT PRIMARY KEY REFERENCES enrollment_invitations(id) ON DELETE CASCADE,
+        retry_key TEXT NOT NULL,
+        client_id TEXT NOT NULL UNIQUE REFERENCES clients(id) ON DELETE CASCADE,
+        requested_client_name TEXT,
+        credential_lookup_digest BLOB NOT NULL,
+        credential_verifier_digest BLOB NOT NULL,
+        purpose TEXT NOT NULL CHECK (purpose IN ('owner', 'client')),
+        owner_epoch INTEGER,
+        created_at TEXT NOT NULL,
+        CHECK ((purpose = 'owner') = (owner_epoch IS NOT NULL))
+      ) STRICT;
+
+      CREATE TABLE client_server_capabilities (
+        client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+        capability TEXT NOT NULL CHECK (capability = 'create_cube'),
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (client_id, capability)
+      ) STRICT, WITHOUT ROWID;
+
+      CREATE TABLE cube_create_bindings (
+        client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+        retry_key TEXT NOT NULL,
+        name TEXT NOT NULL CHECK (length(name) BETWEEN 1 AND 120),
+        template TEXT NOT NULL CHECK (template = 'default'),
+        cube_id TEXT NOT NULL UNIQUE REFERENCES cubes(id) ON DELETE CASCADE,
+        human_seat_role_id TEXT NOT NULL UNIQUE,
+        default_worker_role_id TEXT NOT NULL UNIQUE,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (client_id, retry_key),
+        FOREIGN KEY (human_seat_role_id, cube_id) REFERENCES roles(id, cube_id),
+        FOREIGN KEY (default_worker_role_id, cube_id) REFERENCES roles(id, cube_id)
+      ) STRICT, WITHOUT ROWID;
+
+      CREATE INDEX cube_create_bindings_cube_idx ON cube_create_bindings (cube_id);
+      CREATE INDEX enrollment_invitations_owner_idx
+        ON enrollment_invitations (purpose, owner_epoch, expires_at)
+        WHERE consumed_at IS NULL AND revoked_at IS NULL;
+    `,
+  },
 ]);
 
 interface AppliedMigrationRow {

@@ -5,12 +5,13 @@ export function createPart2ProtocolInfo(limits: ServiceLimits): ProtocolInfoDocu
     protocol_version: "1",
     package: {
       name: "borgmcp-shared",
-      version: "0.2.0",
+      version: "0.2.2",
     },
     capabilities: [
       "coordination.core",
       "auth.bearer",
       "auth.revocation",
+      "auth.retry-safe-enrollment",
       "scope.cube-isolation",
       "transport.tls",
       "authority.no-cloud-fallback",

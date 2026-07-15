@@ -20,7 +20,9 @@ export type OperatorErrorCode =
   | "ACTIVITY_LIMIT_INVALID"
   | "DATABASE_LIMIT_INVALID"
   | "DISK_RESERVE_INVALID"
-  | "CLIENT_NOT_FOUND";
+  | "CLIENT_NOT_FOUND"
+  | "GRANT_NOT_FOUND"
+  | "RECOVERY_INVALID";
 
 const publicMessages: Readonly<Record<OperatorErrorCode, string>> = Object.freeze({
   START_LAN_DUPLICATE: "Provide --lan only once.",
@@ -37,7 +39,7 @@ const publicMessages: Readonly<Record<OperatorErrorCode, string>> = Object.freez
   BIND_LAN_CONSENT: "Add --lan to consent to this private-LAN start.",
   SERVER_FILES_MISSING: "Configure BORG_SERVER_DATA_DIR or the required TLS file variables.",
   LAN_CA_KEY_ONLINE: "Move ca.key out of the runtime data directory before private-LAN startup.",
-  RUNTIME_ACTIVE: "Stop the server before rotating or revoking client credentials.",
+  RUNTIME_ACTIVE: "Stop the server before running offline client administration.",
   RUNTIME_LOCK_UNSAFE: "Ensure runtime.lock is a private regular file before retrying.",
   RUNTIME_LOCK_INVALID: "Confirm the server is stopped, then remove the invalid runtime.lock.",
   RUNTIME_LOCK_STALE: "Confirm the recorded server process is stopped, then remove runtime.lock.",
@@ -45,6 +47,8 @@ const publicMessages: Readonly<Record<OperatorErrorCode, string>> = Object.freez
   DATABASE_LIMIT_INVALID: "Set BORG_SERVER_MAX_DATABASE_BYTES to a positive integer.",
   DISK_RESERVE_INVALID: "Set BORG_SERVER_MIN_FREE_DISK_BYTES to a positive integer.",
   CLIENT_NOT_FOUND: "Provide an existing active client ID.",
+  GRANT_NOT_FOUND: "Provide an existing client cube grant.",
+  RECOVERY_INVALID: "Provide the active recovery credential through the private prompt.",
 });
 
 const operatorErrorCodes = new WeakMap<object, OperatorErrorCode>();

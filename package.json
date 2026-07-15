@@ -50,7 +50,7 @@
   },
   "devDependencies": {
     "@types/node": "22.20.1",
-    "borgmcp-shared": "0.2.2",
+    "borgmcp-shared": "git+https://github.com/Byte-Ventures/borg-mcp-shared.git#0720fa7befae686d0016de47173e5713759ba316",
     "typescript": "7.0.2",
     "vitest": "4.1.10"
   },

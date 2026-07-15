@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -41,19 +42,28 @@ describe("credential authority", () => {
     expect(second).not.toBe(first);
   });
 
-  it("exchanges a valid invitation exactly once and authenticates the returned client", () => {
+  it("returns a stable non-secret identity for an exact credential-proven retry", () => {
     const recovery = authority.createRecoveryCredential();
     const invitation = authority.createInvitation(recovery, 60_000);
     if (invitation === null) throw new Error("Recovery authorization failed.");
 
-    const enrolled = authority.exchangeInvitation({
+    const credential = generateSecret();
+    const request = {
       invitation,
+      retryKey: randomUUID(),
+      clientCredential: credential,
       clientName: "operator-laptop",
-    });
+    };
+    const enrolled = authority.exchangeInvitation(request);
 
-    expect(enrolled?.credential).toMatch(/^[A-Za-z0-9_-]{43}$/u);
-    expect(authority.exchangeInvitation({ invitation })).toBeNull();
-    expect(authority.authenticate(`Bearer ${enrolled?.credential}`)).toEqual(
+    expect(enrolled).toEqual({
+      purpose: "client",
+      clientId: expect.any(String),
+      serverCapabilities: [],
+    });
+    expect(authority.exchangeInvitation(request)).toEqual(enrolled);
+    expect(authority.exchangeInvitation({ ...request, retryKey: randomUUID() })).toBeNull();
+    expect(authority.authenticate(`Bearer ${credential}`)).toEqual(
       expect.objectContaining({ kind: "client", id: enrolled?.clientId }),
     );
     expect(authority.authenticate("Bearer invalid")).toBeNull();
@@ -65,8 +75,8 @@ describe("credential authority", () => {
     if (invitation === null) throw new Error("Recovery authorization failed.");
     now = new Date("2026-07-14T12:00:01.001Z");
 
-    expect(authority.exchangeInvitation({ invitation })).toBeNull();
-    expect(authority.exchangeInvitation({ invitation: generateSecret() })).toBeNull();
+    expect(authority.exchangeInvitation(enrollmentRequest(invitation))).toBeNull();
+    expect(authority.exchangeInvitation(enrollmentRequest(generateSecret()))).toBeNull();
   });
 
   it("rotates and revokes credentials while invalidating active sessions", () => {
@@ -104,13 +114,43 @@ describe("credential authority", () => {
     expect(authority.createInvitation(generateSecret(), 60_000)).toBeNull();
     expect(authority.createInvitation(recovery, 60_000)).toMatch(/^[A-Za-z0-9_-]{43}$/u);
   });
+
+  it("purpose-binds owner authority and revokes the prior owner epoch on replacement", () => {
+    const recovery = authority.createRecoveryCredential();
+    const first = authority.createBootstrapInvitation(60_000);
+    const replacement = authority.replaceOwnerInvitation(recovery, 60_000);
+    if (replacement === null) throw new Error("Owner invitation replacement failed.");
+    expect(authority.exchangeInvitation(enrollmentRequest(first))).toBeNull();
+
+    const credential = generateSecret();
+    const owner = authority.exchangeInvitation(enrollmentRequest(replacement, credential));
+    expect(owner).toEqual({
+      purpose: "owner",
+      clientId: expect.any(String),
+      serverCapabilities: ["create_cube"],
+    });
+    expect(runtime.maintenance.observeAuthorityState()).toMatchObject({
+      enrolled_clients: 1,
+      enrollment_claims: 1,
+      cubes: 0,
+      roles: 0,
+      grants: 0,
+      server_capabilities: 1,
+    });
+    expect(() => authority.replaceOwnerInvitation(recovery, 60_000)).toThrow("Access denied.");
+  });
 });
 
 function enroll(): { readonly id: string; readonly credential: string } {
   const recovery = authority.createRecoveryCredential();
   const invitation = authority.createInvitation(recovery, 60_000);
   if (invitation === null) throw new Error("Recovery authorization failed.");
-  const response = authority.exchangeInvitation({ invitation });
+  const credential = generateSecret();
+  const response = authority.exchangeInvitation(enrollmentRequest(invitation, credential));
   if (response === null) throw new Error("Test enrollment failed.");
-  return { id: response.clientId, credential: response.credential };
+  return { id: response.clientId, credential };
+}
+
+function enrollmentRequest(invitation: string, clientCredential = generateSecret()) {
+  return { invitation, retryKey: randomUUID(), clientCredential };
 }

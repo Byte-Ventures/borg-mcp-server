@@ -4,34 +4,37 @@ import { decodeEnrollmentEnvelope, createEnrollmentExchange } from "../src/enrol
 import { StorageCapacityError } from "../src/store.js";
 
 const invitation = "a".repeat(43);
+const retryKey = "00000000-0000-4000-8000-000000000101";
+const clientCredential = `${"b".repeat(42)}A`;
+const payload = { invitation, retry_key: retryKey, client_credential: clientCredential };
 
 describe("enrollment wire adapter", () => {
   it("exact-decodes the borgmcp-shared enrollment envelope", () => {
     expect(decodeEnrollmentEnvelope({
       protocol_version: "1",
       request_id: "request-1234",
-      payload: { invitation, client_name: "operator-laptop" },
+      payload: { ...payload, client_name: "operator-laptop" },
     })).toEqual({
       protocol_version: "1",
       request_id: "request-1234",
-      payload: { invitation, client_name: "operator-laptop" },
+      payload: { ...payload, client_name: "operator-laptop" },
     });
   });
 
   it.each([
     { protocol_version: "1", request_id: "request-1234", payload: { invitation: "weak" } },
-    { protocol_version: "1", request_id: "bad", payload: { invitation } },
-    { protocol_version: "1", request_id: "request-1234", payload: { invitation, secret: invitation } },
+     { protocol_version: "1", request_id: "bad", payload },
+     { protocol_version: "1", request_id: "request-1234", payload: { ...payload, secret: invitation } },
   ])("rejects malformed or ambiguous enrollment input", (value) => {
     expect(() => decodeEnrollmentEnvelope(value)).toThrow("Invalid enrollment request.");
   });
 
-  it("returns the one-time credential in a matching response envelope", async () => {
+  it("returns a non-secret stable identity in a matching response envelope", async () => {
     const authority = {
       exchangeInvitation: vi.fn().mockReturnValue({
         clientId: "00000000-0000-4000-8000-000000000001",
-        credential: "b".repeat(43),
-        credentialExpiresAt: null,
+        purpose: "owner",
+        serverCapabilities: ["create_cube"],
       }),
     };
     const exchange = createEnrollmentExchange(authority as never);
@@ -39,16 +42,16 @@ describe("enrollment wire adapter", () => {
     await expect(exchange({
       protocol_version: "1",
       request_id: "request-1234",
-      payload: { invitation },
+      payload,
     })).resolves.toEqual({
       status: 201,
       body: {
         protocol_version: "1",
         request_id: "request-1234",
         payload: {
+          purpose: "owner",
           client_id: "00000000-0000-4000-8000-000000000001",
-          credential: "b".repeat(43),
-          credential_expires_at: null,
+          server_capabilities: ["create_cube"],
         },
       },
     });
@@ -70,7 +73,7 @@ describe("enrollment wire adapter", () => {
     await expect(exchange({
       protocol_version: "1",
       request_id: "request-1234",
-      payload: { invitation: "weak" },
+      payload: { ...payload, invitation: "weak" },
     })).resolves.toMatchObject({
       status: 400,
       body: { request_id: "request-1234" },
@@ -84,7 +87,7 @@ describe("enrollment wire adapter", () => {
     const result = await exchange({
       protocol_version: "1",
       request_id: "request-1234",
-      payload: { invitation },
+      payload,
     });
 
     expect(result).toEqual({
@@ -104,7 +107,7 @@ describe("enrollment wire adapter", () => {
     const result = await exchange({
       protocol_version: "1",
       request_id: "request-1234",
-      payload: { invitation },
+      payload,
     });
 
     expect(result).toEqual({

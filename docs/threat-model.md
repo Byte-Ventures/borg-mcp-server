@@ -14,9 +14,16 @@ v1 scope.
 
 ## Assets and trust boundaries
 
-- The recovery credential creates short-lived enrollment invitations. Invitations create independent
-  client credentials. Client credentials can access only explicitly granted cubes and mint narrower,
-  expiring drone-session credentials for attached seats. Product role labels never grant authority.
+- The recovery credential creates short-lived purpose-bound enrollment invitations. Clients generate
+  and persist their own credential and retry key before exchange; exact credential-proven retries
+  return stable non-secret identity. The one owner invitation grants only persisted `create_cube`;
+  ordinary invitations grant no server capability or cube. Client credentials can access only
+  explicitly granted cubes and mint narrower, expiring drone-session credentials for attached seats.
+  Product role labels and cube owner metadata never grant authority.
+- Authenticated `POST /api/cubes` requires an active parent client with `create_cube`. It atomically
+  creates one cube, fixed human/default-worker roles, the creator's `manage` grant, and an idempotency
+  binding. Exact retries are non-mutating; ordinary clients and drone sessions are denied. Per-client
+  and server cube quotas bound growth.
 - Persisted credentials are keyed lookup and verifier digests, never plaintext. Recovery, invitation,
   client, and drone-session digests use separate HMAC domains. Rotation revokes prior client
   credentials; revocation also invalidates child sessions.
@@ -101,7 +108,8 @@ v1 scope.
 
 | Remote growth surface | Capacity-gated mutation |
 | --- | --- |
-| Enrollment exchange | Invitation consumption plus client and client-credential insertion |
+| Enrollment exchange | Purpose-bound invitation claim, client-generated credential digest, retry binding, and owner capability insertion |
+| Cube creation | Cube, two fixed roles, creator manage grant, and retry-result binding |
 | Client attach/retry | Drone/session/credential insertion and prior-session revocation |
 | Cube directive update | Directive replacement and SQLite index/page growth |
 | Activity append | Log/recipient insertion, cursor tombstone insertion, and pruning cascades |

@@ -13,7 +13,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { applyMigrations, type Migration } from "../src/migrations.js";
+import { applyMigrations, STORE_MIGRATIONS, type Migration } from "../src/migrations.js";
 import { openStore } from "../src/store.js";
 
 const temporaryDirectories: string[] = [];
@@ -34,7 +34,7 @@ describe("SQLite migrations", () => {
     expect(first.diagnostics()).toEqual({
       journalMode: "wal",
       foreignKeys: true,
-      schemaVersions: [1, 2, 3, 4],
+      schemaVersions: [1, 2, 3, 4, 5],
     });
     expect((await stat(join(directory, "data"))).mode & 0o777).toBe(0o700);
     expect((await stat(databasePath)).mode & 0o777).toBe(0o600);
@@ -43,7 +43,7 @@ describe("SQLite migrations", () => {
     first.close();
 
     const second = await openStore({ path: databasePath });
-    expect(second.diagnostics().schemaVersions).toEqual([1, 2, 3, 4]);
+    expect(second.diagnostics().schemaVersions).toEqual([1, 2, 3, 4, 5]);
     second.close();
     await expect(access(databasePath)).resolves.toBeUndefined();
   });
@@ -83,6 +83,30 @@ describe("SQLite migrations", () => {
       name: "stable",
       sql: "CREATE TABLE changed_table (id INTEGER PRIMARY KEY) STRICT;",
     }])).toThrow("Migration 1 does not match its recorded checksum.");
+    database.close();
+  });
+
+  it("upgrades valid v4 presentation roles without silently creating owner state", () => {
+    const database = new DatabaseSync(":memory:");
+    applyMigrations(database, STORE_MIGRATIONS.slice(0, 4));
+    const clientId = "00000000-0000-4000-8000-000000000001";
+    const cubeId = "00000000-0000-4000-8000-000000000002";
+    database.prepare("INSERT INTO clients (id, name, created_at) VALUES (?, 'client', ?)")
+      .run(clientId, "2026-07-15T00:00:00.000Z");
+    database.prepare(`
+      INSERT INTO cubes (id, name, directive, created_at, updated_at, owner_id)
+      VALUES (?, 'cube', '', ?, ?, ?)
+    `).run(cubeId, "2026-07-15T00:00:00.000Z", "2026-07-15T00:00:00.000Z", clientId);
+    const role = database.prepare(`
+      INSERT INTO roles (id, cube_id, name, created_at, is_human_seat, role_class)
+      VALUES (?, ?, ?, ?, 1, 'queen')
+    `);
+    role.run("00000000-0000-4000-8000-000000000003", cubeId, "Coordinator", "2026-07-15T00:00:00.000Z");
+    role.run("00000000-0000-4000-8000-000000000004", cubeId, "Observer", "2026-07-15T00:00:00.000Z");
+
+    expect(() => applyMigrations(database, STORE_MIGRATIONS)).not.toThrow();
+    expect(database.prepare("SELECT COUNT(*) AS count FROM owner_enrollment_state").get())
+      .toEqual({ count: 0 });
     database.close();
   });
 

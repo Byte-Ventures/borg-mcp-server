@@ -1,10 +1,11 @@
+import { randomUUID } from "node:crypto";
 import { mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { CoordinationApi } from "../src/coordination-api.js";
-import { CredentialAuthority, CredentialDigester } from "../src/credentials.js";
+import { CredentialAuthority, CredentialDigester, generateSecret } from "../src/credentials.js";
 import { openStore, type StoreRuntime } from "../src/store.js";
 
 const ids = {
@@ -315,10 +316,18 @@ function authorityRuntime(store: StoreRuntime): {
 }
 
 function enroll(nextAuthority: CredentialAuthority, name: string) {
-  const invitation = nextAuthority.createBootstrapInvitation(60_000);
-  const enrollment = nextAuthority.exchangeInvitation({ invitation, clientName: name });
+  const recovery = nextAuthority.createRecoveryCredential();
+  const invitation = nextAuthority.createInvitation(recovery, 60_000);
+  if (invitation === null) throw new Error("Invitation failed.");
+  const credential = generateSecret();
+  const enrollment = nextAuthority.exchangeInvitation({
+    invitation,
+    retryKey: randomUUID(),
+    clientCredential: credential,
+    clientName: name,
+  });
   if (enrollment === null) throw new Error("Enrollment failed.");
-  return enrollment;
+  return { clientId: enrollment.clientId, credential };
 }
 
 async function attach(

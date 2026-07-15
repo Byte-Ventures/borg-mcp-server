@@ -73,6 +73,7 @@ describe("node server service", () => {
       "coordination.core",
       "auth.bearer",
       "auth.revocation",
+      "auth.retry-safe-enrollment",
       "scope.cube-isolation",
       "transport.tls",
       "authority.no-cloud-fallback",
@@ -175,7 +176,7 @@ describe("node server service", () => {
     try {
       const running = await acquireRuntimeLock(directory);
       await expect(acquireRuntimeLock(directory)).rejects.toThrow(
-        "Stop the server before rotating or revoking client credentials.",
+        "Stop the server before running offline client administration.",
       );
       await running.release();
       const offline = await acquireRuntimeLock(directory);
@@ -247,7 +248,7 @@ describe("node server service", () => {
         await closeStarted;
         await expect(createOfflineCredentialService(directory).revokeClient(
           "00000000-0000-4000-8000-000000000001",
-        )).rejects.toThrow("Stop the server before rotating or revoking client credentials.");
+        )).rejects.toThrow("Stop the server before running offline client administration.");
         releaseClose();
 
         expect(await result).toBe(failure);
@@ -388,9 +389,9 @@ describe("node server service", () => {
       expect(authCloseCalls).toBe(0);
       await expect(createOfflineCredentialService(directory).rotateClient(
         "00000000-0000-4000-8000-000000000001",
-      )).rejects.toThrow("Stop the server before rotating or revoking client credentials.");
+      )).rejects.toThrow("Stop the server before running offline client administration.");
       await expect(acquireRuntimeLock(directory)).rejects.toThrow(
-        "Stop the server before rotating or revoking client credentials.",
+        "Stop the server before running offline client administration.",
       );
     } finally {
       await rm(directory, { recursive: true, force: true });

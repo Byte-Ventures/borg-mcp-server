@@ -8,6 +8,7 @@ import {
 
 describe("resolveBindOptions", () => {
   it("defaults to an explicit IPv4 loopback endpoint", () => {
+    expect(DEFAULT_PORT).toBe(7_091);
     expect(resolveBindOptions({})).toEqual({
       host: DEFAULT_BIND_HOST,
       port: DEFAULT_PORT,

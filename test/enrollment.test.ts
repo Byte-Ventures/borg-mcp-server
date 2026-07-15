@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { decodeEnrollmentEnvelope, createEnrollmentExchange } from "../src/enrollment.js";
+import { StorageCapacityError } from "../src/store.js";
 
 const invitation = "a".repeat(43);
 
@@ -94,5 +95,26 @@ describe("enrollment wire adapter", () => {
         error: { code: "AUTH_INVALID", message: "Enrollment authentication failed." },
       },
     });
+  });
+
+  it("maps capacity failures to a sanitized deterministic response", async () => {
+    const exchange = createEnrollmentExchange({
+      exchangeInvitation: vi.fn(() => { throw new StorageCapacityError(); }),
+    } as never);
+    const result = await exchange({
+      protocol_version: "1",
+      request_id: "request-1234",
+      payload: { invitation },
+    });
+
+    expect(result).toEqual({
+      status: 507,
+      body: {
+        protocol_version: "1",
+        request_id: "request-1234",
+        error: { code: "CAPACITY_EXCEEDED", message: "Storage capacity is unavailable." },
+      },
+    });
+    expect(JSON.stringify(result)).not.toContain(invitation);
   });
 });

@@ -251,17 +251,20 @@ export class CredentialAuthority {
   }
 
   rotateClient(clientId: string): string {
+    if (!this.#store.clientIsActive(clientId)) throw new UnknownClientError();
     const secret = generateSecret();
-    this.#store.rotateClientCredential({
+    const rotated = this.#store.rotateClientCredential({
       clientId,
       credentialId: randomUUID(),
       credentialDigest: this.#digester.digest(secret, "client"),
     });
+    if (!rotated) throw new UnknownClientError();
     this.#registry.invalidate(clientId);
     return secret;
   }
 
   revokeClient(clientId: string): void {
+    if (!this.#store.clientExists(clientId)) throw new UnknownClientError();
     this.#store.revokeClientCredentials(clientId);
     this.#registry.invalidate(clientId);
   }
@@ -273,6 +276,12 @@ export class CredentialAuthority {
         ? [principal.id, principal.clientId]
         : principal.id,
     );
+  }
+}
+
+export class UnknownClientError extends Error {
+  constructor() {
+    super("Client does not exist.");
   }
 }
 

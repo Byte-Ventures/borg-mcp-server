@@ -1,7 +1,7 @@
 import { isIP } from "node:net";
 
 export const DEFAULT_BIND_HOST = "127.0.0.1";
-export const DEFAULT_PORT = 7_443;
+export const DEFAULT_PORT = 7_091;
 
 export interface BindOptionsInput {
   readonly host?: string;

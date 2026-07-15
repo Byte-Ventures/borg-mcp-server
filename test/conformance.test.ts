@@ -82,6 +82,7 @@ async function conformanceEnvironment(): Promise<{
       const result = authority.authenticateStatus(authorization);
       return typeof result === "object" ? true : result;
     },
+    authorizeCoordination: async (authorization) => authority.authenticateStatus(authorization),
     exchangeEnrollment,
     handleCoordination: (request) => api.handle(request),
   });

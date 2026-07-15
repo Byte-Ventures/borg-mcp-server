@@ -83,6 +83,7 @@ describe("credential authority", () => {
     authority.revokeClient(enrolled.id);
     expect(rotatedLive.signal.aborted).toBe(true);
     expect(authority.authenticate(`Bearer ${rotated}`)).toBeNull();
+    expect(() => authority.rotateClient(enrolled.id)).toThrow("Client does not exist.");
   });
 
   it("domain-separates keyed lookup and verifier digests", () => {

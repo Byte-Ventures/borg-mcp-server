@@ -1,9 +1,11 @@
 import type { Principal } from "./principal.js";
+import { assertServerDerivedPrincipal } from "./principal.js";
 import type { CredentialAuthority } from "./credentials.js";
 import {
   CursorExpiredError,
   AttachConflictError,
   ScopedStoreError,
+  StorageCapacityError,
   type EnrichedActivityRecord,
   type LogCursor,
   type StoreRuntime,
@@ -12,7 +14,7 @@ import {
 export interface CoordinationRequest {
   readonly method: string;
   readonly path: string;
-  readonly authorization?: string;
+  readonly principal: Principal;
   readonly body?: unknown;
   readonly cursor?: string;
   readonly signal: AbortSignal;
@@ -60,13 +62,8 @@ export class CoordinationApi {
   }
 
   async handle(request: CoordinationRequest): Promise<CoordinationResponse> {
-    const authentication = this.#authority.authenticateStatus(request.authorization);
-    if (typeof authentication === "string") {
-      const code = authentication === "missing"
-        ? "AUTH_MISSING"
-        : authentication === "revoked" ? "SESSION_REVOKED" : "AUTH_INVALID";
-      return failure(401, code, "Authentication failed.");
-    }
+    assertServerDerivedPrincipal(request.principal);
+    const authentication = request.principal;
 
     if (request.path === "/api/client/attach" && request.method === "POST") {
       const requestId = safeRequestId(request.body);
@@ -98,6 +95,9 @@ export class CoordinationApi {
         }
         if (error instanceof ScopedStoreError) {
           return failure(404, "NOT_FOUND", error.message, requestId);
+        }
+        if (error instanceof StorageCapacityError) {
+          return failure(507, "CAPACITY_EXCEEDED", error.message, requestId);
         }
         if (error instanceof InputError || error instanceof TypeError || error instanceof RangeError) {
           return failure(400, "INVALID_INPUT", "Invalid protocol request.", requestId);
@@ -211,6 +211,9 @@ export class CoordinationApi {
       }
       if (error instanceof ScopedStoreError) {
         return failure(404, "NOT_FOUND", error.message);
+      }
+      if (error instanceof StorageCapacityError) {
+        return failure(507, "CAPACITY_EXCEEDED", error.message, safeRequestId(request.body));
       }
       if (error instanceof InputError || error instanceof TypeError || error instanceof RangeError) {
         return failure(400, "INVALID_INPUT", "Invalid protocol request.", safeRequestId(request.body));

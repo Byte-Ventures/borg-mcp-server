@@ -167,7 +167,7 @@ describe("client seat attach", () => {
     const ownAppend = await api.handle({
       method: "POST",
       path: `/api/cubes/${ids.cubeA}/logs`,
-      authorization: `Bearer ${token}`,
+      principal: authenticatedPrincipal(token),
       body: envelope("append-500", { message: "drone-scoped append" }),
       signal: new AbortController().signal,
     });
@@ -178,7 +178,7 @@ describe("client seat attach", () => {
     const decision = await api.handle({
       method: "POST",
       path: `/api/cubes/${ids.cubeA}/decisions`,
-      authorization: `Bearer ${token}`,
+      principal: authenticatedPrincipal(token),
       body: envelope("decision-501", { topic: "authority", decision: "escalate" }),
       signal: new AbortController().signal,
     });
@@ -186,7 +186,7 @@ describe("client seat attach", () => {
     const crossCube = await api.handle({
       method: "PUT",
       path: `/api/cubes/${ids.cubeB}/logs`,
-      authorization: `Bearer ${token}`,
+      principal: authenticatedPrincipal(token),
       body: envelope("read-0501", { cursor: null, limit: 10 }),
       signal: new AbortController().signal,
     });
@@ -205,7 +205,7 @@ describe("client seat attach", () => {
     const append = await api.handle({
       method: "POST",
       path: `/api/cubes/${ids.cubeA}/logs`,
-      authorization: `Bearer ${token}`,
+      principal: authenticatedPrincipal(token),
       body: envelope("append-501", { message: "must remain read-only" }),
       signal: new AbortController().signal,
     });
@@ -214,7 +214,7 @@ describe("client seat attach", () => {
     const read = await api.handle({
       method: "PUT",
       path: `/api/cubes/${ids.cubeA}/logs`,
-      authorization: `Bearer ${token}`,
+      principal: authenticatedPrincipal(token),
       body: envelope("read-0502", { cursor: null, limit: 10 }),
       signal: new AbortController().signal,
     });
@@ -240,7 +240,7 @@ describe("client seat attach", () => {
     const stream = await api.handle({
       method: "GET",
       path: `/api/cubes/${ids.cubeA}/stream`,
-      authorization: `Bearer ${token}`,
+      principal: authenticatedPrincipal(token),
       signal: new AbortController().signal,
     });
     const iterator = stream.stream![Symbol.asyncIterator]();
@@ -261,7 +261,7 @@ describe("client seat attach", () => {
     const decision = await api.handle({
       method: "POST",
       path: `/api/cubes/${ids.cubeB}/decisions`,
-      authorization: `Bearer ${token}`,
+      principal: authenticatedPrincipal(token),
       body: envelope("decision-801", { topic: "role", decision: "Queen cannot manage" }),
       signal: new AbortController().signal,
     });
@@ -270,7 +270,7 @@ describe("client seat attach", () => {
     const stream = await api.handle({
       method: "GET",
       path: `/api/cubes/${ids.cubeB}/stream`,
-      authorization: `Bearer ${token}`,
+      principal: authenticatedPrincipal(token),
       signal: new AbortController().signal,
     });
     const iterator = stream.stream![Symbol.asyncIterator]();
@@ -279,15 +279,14 @@ describe("client seat attach", () => {
     authority.revokeClient(clientB.clientId);
     await expect(pending).resolves.toMatchObject({ done: true });
     expect(authority.authenticateStatus(`Bearer ${token}`)).toBe("revoked");
-    const retry = await attach(api, clientB.credential, ids.cubeB, ids.roleB, ids.retryA, "attach-802");
-    expect(retry).toMatchObject({ status: 401, error: { code: "SESSION_REVOKED" } });
+    expect(authority.authenticateStatus(`Bearer ${clientB.credential}`)).toBe("revoked");
   });
 
   it("rejects unsupported protocol input before creating an attachment", async () => {
     const malformed = await api.handle({
       method: "POST",
       path: "/api/client/attach",
-      authorization: `Bearer ${clientA.credential}`,
+      principal: authenticatedPrincipal(clientA.credential),
       body: {
         protocol_version: "2",
         request_id: "attach-901",
@@ -347,7 +346,7 @@ async function attach(
   const response = await nextApi.handle({
     method: "POST",
     path: "/api/client/attach",
-    authorization: `Bearer ${credential}`,
+    principal: authenticatedPrincipal(credential),
     body: envelope(requestId, { cube_id: cubeId, role_id: roleId, retry_key: retryKey }),
     signal: new AbortController().signal,
   });
@@ -360,6 +359,12 @@ async function attach(
     payload: body.payload as Awaited<ReturnType<typeof attach>>["payload"],
     ...(body.error === undefined ? {} : { error: body.error }),
   };
+}
+
+function authenticatedPrincipal(credential: string) {
+  const principal = authority.authenticate(`Bearer ${credential}`);
+  if (principal === null) throw new Error("Test credential did not authenticate.");
+  return principal;
 }
 
 function envelope(requestId: string, payload: Record<string, unknown>) {

@@ -4,6 +4,16 @@
 stores cube state locally and serves the Borg protocol over authenticated
 HTTPS.
 
+## Release status
+
+The `0.1.0` release preparation remains gated on the `#5` owner-enrollment and
+cube bootstrap work. The current setup command prepares local identity and
+storage and prints one-time recovery and enrollment secrets, but it does not
+create a cube or provide the supported owner-enrollment, client-onboarding,
+idempotent cube-creation, or multi-cube workflow. Supported client onboarding
+and local dogfooding are unavailable until `#5` has been implemented,
+security-reviewed, and dogfooded and this notice has been removed.
+
 ## Requirements
 
 - Node.js 22.12 or later
@@ -20,8 +30,9 @@ npm install --global borgmcp-server
 
 The default data directory is `~/.borg/server`. Setup creates the local
 database, credential-digest key, local certificate authority, server
-certificate, and initial credentials. Run it in a private terminal because the
-recovery credential and enrollment invitation are each printed only once.
+certificate, one recovery credential, and one enrollment invitation. It creates
+no cube. Run it in a private terminal because both secrets are printed only
+once.
 
 ```sh
 borg-mcp-server setup

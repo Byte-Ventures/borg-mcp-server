@@ -16,6 +16,7 @@ import type {
   ScopedStore,
   SeatAttachRecord,
 } from "./store.js";
+import { operatorErrors } from "./operator-error.js";
 
 const tokenPattern = /^[A-Za-z0-9_-]{43,1024}$/u;
 const dummyVerifier = Buffer.alloc(32);
@@ -251,20 +252,20 @@ export class CredentialAuthority {
   }
 
   rotateClient(clientId: string): string {
-    if (!this.#store.clientIsActive(clientId)) throw new UnknownClientError();
+    if (!this.#store.clientIsActive(clientId)) throw operatorErrors.CLIENT_NOT_FOUND;
     const secret = generateSecret();
     const rotated = this.#store.rotateClientCredential({
       clientId,
       credentialId: randomUUID(),
       credentialDigest: this.#digester.digest(secret, "client"),
     });
-    if (!rotated) throw new UnknownClientError();
+    if (!rotated) throw operatorErrors.CLIENT_NOT_FOUND;
     this.#registry.invalidate(clientId);
     return secret;
   }
 
   revokeClient(clientId: string): void {
-    if (!this.#store.clientExists(clientId)) throw new UnknownClientError();
+    if (!this.#store.clientExists(clientId)) throw operatorErrors.CLIENT_NOT_FOUND;
     this.#store.revokeClientCredentials(clientId);
     this.#registry.invalidate(clientId);
   }
@@ -276,12 +277,6 @@ export class CredentialAuthority {
         ? [principal.id, principal.clientId]
         : principal.id,
     );
-  }
-}
-
-export class UnknownClientError extends Error {
-  constructor() {
-    super("Client does not exist.");
   }
 }
 

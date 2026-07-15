@@ -107,6 +107,93 @@ describe("production process signal lifecycle", () => {
     },
     20_000,
   );
+
+  it("keeps invalid ambient bind configuration inside the production main error boundary", async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-main-config-")));
+    try {
+      const mainPath = fileURLToPath(new URL("../dist/main.js", import.meta.url));
+      const help = fork(mainPath, ["help"], {
+        env: {
+          ...process.env,
+          BORG_SERVER_DATA_DIR: directory,
+          BORG_SERVER_BIND_HOST: "attacker.invalid",
+        },
+        stdio: ["ignore", "pipe", "pipe", "ipc"],
+      });
+      const helpOutput = captureOutput(help);
+      await expect(waitForExit(help, 3_000)).resolves.toMatchObject({ code: 0, signal: null });
+      expect(await helpOutput).toContain("Usage: borg-mcp-server");
+      expect(await helpOutput).not.toContain("attacker.invalid");
+      expect(await helpOutput).not.toContain("file:///");
+
+      const setup = fork(mainPath, ["setup"], {
+        env: {
+          ...process.env,
+          BORG_SERVER_DATA_DIR: directory,
+          BORG_SERVER_BIND_HOST: "attacker.invalid",
+        },
+        stdio: ["ignore", "pipe", "pipe", "ipc"],
+      });
+      const setupOutput = captureOutput(setup);
+      await expect(waitForExit(setup, 3_000)).resolves.toMatchObject({ code: 1, signal: null });
+      const output = await setupOutput;
+      expect(output).toContain("Server command failed: Configure --host as an explicit IP address.");
+      expect(output).not.toContain("attacker.invalid");
+      expect(output).not.toContain("file:///");
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  }, 10_000);
+
+  it("sanitizes production entrypoint configuration failures without echoing input", async () => {
+    const mainPath = fileURLToPath(new URL("../dist/main.js", import.meta.url));
+    const cases = [
+      {
+        args: ["start", "--host", "example.invalid"],
+        environment: {},
+        expected: "Server command failed: Configure --host as an explicit IP address.",
+        secret: "example.invalid",
+      },
+      {
+        args: ["start", "--host", "0.0.0.0"],
+        environment: {},
+        expected: "Server command failed: Choose a specific loopback or private-LAN IP; wildcard binds are prohibited.",
+        secret: "0.0.0.0",
+      },
+      {
+        args: ["start", "--port", "attacker-port"],
+        environment: {},
+        expected: "Server command failed: Provide --port as an integer from 0 to 65535.",
+        secret: "attacker-port",
+      },
+      {
+        args: ["start"],
+        environment: { BORG_SERVER_MAX_DATABASE_BYTES: "attacker-capacity" },
+        expected: "Server command failed: Set BORG_SERVER_MAX_DATABASE_BYTES to a positive integer.",
+        secret: "attacker-capacity",
+      },
+      {
+        args: ["start"],
+        environment: { BORG_SERVER_DATA_DIR: "/private/secret-server-path" },
+        expected: "Server command failed.",
+        secret: "/private/secret-server-path",
+      },
+    ] as const;
+
+    for (const testCase of cases) {
+      const child = fork(mainPath, [...testCase.args], {
+        env: { ...process.env, ...testCase.environment },
+        stdio: ["ignore", "pipe", "pipe", "ipc"],
+      });
+      const captured = captureOutput(child);
+      await expect(waitForExit(child, 3_000)).resolves.toMatchObject({ code: 1, signal: null });
+      const output = await captured;
+      expect(output).toContain(testCase.expected);
+      expect(output).not.toContain(testCase.secret);
+      expect(output).not.toContain("file:///");
+      expect(output).not.toContain("credential-secret");
+    }
+  }, 20_000);
 });
 
 function startChild(directory: string, phase: string, closeReject = false): ChildProcess {

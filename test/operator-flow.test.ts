@@ -39,7 +39,7 @@ describe("offline operator flow", () => {
 
     const running = await acquireRuntimeLock(dataDirectory);
     await expect(service.rotateClient(enrolled!.clientId)).rejects.toThrow(
-      "The server must be stopped before offline credential changes.",
+      "Stop the server before rotating or revoking client credentials.",
     );
     await running.release();
 

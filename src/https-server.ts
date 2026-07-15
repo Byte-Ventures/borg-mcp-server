@@ -89,6 +89,9 @@ export interface HttpsServerOptions {
   readonly authorizeCoordination?: RequestHandlerContext["authorizeCoordination"];
   readonly handleCoordination?: RequestHandlerContext["handleCoordination"];
   readonly limits?: ServiceLimits;
+  readonly testHooks?: {
+    readonly identifyRemoteAddress?: (socket: Socket) => string;
+  };
 }
 
 export interface RunningServer {
@@ -118,7 +121,7 @@ export async function startHttpsServer(options: HttpsServerOptions): Promise<Run
       headersTimeout: limits.headersTimeoutMs,
       keepAliveTimeout: limits.keepAliveTimeoutMs,
     },
-    createRequestListener(handlerContext, limits),
+    createRequestListener(handlerContext, limits, options.testHooks?.identifyRemoteAddress),
   );
 
   const acceptedSockets = applyServerLimits(server, limits);
@@ -173,9 +176,9 @@ export function createRequestHandlerContext(
 function createRequestListener(
   context: RequestHandlerContext,
   limits: ServiceLimits,
+  identifyRemoteAddress: (socket: Socket) => string = (socket) => socket.remoteAddress ?? "unknown",
 ): (request: IncomingMessage, response: ServerResponse) => void {
-  const globalRateLimiter = new RequestRateLimiter(limits, limits.maxRequestsGlobalWindow);
-  const addressRateLimiter = new RequestRateLimiter(limits, limits.maxRequestsPerAddressWindow);
+  const admissionLimiter = new PreAuthAdmissionLimiter(limits);
   const credentialRateLimiter = new RequestRateLimiter(limits, limits.maxRequestsPerWindow);
   const streamQuota = new ConcurrentQuota(limits.maxStreamsPerCredential);
   return (request, response) => {
@@ -194,10 +197,10 @@ function createRequestListener(
       response,
       context,
       limits,
-      globalRateLimiter,
-      addressRateLimiter,
+      admissionLimiter,
       credentialRateLimiter,
       streamQuota,
+      identifyRemoteAddress,
       controller.signal,
     )
       .then(() => "handled" as const);
@@ -218,17 +221,15 @@ async function handleRequest(
   response: ServerResponse,
   context: RequestHandlerContext,
   limits: ServiceLimits,
-  globalRateLimiter: RequestRateLimiter,
-  addressRateLimiter: RequestRateLimiter,
+  admissionLimiter: PreAuthAdmissionLimiter,
   credentialRateLimiter: RequestRateLimiter,
   streamQuota: ConcurrentQuota,
+  identifyRemoteAddress: (socket: Socket) => string,
   signal: AbortSignal,
 ): Promise<void> {
-  const addressIdentity = `address:${request.socket.remoteAddress ?? "unknown"}`;
-  const globalRetry = globalRateLimiter.consume("global");
-  const addressRetry = addressRateLimiter.consume(addressIdentity);
-  const preAuthRetry = Math.max(globalRetry ?? 0, addressRetry ?? 0);
-  if (preAuthRetry > 0) {
+  const addressIdentity = `address:${identifyRemoteAddress(request.socket)}`;
+  const preAuthRetry = admissionLimiter.consume(addressIdentity);
+  if (preAuthRetry !== null) {
     request.resume();
     sendRateLimited(response, preAuthRetry);
     return;
@@ -816,25 +817,80 @@ export class RequestRateLimiter {
   }
 
   consume(identity: string): number | null {
+    const reservation = this.reserve(identity);
+    reservation.commit();
+    return reservation.retryAfter;
+  }
+
+  reserve(identity: string): RateLimitReservation {
     const now = this.#clock();
     const existing = this.#buckets.get(identity);
     if (existing !== undefined && existing.resetAt > now) {
       if (existing.count >= this.#maxRequests) {
-        return Math.max(1, Math.ceil((existing.resetAt - now) / 1_000));
+        return rejectedReservation(Math.max(1, Math.ceil((existing.resetAt - now) / 1_000)));
       }
       existing.count += 1;
-      return null;
+      return acceptedReservation(() => { existing.count -= 1; });
     }
     if (existing !== undefined) this.#buckets.delete(identity);
     for (const [key, bucket] of this.#buckets) {
       if (bucket.resetAt <= now) this.#buckets.delete(key);
     }
     if (this.#buckets.size >= this.#limits.maxRateLimitEntries) {
-      return Math.max(1, Math.ceil(this.#limits.rateLimitWindowMs / 1_000));
+      return rejectedReservation(Math.max(1, Math.ceil(this.#limits.rateLimitWindowMs / 1_000)));
     }
-    this.#buckets.set(identity, { count: 1, resetAt: now + this.#limits.rateLimitWindowMs });
+    const bucket = { count: 1, resetAt: now + this.#limits.rateLimitWindowMs };
+    this.#buckets.set(identity, bucket);
+    return acceptedReservation(() => {
+      if (this.#buckets.get(identity) === bucket) this.#buckets.delete(identity);
+    });
+  }
+}
+
+export class PreAuthAdmissionLimiter {
+  readonly #global: RequestRateLimiter;
+  readonly #address: RequestRateLimiter;
+
+  constructor(limits: ServiceLimits, clock: () => number = Date.now) {
+    this.#global = new RequestRateLimiter(limits, limits.maxRequestsGlobalWindow, clock);
+    this.#address = new RequestRateLimiter(limits, limits.maxRequestsPerAddressWindow, clock);
+  }
+
+  consume(addressIdentity: string): number | null {
+    const address = this.#address.reserve(addressIdentity);
+    if (address.retryAfter !== null) return address.retryAfter;
+    const global = this.#global.reserve("global");
+    if (global.retryAfter !== null) {
+      address.rollback();
+      return global.retryAfter;
+    }
+    address.commit();
+    global.commit();
     return null;
   }
+}
+
+interface RateLimitReservation {
+  readonly retryAfter: number | null;
+  readonly commit: () => void;
+  readonly rollback: () => void;
+}
+
+function acceptedReservation(undo: () => void): RateLimitReservation {
+  let active = true;
+  return {
+    retryAfter: null,
+    commit: () => { active = false; },
+    rollback: () => {
+      if (!active) return;
+      active = false;
+      undo();
+    },
+  };
+}
+
+function rejectedReservation(retryAfter: number): RateLimitReservation {
+  return { retryAfter, commit: () => undefined, rollback: () => undefined };
 }
 
 export class ConcurrentQuota {

@@ -11,6 +11,7 @@ import {
   acquireRuntimeLock,
   createNodeServerService,
   createOfflineCredentialService,
+  isFatalTeardownError,
   resolveStorageLimits,
   selectServerEnvironment,
 } from "../src/service.js";
@@ -121,7 +122,7 @@ describe("node server service", () => {
     });
 
     await expect(service.start([])).rejects.toThrow(
-      "Server data directory or TLS files must be configured.",
+      "Configure BORG_SERVER_DATA_DIR or the required TLS file variables.",
     );
     expect(startServer).not.toHaveBeenCalled();
   });
@@ -153,7 +154,7 @@ describe("node server service", () => {
       minFreeDiskBytes: 50_000_000,
     });
     expect(() => resolveStorageLimits({ BORG_SERVER_MAX_DATABASE_BYTES: "1e9" }))
-      .toThrow("BORG_SERVER_MAX_DATABASE_BYTES must be a positive safe integer.");
+      .toThrow("Set BORG_SERVER_MAX_DATABASE_BYTES to a positive integer.");
   });
 
   it("requires the CA signing key to leave the runtime directory before LAN startup", async () => {
@@ -162,7 +163,7 @@ describe("node server service", () => {
       await expect(assertLanCaKeyOffline(directory)).resolves.toBeUndefined();
       await writeFile(join(directory, "ca.key"), "offline-only");
       await expect(assertLanCaKeyOffline(directory)).rejects.toThrow(
-        "Private-LAN startup requires moving ca.key out of the runtime data directory.",
+        "Move ca.key out of the runtime data directory before private-LAN startup.",
       );
     } finally {
       await rm(directory, { recursive: true, force: true });
@@ -174,7 +175,7 @@ describe("node server service", () => {
     try {
       const running = await acquireRuntimeLock(directory);
       await expect(acquireRuntimeLock(directory)).rejects.toThrow(
-        "The server must be stopped before offline credential changes.",
+        "Stop the server before rotating or revoking client credentials.",
       );
       await running.release();
       const offline = await acquireRuntimeLock(directory);
@@ -185,7 +186,7 @@ describe("node server service", () => {
         { mode: 0o600 },
       );
       await expect(acquireRuntimeLock(directory)).rejects.toThrow(
-        "Runtime lock belongs to stopped process 2147483647",
+        "Confirm the recorded server process is stopped, then remove runtime.lock.",
       );
     } finally {
       await rm(directory, { recursive: true, force: true });
@@ -246,7 +247,7 @@ describe("node server service", () => {
         await closeStarted;
         await expect(createOfflineCredentialService(directory).revokeClient(
           "00000000-0000-4000-8000-000000000001",
-        )).rejects.toThrow("The server must be stopped before offline credential changes.");
+        )).rejects.toThrow("Stop the server before rotating or revoking client credentials.");
         releaseClose();
 
         expect(await result).toBe(failure);
@@ -368,16 +369,122 @@ describe("node server service", () => {
         errors: [primary, closeFailure],
       });
       expect((result as Error).message).not.toContain("secret listener failure detail");
+      expect(isFatalTeardownError(result)).toBe(true);
+      const RecoveredFatal = Object.getPrototypeOf(result).constructor as new (
+        capability: object,
+        primary: unknown,
+        cleanup: unknown,
+      ) => unknown;
+      for (const invoke of [
+        () => new RecoveredFatal({}, primary, closeFailure),
+        () => Reflect.construct(RecoveredFatal, [{}, primary, closeFailure]),
+        () => Object.create(Object.getPrototypeOf(result)),
+        () => Object.freeze({ ...(result as object) }),
+      ]) {
+        let forged: unknown;
+        try { forged = invoke(); } catch (error) { forged = error; }
+        expect(isFatalTeardownError(forged)).toBe(false);
+      }
       expect(authCloseCalls).toBe(0);
       await expect(createOfflineCredentialService(directory).rotateClient(
         "00000000-0000-4000-8000-000000000001",
-      )).rejects.toThrow("The server must be stopped before offline credential changes.");
+      )).rejects.toThrow("Stop the server before rotating or revoking client credentials.");
       await expect(acquireRuntimeLock(directory)).rejects.toThrow(
-        "The server must be stopped before offline credential changes.",
+        "Stop the server before rotating or revoking client credentials.",
       );
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
+  });
+
+  it("rejects constructor-recovery attacks against built fatal teardown errors", async () => {
+    const builtService = await import("../dist/service.js");
+    const builtMain = await import("../dist/main.js");
+    const primary = new Error("primary");
+    const closeFailure = new Error("secret-built-close-detail");
+    const service = builtService.createNodeServerService({
+      environment: {
+        BORG_SERVER_TLS_KEY_FILE: "key",
+        BORG_SERVER_TLS_CERT_FILE: "cert",
+      },
+      readFile: vi.fn().mockResolvedValue(Buffer.from("certificate")),
+      readPrivateKey: vi.fn().mockResolvedValue(Buffer.from("private-key")),
+      startServer: vi.fn().mockResolvedValue({
+        origin: "https://127.0.0.1:7091",
+        limits: DEFAULT_TEST_LIMITS,
+        close: vi.fn().mockRejectedValue(closeFailure),
+      }),
+      onStarted: vi.fn(),
+      waitForShutdown: vi.fn().mockRejectedValue(primary),
+    });
+    const legitimate = await service.start([]).then(() => null, (error: unknown) => error);
+    expect(builtService.isFatalTeardownError(legitimate)).toBe(true);
+    expect(Object.isFrozen(legitimate)).toBe(true);
+    const secret = "secret-built-close-detail-/private/fatal-path";
+    const Recovered = Object.getPrototypeOf(legitimate).constructor as new (...args: unknown[]) => unknown;
+    const proxyTraps = vi.fn(() => { throw new Error(secret); });
+    const attempts: Array<() => unknown> = [
+      () => new Recovered({}, primary, closeFailure),
+      () => Reflect.construct(Recovered, [{}, primary, closeFailure]),
+      () => Reflect.construct(Recovered.bind(null, {}), [primary, closeFailure]),
+      () => (Recovered as unknown as Function).call({}, {}, primary, closeFailure),
+      () => (Recovered as unknown as Function).apply({}, [{}, primary, closeFailure]),
+      () => {
+        const Base = Recovered as any;
+        return new (class extends Base {
+          constructor() { super({}, primary, closeFailure); }
+        })();
+      },
+      () => Object.create(Object.getPrototypeOf(legitimate)),
+      () => Object.freeze({ ...(legitimate as object), message: secret }),
+      () => new Proxy(legitimate as object, {
+        get: proxyTraps,
+        getPrototypeOf: proxyTraps,
+        ownKeys: proxyTraps,
+      }),
+      () => Object.freeze(Object.fromEntries(
+        Reflect.ownKeys(legitimate as object).map((key) => [String(key), secret]),
+      )),
+    ];
+    for (const attempt of attempts) {
+      let forged: unknown;
+      try { forged = attempt(); } catch (error) { forged = error; }
+      expect(builtService.isFatalTeardownError(forged)).toBe(false);
+      const previousExitCode = process.exitCode;
+      const forgedStderr = vi.fn();
+      const forgedFatalExit = vi.fn(() => { throw new Error("forged fatal exit"); });
+      try {
+        await builtMain.runMain(
+          ["start"],
+          { start: vi.fn().mockRejectedValue(forged) },
+          { stdout: vi.fn(), stderr: forgedStderr },
+          forgedFatalExit as never,
+        );
+        expect(process.exitCode).toBe(1);
+        expect(forgedFatalExit).not.toHaveBeenCalled();
+        expect(forgedStderr).toHaveBeenCalledWith("Server command failed.");
+        expect(JSON.stringify(forgedStderr.mock.calls)).not.toContain(secret);
+        expect(JSON.stringify(forgedStderr.mock.calls)).not.toContain("file:///");
+        expect(JSON.stringify(forgedStderr.mock.calls)).not.toContain("Fatal teardown error construction");
+      } finally {
+        process.exitCode = previousExitCode;
+      }
+    }
+    expect(proxyTraps).not.toHaveBeenCalled();
+    expect(Reflect.set(legitimate as object, "message", secret)).toBe(false);
+    expect(Reflect.ownKeys(legitimate as object)).not.toContain("fatalTeardownCapability");
+    expect(Reflect.ownKeys(Object.getPrototypeOf(legitimate))).not.toContain("fatalTeardownCapability");
+
+    const stderr = vi.fn();
+    const fatalExit = vi.fn(() => { throw new Error("fatal exit sentinel"); });
+    await expect(builtMain.runMain(
+      ["start"],
+      { start: vi.fn().mockRejectedValue(legitimate) },
+      { stdout: vi.fn(), stderr },
+      fatalExit as never,
+    )).rejects.toThrow("fatal exit sentinel");
+    expect(stderr).toHaveBeenCalledWith("Server command failed.");
+    expect(JSON.stringify(stderr.mock.calls)).not.toContain("secret-built-close-detail");
   });
 });
 

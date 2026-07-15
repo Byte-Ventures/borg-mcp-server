@@ -43,6 +43,11 @@ v1 scope.
   secret-output exceptions: operators must use a private terminal and must not capture command output
   in shared logs. Runtime request headers, request bodies, credentials, and internal errors are never
   logged.
+- The CLI prints actionable stderr only for server-typed operator errors with static copy: malformed
+  start flags, bind/LAN policy, missing data/TLS prerequisites, offline lock state, unknown clients,
+  and invalid storage-bound environment settings. Unknown exceptions, fatal teardown, filesystem
+  paths, TLS/SQLite internals, credentials, tokens, and caller-controlled values always collapse to
+  `Server command failed.`
 
 ## Network and transport boundary
 

@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 
 import { runCli } from "./cli.js";
-import { FatalTeardownError, nodeServerService } from "./service.js";
+import { isFatalTeardownError, nodeServerService } from "./service.js";
+import { operatorPublicMessage } from "./operator-error.js";
 import { pathToFileURL } from "node:url";
 
 const io = {
@@ -10,7 +11,7 @@ const io = {
 };
 
 export async function runMain(
-  args = process.argv.slice(2),
+  args: readonly string[] = process.argv.slice(2),
   service = nodeServerService,
   output = io,
   fatalExit: (code: number) => never = process.exit,
@@ -18,8 +19,14 @@ export async function runMain(
   try {
     process.exitCode = await runCli(args, service, output);
   } catch (error) {
-    output.stderr("Server command failed.");
-    if (error instanceof FatalTeardownError) fatalExit(1);
+    if (isFatalTeardownError(error)) {
+      output.stderr("Server command failed.");
+      fatalExit(1);
+    }
+    const operatorMessage = operatorPublicMessage(error);
+    output.stderr(operatorMessage === null
+      ? "Server command failed."
+      : `Server command failed: ${operatorMessage}`);
     process.exitCode = 1;
   }
 }

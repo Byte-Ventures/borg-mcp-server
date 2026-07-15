@@ -20,6 +20,7 @@ import {
 } from "./https-server.js";
 import { createPart2ProtocolInfo } from "./protocol-draft.js";
 import { resolveBindOptions } from "./network-policy.js";
+import { operatorErrors, type OperatorErrorCode } from "./operator-error.js";
 import { parseStartOptions } from "./start-options.js";
 import { DEFAULT_STORAGE_LIMITS, openStore, type StorageLimits } from "./store.js";
 
@@ -113,7 +114,7 @@ export function createNodeServerService(dependencies: ServiceDependencies): Serv
         (dataDirectory === undefined ? undefined : join(dataDirectory, "ca.crt"));
       if (keyPath === undefined || certificatePath === undefined) {
         shutdown?.dispose();
-        throw new Error("Server data directory or TLS files must be configured.");
+        throw operatorErrors.SERVER_FILES_MISSING;
       }
 
       let runtimeLock: Awaited<ReturnType<typeof acquireRuntimeLock>> | undefined;
@@ -236,7 +237,7 @@ export async function assertLanCaKeyOffline(runtimeDataDirectory: string): Promi
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
     throw error;
   }
-  throw new Error("Private-LAN startup requires moving ca.key out of the runtime data directory.");
+  throw operatorErrors.LAN_CA_KEY_ONLINE;
 }
 
 export function selectServerEnvironment(environment: NodeJS.ProcessEnv): ServerEnvironment {
@@ -286,20 +287,22 @@ export function resolveStorageLimits(environment: ServerEnvironment): StorageLim
 
 function positiveEnvironmentInteger(value: string | undefined, fallback: number, name: string): number {
   if (value === undefined) return fallback;
-  if (!/^[1-9][0-9]*$/u.test(value)) throw new Error(`${name} must be a positive safe integer.`);
+  const code = storageOperatorErrorCode(name);
+  if (!/^[1-9][0-9]*$/u.test(value)) throw operatorErrors[code];
   const parsed = Number(value);
-  if (!Number.isSafeInteger(parsed)) throw new Error(`${name} must be a positive safe integer.`);
+  if (!Number.isSafeInteger(parsed)) throw operatorErrors[code];
   return parsed;
+}
+
+function storageOperatorErrorCode(name: string): OperatorErrorCode {
+  if (name === "BORG_SERVER_MAX_ACTIVITY_ENTRIES_PER_CUBE") return "ACTIVITY_LIMIT_INVALID";
+  if (name === "BORG_SERVER_MAX_DATABASE_BYTES") return "DATABASE_LIMIT_INVALID";
+  if (name === "BORG_SERVER_MIN_FREE_DISK_BYTES") return "DISK_RESERVE_INVALID";
+  throw new Error("Unknown storage environment setting.");
 }
 
 const serverEnvironment = selectServerEnvironment(process.env);
 const dataDirectory = serverEnvironment.BORG_SERVER_DATA_DIR ?? join(homedir(), ".borg", "server");
-const setupBindHost = resolveBindOptions({
-  ...(serverEnvironment.BORG_SERVER_BIND_HOST === undefined
-    ? {}
-    : { host: serverEnvironment.BORG_SERVER_BIND_HOST }),
-  lanConsent: true,
-}).host;
 const startOnlyService = createNodeServerService({
   environment: { ...serverEnvironment, BORG_SERVER_DATA_DIR: dataDirectory },
   readFile,
@@ -324,9 +327,18 @@ const startOnlyService = createNodeServerService({
 });
 export const nodeServerService: ServerService = {
   start: startOnlyService.start,
-  setup: () => bootstrapServer(dataDirectory, setupBindHost),
+  setup: () => bootstrapServer(dataDirectory, resolveSetupBindHost(serverEnvironment)),
   ...createOfflineCredentialService(dataDirectory),
 };
+
+function resolveSetupBindHost(environment: ServerEnvironment): string {
+  return resolveBindOptions({
+    ...(environment.BORG_SERVER_BIND_HOST === undefined
+      ? {}
+      : { host: environment.BORG_SERVER_BIND_HOST }),
+    lanConsent: true,
+  }).host;
+}
 
 export function createOfflineCredentialService(
   offlineDataDirectory: string,
@@ -374,18 +386,30 @@ async function teardownRuntime(resources: RuntimeResources): Promise<void> {
   await resources.runtimeLock?.release();
 }
 
-export class FatalTeardownError extends AggregateError {
-  constructor(primary: unknown, cleanup: unknown) {
+const fatalTeardownErrors = new WeakSet<object>();
+const fatalTeardownCapability = Object.freeze({});
+
+class FatalTeardownError extends AggregateError {
+  constructor(capability: object, primary: unknown, cleanup: unknown) {
     super(
       primary === undefined ? [cleanup] : [primary, cleanup],
       "Server teardown could not be confirmed; the runtime remains locked.",
     );
+    if (capability !== fatalTeardownCapability) {
+      throw new Error("Fatal teardown error construction is unavailable.");
+    }
     this.name = "FatalTeardownError";
+    fatalTeardownErrors.add(this);
+    Object.freeze(this);
   }
 }
 
+export function isFatalTeardownError(error: unknown): boolean {
+  return typeof error === "object" && error !== null && fatalTeardownErrors.has(error);
+}
+
 function fatalTeardownError(primary: unknown, cleanup: unknown): FatalTeardownError {
-  return new FatalTeardownError(primary, cleanup);
+  return new FatalTeardownError(fatalTeardownCapability, primary, cleanup);
 }
 
 export async function acquireRuntimeLock(runtimeDataDirectory: string): Promise<RuntimeLock> {
@@ -415,7 +439,7 @@ export async function acquireRuntimeLock(runtimeDataDirectory: string): Promise<
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
     const metadata = await lstat(path);
     if (!metadata.isFile() || metadata.isSymbolicLink() || (metadata.mode & 0o077) !== 0) {
-      throw new Error("Runtime lock is not a private regular file.");
+      throw operatorErrors.RUNTIME_LOCK_UNSAFE;
     }
     let pid: number;
     try {
@@ -423,10 +447,10 @@ export async function acquireRuntimeLock(runtimeDataDirectory: string): Promise<
       if (!Number.isSafeInteger(value.pid) || (value.pid as number) <= 0) throw new Error();
       pid = value.pid as number;
     } catch {
-      throw new Error("Runtime lock is invalid; remove it only after confirming the server is stopped.");
+      throw operatorErrors.RUNTIME_LOCK_INVALID;
     }
-    if (processIsAlive(pid)) throw new Error("The server must be stopped before offline credential changes.");
-    throw new Error(`Runtime lock belongs to stopped process ${pid}; remove it after confirming shutdown.`);
+    if (processIsAlive(pid)) throw operatorErrors.RUNTIME_ACTIVE;
+    throw operatorErrors.RUNTIME_LOCK_STALE;
   }
 }
 

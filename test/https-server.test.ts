@@ -7,6 +7,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   createRequestHandlerContext,
   ConcurrentQuota,
+  PreAuthAdmissionLimiter,
   RequestRateLimiter,
   startHttpsServer,
   validateTlsCertificate,
@@ -577,6 +578,90 @@ describe("HTTPS service", () => {
     expect(limiter.consume("127.0.0.2")).toBeNull();
   });
 
+  it("does not debit global admission for address-rejected attacker traffic", () => {
+    const limiter = new PreAuthAdmissionLimiter({
+      ...server.limits,
+      maxRequestsPerAddressWindow: 2,
+      maxRequestsGlobalWindow: 4,
+    }, () => 0);
+
+    expect(limiter.consume("address:attacker")).toBeNull();
+    expect(limiter.consume("address:attacker")).toBeNull();
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      expect(limiter.consume("address:attacker")).toBe(60);
+    }
+    expect(limiter.consume("address:fresh")).toBeNull();
+    expect(limiter.consume("address:fresh")).toBeNull();
+    expect(limiter.consume("address:third")).toBe(60);
+  });
+
+  it("preserves global admission for fresh source addresses through the HTTPS handler", async () => {
+    let connection = 0;
+    const limited = await startHttpsServer({
+      bind: { port: 0 },
+      tls: { key, cert: certificate },
+      protocolInfo,
+      authorizeProtocol: async () => true,
+      testHooks: {
+        identifyRemoteAddress: () => {
+          connection += 1;
+          if (connection <= 22) return "attacker";
+          if (connection <= 24) return "fresh";
+          return "third";
+        },
+      },
+      limits: {
+        ...server.limits,
+        maxRequestsPerWindow: 2,
+        maxRequestsPerAddressWindow: 2,
+        maxRequestsGlobalWindow: 4,
+      },
+    });
+    try {
+      expect((await request(limited.origin, certificate, "/healthz")).status)
+        .toBe(204);
+      expect((await request(limited.origin, certificate, "/healthz")).status)
+        .toBe(204);
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        const rejected = await request(
+          limited.origin,
+          certificate,
+          "/healthz",
+        );
+        expect(rejected.status).toBe(429);
+        expect(rejected.headers["retry-after"]).toBe("60");
+      }
+      expect((await request(limited.origin, certificate, "/healthz")).status)
+        .toBe(204);
+      expect((await request(limited.origin, certificate, "/healthz")).status)
+        .toBe(204);
+      expect((await request(limited.origin, certificate, "/healthz")).status)
+        .toBe(429);
+    } finally {
+      await limited.close();
+    }
+  });
+
+  it("rolls back reservations and admits exactly the synchronous global boundary", () => {
+    const limits = {
+      ...server.limits,
+      maxRequestsPerAddressWindow: 10,
+      maxRequestsGlobalWindow: 4,
+    };
+    const reservationLimiter = new RequestRateLimiter(limits, 2, () => 0);
+    const rolledBack = reservationLimiter.reserve("address:victim");
+    rolledBack.rollback();
+    expect(reservationLimiter.consume("address:victim")).toBeNull();
+    expect(reservationLimiter.consume("address:victim")).toBeNull();
+    expect(reservationLimiter.consume("address:victim")).toBe(60);
+
+    const admission = new PreAuthAdmissionLimiter(limits, () => 0);
+    const outcomes = Array.from({ length: 20 }, (_, index) =>
+      admission.consume(`address:${index}`));
+    expect(outcomes.filter((retry) => retry === null)).toHaveLength(4);
+    expect(outcomes.filter((retry) => retry === 60)).toHaveLength(16);
+  });
+
   it("returns 429 for one credential without exhausting another credential's quota", async () => {
     const limited = await startHttpsServer({
       bind: { port: 0 },
@@ -952,6 +1037,7 @@ function request(
   headers: Readonly<Record<string, string>> = {},
   body = "",
   method = "GET",
+  localAddress?: string,
 ): Promise<TestResponse> {
   const url = new URL(path, origin);
 
@@ -966,6 +1052,7 @@ function request(
         ca,
         rejectUnauthorized: true,
         agent: false,
+        ...(localAddress === undefined ? {} : { localAddress }),
       },
       (response) => {
         response.setEncoding("utf8");

@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { performance } from "node:perf_hooks";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
@@ -138,6 +139,42 @@ describe("credential authority", () => {
       server_capabilities: 1,
     });
     expect(() => authority.replaceOwnerInvitation(recovery, 60_000)).toThrow("Access denied.");
+  });
+
+  it("keeps rejected invitation states in one timing class", () => {
+    const recovery = authority.createRecoveryCredential();
+    const revoked = authority.createBootstrapInvitation(60_000);
+    if (authority.replaceOwnerInvitation(recovery, 60_000) === null) {
+      throw new Error("Owner invitation replacement failed.");
+    }
+    const expired = authority.createInvitation(recovery, 1_000);
+    const consumed = authority.createInvitation(recovery, 60_000);
+    if (expired === null || consumed === null) throw new Error("Invitation creation failed.");
+    const consumedRequest = enrollmentRequest(consumed);
+    expect(authority.exchangeInvitation(consumedRequest)).not.toBeNull();
+    now = new Date("2026-07-14T12:00:01.001Z");
+
+    const requests = [
+      enrollmentRequest(generateSecret()),
+      enrollmentRequest(expired),
+      enrollmentRequest(revoked),
+      { ...consumedRequest, retryKey: randomUUID(), clientCredential: generateSecret() },
+    ] as const;
+    for (let iteration = 0; iteration < 200; iteration += 1) {
+      for (const request of requests) expect(authority.exchangeInvitation(request)).toBeNull();
+    }
+
+    const elapsed = requests.map(() => 0);
+    for (let iteration = 0; iteration < 4_000; iteration += 1) {
+      const offset = iteration % requests.length;
+      for (let index = 0; index < requests.length; index += 1) {
+        const requestIndex = (index + offset) % requests.length;
+        const startedAt = performance.now();
+        authority.exchangeInvitation(requests[requestIndex]!);
+        elapsed[requestIndex]! += performance.now() - startedAt;
+      }
+    }
+    expect(Math.max(...elapsed) / Math.min(...elapsed)).toBeLessThan(1.25);
   });
 });
 

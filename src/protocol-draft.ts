@@ -5,7 +5,7 @@ export function createPart2ProtocolInfo(limits: ServiceLimits): ProtocolInfoDocu
     protocol_version: "1",
     package: {
       name: "borgmcp-shared",
-      version: "0.2.2",
+      version: "0.3.0",
     },
     capabilities: [
       "coordination.core",

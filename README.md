@@ -9,7 +9,7 @@ HTTPS.
 The `0.1.0` release preparation remains gated on the `#5` owner-enrollment and
 cube bootstrap work. The server-side source implements purpose-bound owner
 enrollment and idempotent multi-cube creation against an exact development pin
-of the unreleased `borgmcp-shared` 0.3 contract. It is not release-ready until
+of the unreleased `borgmcp-shared` 0.3.0 contract. It is not release-ready until
 that contract has an audited registry release and the coordinated client flow
 has been security-reviewed and dogfooded.
 

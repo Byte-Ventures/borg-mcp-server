@@ -1567,12 +1567,20 @@ class SqliteCredentialStore implements CredentialStore {
   findInvitation(lookup: Buffer): StoredInvitationDigest | null {
     validateLookup(lookup);
     const row = this.#database.prepare(`
-      SELECT id, lookup_digest, verifier_digest, expires_at, consumed_at, revoked_at,
-             purpose, owner_epoch
-      FROM enrollment_invitations
-      WHERE lookup_digest = ?
+      SELECT invitation.id IS NOT NULL AS found,
+             COALESCE(invitation.id, '00000000-0000-4000-8000-000000000000') AS id,
+             COALESCE(invitation.lookup_digest, zeroblob(32)) AS lookup_digest,
+             COALESCE(invitation.verifier_digest, zeroblob(32)) AS verifier_digest,
+             COALESCE(invitation.expires_at, '') AS expires_at,
+             invitation.consumed_at, invitation.revoked_at,
+             COALESCE(invitation.purpose, 'client') AS purpose,
+             invitation.owner_epoch
+      FROM (SELECT 1) AS seed
+      LEFT JOIN enrollment_invitations AS invitation ON invitation.lookup_digest = ?
     `).get(lookup);
-    return row === undefined ? null : storedInvitationDigest(row);
+    if (row === undefined) throw new Error("Invitation lookup did not return a sentinel row.");
+    const stored = storedInvitationDigest(row);
+    return requiredInteger(row, "found") === 1 ? stored : null;
   }
 
   claimInvitation(input: {
@@ -1593,31 +1601,47 @@ class SqliteCredentialStore implements CredentialStore {
     try {
       const now = this.#now();
       const invitation = this.#database.prepare(`
-        SELECT purpose, owner_epoch, expires_at, consumed_at, revoked_at
-        FROM enrollment_invitations WHERE id = ?
+        SELECT invitation.id IS NOT NULL AS found,
+               COALESCE(invitation.purpose, 'client') AS purpose,
+               invitation.owner_epoch,
+               COALESCE(invitation.expires_at, '') AS expires_at,
+               invitation.consumed_at, invitation.revoked_at
+        FROM (SELECT 1) AS seed
+        LEFT JOIN enrollment_invitations AS invitation ON invitation.id = ?
       `).get(input.invitationId);
-      if (invitation === undefined) {
+      const existing = this.#database.prepare(`
+        SELECT claim.invitation_id IS NOT NULL AS found,
+               COALESCE(claim.retry_key, '') AS retry_key,
+               COALESCE(claim.client_id, '') AS client_id,
+               claim.requested_client_name,
+               COALESCE(claim.credential_lookup_digest, zeroblob(32)) AS credential_lookup_digest,
+               COALESCE(claim.credential_verifier_digest, zeroblob(32)) AS credential_verifier_digest,
+               COALESCE(claim.purpose, 'client') AS purpose,
+               claim.owner_epoch
+        FROM (SELECT 1) AS seed
+        LEFT JOIN enrollment_claims AS claim ON claim.invitation_id = ?
+      `).get(input.invitationId);
+      if (invitation === undefined || existing === undefined) {
+        throw new Error("Enrollment lookup did not return a sentinel row.");
+      }
+      const invitationFound = requiredInteger(invitation, "found") === 1;
+      const existingFound = requiredInteger(existing, "found") === 1;
+      const purposeValue = requiredText(invitation, "purpose");
+      if (purposeValue !== "owner" && purposeValue !== "client") {
+        throw new Error("Invalid invitation purpose.");
+      }
+      const purpose = purposeValue;
+      const claimMatch = matchEnrollmentClaim(existing, input, purpose);
+      if (!invitationFound) {
         this.#database.exec("ROLLBACK");
         return null;
       }
-      const purpose = requiredText(invitation, "purpose");
-      if (purpose !== "owner" && purpose !== "client") throw new Error("Invalid invitation purpose.");
-      const existing = this.#database.prepare(`
-        SELECT retry_key, client_id, requested_client_name, credential_lookup_digest,
-               credential_verifier_digest, purpose, owner_epoch
-        FROM enrollment_claims WHERE invitation_id = ?
-      `).get(input.invitationId);
-      if (existing !== undefined) {
-        const exact = requiredText(existing, "retry_key") === input.retryKey &&
-          nullableText(existing, "requested_client_name") === input.requestedClientName &&
-          requiredText(existing, "purpose") === purpose &&
-          Buffer.from(requiredBuffer(existing, "credential_lookup_digest")).equals(input.credentialDigest.lookup) &&
-          Buffer.from(requiredBuffer(existing, "credential_verifier_digest")).equals(input.credentialDigest.verifier);
-        if (!exact) {
+      if (existingFound) {
+        if (!claimMatch.exact) {
           this.#database.exec("ROLLBACK");
           return null;
         }
-        const result = enrollmentClaimResult(purpose, requiredText(existing, "client_id"));
+        const result = enrollmentClaimResult(purpose, claimMatch.clientId);
         this.#database.exec("COMMIT");
         return result;
       }
@@ -2106,6 +2130,33 @@ function enrollmentClaimResult(
   return purpose === "owner"
     ? { purpose, clientId, serverCapabilities: ["create_cube"] }
     : { purpose, clientId, serverCapabilities: [] };
+}
+
+function matchEnrollmentClaim(
+  row: Record<string, unknown>,
+  input: {
+    readonly retryKey: string;
+    readonly requestedClientName: string | null;
+    readonly credentialDigest: DigestPair;
+  },
+  purpose: "owner" | "client",
+): { exact: boolean; clientId: string } {
+  const retryKey = requiredText(row, "retry_key");
+  const clientId = requiredText(row, "client_id");
+  const requestedClientName = nullableText(row, "requested_client_name");
+  const storedPurpose = requiredText(row, "purpose");
+  const lookup = requiredBuffer(row, "credential_lookup_digest");
+  const verifier = requiredBuffer(row, "credential_verifier_digest");
+
+  const retryMatches = retryKey === input.retryKey;
+  const nameMatches = requestedClientName === input.requestedClientName;
+  const purposeMatches = storedPurpose === purpose;
+  const lookupMatches = lookup.equals(input.credentialDigest.lookup);
+  const verifierMatches = verifier.equals(input.credentialDigest.verifier);
+  return {
+    exact: retryMatches && nameMatches && purposeMatches && lookupMatches && verifierMatches,
+    clientId,
+  };
 }
 
 function storedDroneSessionDigest(row: Record<string, unknown>): StoredDroneSessionDigest {

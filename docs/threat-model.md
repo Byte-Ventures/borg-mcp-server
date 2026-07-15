@@ -26,7 +26,9 @@ v1 scope.
   and server cube quotas bound growth.
 - Persisted credentials are keyed lookup and verifier digests, never plaintext. Recovery, invitation,
   client, and drone-session digests use separate HMAC domains. Rotation revokes prior client
-  credentials; revocation also invalidates child sessions.
+  credentials; revocation also invalidates child sessions. Unknown, expired, revoked, and
+  consumed-with-another-tuple invitation claims execute the same sentinel-row lookup, tuple checks,
+  and digest comparisons before returning the same public failure.
 - `credential-digest.key`, `server.key`, and `borg.db` are runtime secrets. They remain mode `0600`
   under an operator-controlled mode `0700` directory. The long-running service does not load
   `ca.key`. After setup, operators deploying on a LAN must move `ca.key` to offline storage that the
@@ -117,7 +119,8 @@ v1 scope.
 | Decision ratification | Active-decision supersession and immutable history insertion |
 
 - Network routes map only to fixed coordination operations. Production source contains no subprocess,
-  shell, dynamic-code, remote-tool, outbound-cloud, or arbitrary SQL execution surface.
+  shell, dynamic-code, remote-tool, outbound-cloud, or arbitrary SQL execution surface. Offline
+  bootstrap is also exercised with TCP, UDP, and `fetch` egress actively intercepted.
 
 ## Acceptance matrix
 
@@ -127,9 +130,9 @@ v1 scope.
 | Loopback default, explicit LAN consent, no discovery | `network-policy.ts`, `start-options.ts`, bind negatives, and static discovery boundary test. |
 | Verified TLS for non-loopback | Exact SAN/EKU/validity checks plus mandatory bounded root/intermediate path verification for LAN mode; trusted/untrusted/direct/intermediate LAN certificate tests. |
 | Authentication on all REST and SSE | All application REST/SSE routes authenticate; invitation exchange is one-time authenticated; the ratified shared-contract health exception is data-free; missing/invalid SSE/route matrix is release-gating. |
-| Hashed per-client rotate/revoke tokens | Digest-only SQLite schema, atomic rotation/revocation, offline CLI flow, plaintext-absence and revocation tests. |
+| Hashed per-client rotate/revoke tokens | Digest-only SQLite schema, atomic rotation/revocation, offline CLI flow, rejection timing-class regression, generated-file/config/database-sidecar/backup-copy plaintext scans, and revocation tests. |
 | Rate, body, connection, and storage limits | Fair per-address and parent-client request rates plus handshake, connection, per-verified-credential SSE, activity-retention, database-size, and disk-reserve bounds beneath global caps; bounded state, `429`, and `CAPACITY_EXCEEDED`; body/header/socket/deadline/pruning/capacity tests. |
-| No remote tool or subprocess execution | Fixed route surface and static production-source boundary tests. |
+| No remote tool or subprocess execution | Fixed route surface, static production-source boundary tests, and actively intercepted offline-bootstrap egress test. |
 | Threat model | This document, reviewed with the exact release commit. |
 | Negative bind/auth/CORS/log-secret tests | Network policy, HTTPS, operator flow, credential, cross-cube, and runtime-boundary suites. |
 

@@ -29,6 +29,13 @@ afterEach(async () => {
 });
 
 describe("borgmcp-shared server adapter", () => {
+  it("advertises the breaking retry-safe enrollment contract as shared 0.3.0", () => {
+    expect(createPart2ProtocolInfo(DEFAULT_SERVICE_LIMITS).package).toEqual({
+      name: "borgmcp-shared",
+      version: "0.3.0",
+    });
+  });
+
   it("passes the full forward conformance suite", async () => {
     const fixture = await conformanceEnvironment();
     try {

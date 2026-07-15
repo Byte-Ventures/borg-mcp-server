@@ -1,4 +1,4 @@
-import { chmod, mkdtemp, readFile, realpath, rm, stat, symlink } from "node:fs/promises";
+import { chmod, copyFile, mkdtemp, readFile, readdir, realpath, rm, stat, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { X509Certificate } from "node:crypto";
@@ -39,9 +39,19 @@ describe("offline bootstrap", () => {
     const key = await loadDigestKey(result.paths.digestKey);
     expect(key).toHaveLength(32);
     key.fill(0);
-    const databaseBytes = await readFile(result.paths.database);
-    expect(databaseBytes.includes(Buffer.from(result.recoveryCredential))).toBe(false);
-    expect(databaseBytes.includes(Buffer.from(result.initialInvitation))).toBe(false);
+    const backup = join(parent, "borg.db.backup");
+    await copyFile(result.paths.database, backup);
+    const generatedFiles = [
+      ...(await readdir(join(parent, "server"))).map((file) => join(parent, "server", file)),
+      backup,
+      `${result.paths.database}-wal`,
+      `${result.paths.database}-shm`,
+    ];
+    for (const path of generatedFiles) {
+      const bytes = await readFile(path).catch(() => Buffer.alloc(0));
+      expect(bytes.includes(Buffer.from(result.recoveryCredential)), path).toBe(false);
+      expect(bytes.includes(Buffer.from(result.initialInvitation)), path).toBe(false);
+    }
     const runtime = await openStore({ path: result.paths.database });
     expect(runtime.maintenance.observeAuthorityState()).toMatchObject({
       cubes: 0,

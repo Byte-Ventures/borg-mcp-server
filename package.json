@@ -1,8 +1,20 @@
 {
   "name": "borgmcp-server",
-  "version": "0.0.0",
-  "private": true,
+  "version": "0.1.0",
+  "private": false,
   "description": "Self-hosted Borg coordination server",
+  "license": "SEE LICENSE IN LICENSE",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Byte-Ventures/borg-mcp-server.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Byte-Ventures/borg-mcp-server/issues"
+  },
+  "homepage": "https://github.com/Byte-Ventures/borg-mcp-server#readme",
+  "publishConfig": {
+    "access": "public"
+  },
   "type": "module",
   "engines": {
     "node": ">=22.12.0",
@@ -18,7 +30,14 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "src",
+    "LICENSE",
+    "NOTICE",
+    "README.md",
+    "SECURITY.md",
+    "THIRD_PARTY_NOTICES.md",
+    "npm-shrinkwrap.json"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
@@ -30,12 +49,12 @@
     "verify:artifact": "node scripts/verify-packed-artifact.mjs"
   },
   "devDependencies": {
-    "@types/node": "^22.20.1",
-    "borgmcp-shared": "git+ssh://git@github.com/Byte-Ventures/borg-mcp-shared.git#ff8b92503358f407ce15d8a9c1e65b573f851569",
-    "typescript": "^7.0.2",
-    "vitest": "^4.1.10"
+    "@types/node": "22.20.1",
+    "borgmcp-shared": "0.2.2",
+    "typescript": "7.0.2",
+    "vitest": "4.1.10"
   },
   "dependencies": {
-    "selfsigned": "^5.5.0"
+    "selfsigned": "5.5.0"
   }
 }

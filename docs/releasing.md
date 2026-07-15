@@ -11,17 +11,22 @@ Every item below must be complete before a release tag is authorized:
 
 1. The server preview threat model in `docs/threat-model.md` passes the `#1016` gate for the exact
    release commit.
-2. Counsel has approved the final FSL-1.1 license text and Additional Use Grant tracked by `#1026`.
-3. The exact counsel-approved text is committed as `LICENSE`, `package.json` uses
+2. The final license is the unmodified canonical Functional Source License, Version 1.1,
+   ALv2 Future License (`FSL-1.1-ALv2`) with the notice `Copyright 2026 Byte Ventures`.
+   No Additional Permission, Additional Use Grant, or other addendum may be appended. The approval
+   and exact-byte audit trail is tracked by `#1026`.
+3. The exact approved text is committed as `LICENSE`, `package.json` uses
    `"license": "SEE LICENSE IN LICENSE"`, and the license SHA-256 is recorded in
    `SERVER_FSL_COUNSEL_LICENSE_SHA256`.
 4. The repository has completed public-boundary CR, SR, Release Quality, documentation,
    sensitivity, credential-history, dependency, and vulnerability review for the exact commit.
 5. `README.md`, `CONTRIBUTING.md`, and `SECURITY.md` are complete for a standalone public repository.
 6. `borgmcp-shared` is consumed from its audited public registry release, not a Git or SSH dependency.
-7. Runtime dependencies are exact registry versions, a publishable `npm-shrinkwrap.json` locks the
-   consumer tree without install scripts or non-registry sources, source maps reference shipped files,
-   and `node scripts/verify-packed-artifact.mjs <tarball>` accepts the exact package.
+7. All declared dependencies are exact registry versions, a publishable `npm-shrinkwrap.json` locks
+   the complete build and consumer trees without non-registry sources, and the production tree has no
+   install scripts. Source maps reference shipped files, and
+   `node scripts/verify-packed-artifact.mjs <tarball>` accepts the exact package. NOTICE, third-party
+   license disclosures, and the generated CycloneDX SBOM must match that tree.
 8. The Coordinator has recorded a separate release authorization for the exact version, tag,
    and commit. The `client-server-release-lanes-autonomy` decision authorizes lane preparation only.
 
@@ -32,7 +37,7 @@ The verify job enforces these approvals by exact value rather than by presence:
 - `SERVER_FSL_COUNSEL_LICENSE_SHA256` equals `sha256sum LICENSE`.
 - `SERVER_RELEASE_AUTHORIZATION` equals `v<version>@<commit>`.
 
-The repository must already be public and `package.json` must have a non-placeholder version,
+The repository must already be public and `package.json` must have the separately approved version,
 `private: false`, the exact repository URL, and public npm publish metadata. These are outputs of
 separately reviewed work, never edits performed by the release workflow.
 
@@ -53,7 +58,8 @@ Before any tag is authorized, the Coordinator configures and verifies:
 - npm ownership is verified and Trusted Publishing is bound to this repository and
   `.github/workflows/release.yml`. A bootstrap `NPM_TOKEN`, if first-publication ownership requires
   one, exists only in the protected environment and is deleted immediately after ownership and OIDC
-  publishing are verified.
+  publishing are verified. `ALLOW_UNCLAIMED_FIRST_PUBLISH` must be disabled after the first verified
+  publication.
 
 Repository visibility must not be changed under this runbook. Visibility requires its own explicit
 authorization after all public-boundary and license gates.
@@ -94,11 +100,15 @@ separate exact-artifact CR/SR/Release Quality gates before any preview.
 
 ## Current audit state
 
-The repository is public; visibility is complete and is no longer a release blocker. The protected
-publish environment, required branch/tag rulesets, and scanning controls still require live
-verification before a tag is authorized. Vulnerability alerts and automated security updates are
-enabled. Actions are restricted to GitHub-owned actions with full-SHA pinning required; the workflow
-token defaults to read-only and cannot approve pull requests. The repository does not yet contain the
-final FSL license or standalone public documentation. `package.json` remains private at version
-`0.0.0`, uses a Git+SSH development dependency, and has non-exact runtime dependency ranges. Those
-remaining facts intentionally make release verification fail closed.
+The repository is public; visibility is complete and is no longer a release blocker. The canonical
+license, standalone public documentation, version `0.1.0` package metadata, exact registry
+dependencies, publishable shrinkwrap, source-map closure, and disclosure files are prepared on the
+release-readiness branch. They do not become approved merely by being committed. The exact source and
+packed artifact still require the mandated CR, SR, Release Quality, license-byte, public-boundary, and
+consumer-install gates before a tag can be authorized.
+
+The protected `npm-publish` environment contains the encrypted first-publication bootstrap token and
+the expected-owner/unclaimed-package controls. Their presence is bootstrap preparation only. The
+release remains blocked on a separate authorization naming the exact protected-main commit and tag,
+and on completion of the least-privilege fresh-bootstrap/grant dogfood gate. No source change or
+workflow runbook statement authorizes tag creation, npm publication, deployment, or preview.

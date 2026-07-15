@@ -1,0 +1,38 @@
+# Security policy
+
+## Supported versions
+
+Security fixes are provided for the latest release of `borgmcp-server`. Upgrade
+to the newest published version before reporting a problem that may already be
+resolved.
+
+## Reporting a vulnerability
+
+Use GitHub's private vulnerability reporting for this repository:
+
+https://github.com/Byte-Ventures/borg-mcp-server/security/advisories/new
+
+Do not open a public issue for a suspected vulnerability. Include the affected
+version, impact, prerequisites, and minimal reproduction steps. Remove all real
+credentials, invitation tokens, private keys, database contents, and private
+deployment details from the report.
+
+We will acknowledge the report through the private advisory and coordinate
+validation, remediation, and disclosure there. Please do not disclose the
+issue publicly until a release or other mitigation is available and disclosure
+has been coordinated.
+
+## Deployment guidance
+
+- Keep the default loopback binding unless private-LAN access is necessary.
+- Treat `--lan` as explicit consent to network exposure, not as a firewall or
+  access-control substitute.
+- Keep the local CA private key offline whenever the server is running on a
+  private LAN.
+- Restrict the data directory and all generated credentials to the service
+  account.
+- Capture one-time setup and rotation credentials only in a private terminal.
+- Stop the server before offline credential rotation or revocation.
+- Back up sensitive state using encrypted storage and test restoration in a
+  separate environment.
+- Review dependency and release provenance before upgrading.

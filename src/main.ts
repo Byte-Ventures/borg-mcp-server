@@ -3,7 +3,8 @@
 import { runCli } from "./cli.js";
 import { isFatalTeardownError, nodeServerService } from "./service.js";
 import { operatorPublicMessage } from "./operator-error.js";
-import { pathToFileURL } from "node:url";
+import { realpathSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
 const io = {
   stdout: (message: string): void => console.log(message),
@@ -31,6 +32,6 @@ export async function runMain(
   }
 }
 
-if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (process.argv[1] !== undefined && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
   await runMain();
 }

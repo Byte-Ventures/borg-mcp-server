@@ -12,8 +12,36 @@ const MAX_PACKED_BYTES = 2 * 1024 * 1024;
 const MAX_UNPACKED_BYTES = 8 * 1024 * 1024;
 const MAX_FILES = 512;
 const MAX_FILE_BYTES = 1024 * 1024;
-const REQUIRED_FILES = ['LICENSE', 'README.md', 'npm-shrinkwrap.json', 'package.json'];
-const ALLOWED_ROOTS = new Set(['LICENSE', 'README.md', 'dist', 'npm-shrinkwrap.json', 'package.json']);
+const REQUIRED_FILES = [
+  'LICENSE',
+  'NOTICE',
+  'README.md',
+  'SECURITY.md',
+  'THIRD_PARTY_NOTICES.md',
+  'npm-shrinkwrap.json',
+  'package.json',
+];
+const ALLOWED_ROOTS = new Set([
+  'LICENSE',
+  'NOTICE',
+  'README.md',
+  'SECURITY.md',
+  'THIRD_PARTY_NOTICES.md',
+  'dist',
+  'npm-shrinkwrap.json',
+  'package.json',
+  'src',
+]);
+const EXPECTED_MANIFEST_FILES = [
+  'dist',
+  'src',
+  'LICENSE',
+  'NOTICE',
+  'README.md',
+  'SECURITY.md',
+  'THIRD_PARTY_NOTICES.md',
+  'npm-shrinkwrap.json',
+];
 const FORBIDDEN_HOOKS = [
   'preinstall', 'install', 'postinstall', 'prepublish', 'preprepare', 'prepare',
   'postprepare', 'prepack', 'postpack', 'prepublishOnly', 'publish', 'postpublish',
@@ -44,6 +72,40 @@ async function walk(root, directory = root) {
 function isInside(root, candidate) {
   const path = relative(root, candidate);
   return path !== '..' && !path.startsWith(`..${sep}`) && !isAbsolute(path);
+}
+
+function lockedPackageName(path) {
+  const match = /(?:^|\/)node_modules\/(@[^/]+\/[^/]+|[^/]+)$/u.exec(path);
+  if (!match) throw new Error(`Cannot identify disclosed dependency: ${path}`);
+  return match[1];
+}
+
+function verifyThirdPartyNotices(content, shrinkwrap) {
+  const expected = new Map();
+  for (const [path, dependency] of Object.entries(shrinkwrap.packages)) {
+    if (path === '' || dependency.dev === true) continue;
+    if (typeof dependency.license !== 'string' || dependency.license.length === 0) {
+      throw new Error(`Locked production dependency has no license identifier: ${path}`);
+    }
+    const name = lockedPackageName(path);
+    const entry = expected.get(name) ?? { licenses: new Set(), versions: new Set() };
+    entry.licenses.add(dependency.license);
+    entry.versions.add(dependency.version);
+    expected.set(name, entry);
+  }
+  const expectedRows = [...expected.entries()].map(([name, entry]) => ({
+    name,
+    versions: [...entry.versions].sort(),
+    licenses: [...entry.licenses].sort(),
+  })).sort((left, right) => left.name.localeCompare(right.name));
+  const actualRows = [...content.matchAll(/^\| `([^`]+)` \| ([^|]+?) \| ([^|]+?) \|$/gmu)].map((match) => ({
+    name: match[1],
+    versions: match[2].split(', '),
+    licenses: match[3].split(', '),
+  })).sort((left, right) => left.name.localeCompare(right.name));
+  if (!isDeepStrictEqual(actualRows, expectedRows)) {
+    throw new Error('THIRD_PARTY_NOTICES.md does not match the locked production dependency tree.');
+  }
 }
 
 export async function verifyPackedArtifact(tarballPath) {
@@ -93,6 +155,9 @@ export async function verifyPackedArtifact(tarballPath) {
       if (rootEntry === 'dist' && !/\.(?:js|d\.ts)(?:\.map)?$/u.test(path)) {
         throw new Error(`Unexpected dist artifact: ${path}`);
       }
+      if (rootEntry === 'src' && !/\.ts$/u.test(path)) {
+        throw new Error(`Unexpected source artifact: ${path}`);
+      }
       if (/(^|\/)(\.env(?:\.|$)|\.npmrc$|node_modules|[^/]+\.(?:pem|key|p12|pfx))/.test(path)) {
         throw new Error(`Forbidden packed path: ${path}`);
       }
@@ -125,6 +190,9 @@ export async function verifyPackedArtifact(tarballPath) {
     if (JSON.stringify(manifest.publishConfig) !== JSON.stringify({ access: 'public' })) {
       throw new Error('publishConfig must contain only access=public; registry redirects are forbidden.');
     }
+    if (!isDeepStrictEqual(manifest.files, EXPECTED_MANIFEST_FILES)) {
+      throw new Error('Package files must match the reviewed public artifact boundary.');
+    }
     if (!isDeepStrictEqual(manifest.bin, { 'borg-mcp-server': './dist/main.js' }) ||
         !isDeepStrictEqual(manifest.exports, {
           '.': { types: './dist/index.d.ts', import: './dist/index.js' },
@@ -145,8 +213,12 @@ export async function verifyPackedArtifact(tarballPath) {
     await verifyLockfile(manifest, shrinkwrap, {
       lockName: 'npm-shrinkwrap.json',
       dependencyFields: ['dependencies', 'optionalDependencies', 'peerDependencies', 'devDependencies'],
-      rejectInstallScripts: true,
+      rejectInstallScripts: 'production',
     });
+    verifyThirdPartyNotices(
+      await readFile(join(root, 'THIRD_PARTY_NOTICES.md'), 'utf8'),
+      shrinkwrap,
+    );
 
     for (const path of relativeFiles) {
       if (!path.endsWith('.map')) continue;

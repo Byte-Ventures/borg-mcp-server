@@ -1,6 +1,8 @@
-import { mkdtemp, realpath, rm } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { mkdtemp, realpath, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { promisify } from "node:util";
 import { describe, expect, it, vi } from "vitest";
 
 import { bootstrapServer } from "../src/bootstrap.js";
@@ -17,7 +19,21 @@ import {
 import { isFatalTeardownError } from "../src/service.js";
 import * as serviceModule from "../src/service.js";
 
+const execute = promisify(execFile);
+
 describe("main operator errors", () => {
+  it("runs when npm invokes the executable through a bin symlink", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "borg-main-bin-"));
+    const bin = join(directory, "borg-mcp-server");
+    try {
+      await symlink(join(process.cwd(), "dist", "main.js"), bin);
+      const result = await execute(process.execPath, [bin, "--help"]);
+      expect(result.stdout).toContain("Usage: borg-mcp-server");
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it.each([
     ["START_PORT_INVALID", "Provide --port as an integer from 0 to 65535."],
     ["BIND_LAN_CONSENT", "Add --lan to consent to this private-LAN start."],

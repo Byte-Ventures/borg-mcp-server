@@ -44,6 +44,53 @@ describe("runCli", () => {
     expect(service.start).toHaveBeenCalledWith(["--lan"]);
   });
 
+  it("rotates and revokes clients only through explicit offline commands", async () => {
+    const listen = vi.spyOn(Server.prototype, "listen");
+    const rotateClient = vi.fn().mockResolvedValue("r".repeat(43));
+    const revokeClient = vi.fn().mockResolvedValue(undefined);
+    const service: ServerService = { start: vi.fn(), rotateClient, revokeClient };
+    const rotateIo = createIo();
+    const revokeIo = createIo();
+    const clientId = "00000000-0000-4000-8000-000000000001";
+
+    expect(await runCli(["client-rotate", clientId], service, rotateIo)).toBe(0);
+    expect(await runCli(["client-revoke", clientId], service, revokeIo)).toBe(0);
+
+    expect(rotateClient).toHaveBeenCalledWith(clientId);
+    expect(revokeClient).toHaveBeenCalledWith(clientId);
+    expect(rotateIo.stdout).toHaveBeenCalledWith(expect.stringContaining("shown once"));
+    expect(revokeIo.stdout).toHaveBeenCalledWith("Client revoked.");
+    expect(service.start).not.toHaveBeenCalled();
+    expect(listen).not.toHaveBeenCalled();
+  });
+
+  it("rejects malformed offline credential commands without exposing a service", async () => {
+    const service: ServerService = {
+      start: vi.fn(),
+      rotateClient: vi.fn(),
+      revokeClient: vi.fn(),
+    };
+
+    expect(await runCli(["client-rotate"], service, createIo())).toBe(1);
+    expect(await runCli(["client-revoke", "one", "two"], service, createIo())).toBe(1);
+    expect(service.rotateClient).not.toHaveBeenCalled();
+    expect(service.revokeClient).not.toHaveBeenCalled();
+  });
+
+  it("does not print a credential when offline rotation fails", async () => {
+    const io = createIo();
+    const service: ServerService = {
+      start: vi.fn(),
+      rotateClient: vi.fn().mockRejectedValue(new Error("Client does not exist.")),
+    };
+
+    await expect(runCli([
+      "client-rotate",
+      "00000000-0000-4000-8000-000000000001",
+    ], service, io)).rejects.toThrow("Client does not exist.");
+    expect(io.stdout).not.toHaveBeenCalled();
+  });
+
   it("prints help without starting the service", async () => {
     const service: ServerService = { start: vi.fn() };
     const io = createIo();

@@ -1,4 +1,5 @@
 import type { BindOptionsInput } from "./network-policy.js";
+import { operatorErrors, type OperatorErrorCode } from "./operator-error.js";
 
 export function parseStartOptions(args: readonly string[]): BindOptionsInput {
   let host: string | undefined;
@@ -8,25 +9,25 @@ export function parseStartOptions(args: readonly string[]): BindOptionsInput {
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index];
     if (argument === "--lan") {
-      if (lanConsent) throw new Error("--lan may be provided only once.");
+      if (lanConsent) throw operatorErrors.START_LAN_DUPLICATE;
       lanConsent = true;
       continue;
     }
     if (argument === "--host") {
-      if (host !== undefined) throw new Error("--host may be provided only once.");
-      host = requiredValue(args, index, "--host");
+      if (host !== undefined) throw operatorErrors.START_HOST_DUPLICATE;
+      host = requiredValue(args, index, "START_HOST_MISSING");
       index += 1;
       continue;
     }
     if (argument === "--port") {
-      if (port !== undefined) throw new Error("--port may be provided only once.");
-      const value = requiredValue(args, index, "--port");
-      if (!/^\d+$/u.test(value)) throw new Error("--port must be an integer.");
+      if (port !== undefined) throw operatorErrors.START_PORT_DUPLICATE;
+      const value = requiredValue(args, index, "START_PORT_MISSING");
+      if (!/^\d+$/u.test(value)) throw operatorErrors.START_PORT_INVALID;
       port = Number(value);
       index += 1;
       continue;
     }
-    throw new Error("Unknown start option.");
+    throw operatorErrors.START_OPTION_UNKNOWN;
   }
 
   return {
@@ -36,10 +37,10 @@ export function parseStartOptions(args: readonly string[]): BindOptionsInput {
   };
 }
 
-function requiredValue(args: readonly string[], index: number, option: string): string {
+function requiredValue(args: readonly string[], index: number, code: OperatorErrorCode): string {
   const value = args[index + 1];
   if (value === undefined || value.startsWith("--")) {
-    throw new Error(`${option} requires a value.`);
+    throw operatorErrors[code];
   }
   return value;
 }

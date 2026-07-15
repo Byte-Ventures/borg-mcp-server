@@ -1,4 +1,5 @@
 import type { CredentialAuthority } from "./credentials.js";
+import { StorageCapacityError } from "./store.js";
 
 interface EnrollmentEnvelope {
   readonly protocol_version: "1";
@@ -11,7 +12,7 @@ interface EnrollmentEnvelope {
 
 export function createEnrollmentExchange(authority: CredentialAuthority) {
   return async (body: unknown): Promise<{
-    readonly status: 201 | 400 | 401;
+    readonly status: 201 | 400 | 401 | 507;
     readonly body?: unknown;
   }> => {
     let envelope: EnrollmentEnvelope;
@@ -27,12 +28,21 @@ export function createEnrollmentExchange(authority: CredentialAuthority) {
         ),
       };
     }
-    const response = authority.exchangeInvitation({
-      invitation: envelope.payload.invitation,
-      ...(envelope.payload.client_name === undefined
-        ? {}
-        : { clientName: envelope.payload.client_name }),
-    });
+    let response;
+    try {
+      response = authority.exchangeInvitation({
+        invitation: envelope.payload.invitation,
+        ...(envelope.payload.client_name === undefined
+          ? {}
+          : { clientName: envelope.payload.client_name }),
+      });
+    } catch (error) {
+      if (!(error instanceof StorageCapacityError)) throw error;
+      return {
+        status: 507,
+        body: errorEnvelope("CAPACITY_EXCEEDED", error.message, envelope.request_id),
+      };
+    }
     if (response === null) {
       return {
         status: 401,
@@ -58,7 +68,11 @@ export function createEnrollmentExchange(authority: CredentialAuthority) {
   };
 }
 
-function errorEnvelope(code: "INVALID_INPUT" | "AUTH_INVALID", message: string, requestId?: string) {
+function errorEnvelope(
+  code: "INVALID_INPUT" | "AUTH_INVALID" | "CAPACITY_EXCEEDED",
+  message: string,
+  requestId?: string,
+) {
   return {
     protocol_version: "1" as const,
     ...(requestId === undefined ? {} : { request_id: requestId }),

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { statfsSync, statSync } from "node:fs";
 import { chmod, lstat, mkdir, open } from "node:fs/promises";
 import { dirname, join, parse, relative, resolve, sep } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -107,7 +108,26 @@ export interface StoreDiagnostics {
 export interface OpenStoreOptions {
   readonly path: string;
   readonly clock?: () => Date;
+  readonly storageLimits?: StorageLimits;
+  readonly capacityProbe?: () => StorageCapacity;
 }
+
+export interface StorageLimits {
+  readonly maxActivityEntriesPerCube: number;
+  readonly maxDatabaseBytes: number;
+  readonly minFreeDiskBytes: number;
+}
+
+export interface StorageCapacity {
+  readonly databaseBytes: number;
+  readonly freeDiskBytes: number;
+}
+
+export const DEFAULT_STORAGE_LIMITS: StorageLimits = Object.freeze({
+  maxActivityEntriesPerCube: 10_000,
+  maxDatabaseBytes: 1_073_741_824,
+  minFreeDiskBytes: 67_108_864,
+});
 
 export interface StoreRuntime {
   readonly forPrincipal: (principal: Principal) => ScopedStore;
@@ -151,12 +171,14 @@ export interface CredentialStore {
     readonly credentialDigest: DigestPair;
   }) => boolean;
   readonly findClientCredential: (lookup: Buffer) => StoredSecretDigest | null;
+  readonly clientExists: (clientId: string) => boolean;
+  readonly clientIsActive: (clientId: string) => boolean;
   readonly findDroneSessionCredential: (lookup: Buffer) => StoredDroneSessionDigest | null;
   readonly rotateClientCredential: (input: {
     readonly clientId: string;
     readonly credentialId: string;
     readonly credentialDigest: DigestPair;
-  }) => void;
+  }) => boolean;
   readonly revokeClientCredentials: (clientId: string) => void;
 }
 
@@ -288,6 +310,15 @@ export class AttachConflictError extends Error {
   }
 }
 
+export class StorageCapacityError extends Error {
+  readonly code = "CAPACITY_EXCEEDED";
+
+  constructor() {
+    super("Storage capacity is unavailable.");
+    this.name = "StorageCapacityError";
+  }
+}
+
 interface CubeRow {
   readonly id: string;
   readonly owner_id: string;
@@ -312,8 +343,48 @@ interface ScopePredicate {
   readonly parameters: readonly (string | number)[];
 }
 
+class StorageCapacityGuard {
+  readonly #limits: StorageLimits;
+  readonly #probe: () => StorageCapacity;
+  readonly #pageSize: number;
+
+  constructor(limits: StorageLimits, probe: () => StorageCapacity, pageSize: number) {
+    this.#limits = limits;
+    this.#probe = probe;
+    this.#pageSize = pageSize;
+  }
+
+  assertCanGrow(payloadBytes: number): void {
+    try {
+      if (!Number.isSafeInteger(payloadBytes) || payloadBytes < 0) throw new StorageCapacityError();
+      const capacity = this.#probe();
+      if (capacity === null || typeof capacity !== "object" ||
+          !Number.isSafeInteger(capacity.databaseBytes) || capacity.databaseBytes < 0 ||
+          !Number.isSafeInteger(capacity.freeDiskBytes) || capacity.freeDiskBytes < 0) {
+        throw new StorageCapacityError();
+      }
+      const page = BigInt(this.#pageSize);
+      const content = BigInt(payloadBytes) + (page * 64n);
+      const contentPages = (content + page - 1n) / page;
+      const newContentBytes = contentPages * page;
+      // A transaction may dirty every existing page and write each new page to both DB and WAL.
+      const worstCaseGrowth = BigInt(capacity.databaseBytes) + (newContentBytes * 2n);
+      const projectedFootprint = BigInt(capacity.databaseBytes) + worstCaseGrowth;
+      if (projectedFootprint > BigInt(this.#limits.maxDatabaseBytes) ||
+          BigInt(capacity.freeDiskBytes) - worstCaseGrowth < BigInt(this.#limits.minFreeDiskBytes)) {
+        throw new StorageCapacityError();
+      }
+    } catch {
+      throw new StorageCapacityError();
+    }
+  }
+}
+
 export async function openStore(options: OpenStoreOptions): Promise<StoreRuntime> {
   const databasePath = await prepareDatabasePath(options.path);
+  const storageLimits = options.storageLimits ?? DEFAULT_STORAGE_LIMITS;
+  validateStorageLimits(storageLimits);
+  const capacityProbe = options.capacityProbe ?? (() => storageCapacity(databasePath));
   const database = new DatabaseSync(databasePath, {
     enableForeignKeyConstraints: true,
     enableDoubleQuotedStringLiterals: false,
@@ -327,13 +398,30 @@ export async function openStore(options: OpenStoreOptions): Promise<StoreRuntime
     throw error;
   }
 
+  const pageRow = database.prepare("PRAGMA page_size").get();
+  if (pageRow === undefined) {
+    database.close();
+    throw new Error("SQLite page size is unavailable.");
+  }
+  const capacityGuard = new StorageCapacityGuard(
+    storageLimits,
+    capacityProbe,
+    requiredInteger(pageRow, "page_size"),
+  );
   const maintenance = new SqliteMaintenanceStore(database, clock);
-  const credentials = new SqliteCredentialStore(database, clock);
+  const credentials = new SqliteCredentialStore(database, clock, capacityGuard);
   const activityHub = new ActivityHub();
   return Object.freeze({
     forPrincipal: (principal: Principal) => {
       assertServerDerivedPrincipal(principal);
-      return new SqliteScopedStore(database, principal, clock, activityHub);
+      return new SqliteScopedStore(
+        database,
+        principal,
+        clock,
+        activityHub,
+        storageLimits,
+        capacityGuard,
+      );
     },
     maintenance,
     credentials,
@@ -347,17 +435,23 @@ class SqliteScopedStore implements ScopedStore {
   readonly #principal: Principal;
   readonly #clock: () => Date;
   readonly #activityHub: ActivityHub;
+  readonly #storageLimits: StorageLimits;
+  readonly #capacityGuard: StorageCapacityGuard;
 
   constructor(
     database: DatabaseSync,
     principal: Principal,
     clock: () => Date,
     activityHub: ActivityHub,
+    storageLimits: StorageLimits,
+    capacityGuard: StorageCapacityGuard,
   ) {
     this.#database = database;
     this.#principal = principal;
     this.#clock = clock;
     this.#activityHub = activityHub;
+    this.#storageLimits = storageLimits;
+    this.#capacityGuard = capacityGuard;
   }
 
   listCubes(): CubeRecord[] {
@@ -386,6 +480,8 @@ class SqliteScopedStore implements ScopedStore {
     assertCanonicalUuid(cubeId, "Cube id");
     validateDirective(directive);
     const scope = this.#scope("manage");
+    this.#requireCube(cubeId, "manage");
+    this.#capacityGuard.assertCanGrow(Buffer.byteLength(directive));
     const result = this.#database.prepare(`
       UPDATE cubes AS c
       SET directive = ?, updated_at = ?
@@ -472,6 +568,8 @@ class SqliteScopedStore implements ScopedStore {
     }
 
     const scope = this.#scope("write");
+    this.#requireCube(cubeId, "write");
+    this.#capacityGuard.assertCanGrow(Buffer.byteLength(input.message) + (recipients.length * 128));
     const id = randomUUID();
     const createdAt = this.#nextActivityTimestamp(cubeId);
     const droneId = this.#principal.kind === "drone-session" ? this.#principal.droneId : null;
@@ -502,6 +600,7 @@ class SqliteScopedStore implements ScopedStore {
         );
         for (const recipient of recipients) addRecipient.run(id, recipient);
       }
+      this.#pruneActivity(cubeId);
       this.#database.exec("COMMIT");
     } catch (error) {
       try { this.#database.exec("ROLLBACK"); } catch { /* Preserve the original failure. */ }
@@ -554,6 +653,7 @@ class SqliteScopedStore implements ScopedStore {
       "SELECT 1 AS present FROM activity_log WHERE id = ? AND cube_id = ?",
     ).get(entryId, cubeId);
     if (exists === undefined) throw new ScopedStoreError();
+    this.#capacityGuard.assertCanGrow(512);
     const claimant = this.#principal.kind === "drone-session"
       ? this.#principal.droneId
       : this.#principal.id;
@@ -573,6 +673,10 @@ class SqliteScopedStore implements ScopedStore {
     validateBoundedText(input.topic, "Decision topic", 120);
     validateBoundedText(input.decision, "Decision", 100_000);
     if (input.rationale !== undefined) validateBoundedText(input.rationale, "Decision rationale", 100_000);
+    this.#capacityGuard.assertCanGrow(
+      Buffer.byteLength(input.topic) + Buffer.byteLength(input.decision) +
+      (input.rationale === undefined ? 0 : Buffer.byteLength(input.rationale)),
+    );
     const id = randomUUID();
     const now = this.#now();
     this.#database.exec("BEGIN IMMEDIATE");
@@ -621,6 +725,12 @@ class SqliteScopedStore implements ScopedStore {
     validateDigest(input.credentialDigest);
     validateTimestamp(input.expiresAt);
     const scope = this.#scope("read");
+    const authorizedRole = this.#database.prepare(`
+      SELECT 1 FROM cubes AS c JOIN roles AS role ON role.cube_id = c.id
+      WHERE c.id = ? AND role.id = ? AND ${scope.sql}
+    `).get(input.cubeId, input.roleId, ...scope.parameters);
+    if (authorizedRole === undefined) throw new ScopedStoreError();
+    this.#capacityGuard.assertCanGrow(4_096);
     const now = this.#now();
     this.#database.exec("BEGIN IMMEDIATE");
     try {
@@ -765,6 +875,34 @@ class SqliteScopedStore implements ScopedStore {
     `).get(cubeId);
     if (latest === undefined) return new Date(now).toISOString();
     return new Date(Math.max(now, Date.parse(requiredText(latest, "created_at")) + 1)).toISOString();
+  }
+
+  #pruneActivity(cubeId: string): void {
+    const excess = this.#database.prepare(`
+      SELECT id, created_at FROM activity_log WHERE cube_id = ?
+      ORDER BY created_at, id
+      LIMIT MAX(0, (SELECT COUNT(*) FROM activity_log WHERE cube_id = ?) - ?)
+    `).all(cubeId, cubeId, this.#storageLimits.maxActivityEntriesPerCube);
+    const expire = this.#database.prepare(`
+      INSERT OR IGNORE INTO expired_activity_cursors (cube_id, entry_id, created_at)
+      VALUES (?, ?, ?)
+    `);
+    const remove = this.#database.prepare("DELETE FROM activity_log WHERE cube_id = ? AND id = ?");
+    for (const row of excess) {
+      const entryId = requiredText(row, "id");
+      expire.run(cubeId, entryId, requiredText(row, "created_at"));
+      remove.run(cubeId, entryId);
+    }
+    const staleCursors = this.#database.prepare(`
+      SELECT entry_id, created_at FROM expired_activity_cursors WHERE cube_id = ?
+      ORDER BY created_at DESC, entry_id DESC LIMIT -1 OFFSET ?
+    `).all(cubeId, this.#storageLimits.maxActivityEntriesPerCube);
+    const removeCursor = this.#database.prepare(`
+      DELETE FROM expired_activity_cursors WHERE cube_id = ? AND entry_id = ? AND created_at = ?
+    `);
+    for (const row of staleCursors) {
+      removeCursor.run(cubeId, requiredText(row, "entry_id"), requiredText(row, "created_at"));
+    }
   }
 
   #validateCursor(cubeId: string, cursor: LogCursor | null): void {
@@ -1097,10 +1235,12 @@ class ActivityHub {
 class SqliteCredentialStore implements CredentialStore {
   readonly #database: DatabaseSync;
   readonly #clock: () => Date;
+  readonly #capacityGuard: StorageCapacityGuard;
 
-  constructor(database: DatabaseSync, clock: () => Date) {
+  constructor(database: DatabaseSync, clock: () => Date, capacityGuard: StorageCapacityGuard) {
     this.#database = database;
     this.#clock = clock;
+    this.#capacityGuard = capacityGuard;
   }
 
   createRecoveryCredential(id: string, digest: DigestPair): void {
@@ -1156,6 +1296,7 @@ class SqliteCredentialStore implements CredentialStore {
     assertCanonicalUuid(input.credentialId, "Credential id");
     validateName(input.clientName);
     validateDigest(input.credentialDigest);
+    this.#capacityGuard.assertCanGrow(Buffer.byteLength(input.clientName) + 4_096);
     this.#database.exec("BEGIN IMMEDIATE");
     try {
       const now = this.#now();
@@ -1207,6 +1348,18 @@ class SqliteCredentialStore implements CredentialStore {
     return row === undefined ? null : storedDigest(row);
   }
 
+  clientExists(clientId: string): boolean {
+    assertCanonicalUuid(clientId, "Client id");
+    return this.#database.prepare("SELECT 1 FROM clients WHERE id = ?").get(clientId) !== undefined;
+  }
+
+  clientIsActive(clientId: string): boolean {
+    assertCanonicalUuid(clientId, "Client id");
+    return this.#database.prepare(
+      "SELECT 1 FROM clients WHERE id = ? AND revoked_at IS NULL",
+    ).get(clientId) !== undefined;
+  }
+
   findDroneSessionCredential(lookup: Buffer): StoredDroneSessionDigest | null {
     validateLookup(lookup);
     const row = this.#database.prepare(`
@@ -1231,12 +1384,19 @@ class SqliteCredentialStore implements CredentialStore {
     readonly clientId: string;
     readonly credentialId: string;
     readonly credentialDigest: DigestPair;
-  }): void {
+  }): boolean {
     assertCanonicalUuid(input.clientId, "Client id");
     assertCanonicalUuid(input.credentialId, "Credential id");
     validateDigest(input.credentialDigest);
     this.#database.exec("BEGIN IMMEDIATE");
     try {
+      const active = this.#database.prepare(
+        "SELECT 1 FROM clients WHERE id = ? AND revoked_at IS NULL",
+      ).get(input.clientId);
+      if (active === undefined) {
+        this.#database.exec("ROLLBACK");
+        return false;
+      }
       const now = this.#now();
       this.#database.prepare(`
         UPDATE client_credentials SET revoked_at = ?
@@ -1254,6 +1414,7 @@ class SqliteCredentialStore implements CredentialStore {
         now,
       );
       this.#database.exec("COMMIT");
+      return true;
     } catch (error) {
       try {
         this.#database.exec("ROLLBACK");
@@ -1628,6 +1789,35 @@ function validateTimestamp(value: string): void {
       new Date(value).toISOString() !== value) {
     throw new Error("Timestamp must be canonical UTC with millisecond precision.");
   }
+}
+
+function validateStorageLimits(limits: StorageLimits): void {
+  for (const [name, value] of Object.entries(limits)) {
+    if (!Number.isSafeInteger(value) || value <= 0) {
+      throw new Error(`${name} must be a positive safe integer.`);
+    }
+  }
+}
+
+function storageCapacity(databasePath: string): StorageCapacity {
+  const databaseBytes = [databasePath, `${databasePath}-wal`, `${databasePath}-shm`]
+    .reduce((total, path) => total + fileSize(path), 0);
+  const filesystem = statfsSync(dirname(databasePath), { bigint: true });
+  const freeDiskBytes = toSafeInteger(filesystem.bavail * filesystem.bsize);
+  return { databaseBytes, freeDiskBytes };
+}
+
+function fileSize(path: string): number {
+  try {
+    return toSafeInteger(statSync(path, { bigint: true }).size);
+  } catch (error) {
+    if (isMissing(error)) return 0;
+    throw error;
+  }
+}
+
+function toSafeInteger(value: bigint): number {
+  return Number(value > BigInt(Number.MAX_SAFE_INTEGER) ? BigInt(Number.MAX_SAFE_INTEGER) : value);
 }
 
 function isAlreadyExists(error: unknown): boolean {

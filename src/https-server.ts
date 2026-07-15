@@ -1,10 +1,11 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { createServer, type Server as HttpsServer } from "node:https";
-import type { AddressInfo } from "node:net";
-import { X509Certificate } from "node:crypto";
+import type { AddressInfo, Socket } from "node:net";
+import { createHash, X509Certificate } from "node:crypto";
 
 import { resolveBindOptions, type BindOptionsInput } from "./network-policy.js";
 import type { CoordinationRequest, CoordinationResponse } from "./coordination-api.js";
+import type { Principal } from "./principal.js";
 
 export interface ProtocolInfoDocument {
   readonly protocol_version: string;
@@ -23,10 +24,18 @@ export interface ProtocolInfoDocument {
 
 export interface ServiceLimits {
   readonly maxConnections: number;
+  readonly maxConnectionsPerAddress: number;
+  readonly maxRequestsPerWindow: number;
+  readonly maxRequestsPerAddressWindow: number;
+  readonly maxRequestsGlobalWindow: number;
+  readonly rateLimitWindowMs: number;
+  readonly maxRateLimitEntries: number;
+  readonly maxStreamsPerCredential: number;
   readonly maxHeaderBytes: number;
   readonly maxRequestBodyBytes: number;
   readonly maxRequestsPerSocket: number;
   readonly requestTimeoutMs: number;
+  readonly tlsHandshakeTimeoutMs: number;
   readonly headersTimeoutMs: number;
   readonly keepAliveTimeoutMs: number;
   readonly handlerTimeoutMs: number;
@@ -34,10 +43,18 @@ export interface ServiceLimits {
 
 export const DEFAULT_SERVICE_LIMITS: ServiceLimits = {
   maxConnections: 100,
+  maxConnectionsPerAddress: 25,
+  maxRequestsPerWindow: 120,
+  maxRequestsPerAddressWindow: 600,
+  maxRequestsGlobalWindow: 5_000,
+  rateLimitWindowMs: 60_000,
+  maxRateLimitEntries: 1_024,
+  maxStreamsPerCredential: 8,
   maxHeaderBytes: 16_384,
   maxRequestBodyBytes: 65_536,
   maxRequestsPerSocket: 100,
   requestTimeoutMs: 15_000,
+  tlsHandshakeTimeoutMs: 10_000,
   headersTimeoutMs: 10_000,
   keepAliveTimeoutMs: 5_000,
   handlerTimeoutMs: 5_000,
@@ -51,7 +68,11 @@ export interface RequestHandlerContext {
   ) => Promise<boolean | "missing" | "invalid" | "revoked">;
   readonly exchangeEnrollment?: (
     body: unknown,
-  ) => Promise<{ readonly status: 201 | 400 | 401; readonly body?: unknown }>;
+  ) => Promise<{ readonly status: 201 | 400 | 401 | 507; readonly body?: unknown }>;
+  readonly authorizeCoordination?: (
+    authorization: string | undefined,
+    signal: AbortSignal,
+  ) => Promise<Principal | "missing" | "invalid" | "revoked">;
   readonly handleCoordination?: (request: CoordinationRequest) => Promise<CoordinationResponse>;
 }
 
@@ -60,12 +81,17 @@ export interface HttpsServerOptions {
   readonly tls: {
     readonly key: string | Buffer;
     readonly cert: string | Buffer;
+    readonly ca?: string | Buffer;
   };
   readonly protocolInfo: ProtocolInfoDocument;
   readonly authorizeProtocol: RequestHandlerContext["authorizeProtocol"];
   readonly exchangeEnrollment?: RequestHandlerContext["exchangeEnrollment"];
+  readonly authorizeCoordination?: RequestHandlerContext["authorizeCoordination"];
   readonly handleCoordination?: RequestHandlerContext["handleCoordination"];
   readonly limits?: ServiceLimits;
+  readonly testHooks?: {
+    readonly identifyRemoteAddress?: (socket: Socket) => string;
+  };
 }
 
 export interface RunningServer {
@@ -75,10 +101,13 @@ export interface RunningServer {
 }
 
 export async function startHttpsServer(options: HttpsServerOptions): Promise<RunningServer> {
+  if (options.handleCoordination !== undefined && options.authorizeCoordination === undefined) {
+    throw new Error("Coordination routes require server-derived principal authentication.");
+  }
   const bind = resolveBindOptions(options.bind ?? {});
   const limits = options.limits ?? DEFAULT_SERVICE_LIMITS;
   validateLimits(limits);
-  validateTlsCertificate(options.tls.cert, bind.host);
+  validateTlsCertificate(options.tls.cert, bind.host, bind.mode, options.tls.ca);
   const handlerContext = createRequestHandlerContext(options);
 
   const server = createServer(
@@ -88,26 +117,41 @@ export async function startHttpsServer(options: HttpsServerOptions): Promise<Run
       minVersion: "TLSv1.3",
       maxHeaderSize: limits.maxHeaderBytes,
       requestTimeout: limits.requestTimeoutMs,
+      handshakeTimeout: limits.tlsHandshakeTimeoutMs,
       headersTimeout: limits.headersTimeoutMs,
       keepAliveTimeout: limits.keepAliveTimeoutMs,
     },
-    createRequestListener(handlerContext, limits),
+    createRequestListener(handlerContext, limits, options.testHooks?.identifyRemoteAddress),
   );
 
-  applyServerLimits(server, limits);
+  const acceptedSockets = applyServerLimits(server, limits);
   server.on("secureConnection", (socket) => socket.disableRenegotiation());
   server.on("tlsClientError", (_error, socket) => socket.destroy());
   server.on("clientError", (_error, socket) => socket.end("HTTP/1.1 400 Bad Request\r\n\r\n"));
   server.on("checkContinue", (_request, response) => sendEmpty(response, 417, true));
 
-  await listen(server, bind.port, bind.host);
+  try {
+    await listen(server, bind.port, bind.host);
+  } catch (error) {
+    server.closeAllConnections();
+    try {
+      server.close();
+    } catch {
+      // Preserve the originating listen failure.
+    }
+    throw error;
+  }
   const address = server.address() as AddressInfo;
   const displayHost = address.family === "IPv6" ? `[${address.address}]` : address.address;
+  let closePromise: Promise<void> | undefined;
 
   return {
     origin: `https://${displayHost}:${address.port}`,
     limits,
-    close: () => close(server),
+    close: () => {
+      closePromise ??= close(server, acceptedSockets);
+      return closePromise;
+    },
   };
 }
 
@@ -120,6 +164,9 @@ export function createRequestHandlerContext(
     ...(options.exchangeEnrollment === undefined
       ? {}
       : { exchangeEnrollment: options.exchangeEnrollment }),
+    ...(options.authorizeCoordination === undefined
+      ? {}
+      : { authorizeCoordination: options.authorizeCoordination }),
     ...(options.handleCoordination === undefined
       ? {}
       : { handleCoordination: options.handleCoordination }),
@@ -129,7 +176,11 @@ export function createRequestHandlerContext(
 function createRequestListener(
   context: RequestHandlerContext,
   limits: ServiceLimits,
+  identifyRemoteAddress: (socket: Socket) => string = (socket) => socket.remoteAddress ?? "unknown",
 ): (request: IncomingMessage, response: ServerResponse) => void {
+  const admissionLimiter = new PreAuthAdmissionLimiter(limits);
+  const credentialRateLimiter = new RequestRateLimiter(limits, limits.maxRequestsPerWindow);
+  const streamQuota = new ConcurrentQuota(limits.maxStreamsPerCredential);
   return (request, response) => {
     const controller = new AbortController();
     response.once("close", () => controller.abort());
@@ -141,7 +192,17 @@ function createRequestListener(
       }, limits.handlerTimeoutMs);
       timer.unref();
     });
-    const handled = handleRequest(request, response, context, limits, controller.signal)
+    const handled = handleRequest(
+      request,
+      response,
+      context,
+      limits,
+      admissionLimiter,
+      credentialRateLimiter,
+      streamQuota,
+      identifyRemoteAddress,
+      controller.signal,
+    )
       .then(() => "handled" as const);
 
     void Promise.race([handled, deadline])
@@ -160,8 +221,19 @@ async function handleRequest(
   response: ServerResponse,
   context: RequestHandlerContext,
   limits: ServiceLimits,
+  admissionLimiter: PreAuthAdmissionLimiter,
+  credentialRateLimiter: RequestRateLimiter,
+  streamQuota: ConcurrentQuota,
+  identifyRemoteAddress: (socket: Socket) => string,
   signal: AbortSignal,
 ): Promise<void> {
+  const addressIdentity = `address:${identifyRemoteAddress(request.socket)}`;
+  const preAuthRetry = admissionLimiter.consume(addressIdentity);
+  if (preAuthRetry !== null) {
+    request.resume();
+    sendRateLimited(response, preAuthRetry);
+    return;
+  }
   if (request.headers.origin !== undefined) {
     request.resume();
     sendEmpty(response, 403, true);
@@ -189,6 +261,7 @@ async function handleRequest(
   if (path === "/api/protocol") {
     if (requestBody.length !== 0) return sendEmpty(response, 400, true);
     const authorized = await context.authorizeProtocol(request.headers.authorization, signal);
+    if (signal.aborted) return;
     if (authorized !== true) {
       const code = authorized === "revoked"
         ? "SESSION_REVOKED"
@@ -198,6 +271,11 @@ async function handleRequest(
       sendJson(response, 401, protocolError(code, "Authentication failed."));
       return;
     }
+    const credentialRetry = consumeAuthenticatedRateLimit(
+      request.headers.authorization,
+      credentialRateLimiter,
+    );
+    if (credentialRetry !== null) return sendRateLimited(response, credentialRetry);
     if (request.method !== "GET") {
       sendEmpty(response, 405);
       return;
@@ -226,9 +304,10 @@ async function handleRequest(
       }
     }
     const result = await context.exchangeEnrollment(decoded);
+    if (signal.aborted) return;
     if (result.body === undefined) sendEmpty(response, result.status, result.status === 400);
     else if (result.status === 400) sendJson(response, 400, result.body, true);
-    else if (result.status === 401) sendJson(response, 401, result.body);
+    else if (result.status === 401 || result.status === 507) sendJson(response, result.status, result.body);
     else sendJson(response, 201, result.body);
     return;
   }
@@ -245,6 +324,25 @@ async function handleRequest(
       }
     }
     const authorization = request.headers.authorization;
+    const authorizeCoordination = context.authorizeCoordination;
+    if (authorizeCoordination === undefined) {
+      sendJson(response, 500, protocolError("INTERNAL_ERROR", "Coordination authentication is unavailable."), true);
+      return;
+    }
+    const authentication = await authorizeCoordination(authorization, signal);
+    if (signal.aborted) return;
+    if (typeof authentication === "string") {
+      const code = authentication === "revoked"
+        ? "SESSION_REVOKED"
+        : authentication === "missing" || authorization === undefined ? "AUTH_MISSING" : "AUTH_INVALID";
+      sendJson(response, 401, protocolError(code, "Authentication failed."));
+      return;
+    }
+    const clientIdentity = `client:${authentication.kind === "drone-session"
+      ? authentication.clientId
+      : authentication.id}`;
+    const credentialRetry = credentialRateLimiter.consume(clientIdentity);
+    if (credentialRetry !== null) return sendRateLimited(response, credentialRetry);
     const cursor = parseCursorParameter(request.url, path);
     if (cursor === INVALID_COORDINATION_QUERY) {
       sendJson(response, 400, protocolError("INVALID_INPUT", "Invalid query parameters."), true);
@@ -253,13 +351,22 @@ async function handleRequest(
     const result = await context.handleCoordination({
       method: request.method ?? "",
       path,
-      ...(authorization === undefined ? {} : { authorization }),
+      principal: authentication,
       ...(decoded === undefined ? {} : { body: decoded }),
       ...(cursor === undefined ? {} : { cursor }),
       signal,
     });
+    if (signal.aborted) {
+      if (result.stream !== undefined) await closeRejectedStream(result.stream);
+      return;
+    }
     if (result.stream !== undefined) {
-      startEventStream(response, result.stream);
+      const release = streamQuota.acquire(credentialIdentity(authorization) ?? addressIdentity);
+      if (release === null) {
+        await closeRejectedStream(result.stream);
+        sendRateLimited(response, 1);
+      }
+      else await startEventStream(response, result.stream, release);
     } else if (result.body === undefined) {
       sendEmpty(response, result.status);
     } else {
@@ -269,6 +376,15 @@ async function handleRequest(
   }
 
   sendEmpty(response, 404);
+}
+
+async function closeRejectedStream(stream: AsyncIterable<string>): Promise<void> {
+  const iterator = stream[Symbol.asyncIterator]();
+  try {
+    await iterator.return?.();
+  } catch {
+    // Quota rejection must not expose stream cleanup failures.
+  }
 }
 
 async function readRequestBody(
@@ -320,6 +436,17 @@ function sendEmpty(response: ServerResponse, status: number, closeConnection = f
   response.end();
 }
 
+function sendRateLimited(response: ServerResponse, retryAfter: number): void {
+  if (response.headersSent || response.destroyed) return;
+  response.writeHead(429, {
+    "cache-control": "no-store",
+    connection: "close",
+    "content-length": "0",
+    "retry-after": retryAfter.toString(),
+  });
+  response.end();
+}
+
 function sendJson(
   response: ServerResponse,
   status: number,
@@ -337,14 +464,29 @@ function sendJson(
   response.end(body);
 }
 
-function startEventStream(response: ServerResponse, stream: AsyncIterable<string>): void {
-  response.writeHead(200, {
-    "cache-control": "no-store",
-    connection: "keep-alive",
-    "content-type": "text/event-stream; charset=utf-8",
-    "x-accel-buffering": "no",
-    "x-content-type-options": "nosniff",
-  });
+async function startEventStream(
+  response: ServerResponse,
+  stream: AsyncIterable<string>,
+  releaseQuota: () => void,
+): Promise<void> {
+  if (response.destroyed || response.writableEnded || response.headersSent) {
+    releaseQuota();
+    await closeRejectedStream(stream);
+    return;
+  }
+  try {
+    response.writeHead(200, {
+      "cache-control": "no-store",
+      connection: "keep-alive",
+      "content-type": "text/event-stream; charset=utf-8",
+      "x-accel-buffering": "no",
+      "x-content-type-options": "nosniff",
+    });
+  } catch (error) {
+    releaseQuota();
+    await closeRejectedStream(stream);
+    throw error;
+  }
   void (async () => {
     try {
       for await (const chunk of stream) {
@@ -354,6 +496,7 @@ function startEventStream(response: ServerResponse, stream: AsyncIterable<string
     } catch {
       // Stream failures terminate the connection without exposing internals.
     } finally {
+      releaseQuota();
       if (!response.destroyed && !response.writableEnded) response.end();
     }
   })();
@@ -406,7 +549,7 @@ function isCoordinationPath(path: string | null): path is string {
     path?.startsWith("/api/cubes/") === true;
 }
 
-function applyServerLimits(server: HttpsServer, limits: ServiceLimits): void {
+function applyServerLimits(server: HttpsServer, limits: ServiceLimits): Set<Socket> {
   server.maxConnections = limits.maxConnections;
   server.maxRequestsPerSocket = limits.maxRequestsPerSocket;
   server.requestTimeout = limits.requestTimeoutMs;
@@ -416,6 +559,21 @@ function applyServerLimits(server: HttpsServer, limits: ServiceLimits): void {
     Math.min(limits.handlerTimeoutMs * 2, 2_147_483_647),
     (socket) => socket.destroy(),
   );
+  const addressConnections = new ConcurrentQuota(limits.maxConnectionsPerAddress);
+  const acceptedSockets = new Set<Socket>();
+  server.on("connection", (socket) => {
+    const tracked = socket as Socket;
+    acceptedSockets.add(tracked);
+    tracked.once("close", () => acceptedSockets.delete(tracked));
+    const identity = tracked.remoteAddress ?? "unknown";
+    const release = addressConnections.acquire(identity);
+    if (release === null) {
+      socket.destroy();
+      return;
+    }
+    socket.once("close", release);
+  });
+  return acceptedSockets;
 }
 
 function validateLimits(limits: ServiceLimits): void {
@@ -427,10 +585,31 @@ function validateLimits(limits: ServiceLimits): void {
   if (limits.headersTimeoutMs > limits.requestTimeoutMs) {
     throw new Error("headersTimeoutMs must not exceed requestTimeoutMs.");
   }
+  if (limits.tlsHandshakeTimeoutMs > limits.requestTimeoutMs) {
+    throw new Error("tlsHandshakeTimeoutMs must not exceed requestTimeoutMs.");
+  }
+  if (limits.maxConnectionsPerAddress > limits.maxConnections) {
+    throw new Error("maxConnectionsPerAddress must not exceed maxConnections.");
+  }
+  if (limits.maxStreamsPerCredential > limits.maxConnectionsPerAddress) {
+    throw new Error("maxStreamsPerCredential must not exceed maxConnectionsPerAddress.");
+  }
+  if (limits.maxRequestsPerWindow > limits.maxRequestsPerAddressWindow) {
+    throw new Error("maxRequestsPerWindow must not exceed maxRequestsPerAddressWindow.");
+  }
+  if (limits.maxRequestsPerAddressWindow > limits.maxRequestsGlobalWindow) {
+    throw new Error("maxRequestsPerAddressWindow must not exceed maxRequestsGlobalWindow.");
+  }
 }
 
-function validateTlsCertificate(certificate: string | Buffer, host: string): void {
-  const parsed = new X509Certificate(certificate);
+export function validateTlsCertificate(
+  certificate: string | Buffer,
+  host: string,
+  mode: "loopback" | "lan",
+  caCertificate?: string | Buffer,
+): void {
+  const [parsed, ...intermediates] = parseCertificateBundle(certificate);
+  if (parsed === undefined) throw new Error("TLS certificate is missing.");
   const now = Date.now();
   if (now < parsed.validFromDate.getTime() || now > parsed.validToDate.getTime()) {
     throw new Error("TLS certificate is outside its validity period.");
@@ -445,6 +624,309 @@ function validateTlsCertificate(certificate: string | Buffer, host: string): voi
   if (parsed.keyUsage.length > 0 && !parsed.keyUsage.includes(serverAuthOid)) {
     throw new Error("TLS certificate does not permit server authentication.");
   }
+  if (caCertificate === undefined) {
+    if (mode === "lan") throw new Error("A private LAN bind requires an explicit TLS trust anchor.");
+    return;
+  }
+  const [trustAnchor, ...additionalIntermediates] = parseCertificateBundle(caCertificate);
+  if (trustAnchor === undefined) throw new Error("TLS trust anchor is missing.");
+  validateCertificateAuthority(trustAnchor, now, "TLS trust anchor");
+  if (!trustAnchor.verify(trustAnchor.publicKey)) {
+    throw new Error("TLS trust anchor must be self-signed.");
+  }
+  const chain = [...intermediates, ...additionalIntermediates];
+  for (const intermediate of chain) validateCertificateAuthority(intermediate, now, "TLS intermediate");
+  const path = findCertificatePath(parsed, trustAnchor, chain, new Set(), 0);
+  if (path === null) {
+    throw new Error("TLS certificate is not signed by the configured trust anchor.");
+  }
+  validatePathLengthConstraints(path);
+}
+
+function parseCertificateBundle(value: string | Buffer): X509Certificate[] {
+  const text = typeof value === "string" ? value : value.toString("utf8");
+  const pem = text.match(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/gu);
+  return pem === null ? [new X509Certificate(value)] : pem.map((certificate) => new X509Certificate(certificate));
+}
+
+function validateCertificateAuthority(certificate: X509Certificate, now: number, label: string): void {
+  if (!certificate.ca) throw new Error(`${label} must be a CA certificate.`);
+  if (now < certificate.validFromDate.getTime() || now > certificate.validToDate.getTime()) {
+    throw new Error(`${label} is outside its validity period.`);
+  }
+  const constraints = readCaConstraints(certificate);
+  if (!constraints.basicConstraintsCritical || !constraints.ca || !constraints.keyCertSign) {
+    throw new Error(`${label} lacks required CA constraints or certificate-signing usage.`);
+  }
+}
+
+function findCertificatePath(
+  certificate: X509Certificate,
+  trustAnchor: X509Certificate,
+  intermediates: readonly X509Certificate[],
+  visited: Set<string>,
+  depth: number,
+): X509Certificate[] | null {
+  if (depth > 8) return null;
+  if (isIssuedBy(certificate, trustAnchor)) return [certificate, trustAnchor];
+  for (const intermediate of intermediates) {
+    if (visited.has(intermediate.fingerprint256) || !isIssuedBy(certificate, intermediate)) continue;
+    visited.add(intermediate.fingerprint256);
+    const path = findCertificatePath(intermediate, trustAnchor, intermediates, visited, depth + 1);
+    if (path !== null) return [certificate, ...path];
+    visited.delete(intermediate.fingerprint256);
+  }
+  return null;
+}
+
+function isIssuedBy(certificate: X509Certificate, issuer: X509Certificate): boolean {
+  return certificate.checkIssued(issuer) && certificate.verify(issuer.publicKey);
+}
+
+function validatePathLengthConstraints(path: readonly X509Certificate[]): void {
+  for (let index = 1; index < path.length; index += 1) {
+    const authority = path[index]!;
+    const { pathLength } = readCaConstraints(authority);
+    if (pathLength === null) continue;
+    const subordinateAuthorities = path.slice(1, index)
+      .filter((certificate) => certificate.subject !== certificate.issuer).length;
+    if (subordinateAuthorities > pathLength) {
+      throw new Error("TLS certificate chain exceeds a CA path-length constraint.");
+    }
+  }
+}
+
+interface CaConstraints {
+  readonly basicConstraintsCritical: boolean;
+  readonly ca: boolean;
+  readonly pathLength: number | null;
+  readonly keyCertSign: boolean;
+}
+
+function readCaConstraints(certificate: X509Certificate): CaConstraints {
+  const extensions = readCertificateExtensions(certificate.raw);
+  const basic = extensions.get("551d13");
+  const keyUsage = extensions.get("551d0f");
+  if (basic === undefined || keyUsage === undefined) {
+    return { basicConstraintsCritical: false, ca: false, pathLength: null, keyCertSign: false };
+  }
+  const basicSequence = readDerElement(basic.value, 0, basic.value.length);
+  if (basicSequence.tag !== 0x30 || basicSequence.end !== basic.value.length) throw new Error("Invalid CA constraints.");
+  const basicChildren = readDerChildren(basic.value, basicSequence);
+  const caElement = basicChildren.find((element) => element.tag === 0x01);
+  const pathElement = basicChildren.find((element) => element.tag === 0x02);
+  const usageBits = readDerElement(keyUsage.value, 0, keyUsage.value.length);
+  if (usageBits.tag !== 0x03 || usageBits.end !== keyUsage.value.length ||
+      usageBits.contentStart + 1 >= usageBits.end) throw new Error("Invalid CA key usage.");
+  return {
+    basicConstraintsCritical: basic.critical,
+    ca: caElement !== undefined && basic.value[caElement.contentStart] !== 0,
+    pathLength: pathElement === undefined ? null : readDerInteger(basic.value, pathElement),
+    keyCertSign: (keyUsage.value[usageBits.contentStart + 1]! & 0x04) !== 0,
+  };
+}
+
+function readCertificateExtensions(certificate: Buffer): Map<string, { critical: boolean; value: Buffer }> {
+  const outer = readDerElement(certificate, 0, certificate.length);
+  const outerChildren = readDerChildren(certificate, outer);
+  const tbs = outerChildren[0];
+  if (outer.tag !== 0x30 || tbs?.tag !== 0x30) throw new Error("Invalid X.509 certificate encoding.");
+  const extensionWrapper = readDerChildren(certificate, tbs).find((element) => element.tag === 0xa3);
+  if (extensionWrapper === undefined) return new Map();
+  const wrapperChildren = readDerChildren(certificate, extensionWrapper);
+  const extensionSequence = wrapperChildren[0];
+  if (extensionSequence?.tag !== 0x30) throw new Error("Invalid X.509 extension encoding.");
+  const result = new Map<string, { critical: boolean; value: Buffer }>();
+  for (const extension of readDerChildren(certificate, extensionSequence)) {
+    if (extension.tag !== 0x30) throw new Error("Invalid X.509 extension encoding.");
+    const fields = readDerChildren(certificate, extension);
+    const oid = fields[0];
+    const hasCriticalField = fields[1]?.tag === 0x01;
+    const critical = hasCriticalField && certificate[fields[1]!.contentStart] !== 0;
+    const value = fields[hasCriticalField ? 2 : 1];
+    if (oid?.tag !== 0x06 || value?.tag !== 0x04) throw new Error("Invalid X.509 extension encoding.");
+    result.set(
+      certificate.subarray(oid.contentStart, oid.end).toString("hex"),
+      { critical, value: certificate.subarray(value.contentStart, value.end) },
+    );
+  }
+  return result;
+}
+
+interface DerElement {
+  readonly tag: number;
+  readonly contentStart: number;
+  readonly end: number;
+}
+
+function readDerElement(data: Buffer, offset: number, limit: number): DerElement {
+  if (offset + 2 > limit) throw new Error("Invalid DER encoding.");
+  const tag = data[offset]!;
+  const firstLength = data[offset + 1]!;
+  let length = firstLength;
+  let contentStart = offset + 2;
+  if ((firstLength & 0x80) !== 0) {
+    const lengthBytes = firstLength & 0x7f;
+    if (lengthBytes === 0 || lengthBytes > 4 || contentStart + lengthBytes > limit) {
+      throw new Error("Invalid DER encoding.");
+    }
+    length = 0;
+    for (let index = 0; index < lengthBytes; index += 1) {
+      length = (length * 256) + data[contentStart + index]!;
+    }
+    contentStart += lengthBytes;
+  }
+  const end = contentStart + length;
+  if (end > limit || end < contentStart) throw new Error("Invalid DER encoding.");
+  return { tag, contentStart, end };
+}
+
+function readDerChildren(data: Buffer, parent: DerElement): DerElement[] {
+  const children: DerElement[] = [];
+  let offset = parent.contentStart;
+  while (offset < parent.end) {
+    const child = readDerElement(data, offset, parent.end);
+    children.push(child);
+    offset = child.end;
+  }
+  if (offset !== parent.end) throw new Error("Invalid DER encoding.");
+  return children;
+}
+
+function readDerInteger(data: Buffer, element: DerElement): number {
+  if (element.tag !== 0x02 || element.contentStart === element.end ||
+      (data[element.contentStart]! & 0x80) !== 0) throw new Error("Invalid DER integer.");
+  let value = 0;
+  for (let offset = element.contentStart; offset < element.end; offset += 1) {
+    value = (value * 256) + data[offset]!;
+    if (!Number.isSafeInteger(value)) throw new Error("DER integer exceeds policy.");
+  }
+  return value;
+}
+
+export class RequestRateLimiter {
+  readonly #limits: Pick<ServiceLimits, "maxRequestsPerWindow" | "rateLimitWindowMs" | "maxRateLimitEntries">;
+  readonly #clock: () => number;
+  readonly #maxRequests: number;
+  readonly #buckets = new Map<string, { count: number; resetAt: number }>();
+
+  constructor(limits: ServiceLimits, maxRequests = limits.maxRequestsPerWindow, clock: () => number = Date.now) {
+    this.#limits = limits;
+    this.#maxRequests = maxRequests;
+    this.#clock = clock;
+  }
+
+  consume(identity: string): number | null {
+    const reservation = this.reserve(identity);
+    reservation.commit();
+    return reservation.retryAfter;
+  }
+
+  reserve(identity: string): RateLimitReservation {
+    const now = this.#clock();
+    const existing = this.#buckets.get(identity);
+    if (existing !== undefined && existing.resetAt > now) {
+      if (existing.count >= this.#maxRequests) {
+        return rejectedReservation(Math.max(1, Math.ceil((existing.resetAt - now) / 1_000)));
+      }
+      existing.count += 1;
+      return acceptedReservation(() => { existing.count -= 1; });
+    }
+    if (existing !== undefined) this.#buckets.delete(identity);
+    for (const [key, bucket] of this.#buckets) {
+      if (bucket.resetAt <= now) this.#buckets.delete(key);
+    }
+    if (this.#buckets.size >= this.#limits.maxRateLimitEntries) {
+      return rejectedReservation(Math.max(1, Math.ceil(this.#limits.rateLimitWindowMs / 1_000)));
+    }
+    const bucket = { count: 1, resetAt: now + this.#limits.rateLimitWindowMs };
+    this.#buckets.set(identity, bucket);
+    return acceptedReservation(() => {
+      if (this.#buckets.get(identity) === bucket) this.#buckets.delete(identity);
+    });
+  }
+}
+
+export class PreAuthAdmissionLimiter {
+  readonly #global: RequestRateLimiter;
+  readonly #address: RequestRateLimiter;
+
+  constructor(limits: ServiceLimits, clock: () => number = Date.now) {
+    this.#global = new RequestRateLimiter(limits, limits.maxRequestsGlobalWindow, clock);
+    this.#address = new RequestRateLimiter(limits, limits.maxRequestsPerAddressWindow, clock);
+  }
+
+  consume(addressIdentity: string): number | null {
+    const address = this.#address.reserve(addressIdentity);
+    if (address.retryAfter !== null) return address.retryAfter;
+    const global = this.#global.reserve("global");
+    if (global.retryAfter !== null) {
+      address.rollback();
+      return global.retryAfter;
+    }
+    address.commit();
+    global.commit();
+    return null;
+  }
+}
+
+interface RateLimitReservation {
+  readonly retryAfter: number | null;
+  readonly commit: () => void;
+  readonly rollback: () => void;
+}
+
+function acceptedReservation(undo: () => void): RateLimitReservation {
+  let active = true;
+  return {
+    retryAfter: null,
+    commit: () => { active = false; },
+    rollback: () => {
+      if (!active) return;
+      active = false;
+      undo();
+    },
+  };
+}
+
+function rejectedReservation(retryAfter: number): RateLimitReservation {
+  return { retryAfter, commit: () => undefined, rollback: () => undefined };
+}
+
+export class ConcurrentQuota {
+  readonly #limit: number;
+  readonly #counts = new Map<string, number>();
+
+  constructor(limit: number) {
+    this.#limit = limit;
+  }
+
+  acquire(identity: string): (() => void) | null {
+    const count = this.#counts.get(identity) ?? 0;
+    if (count >= this.#limit) return null;
+    this.#counts.set(identity, count + 1);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const remaining = (this.#counts.get(identity) ?? 1) - 1;
+      if (remaining <= 0) this.#counts.delete(identity);
+      else this.#counts.set(identity, remaining);
+    };
+  }
+}
+
+function credentialIdentity(authorization: string | undefined): string | null {
+  if (authorization === undefined) return null;
+  return `credential:${createHash("sha256").update(authorization).digest("base64url")}`;
+}
+
+function consumeAuthenticatedRateLimit(
+  authorization: string | undefined,
+  rateLimiter: RequestRateLimiter,
+): number | null {
+  const identity = credentialIdentity(authorization);
+  return identity === null ? null : rateLimiter.consume(identity);
 }
 
 function listen(server: HttpsServer, port: number, host: string): Promise<void> {
@@ -463,12 +945,18 @@ function listen(server: HttpsServer, port: number, host: string): Promise<void> 
   });
 }
 
-function close(server: HttpsServer): Promise<void> {
-  return new Promise((resolve, reject) => {
+async function close(server: HttpsServer, acceptedSockets: Set<Socket>): Promise<void> {
+  const socketClosures = [...acceptedSockets].map((socket) => new Promise<void>((resolve) => {
+    socket.once("close", () => resolve());
+  }));
+  const listenerClosure = new Promise<void>((resolve, reject) => {
     server.close((error) => {
       if (error !== undefined) reject(error);
       else resolve();
     });
-    server.closeAllConnections();
   });
+  for (const socket of acceptedSockets) socket.destroy();
+  server.closeAllConnections();
+  await Promise.all([listenerClosure, ...socketClosures]);
+  if (acceptedSockets.size !== 0) throw new Error("HTTPS socket closure could not be confirmed.");
 }

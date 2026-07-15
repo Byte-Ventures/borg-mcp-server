@@ -1,7 +1,8 @@
 import { isIP } from "node:net";
+import { operatorErrors } from "./operator-error.js";
 
 export const DEFAULT_BIND_HOST = "127.0.0.1";
-export const DEFAULT_PORT = 7_443;
+export const DEFAULT_PORT = 7_091;
 
 export interface BindOptionsInput {
   readonly host?: string;
@@ -20,22 +21,22 @@ export function resolveBindOptions(input: BindOptionsInput): ResolvedBindOptions
   const port = input.port ?? DEFAULT_PORT;
 
   if (!Number.isInteger(port) || port < 0 || port > 65_535) {
-    throw new Error("Port must be an integer from 0 to 65535.");
+    throw operatorErrors.BIND_PORT_INVALID;
   }
   if (isIP(host) === 0) {
-    throw new Error("Bind host must be an explicit IP address.");
+    throw operatorErrors.BIND_HOST_INVALID;
   }
   if (host === "0.0.0.0" || host === "::") {
-    throw new Error("Wildcard bind addresses are prohibited.");
+    throw operatorErrors.BIND_WILDCARD;
   }
   if (isLoopback(host)) {
     return { host, port, mode: "loopback" };
   }
   if (!isPrivateLan(host)) {
-    throw new Error("Public-routable binds are unsupported.");
+    throw operatorErrors.BIND_PUBLIC;
   }
   if (input.lanConsent !== true) {
-    throw new Error("A private LAN bind requires explicit --lan consent for this start.");
+    throw operatorErrors.BIND_LAN_CONSENT;
   }
 
   return { host, port, mode: "lan" };

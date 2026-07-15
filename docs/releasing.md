@@ -9,7 +9,8 @@ preview, package publication, or deployment.
 
 Every item below must be complete before a release tag is authorized:
 
-1. The server preview threat-model gate in `#1016` is closed for the exact release commit.
+1. The server preview threat model in `docs/threat-model.md` passes the `#1016` gate for the exact
+   release commit.
 2. Counsel has approved the final FSL-1.1 license text and Additional Use Grant tracked by `#1026`.
 3. The exact counsel-approved text is committed as `LICENSE`, `package.json` uses
    `"license": "SEE LICENSE IN LICENSE"`, and the license SHA-256 is recorded in

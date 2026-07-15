@@ -8,6 +8,7 @@ import {
 
 describe("resolveBindOptions", () => {
   it("defaults to an explicit IPv4 loopback endpoint", () => {
+    expect(DEFAULT_PORT).toBe(7_091);
     expect(resolveBindOptions({})).toEqual({
       host: DEFAULT_BIND_HOST,
       port: DEFAULT_PORT,
@@ -24,7 +25,7 @@ describe("resolveBindOptions", () => {
 
   it.each(["0.0.0.0", "::"])("rejects wildcard bind %s even with LAN consent", (host) => {
     expect(() => resolveBindOptions({ host, lanConsent: true })).toThrow(
-      "Wildcard bind addresses are prohibited.",
+      "Choose a specific loopback or private-LAN IP; wildcard binds are prohibited.",
     );
   });
 
@@ -32,7 +33,7 @@ describe("resolveBindOptions", () => {
     "requires fresh LAN consent for private address %s",
     (host) => {
       expect(() => resolveBindOptions({ host })).toThrow(
-        "A private LAN bind requires explicit --lan consent for this start.",
+        "Add --lan to consent to this private-LAN start.",
       );
       expect(resolveBindOptions({ host, lanConsent: true }).mode).toBe("lan");
     },
@@ -42,18 +43,20 @@ describe("resolveBindOptions", () => {
     "rejects public address %s",
     (host) => {
       expect(() => resolveBindOptions({ host, lanConsent: true })).toThrow(
-        "Public-routable binds are unsupported.",
+        "Choose a loopback or private-LAN IP; public-routable binds are unsupported.",
       );
     },
   );
 
   it("rejects hostnames to avoid DNS-dependent bind policy", () => {
     expect(() => resolveBindOptions({ host: "localhost" })).toThrow(
-      "Bind host must be an explicit IP address.",
+      "Configure --host as an explicit IP address.",
     );
   });
 
   it.each([-1, 65_536, 1.5])("rejects invalid port %s", (port) => {
-    expect(() => resolveBindOptions({ port })).toThrow("Port must be an integer from 0 to 65535.");
+    expect(() => resolveBindOptions({ port })).toThrow(
+      "Configure the listen port as an integer from 0 to 65535.",
+    );
   });
 });

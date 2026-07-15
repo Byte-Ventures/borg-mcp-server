@@ -8,9 +8,11 @@ import {
   droneSessionPrincipal,
   operatorPrincipal,
 } from "../src/principal.js";
+import { CredentialAuthority, CredentialDigester } from "../src/credentials.js";
 import {
   CursorExpiredError,
   ScopedStoreError,
+  StorageCapacityError,
   type StoreRuntime,
   openStore,
 } from "../src/store.js";
@@ -249,6 +251,175 @@ describe("Principal to ScopedStore isolation", () => {
       log_entry_id: beta.id,
       claimant_drone_id: ids.clientA,
     })]);
+  });
+
+  it("transactionally prunes old log rows, cursors, recipients, and acknowledgements", async () => {
+    const path = join(directory, "borg.db");
+    runtime.close();
+    runtime = await openStore({
+      path,
+      clock: () => new Date("2026-07-14T12:00:00.000Z"),
+      storageLimits: {
+        maxActivityEntriesPerCube: 10,
+        maxDatabaseBytes: 1_000_000,
+        minFreeDiskBytes: 1,
+      },
+      capacityProbe: () => ({ databaseBytes: 0, freeDiskBytes: 1_000_000 }),
+    });
+    const client = runtime.forPrincipal(clientPrincipal(ids.clientA));
+    const first = client.appendLog(ids.cubeA, {
+      message: "entry-00",
+      visibility: "direct",
+      recipientDroneIds: [ids.droneA],
+    });
+    client.acknowledge(ids.cubeA, first.id, "claim");
+    const appended = [first];
+    for (let index = 1; index < 50; index += 1) {
+      appended.push(client.appendLog(ids.cubeA, { message: `entry-${index.toString().padStart(2, "0")}` }));
+    }
+
+    const retained = client.readLog(ids.cubeA, null, 50);
+    expect(retained.entries.map((entry) => entry.message)).toEqual(
+      Array.from({ length: 10 }, (_, index) => `entry-${index + 40}`),
+    );
+    expect(retained.entries.map((entry) => entry.created_at)).toEqual(
+      [...retained.entries.map((entry) => entry.created_at)].sort(),
+    );
+    expect(retained.claims).toEqual([]);
+    const recentlyPruned = appended[39]!;
+    expect(() => client.readLog(
+      ids.cubeA,
+      { id: recentlyPruned.id, created_at: recentlyPruned.created_at },
+      10,
+    )).toThrow(CursorExpiredError);
+    expect(() => client.acknowledge(ids.cubeA, first.id, "ack")).toThrow(ScopedStoreError);
+    expect(retained.entries.at(-1)?.id).toBe(appended.at(-1)?.id);
+  });
+
+  it("fails closed before log mutation when disk or database capacity is exhausted", async () => {
+    const path = join(directory, "borg.db");
+    runtime.close();
+    let capacity = { databaseBytes: 0, freeDiskBytes: 1_000_000 };
+    runtime = await openStore({
+      path,
+      storageLimits: {
+        maxActivityEntriesPerCube: 10,
+        maxDatabaseBytes: 1_000_000,
+        minFreeDiskBytes: 10_000,
+      },
+      capacityProbe: () => capacity,
+    });
+    const client = runtime.forPrincipal(clientPrincipal(ids.clientA));
+    const retained = client.appendLog(ids.cubeA, { message: "retained" });
+
+    capacity = { databaseBytes: 0, freeDiskBytes: 0 };
+    expect(() => client.appendLog(ids.cubeA, { message: "disk-pressure-secret" })).toThrowError(
+      expect.objectContaining({
+        name: "StorageCapacityError",
+        code: "CAPACITY_EXCEEDED",
+        message: "Storage capacity is unavailable.",
+      }),
+    );
+    capacity = { databaseBytes: 1_000_000, freeDiskBytes: 2_000_000 };
+    expect(() => client.appendLog(ids.cubeA, { message: "database-pressure-secret" }))
+      .toThrow(StorageCapacityError);
+    expect(client.readLog(ids.cubeA, null, 10).entries).toEqual([retained]);
+  });
+
+  it("guards every remotely reachable database-growth mutation before state change", async () => {
+    const path = join(directory, "borg.db");
+    runtime.close();
+    let capacity = { databaseBytes: 0, freeDiskBytes: 2_000_000 };
+    runtime = await openStore({
+      path,
+      storageLimits: {
+        maxActivityEntriesPerCube: 10,
+        maxDatabaseBytes: 1_000_000,
+        minFreeDiskBytes: 10_000,
+      },
+      capacityProbe: () => capacity,
+    });
+    const client = runtime.forPrincipal(clientPrincipal(ids.clientA));
+    const baseline = client.appendLog(ids.cubeA, { message: "baseline" });
+    const beforeDrones = client.listDrones(ids.cubeA);
+    const digester = new CredentialDigester(Buffer.alloc(32, 9));
+    const authority = new CredentialAuthority(runtime.credentials, digester);
+    const invitation = authority.createBootstrapInvitation(60_000);
+    capacity = { databaseBytes: 1_000_000, freeDiskBytes: 2_000_000 };
+
+    const denied: Array<() => unknown> = [
+      () => client.updateDirective(ids.cubeA, "blocked directive"),
+      () => client.appendLog(ids.cubeA, { message: "blocked log" }),
+      () => client.acknowledge(ids.cubeA, baseline.id, "claim"),
+      () => client.recordDecision(ids.cubeA, { topic: "blocked", decision: "blocked" }),
+      () => client.attachSeat({
+        cubeId: ids.cubeA,
+        roleId: ids.roleA,
+        retryKey: "00000000-0000-4000-8000-000000000031",
+        droneId: "00000000-0000-4000-8000-000000000032",
+        sessionId: "00000000-0000-4000-8000-000000000033",
+        credentialId: "00000000-0000-4000-8000-000000000034",
+        credentialDigest: { lookup: Buffer.alloc(16), verifier: Buffer.alloc(32) },
+        expiresAt: "2026-07-15T12:00:00.000Z",
+      }),
+      () => authority.exchangeInvitation({ invitation, clientName: "blocked enrollment" }),
+    ];
+    for (const mutation of denied) expect(mutation).toThrow(StorageCapacityError);
+
+    expect(client.getCube(ids.cubeA)?.directive).toBe("A");
+    expect(client.readLog(ids.cubeA, null, 10)).toMatchObject({ entries: [baseline], claims: [] });
+    expect(client.listDecisions(ids.cubeA)).toEqual([]);
+    expect(client.listDrones(ids.cubeA)).toEqual(beforeDrones);
+    capacity = { databaseBytes: 0, freeDiskBytes: 2_000_000 };
+    expect(authority.exchangeInvitation({ invitation, clientName: "allowed enrollment" })).not.toBeNull();
+    digester.destroy();
+  });
+
+  it("normalizes invalid and throwing capacity probes without mutation", async () => {
+    const path = join(directory, "borg.db");
+    runtime.close();
+    let result: unknown = { databaseBytes: 0, freeDiskBytes: 2_000_000 };
+    let shouldThrow = false;
+    runtime = await openStore({
+      path,
+      storageLimits: {
+        maxActivityEntriesPerCube: 10,
+        maxDatabaseBytes: 1_000_000,
+        minFreeDiskBytes: 10_000,
+      },
+      capacityProbe: () => {
+        if (shouldThrow) throw new Error("secret probe detail");
+        return result as never;
+      },
+    });
+    const client = runtime.forPrincipal(clientPrincipal(ids.clientA));
+    for (result of [null, {}, { databaseBytes: Number.NaN, freeDiskBytes: 2_000_000 }]) {
+      expect(() => client.appendLog(ids.cubeA, { message: "blocked" })).toThrowError(
+        expect.objectContaining({ code: "CAPACITY_EXCEEDED", message: "Storage capacity is unavailable." }),
+      );
+    }
+    shouldThrow = true;
+    expect(() => client.appendLog(ids.cubeA, { message: "blocked" })).toThrowError(
+      expect.objectContaining({ code: "CAPACITY_EXCEEDED", message: "Storage capacity is unavailable." }),
+    );
+    expect(client.readLog(ids.cubeA, null, 10).entries).toEqual([]);
+  });
+
+  it("rejects a one-byte write when only the measured 12360-byte SQLite growth remains", async () => {
+    const path = join(directory, "borg.db");
+    runtime.close();
+    runtime = await openStore({
+      path,
+      storageLimits: {
+        maxActivityEntriesPerCube: 10,
+        maxDatabaseBytes: 1_000_000,
+        minFreeDiskBytes: 10_000,
+      },
+      capacityProbe: () => ({ databaseBytes: 0, freeDiskBytes: 22_359 }),
+    });
+    const client = runtime.forPrincipal(clientPrincipal(ids.clientA));
+    expect(() => client.appendLog(ids.cubeA, { message: "x" })).toThrow(StorageCapacityError);
+    expect(client.readLog(ids.cubeA, null, 10).entries).toEqual([]);
   });
 
   it("returns indistinguishable not-found errors for cross-cube log access", () => {

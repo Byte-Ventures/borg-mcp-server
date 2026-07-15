@@ -96,7 +96,9 @@ export async function verifyLockfile(manifest, lockfile, options = {}) {
     }
     const name = packageNameFromLockPath(path, lockName);
     const expectedTarball = canonicalRegistryTarball(name, dependency.version);
-    if (dependency.link === true || (options.rejectInstallScripts && dependency.hasInstallScript === true) ||
+    const rejectInstallScript = options.rejectInstallScripts === true ||
+      (options.rejectInstallScripts === 'production' && dependency.dev !== true);
+    if (dependency.link === true || (rejectInstallScript && dependency.hasInstallScript === true) ||
         !isExactVersion(dependency.version) ||
         (dependency.name !== undefined && dependency.name !== name) ||
         dependency.resolved !== expectedTarball || !isSha512Integrity(dependency.integrity)) {

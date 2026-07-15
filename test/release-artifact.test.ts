@@ -87,7 +87,7 @@ describe("packed release artifact", () => {
     await writeFile(join(fixture, "dist", "index.js.map"), JSON.stringify({
       version: 3,
       file: "index.js",
-      sources: ["../src/index.ts"],
+      sources: ["../src/missing.ts"],
       names: [],
       mappings: "",
     }));
@@ -126,6 +126,26 @@ describe("packed release artifact", () => {
     );
   });
 
+  it("allows an install script only in a development-only dependency", async () => {
+    const fixture = await packageFixture();
+    await mutateShrinkwrapRoot(fixture, (_root, shrinkwrap) => {
+      shrinkwrap.packages["node_modules/dev-tool"] = {
+        version: "1.0.0",
+        resolved: "https://registry.npmjs.org/dev-tool/-/dev-tool-1.0.0.tgz",
+        integrity: VALID_INTEGRITY,
+        dev: true,
+        hasInstallScript: true,
+      };
+    });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      dist: {
+        tarball: "https://registry.npmjs.org/dev-tool/-/dev-tool-1.0.0.tgz",
+        integrity: VALID_INTEGRITY,
+      },
+    }), { status: 200 })));
+    await expect(verifyPackedArtifact(await pack(fixture))).resolves.toBeDefined();
+  });
+
   it("rejects a root dependency mismatch", async () => {
     const fixture = await packageFixture({ dependencies: { safe: "1.0.0" } });
     await mutateShrinkwrapRoot(fixture, (root) => {
@@ -133,6 +153,17 @@ describe("packed release artifact", () => {
     });
     await expect(verifyPackedArtifact(await pack(fixture))).rejects.toThrow(
       "root dependencies do not match package.json",
+    );
+  });
+
+  it("rejects third-party notices that do not match production dependencies", async () => {
+    const fixture = await packageFixture();
+    await writeFile(
+      join(fixture, "THIRD_PARTY_NOTICES.md"),
+      "| Package | Version | License |\n| --- | --- | --- |\n| `extra` | 1.0.0 | MIT |\n",
+    );
+    await expect(verifyPackedArtifact(await pack(fixture))).rejects.toThrow(
+      "does not match the locked production dependency tree",
     );
   });
 
@@ -262,6 +293,7 @@ async function packageFixture(overrides: Record<string, unknown> = {}): Promise<
   const directory = await mkdtemp(join(tmpdir(), "borg-release-fixture-"));
   directories.push(directory);
   await execute("mkdir", ["-p", join(directory, "dist")]);
+  await execute("mkdir", ["-p", join(directory, "src")]);
   const manifest = {
     name: "borgmcp-server",
     version: "1.2.3",
@@ -273,7 +305,16 @@ async function packageFixture(overrides: Record<string, unknown> = {}): Promise<
       url: "git+https://github.com/Byte-Ventures/borg-mcp-server.git",
     },
     publishConfig: { access: "public" },
-    files: ["dist", "LICENSE", "README.md", "npm-shrinkwrap.json"],
+    files: [
+      "dist",
+      "src",
+      "LICENSE",
+      "NOTICE",
+      "README.md",
+      "SECURITY.md",
+      "THIRD_PARTY_NOTICES.md",
+      "npm-shrinkwrap.json",
+    ],
     bin: { "borg-mcp-server": "./dist/main.js" },
     exports: { ".": { types: "./dist/index.d.ts", import: "./dist/index.js" } },
     dependencies: {},
@@ -282,7 +323,10 @@ async function packageFixture(overrides: Record<string, unknown> = {}): Promise<
   await Promise.all([
     writeFile(join(directory, "package.json"), `${JSON.stringify(manifest, null, 2)}\n`),
     writeFile(join(directory, "LICENSE"), "Reviewed FSL fixture.\n"),
+    writeFile(join(directory, "NOTICE"), "Fixture copyright notice.\n"),
     writeFile(join(directory, "README.md"), "# Server fixture\n"),
+    writeFile(join(directory, "SECURITY.md"), "# Fixture security policy\n"),
+    writeFile(join(directory, "THIRD_PARTY_NOTICES.md"), "# Fixture notices\n"),
     writeFile(join(directory, "npm-shrinkwrap.json"), `${JSON.stringify({
       name: "borgmcp-server",
       version: "1.2.3",
@@ -293,6 +337,7 @@ async function packageFixture(overrides: Record<string, unknown> = {}): Promise<
     writeFile(join(directory, "dist", "index.js"), "export const ready = true;\n"),
     writeFile(join(directory, "dist", "index.d.ts"), "export declare const ready: true;\n"),
     writeFile(join(directory, "dist", "main.js"), "#!/usr/bin/env node\nconsole.log('Usage: borg-mcp-server');\n"),
+    writeFile(join(directory, "src", "index.ts"), "export const ready = true;\n"),
   ]);
   return directory;
 }

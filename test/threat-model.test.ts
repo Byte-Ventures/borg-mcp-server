@@ -8,6 +8,7 @@ describe("server threat model", () => {
     const manifest = JSON.parse(await readFile("package.json", "utf8")) as {
       private: boolean;
       version: string;
+      license: string;
     };
 
     for (const boundary of [
@@ -25,6 +26,10 @@ describe("server threat model", () => {
       expect(threatModel).toContain(boundary);
     }
     expect(releaseWorkflow).toContain('test "${SERVER_1016_APPROVED_SHA}" = "${release_commit}"');
-    expect(manifest).toMatchObject({ private: true, version: "0.0.0" });
+    expect(manifest).toMatchObject({
+      private: false,
+      version: "0.1.0",
+      license: "SEE LICENSE IN LICENSE",
+    });
   });
 });

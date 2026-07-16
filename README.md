@@ -23,7 +23,12 @@ review, authorization, and protected-publication gates.
 - npm 10 or later
 - A private local data directory with sufficient disk space
 
-## Install
+## Install after publication
+
+The global package command becomes available only after the pending npm release
+completes. Until then, source and preview reviewers should follow the release
+status above and the [release runbook](docs/releasing.md), not expect this
+registry install to succeed.
 
 ```sh
 npm install --global borgmcp-server

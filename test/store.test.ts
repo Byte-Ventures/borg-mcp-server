@@ -12,6 +12,7 @@ import {
 import { CredentialAuthority, CredentialDigester, generateSecret } from "../src/credentials.js";
 import {
   CursorExpiredError,
+  RoleConflictError,
   ScopedStoreError,
   StorageCapacityError,
   type StoreRuntime,
@@ -198,6 +199,78 @@ describe("Principal to ScopedStore isolation", () => {
     expect(entry.droneId).toBeNull();
   });
 
+  it("creates complete worker roles and promotes one default atomically", async () => {
+    const path = join(directory, "borg.db");
+    const client = runtime.forPrincipal(clientPrincipal(ids.clientA));
+    const reviewer = client.createRole(ids.cubeA, {
+      name: "Code Reviewer",
+      shortDescription: "Reviews completed branches",
+      detailedDescription: "Review findings:\nBlock regressions.",
+      isDefault: true,
+      isMandatory: true,
+      isHumanSeat: true,
+      canBroadcast: true,
+      receivesAllDirect: true,
+    });
+    expect(reviewer).toMatchObject({
+      cube_id: ids.cubeA,
+      name: "Code Reviewer",
+      short_description: "Reviews completed branches",
+      detailed_description: "Review findings:\nBlock regressions.",
+      is_default: true,
+      is_mandatory: true,
+      is_human_seat: true,
+      can_broadcast: true,
+      receives_all_direct: true,
+      role_class: "worker",
+    });
+
+    const builder = client.createRole(ids.cubeA, { name: "Builder", isDefault: true });
+    const roles = client.listRoles(ids.cubeA);
+    expect(roles.find((role) => role.id === reviewer.id)?.is_default).toBe(false);
+    expect(roles.find((role) => role.id === builder.id)?.is_default).toBe(true);
+    expect(roles.filter((role) => role.is_default)).toHaveLength(1);
+
+    runtime.close();
+    runtime = await openStore({ path, clock: () => new Date("2026-07-14T12:30:00.000Z") });
+    expect(runtime.forPrincipal(clientPrincipal(ids.clientA)).listRoles(ids.cubeA))
+      .toContainEqual(expect.objectContaining({ id: reviewer.id, detailed_description: reviewer.detailed_description }));
+  });
+
+  it("requires manage authority for role creation without a cube oracle", () => {
+    const manager = runtime.forPrincipal(clientPrincipal(ids.clientA));
+    const foreignManager = runtime.forPrincipal(clientPrincipal(ids.clientB));
+    const drone = runtime.forPrincipal(droneSessionPrincipal({
+      id: ids.sessionA,
+      clientId: ids.clientA,
+      cubeId: ids.cubeA,
+      droneId: ids.droneA,
+    }));
+    const before = manager.listRoles(ids.cubeA);
+
+    expect(() => manager.createRole(ids.cubeB, { name: "Read only" })).toThrow(ScopedStoreError);
+    expect(() => foreignManager.createRole(ids.cubeA, { name: "Foreign" })).toThrow(ScopedStoreError);
+    expect(() => drone.createRole(ids.cubeA, { name: "Queen escalation" })).toThrow(ScopedStoreError);
+    expect(() => manager.createRole(randomUUID(), { name: "Missing" })).toThrow(ScopedStoreError);
+    expect(manager.listRoles(ids.cubeA)).toEqual(before);
+  });
+
+  it("rejects duplicate and oversized roles without changing the current default", () => {
+    const client = runtime.forPrincipal(clientPrincipal(ids.clientA));
+    const defaultRole = client.createRole(ids.cubeA, { name: "Default", isDefault: true });
+
+    expect(() => client.createRole(ids.cubeA, { name: "Queen", isDefault: true }))
+      .toThrow(RoleConflictError);
+    expect(() => client.createRole(ids.cubeA, {
+      name: "Oversized",
+      detailedDescription: "x".repeat(51_201),
+    })).toThrow(RangeError);
+    const roles = client.listRoles(ids.cubeA);
+    expect(roles.find((role) => role.id === defaultRole.id)?.is_default).toBe(true);
+    expect(roles.filter((role) => role.is_default)).toHaveLength(1);
+    expect(roles.some((role) => role.name === "Oversized")).toBe(false);
+  });
+
   it("exposes named stores without a raw database or generic admin escape hatch", () => {
     expect(Object.keys(runtime).sort()).toEqual([
       "close",
@@ -353,6 +426,7 @@ describe("Principal to ScopedStore isolation", () => {
       () => client.appendLog(ids.cubeA, { message: "blocked log" }),
       () => client.acknowledge(ids.cubeA, baseline.id, "claim"),
       () => client.recordDecision(ids.cubeA, { topic: "blocked", decision: "blocked" }),
+      () => client.createRole(ids.cubeA, { name: "Blocked role" }),
       () => client.attachSeat({
         cubeId: ids.cubeA,
         roleId: ids.roleA,

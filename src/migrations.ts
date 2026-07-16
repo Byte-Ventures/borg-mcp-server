@@ -303,6 +303,21 @@ export const STORE_MIGRATIONS: readonly Migration[] = Object.freeze([
         ON seat_attach_bindings (drone_id, client_id, cube_id);
     `,
   },
+  {
+    version: 7,
+    name: "role_management_foundation",
+    sql: `
+      ALTER TABLE roles ADD COLUMN is_mandatory INTEGER NOT NULL DEFAULT 0
+        CHECK (is_mandatory IN (0, 1));
+      ALTER TABLE roles ADD COLUMN can_broadcast INTEGER NOT NULL DEFAULT 0
+        CHECK (can_broadcast IN (0, 1));
+      ALTER TABLE roles ADD COLUMN receives_all_direct INTEGER NOT NULL DEFAULT 0
+        CHECK (receives_all_direct IN (0, 1));
+
+      CREATE UNIQUE INDEX roles_one_default_per_cube_idx
+        ON roles (cube_id) WHERE is_default = 1;
+    `,
+  },
 ]);
 
 interface AppliedMigrationRow {

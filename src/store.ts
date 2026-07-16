@@ -11,6 +11,7 @@ import {
   assertServerDerivedPrincipal,
   type Principal,
 } from "./principal.js";
+import { patchRoleSectionText, type RoleSectionPatchOp } from "./role-section.js";
 
 export type CubeAccess = "read" | "write" | "manage";
 
@@ -225,6 +226,8 @@ export interface ScopedStore {
   readonly readActivity: (cubeId: string, limit: number) => ActivityRecord[];
   readonly listRoles: (cubeId: string) => RoleRecord[];
   readonly createRole: (cubeId: string, input: CreateRoleInput) => RoleRecord;
+  readonly updateRole: (cubeId: string, roleId: string, input: UpdateRoleInput) => RoleRecord;
+  readonly patchRoleSection: (cubeId: string, roleId: string, input: RoleSectionPatchOp) => RoleRecord;
   readonly listDrones: (cubeId: string) => DroneRecord[];
   readonly appendLog: (cubeId: string, input: {
     readonly message: string;
@@ -248,6 +251,17 @@ export interface ScopedStore {
 
 export interface CreateRoleInput {
   readonly name: string;
+  readonly shortDescription?: string;
+  readonly detailedDescription?: string;
+  readonly isDefault?: boolean;
+  readonly isMandatory?: boolean;
+  readonly isHumanSeat?: boolean;
+  readonly canBroadcast?: boolean;
+  readonly receivesAllDirect?: boolean;
+}
+
+export interface UpdateRoleInput {
+  readonly name?: string;
   readonly shortDescription?: string;
   readonly detailedDescription?: string;
   readonly isDefault?: boolean;
@@ -381,6 +395,24 @@ export class RoleConflictError extends Error {
   constructor() {
     super("A role with that name already exists.");
     this.name = "RoleConflictError";
+  }
+}
+
+export class DefaultRoleRequiredError extends Error {
+  readonly code = "DEFAULT_ROLE_REQUIRED";
+
+  constructor() {
+    super("A cube must retain one default role.");
+    this.name = "DefaultRoleRequiredError";
+  }
+}
+
+export class RoleSectionConflictError extends Error {
+  readonly code = "ROLE_SECTION_CONFLICT";
+
+  constructor() {
+    super("The role section patch conflicts with the current role text.");
+    this.name = "RoleSectionConflictError";
   }
 }
 
@@ -784,6 +816,139 @@ class SqliteScopedStore implements ScopedStore {
                receives_all_direct, role_class, created_at
         FROM roles WHERE id = ? AND cube_id = ?
       `).get(id, cubeId);
+      if (row === undefined) throw new ScopedStoreError();
+      this.#database.exec("COMMIT");
+      this.#mutationHook?.("role.after-commit");
+      return roleRecord(row);
+    } catch (error) {
+      try { this.#database.exec("ROLLBACK"); } catch { /* Preserve the original failure. */ }
+      throw error;
+    }
+  }
+
+  updateRole(cubeId: string, roleId: string, input: UpdateRoleInput): RoleRecord {
+    assertCanonicalUuid(cubeId, "Cube id");
+    assertCanonicalUuid(roleId, "Role id");
+    if (Object.values(input).every((value) => value === undefined)) {
+      throw new TypeError("At least one role field is required.");
+    }
+    if (input.name !== undefined) validateRoleName(input.name);
+    if (input.shortDescription !== undefined) validateRoleShortDescription(input.shortDescription);
+    if (input.detailedDescription !== undefined && typeof input.detailedDescription !== "string") {
+      throw new TypeError("Role detailed description must be text.");
+    }
+    for (const value of [
+      input.isDefault,
+      input.isMandatory,
+      input.isHumanSeat,
+      input.canBroadcast,
+      input.receivesAllDirect,
+    ]) {
+      if (value !== undefined && typeof value !== "boolean") throw new TypeError("Role flags must be boolean.");
+    }
+    this.#requireCube(cubeId, "manage");
+    this.#capacityGuard.assertCanGrow(
+      Buffer.byteLength(input.name ?? "") + Buffer.byteLength(input.shortDescription ?? "") +
+      Buffer.byteLength(input.detailedDescription ?? "") + 8_192,
+    );
+
+    this.#database.exec("BEGIN IMMEDIATE");
+    try {
+      this.#requireCube(cubeId, "manage");
+      const existingRow = this.#database.prepare(`
+        SELECT id, cube_id, name, short_description, detailed_description,
+               is_default, is_mandatory, is_human_seat, can_broadcast,
+               receives_all_direct, role_class, created_at
+        FROM roles WHERE id = ? AND cube_id = ?
+      `).get(roleId, cubeId);
+      if (existingRow === undefined) throw new ScopedStoreError();
+      const existing = roleRecord(existingRow);
+      if (input.isDefault === false && existing.is_default) {
+        throw new DefaultRoleRequiredError();
+      }
+      if (input.name !== undefined && input.name !== existing.name) {
+        const duplicate = this.#database.prepare(
+          "SELECT 1 AS present FROM roles WHERE cube_id = ? AND name = ? AND id <> ?",
+        ).get(cubeId, input.name, roleId);
+        if (duplicate !== undefined) throw new RoleConflictError();
+      }
+      if (input.isDefault === true && !existing.is_default) {
+        this.#database.prepare("UPDATE roles SET is_default = 0 WHERE cube_id = ? AND is_default = 1")
+          .run(cubeId);
+        this.#mutationHook?.("role.demote-default");
+      }
+      const nextDetailedDescription = input.detailedDescription ?? existing.detailed_description;
+      assertRoleTextWriteAllowed(nextDetailedDescription, existing.detailed_description);
+      this.#database.prepare(`
+        UPDATE roles SET
+          name = ?, short_description = ?, detailed_description = ?, is_default = ?,
+          is_mandatory = ?, is_human_seat = ?, can_broadcast = ?, receives_all_direct = ?
+        WHERE id = ? AND cube_id = ?
+      `).run(
+        input.name ?? existing.name,
+        input.shortDescription ?? existing.short_description,
+        nextDetailedDescription,
+        booleanInteger(input.isDefault ?? existing.is_default),
+        booleanInteger(input.isMandatory ?? existing.is_mandatory),
+        booleanInteger(input.isHumanSeat ?? existing.is_human_seat),
+        booleanInteger(input.canBroadcast ?? existing.can_broadcast),
+        booleanInteger(input.receivesAllDirect ?? existing.receives_all_direct),
+        roleId,
+        cubeId,
+      );
+      const row = this.#database.prepare(`
+        SELECT id, cube_id, name, short_description, detailed_description,
+               is_default, is_mandatory, is_human_seat, can_broadcast,
+               receives_all_direct, role_class, created_at
+        FROM roles WHERE id = ? AND cube_id = ?
+      `).get(roleId, cubeId);
+      if (row === undefined) throw new ScopedStoreError();
+      this.#database.exec("COMMIT");
+      this.#mutationHook?.("role.after-commit");
+      return roleRecord(row);
+    } catch (error) {
+      try { this.#database.exec("ROLLBACK"); } catch { /* Preserve the original failure. */ }
+      throw error;
+    }
+  }
+
+  patchRoleSection(cubeId: string, roleId: string, input: RoleSectionPatchOp): RoleRecord {
+    assertCanonicalUuid(cubeId, "Cube id");
+    assertCanonicalUuid(roleId, "Role id");
+    this.#requireCube(cubeId, "manage");
+    this.#capacityGuard.assertCanGrow(
+      Buffer.byteLength(input.heading) +
+      ("body" in input ? Buffer.byteLength(input.body) : 0) + 8_192,
+    );
+
+    this.#database.exec("BEGIN IMMEDIATE");
+    try {
+      this.#requireCube(cubeId, "manage");
+      const existingRow = this.#database.prepare(`
+        SELECT id, cube_id, name, short_description, detailed_description,
+               is_default, is_mandatory, is_human_seat, can_broadcast,
+               receives_all_direct, role_class, created_at
+        FROM roles WHERE id = ? AND cube_id = ?
+      `).get(roleId, cubeId);
+      if (existingRow === undefined) throw new ScopedStoreError();
+      const existing = roleRecord(existingRow);
+      let detailedDescription: string;
+      try {
+        detailedDescription = patchRoleSectionText(existing.detailed_description, input);
+      } catch (error) {
+        if (error instanceof TypeError) throw error;
+        throw new RoleSectionConflictError();
+      }
+      assertRoleTextWriteAllowed(detailedDescription, existing.detailed_description);
+      this.#database.prepare(
+        "UPDATE roles SET detailed_description = ? WHERE id = ? AND cube_id = ?",
+      ).run(detailedDescription, roleId, cubeId);
+      const row = this.#database.prepare(`
+        SELECT id, cube_id, name, short_description, detailed_description,
+               is_default, is_mandatory, is_human_seat, can_broadcast,
+               receives_all_direct, role_class, created_at
+        FROM roles WHERE id = ? AND cube_id = ?
+      `).get(roleId, cubeId);
       if (row === undefined) throw new ScopedStoreError();
       this.#database.exec("COMMIT");
       this.#mutationHook?.("role.after-commit");

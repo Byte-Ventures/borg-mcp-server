@@ -6,7 +6,9 @@ import {
   AttachConflictError,
   AccessDeniedError,
   CreateCubeConflictError,
+  DefaultRoleRequiredError,
   RoleConflictError,
+  RoleSectionConflictError,
   ScopedStoreError,
   StorageCapacityError,
   type EnrichedActivityRecord,
@@ -160,14 +162,20 @@ export class CoordinationApi {
       }
     }
 
+    const roleMatch = /^\/api\/cubes\/([0-9a-f-]{36})\/roles\/([0-9a-f-]{36})(\/section-patch)?$/u
+      .exec(request.path);
     const match = /^\/api\/cubes\/([0-9a-f-]{36})(?:\/(roles|drones|logs|acks|decisions|stream))?$/u
       .exec(request.path);
-    if (match === null) return failure(404, "NOT_FOUND", "The requested resource was not found.");
-    const cubeId = match[1]!;
-    if (!uuidPattern.test(cubeId)) {
+    if (match === null && roleMatch === null) {
       return failure(404, "NOT_FOUND", "The requested resource was not found.");
     }
-    const resource = match[2];
+    const cubeId = (roleMatch?.[1] ?? match?.[1])!;
+    const roleId = roleMatch?.[2];
+    if (!uuidPattern.test(cubeId) || (roleId !== undefined && !uuidPattern.test(roleId))) {
+      return failure(404, "NOT_FOUND", "The requested resource was not found.");
+    }
+    const resource = roleMatch === null ? match?.[2] : "role";
+    const sectionPatch = roleMatch?.[3] !== undefined;
     const store = this.#runtime.forPrincipal(authentication);
 
     try {
@@ -210,6 +218,72 @@ export class CoordinationApi {
           receivesAllDirect: optionalBoolean(envelope.payload["receives_all_direct"]),
         });
         return success(201, envelope.requestId, { role });
+      }
+      if (resource === "role" && !sectionPatch && request.method === "PATCH") {
+        const envelope = decodeEnvelope(request.body);
+        exactKeys(envelope.payload, [], [
+          "name",
+          "short_description",
+          "detailed_description",
+          "is_default",
+          "is_mandatory",
+          "is_human_seat",
+          "can_broadcast",
+          "receives_all_direct",
+        ]);
+        if (Object.keys(envelope.payload).length === 0) throw new InputError();
+        const name = envelope.payload["name"] === undefined
+          ? undefined
+          : requiredRoleName(envelope.payload, "name");
+        const shortDescription = optionalText(envelope.payload, "short_description", 1_024);
+        const detailedDescription = optionalText(envelope.payload, "detailed_description", 51_200);
+        const isDefault = optionalBooleanValue(envelope.payload["is_default"]);
+        const isMandatory = optionalBooleanValue(envelope.payload["is_mandatory"]);
+        const isHumanSeat = optionalBooleanValue(envelope.payload["is_human_seat"]);
+        const canBroadcast = optionalBooleanValue(envelope.payload["can_broadcast"]);
+        const receivesAllDirect = optionalBooleanValue(envelope.payload["receives_all_direct"]);
+        const role = store.updateRole(cubeId, roleId!, {
+          ...(name === undefined ? {} : { name }),
+          ...(shortDescription === undefined ? {} : { shortDescription }),
+          ...(detailedDescription === undefined ? {} : { detailedDescription }),
+          ...(isDefault === undefined ? {} : { isDefault }),
+          ...(isMandatory === undefined ? {} : { isMandatory }),
+          ...(isHumanSeat === undefined ? {} : { isHumanSeat }),
+          ...(canBroadcast === undefined ? {} : { canBroadcast }),
+          ...(receivesAllDirect === undefined ? {} : { receivesAllDirect }),
+        });
+        return success(200, envelope.requestId, { role });
+      }
+      if (resource === "role" && sectionPatch && request.method === "POST") {
+        const envelope = decodeEnvelope(request.body);
+        const action = envelope.payload["action"];
+        if (action === "delete") {
+          exactKeys(envelope.payload, ["action", "heading"]);
+          const role = store.patchRoleSection(cubeId, roleId!, {
+            action,
+            heading: requiredSectionHeading(envelope.payload, "heading"),
+          });
+          return success(200, envelope.requestId, { role });
+        }
+        if (action !== "replace" && action !== "insert") throw new InputError();
+        exactKeys(envelope.payload, ["action", "heading", "body"], action === "insert" ? ["after"] : []);
+        const body = optionalText(envelope.payload, "body", 51_200);
+        if (body === undefined) throw new InputError();
+        const heading = requiredSectionHeading(envelope.payload, "heading");
+        if (action === "replace") {
+          return success(200, envelope.requestId, {
+            role: store.patchRoleSection(cubeId, roleId!, { action, heading, body }),
+          });
+        }
+        const after = optionalNullableSectionHeading(envelope.payload["after"]);
+        return success(200, envelope.requestId, {
+          role: store.patchRoleSection(cubeId, roleId!, {
+            action,
+            heading,
+            body,
+            ...(after === undefined ? {} : { after }),
+          }),
+        });
       }
       if (resource === "drones" && request.method === "GET") {
         return success(200, "drones-read", { drones: store.listDrones(cubeId) });
@@ -278,6 +352,12 @@ export class CoordinationApi {
         return failure(404, "NOT_FOUND", error.message);
       }
       if (error instanceof RoleConflictError) {
+        return failure(409, error.code, error.message, safeRequestId(request.body));
+      }
+      if (error instanceof DefaultRoleRequiredError) {
+        return failure(409, error.code, error.message, safeRequestId(request.body));
+      }
+      if (error instanceof RoleSectionConflictError) {
         return failure(409, error.code, error.message, safeRequestId(request.body));
       }
       if (error instanceof StorageCapacityError) {
@@ -461,6 +541,25 @@ function optionalBoolean(value: unknown): boolean {
   if (value === undefined) return false;
   if (typeof value !== "boolean") throw new InputError();
   return value;
+}
+
+function optionalBooleanValue(value: unknown): boolean | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "boolean") throw new InputError();
+  return value;
+}
+
+function requiredSectionHeading(record: Record<string, unknown>, key: string): string {
+  const value = requiredString(record, key, 60);
+  const heading = value.trim();
+  if (heading.length === 0 || /^\s/u.test(value) || /[:\n\r]/u.test(heading) ||
+      /^[*\-#>`]/u.test(heading)) throw new InputError();
+  return heading;
+}
+
+function optionalNullableSectionHeading(value: unknown): string | null | undefined {
+  if (value === undefined || value === null) return value;
+  return requiredSectionHeading({ value }, "value");
 }
 
 function requiredUuid(record: Record<string, unknown>, key: string): string {

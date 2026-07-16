@@ -105,9 +105,13 @@ Invitation commands visibly prompt with `Recovery credential (hidden input):`
 before reading the recovery credential from a private hidden terminal, never argv
 or environment. `owner-invite` prints an owner enrollment invitation. A plain
 `client-invite` remains an enroll-only invitation with no cube grant. Supplying a
-cube selector atomically binds one grant to the invitation: `read` observes,
-`write` coordinates and is the default, and explicit `manage` adds cube
-administration. The command prints the resolved display name, full cube ID,
+cube selector atomically binds one grant to the invitation. `read` attaches an
+observer that can discover the cube and read shared activity, but cannot post,
+acknowledge, claim, administer, be selected as a direct recipient, or receive
+directed stream events. `write` attaches a participant that can coordinate and is
+the default; explicit `manage` adds cube administration. Attach responses and
+drone listings identify the effective `observer` or `participant` posture. The
+command prints the resolved display name, full cube ID,
 effective access, and capability summary before the single-use invitation.
 
 For automation and duplicate-name environments, use the full lowercase canonical

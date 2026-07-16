@@ -22,6 +22,13 @@ v1 scope.
   capability. Client credentials can access only explicitly granted cubes and mint narrower,
   expiring drone-session credentials for attached seats.
   Product role labels and cube owner metadata never grant authority.
+- A client with only `read` access attaches with an explicit observer posture derived from its current
+  parent grant. Attach responses and drone listings expose that posture, but the server remains the
+  enforcement boundary: observer drones are rejected during direct-recipient validation, observer
+  clients and sessions cannot mutate or acknowledge activity, and their page/replay/live stream views
+  omit directed entries. `write` and `manage` parent grants derive participant posture and remain
+  eligible for directed work. Grant changes therefore alter effective posture without a second stored
+  authority flag that could drift.
 - Authenticated `POST /api/cubes` requires an active parent client with `create_cube`. It atomically
   creates one cube, fixed human/default-worker roles, the creator's `manage` grant, and an idempotency
   binding. Exact retries are non-mutating; ordinary clients and drone sessions are denied. Per-client

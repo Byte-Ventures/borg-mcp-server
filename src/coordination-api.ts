@@ -103,6 +103,7 @@ export class CoordinationApi {
             token: attachment.credential,
             expires_at: attachment.expiresAt,
             generation: attachment.generation,
+            posture: attachment.posture,
           },
           reattached: attachment.reattached,
         });

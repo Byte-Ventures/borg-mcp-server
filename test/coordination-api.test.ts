@@ -31,6 +31,212 @@ afterEach(async () => {
 });
 
 describe("coordination stream setup", () => {
+  it("attaches read grants as observers and excludes them from directed work", async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-api-observer-")));
+    directories.push(directory);
+    runtime = await openStore({ path: join(directory, "borg.db") });
+    digester = new CredentialDigester(Buffer.alloc(32, 12));
+    const authority = new CredentialAuthority(runtime.credentials, digester);
+    const api = new CoordinationApi(runtime, authority);
+    const cubeId = "00000000-0000-4000-8000-000000000061";
+    const roleId = "00000000-0000-4000-8000-000000000062";
+    const observerClientId = "00000000-0000-4000-8000-000000000063";
+    const participantClientId = "00000000-0000-4000-8000-000000000064";
+    runtime.maintenance.createClient({ id: observerClientId, name: "Observer" });
+    runtime.maintenance.createClient({ id: participantClientId, name: "Participant" });
+    runtime.maintenance.createCube({ id: cubeId, name: "Postures", directive: "" });
+    runtime.maintenance.createRole({ id: roleId, cubeId, name: "Builder" });
+    runtime.maintenance.grantClientCube({ clientId: observerClientId, cubeId, access: "read" });
+    runtime.maintenance.grantClientCube({ clientId: participantClientId, cubeId, access: "write" });
+    const observerClient = clientPrincipal(observerClientId);
+    const participantClient = clientPrincipal(participantClientId);
+
+    const attach = async (principal: ReturnType<typeof clientPrincipal>, requestId: string) => api.handle({
+      method: "POST",
+      path: "/api/client/attach",
+      principal,
+      body: {
+        protocol_version: "1",
+        request_id: requestId,
+        payload: { cube_id: cubeId, role_id: roleId, retry_key: randomUUID() },
+      },
+      signal: new AbortController().signal,
+    });
+    const observerAttach = await attach(observerClient, "observer-attach");
+    const participantAttach = await attach(participantClient, "participant-attach");
+    expect(observerAttach).toMatchObject({
+      status: 201,
+      body: { payload: { session: { posture: "observer" } } },
+    });
+    expect(participantAttach).toMatchObject({
+      status: 201,
+      body: { payload: { session: { posture: "participant" } } },
+    });
+    const observerPayload = (observerAttach.body as any).payload;
+    const participantPayload = (participantAttach.body as any).payload;
+    const observerSession = authority.authenticate(`Bearer ${observerPayload.session.token}`)!;
+    const participantSession = authority.authenticate(`Bearer ${participantPayload.session.token}`)!;
+
+    const cubes = await api.handle({
+      method: "GET",
+      path: "/api/cubes",
+      principal: observerSession,
+      signal: new AbortController().signal,
+    });
+    expect(cubes).toMatchObject({
+      status: 200,
+      body: { payload: { cubes: [expect.objectContaining({ id: cubeId })] } },
+    });
+    const roles = await api.handle({
+      method: "GET",
+      path: `/api/cubes/${cubeId}/roles`,
+      principal: observerSession,
+      signal: new AbortController().signal,
+    });
+    expect(roles).toMatchObject({
+      status: 200,
+      body: { payload: { roles: [expect.objectContaining({ id: roleId })] } },
+    });
+
+    const drones = await api.handle({
+      method: "GET",
+      path: `/api/cubes/${cubeId}/drones`,
+      principal: observerSession,
+      signal: new AbortController().signal,
+    });
+    expect((drones.body as any).payload.drones).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: observerPayload.drone.id, posture: "observer" }),
+      expect.objectContaining({ id: participantPayload.drone.id, posture: "participant" }),
+    ]));
+
+    const observerPost = await api.handle({
+      method: "POST",
+      path: `/api/cubes/${cubeId}/logs`,
+      principal: observerSession,
+      body: {
+        protocol_version: "1",
+        request_id: "observer-post",
+        payload: { message: "denied" },
+      },
+      signal: new AbortController().signal,
+    });
+    expect(observerPost.status).toBe(404);
+    const observerManage = await api.handle({
+      method: "POST",
+      path: `/api/cubes/${cubeId}/roles`,
+      principal: observerSession,
+      body: {
+        protocol_version: "1",
+        request_id: "observer-manage",
+        payload: { name: "Denied" },
+      },
+      signal: new AbortController().signal,
+    });
+    expect(observerManage.status).toBe(404);
+
+    const observerController = new AbortController();
+    const participantController = new AbortController();
+    const observerStream = await api.handle({
+      method: "GET",
+      path: `/api/cubes/${cubeId}/stream`,
+      principal: observerSession,
+      signal: observerController.signal,
+    });
+    const participantStream = await api.handle({
+      method: "GET",
+      path: `/api/cubes/${cubeId}/stream`,
+      principal: participantSession,
+      signal: participantController.signal,
+    });
+    const observerIterator = observerStream.stream![Symbol.asyncIterator]();
+    const participantIterator = participantStream.stream![Symbol.asyncIterator]();
+    expect((await observerIterator.next()).value).toContain("event: bookmark");
+    expect((await participantIterator.next()).value).toContain("event: bookmark");
+
+    const observerTarget = await api.handle({
+      method: "POST",
+      path: `/api/cubes/${cubeId}/logs`,
+      principal: participantSession,
+      body: {
+        protocol_version: "1",
+        request_id: "observer-target",
+        payload: {
+          message: "must-not-arrive",
+          visibility: "direct",
+          recipientDroneIds: [observerPayload.drone.id],
+        },
+      },
+      signal: new AbortController().signal,
+    });
+    expect(observerTarget.status).toBe(404);
+    const directed = await api.handle({
+      method: "POST",
+      path: `/api/cubes/${cubeId}/logs`,
+      principal: participantSession,
+      body: {
+        protocol_version: "1",
+        request_id: "participant-target",
+        payload: {
+          message: "participant-work",
+          visibility: "direct",
+          recipientDroneIds: [participantPayload.drone.id],
+        },
+      },
+      signal: new AbortController().signal,
+    });
+    expect(directed.status).toBe(201);
+    expect((await participantIterator.next()).value).toContain("participant-work");
+    const directedEntryId = (directed.body as any).payload.entry.id;
+    for (const kind of ["ack", "claim"] as const) {
+      const acknowledgement = await api.handle({
+        method: "POST",
+        path: `/api/cubes/${cubeId}/acks`,
+        principal: observerSession,
+        body: {
+          protocol_version: "1",
+          request_id: `observer-${kind}`,
+          payload: { entry_id: directedEntryId, kind },
+        },
+        signal: new AbortController().signal,
+      });
+      expect(acknowledgement.status).toBe(404);
+    }
+    const broadcast = await api.handle({
+      method: "POST",
+      path: `/api/cubes/${cubeId}/logs`,
+      principal: participantSession,
+      body: {
+        protocol_version: "1",
+        request_id: "participant-broadcast",
+        payload: { message: "shared-update" },
+      },
+      signal: new AbortController().signal,
+    });
+    expect(broadcast.status).toBe(201);
+    const observerWake = (await observerIterator.next()).value!;
+    expect(observerWake).toContain("shared-update");
+    expect(observerWake).not.toContain("participant-work");
+
+    const observerRead = await api.handle({
+      method: "PUT",
+      path: `/api/cubes/${cubeId}/logs`,
+      principal: observerSession,
+      body: {
+        protocol_version: "1",
+        request_id: "observer-read",
+        payload: { cursor: null },
+      },
+      signal: new AbortController().signal,
+    });
+    expect(observerRead.status).toBe(200);
+    expect((observerRead.body as any).payload.entries.map((entry: any) => entry.message))
+      .toEqual(["shared-update"]);
+    observerController.abort();
+    participantController.abort();
+    await observerIterator.return?.();
+    await participantIterator.return?.();
+  });
+
   it("releases live registrations and listeners when stream setup fails", async () => {
     const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-api-")));
     directories.push(directory);

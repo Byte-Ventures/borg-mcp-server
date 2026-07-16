@@ -45,12 +45,17 @@ v1 scope.
   `ca.key`. After setup, operators deploying on a LAN must move `ca.key` to offline storage that the
   service account cannot read; only `ca.crt`, `server.crt`, and `server.key` remain available at
   runtime.
-- Client rotation and revocation are offline commands, not network routes. Stop the server first, run
+- Client rotation, revocation, and grant changes are offline commands, not network routes. Stop the server first, run
   `borg-mcp-server client-rotate <client-id>` or `borg-mcp-server client-revoke <client-id>`, securely
   deliver any one-time rotated credential, then restart. A PID-bound runtime lock rejects offline
   changes while the service is live. Stale locks fail closed and require explicit removal only after
   confirming the recorded PID is stopped; an old cross-process SSE stream therefore cannot survive
   an offline database change.
+- Client and pre-claim owner invitation minting remain local CLI operations with no network route, but
+  may execute beside a live server because they add one purpose-bound digest row and invalidate no live
+  authority. A separate short-lived invitation-mutation lock prevents concurrent invitation commands and
+  excludes setup, reinitialization, rotation, revocation, and grant changes. The live server observes the
+  committed WAL write on its next enrollment read without restart; SQLite contention fails closed.
 - Setup acquires the same PID-bound runtime lock before inspecting or changing identity state. It
   refuses any existing or partial installation by default; only the explicit destructive
   `setup --reinitialize` path removes the known identity/database files, and it can never run while

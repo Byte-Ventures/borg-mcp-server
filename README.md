@@ -85,9 +85,11 @@ recovery material, request or message bodies, decision text, tokens, raw paths, 
 exceptions. Operational IDs are still private data; capture stderr only in a
 private local sink. The log level cannot be changed through the network API.
 
-## Offline credential administration
+## Local credential administration
 
-Stop the server before all offline client administration:
+Invitation minting is an additive local operation and may run while the server is
+live. Rotation, revocation, and grant changes remain exclusive: stop the server
+before running those commands.
 
 ```sh
 borg-mcp-server client-rotate <client-id>

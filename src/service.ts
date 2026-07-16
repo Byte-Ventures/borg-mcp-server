@@ -145,7 +145,7 @@ export function createNodeServerService(dependencies: ServiceDependencies): Serv
 
       let runtimeLock: Awaited<ReturnType<typeof acquireRuntimeLock>> | undefined;
       try {
-        runtimeLock = dataDirectory === undefined ? undefined : await acquireRuntimeLock(dataDirectory);
+        runtimeLock = dataDirectory === undefined ? undefined : await acquireRuntimeLock(dataDirectory, "server");
         await dependencies.onStartupPhase?.("post-lock");
         throwIfShutdown(shutdown?.signal);
       } catch (error) {
@@ -391,7 +391,9 @@ export async function setupNodeServerInstallation(
 ): Promise<BootstrapResult> {
   const directory = await preparePrivateDataDirectory(setupDataDirectory);
   const runtimeLock = await acquireRuntimeLock(directory);
+  let invitationLock: RuntimeLock | undefined;
   try {
+    invitationLock = await acquireInvitationMintLock(directory);
     const existing = await inspectManagedInstallation(directory);
     if (existing.length !== 0 && !options.reinitialize) throw operatorErrors.INSTALLATION_EXISTS;
     if (options.reinitialize) {
@@ -399,7 +401,8 @@ export async function setupNodeServerInstallation(
     }
     return await bootstrapServer(directory, bindHost);
   } finally {
-    await runtimeLock.release();
+    if (invitationLock === undefined) await runtimeLock.release();
+    else await invitationLock.release().finally(() => runtimeLock.release());
   }
 }
 
@@ -439,9 +442,11 @@ export function createOfflineCredentialService(
     runtime: Awaited<ReturnType<typeof openStore>>,
   ) => T): Promise<T> => {
     const runtimeLock = await acquireRuntimeLock(offlineDataDirectory);
+    let invitationLock: RuntimeLock | undefined;
     let runtime: Awaited<ReturnType<typeof openStore>> | undefined;
     let digester: CredentialDigester | undefined;
     try {
+      invitationLock = await acquireInvitationMintLock(offlineDataDirectory);
       runtime = await openStore({ path: join(offlineDataDirectory, "borg.db") });
       const digestKey = await loadDigestKey(join(offlineDataDirectory, "credential-digest.key"));
       digester = new CredentialDigester(digestKey);
@@ -450,7 +455,28 @@ export function createOfflineCredentialService(
     } finally {
       digester?.destroy();
       runtime?.close();
-      await runtimeLock.release();
+      if (invitationLock === undefined) await runtimeLock.release();
+      else await invitationLock.release().finally(() => runtimeLock.release());
+    }
+  };
+  const withInvitationAuthority = async <T>(operation: (authority: CredentialAuthority) => T): Promise<T> => {
+    const invitationLock = await acquireInvitationMintLock(offlineDataDirectory);
+    let runtime: Awaited<ReturnType<typeof openStore>> | undefined;
+    let digester: CredentialDigester | undefined;
+    try {
+      await assertInvitationRuntimeCompatible(offlineDataDirectory);
+      runtime = await openStore({ path: join(offlineDataDirectory, "borg.db") });
+      const digestKey = await loadDigestKey(join(offlineDataDirectory, "credential-digest.key"));
+      digester = new CredentialDigester(digestKey);
+      digestKey.fill(0);
+      return operation(new CredentialAuthority(runtime.credentials, digester));
+    } catch (error) {
+      if (isSqliteContention(error)) throw operatorErrors.INVITATION_CONTENTION;
+      throw error;
+    } finally {
+      digester?.destroy();
+      runtime?.close();
+      await invitationLock.release();
     }
   };
   return {
@@ -468,12 +494,12 @@ export function createOfflineCredentialService(
         throw operatorErrors.GRANT_NOT_FOUND;
       }
     }),
-    createClientInvitation: (recoveryCredential) => withAuthority((authority) => {
+    createClientInvitation: (recoveryCredential) => withInvitationAuthority((authority) => {
       const invitation = authority.createInvitation(recoveryCredential, 15 * 60_000);
       if (invitation === null) throw operatorErrors.RECOVERY_INVALID;
       return invitation;
     }),
-    replaceOwnerInvitation: (recoveryCredential) => withAuthority((authority) => {
+    replaceOwnerInvitation: (recoveryCredential) => withInvitationAuthority((authority) => {
       const invitation = authority.replaceOwnerInvitation(recoveryCredential, 15 * 60_000);
       if (invitation === null) throw operatorErrors.RECOVERY_INVALID;
       return invitation;
@@ -528,13 +554,16 @@ function fatalTeardownError(primary: unknown, cleanup: unknown): FatalTeardownEr
   return new FatalTeardownError(fatalTeardownCapability, primary, cleanup);
 }
 
-export async function acquireRuntimeLock(runtimeDataDirectory: string): Promise<RuntimeLock> {
+export async function acquireRuntimeLock(
+  runtimeDataDirectory: string,
+  purpose: "server" | "exclusive-admin" = "exclusive-admin",
+): Promise<RuntimeLock> {
   const path = join(runtimeDataDirectory, "runtime.lock");
   const nonce = randomUUID();
   try {
     const handle = await open(path, "wx", 0o600);
     try {
-      await handle.writeFile(JSON.stringify({ pid: process.pid, nonce }));
+      await handle.writeFile(JSON.stringify({ pid: process.pid, nonce, purpose }));
     } catch (error) {
       await handle.close();
       await unlink(path).catch(() => undefined);
@@ -568,6 +597,67 @@ export async function acquireRuntimeLock(runtimeDataDirectory: string): Promise<
     if (processIsAlive(pid)) throw operatorErrors.RUNTIME_ACTIVE;
     throw operatorErrors.RUNTIME_LOCK_STALE;
   }
+}
+
+export async function acquireInvitationMintLock(runtimeDataDirectory: string): Promise<RuntimeLock> {
+  const path = join(runtimeDataDirectory, "invitation-mint.lock");
+  const nonce = randomUUID();
+  try {
+    const handle = await open(path, "wx", 0o600);
+    try {
+      await handle.writeFile(JSON.stringify({ pid: process.pid, nonce }));
+    } catch (error) {
+      await handle.close();
+      await unlink(path).catch(() => undefined);
+      throw error;
+    }
+    return {
+      release: async () => {
+        await handle.close();
+        try {
+          const current = JSON.parse(await readFile(path, "utf8")) as { nonce?: unknown };
+          if (current.nonce === nonce) await unlink(path);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        }
+      },
+    };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    throw operatorErrors.INVITATION_BUSY;
+  }
+}
+
+async function assertInvitationRuntimeCompatible(runtimeDataDirectory: string): Promise<void> {
+  const path = join(runtimeDataDirectory, "runtime.lock");
+  let metadata;
+  try {
+    metadata = await lstat(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw error;
+  }
+  if (!metadata.isFile() || metadata.isSymbolicLink() || (metadata.mode & 0o077) !== 0) {
+    throw operatorErrors.RUNTIME_LOCK_UNSAFE;
+  }
+  let pid: number;
+  let purpose: unknown;
+  try {
+    const value = JSON.parse(await readFile(path, "utf8")) as { pid?: unknown; purpose?: unknown };
+    if (!Number.isSafeInteger(value.pid) || (value.pid as number) <= 0) throw new Error();
+    pid = value.pid as number;
+    purpose = value.purpose;
+  } catch {
+    throw operatorErrors.RUNTIME_LOCK_INVALID;
+  }
+  if (!processIsAlive(pid)) throw operatorErrors.RUNTIME_LOCK_STALE;
+  if (purpose !== "server") throw operatorErrors.RUNTIME_ACTIVE;
+}
+
+function isSqliteContention(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  const value = error as { code?: unknown; errcode?: unknown };
+  return value.code === "ERR_SQLITE_ERROR" && (value.errcode === 5 || value.errcode === 6);
 }
 
 function processIsAlive(pid: number): boolean {

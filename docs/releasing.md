@@ -113,8 +113,7 @@ release remains blocked on a separate authorization naming the exact protected-m
 and on completion of the least-privilege fresh-bootstrap/grant dogfood gate. No source change or
 workflow runbook statement authorizes tag creation, npm publication, deployment, or preview.
 
-The `#5` development branch temporarily pins the exact merged `borgmcp-shared` 0.3 contract source by
-Git commit because that breaking contract has not been published. This is an explicit development
-blocker, not release-ready dependency state. Before integration or release review, replace it with the
-audited exact `borgmcp-shared@0.3.0` registry version, regenerate `npm-shrinkwrap.json`, and pass the
-source-lock, artifact, audit, signature, SBOM, and consumer gates without Git dependencies.
+The `#5` branch consumes the audited exact `borgmcp-shared@0.3.0` registry release. Its shrinkwrap must
+retain the canonical registry tarball URL and matching SRI, and the source-lock, artifact, audit,
+signature, SBOM, and consumer gates must pass without Git dependencies before integration or release
+review.

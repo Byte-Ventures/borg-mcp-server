@@ -12,6 +12,7 @@ export type OperatorErrorCode =
   | "BIND_PUBLIC"
   | "BIND_LAN_CONSENT"
   | "SERVER_FILES_MISSING"
+  | "DATA_PATH_SYMLINK"
   | "LAN_CA_KEY_ONLINE"
   | "RUNTIME_ACTIVE"
   | "RUNTIME_LOCK_UNSAFE"
@@ -38,6 +39,7 @@ const publicMessages: Readonly<Record<OperatorErrorCode, string>> = Object.freez
   BIND_PUBLIC: "Choose a loopback or private-LAN IP; public-routable binds are unsupported.",
   BIND_LAN_CONSENT: "Add --lan to consent to this private-LAN start.",
   SERVER_FILES_MISSING: "Configure BORG_SERVER_DATA_DIR or the required TLS file variables.",
+  DATA_PATH_SYMLINK: "Choose a BORG_SERVER_DATA_DIR path that contains no symbolic links.",
   LAN_CA_KEY_ONLINE: "Move ca.key out of the runtime data directory before private-LAN startup.",
   RUNTIME_ACTIVE: "Stop the server before running offline client administration.",
   RUNTIME_LOCK_UNSAFE: "Ensure runtime.lock is a private regular file before retrying.",

@@ -5,6 +5,7 @@ import { dirname, join, parse, relative, resolve, sep } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
 import { applyMigrations } from "./migrations.js";
+import { operatorErrors } from "./operator-error.js";
 import {
   assertCanonicalUuid,
   assertServerDerivedPrincipal,
@@ -1855,7 +1856,7 @@ async function prepareDatabasePath(path: string): Promise<string> {
     if (!isAlreadyExists(error)) throw error;
     const metadata = await lstat(databasePath);
     if (!metadata.isFile() || metadata.isSymbolicLink()) {
-      throw new Error("Database path must not contain symbolic links.");
+      throw operatorErrors.DATA_PATH_SYMLINK;
     }
   }
   await assertDirectoryTreeHasNoSymlinks(directory);
@@ -1895,7 +1896,7 @@ async function assertDirectoryTreeHasNoSymlinks(directory: string): Promise<void
 async function assertDirectoryComponent(path: string): Promise<void> {
   const metadata = await lstat(path);
   if (metadata.isSymbolicLink()) {
-    throw new Error("Database path must not contain symbolic links.");
+    throw operatorErrors.DATA_PATH_SYMLINK;
   }
   if (!metadata.isDirectory()) {
     throw new Error("Database parent path must contain only directories.");

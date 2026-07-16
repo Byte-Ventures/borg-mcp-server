@@ -72,6 +72,33 @@ describe("main operator errors", () => {
     }
   });
 
+  it("explains setup rejection of a symlinked data directory without disclosing paths", async () => {
+    const previousExitCode = process.exitCode;
+    const parent = await realpath(await mkdtemp(join(tmpdir(), "borg-main-setup-")));
+    const target = join(parent, "private-target");
+    const link = join(parent, "server-link");
+    const stderr = vi.fn();
+    try {
+      await bootstrapServer(target);
+      await symlink(target, link);
+      const service: ServerService = {
+        start: vi.fn(),
+        setup: () => bootstrapServer(link),
+      };
+
+      await runMain(["setup"], service, { stdout: vi.fn(), stderr });
+
+      expect(stderr).toHaveBeenCalledWith(
+        "Server command failed: Choose a BORG_SERVER_DATA_DIR path that contains no symbolic links.",
+      );
+      expect(JSON.stringify(stderr.mock.calls)).not.toContain(parent);
+      expect(process.exitCode).toBe(1);
+    } finally {
+      process.exitCode = previousExitCode;
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
   it.each([
     [["start", "--host", "example.invalid"], "Server command failed: Configure --host as an explicit IP address."],
     [["start", "--host", "192.168.1.20"], "Server command failed: Add --lan to consent to this private-LAN start."],

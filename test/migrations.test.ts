@@ -132,7 +132,7 @@ describe("SQLite migrations", () => {
     await symlink(target, link);
 
     await expect(openStore({ path: link })).rejects.toThrow(
-      "Database path must not contain symbolic links.",
+      "Choose a BORG_SERVER_DATA_DIR path that contains no symbolic links.",
     );
   });
 
@@ -146,7 +146,7 @@ describe("SQLite migrations", () => {
 
     await expect(openStore({
       path: join(safe, "link", "nested", "borg.db"),
-    })).rejects.toThrow("Database path must not contain symbolic links.");
+    })).rejects.toThrow("Choose a BORG_SERVER_DATA_DIR path that contains no symbolic links.");
     await expect(access(join(attacker, "nested", "borg.db"))).rejects.toThrow();
   });
 });

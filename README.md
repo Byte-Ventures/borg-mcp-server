@@ -38,14 +38,19 @@ npm install --global borgmcp-server
 
 The default data directory is `~/.borg/server`. Setup creates the local
 database, credential-digest key, local certificate authority, server
-certificate, one recovery credential, and one enrollment invitation. It creates
-no cube. Run it in a private terminal because both secrets are printed only
-once.
+certificate, one recovery credential, and one owner enrollment invitation. It
+creates no cube. Run it in a private terminal because both secrets are shown
+once; the owner enrollment invitation is single-use and enrolls the owner client.
 
 ```sh
 borg-mcp-server setup
 borg-mcp-server start
 ```
+
+Running `setup` again refuses to change an existing installation. After stopping
+the server, `borg-mcp-server setup --reinitialize` explicitly destroys and
+recreates the server identity and database; use it only when prior state may be
+discarded.
 
 The server listens on `https://127.0.0.1:7091` by default. Use
 `BORG_SERVER_DATA_DIR` to select another data directory.
@@ -81,10 +86,12 @@ borg-mcp-server client-grant <client-id> <cube-id> <read|write|manage>
 borg-mcp-server client-ungrant <client-id> <cube-id>
 ```
 
-Invitation commands read the recovery credential from a private hidden terminal
-prompt, never argv or environment. Rotation and invitation commands print their
-replacement secret once. Treat setup, enrollment, invitation, and rotation
-output as secrets; do not paste it into issues, logs, or chat.
+Invitation commands visibly prompt with `Recovery credential (hidden input):`
+before reading the recovery credential from a private hidden terminal, never argv
+or environment. `owner-invite` prints an owner enrollment invitation;
+`client-invite` prints a client enrollment invitation. Both are single-use and
+shown once. Treat setup, enrollment, invitation, and rotation output as secrets;
+do not paste it into issues, logs, or chat.
 
 ## Capacity controls
 

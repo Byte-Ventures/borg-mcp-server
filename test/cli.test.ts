@@ -32,7 +32,9 @@ describe("runCli", () => {
     expect(service.start).not.toHaveBeenCalled();
     expect(service.setup).toHaveBeenCalledWith({ reinitialize: false });
     expect(listen).not.toHaveBeenCalled();
-    expect(io.stdout).toHaveBeenCalledWith(expect.stringContaining("shown once"));
+    expect(io.stdout).toHaveBeenCalledWith(
+      `Server setup complete.\nRecovery credential (shown once; keep offline): ${"a".repeat(43)}\nOwner enrollment invitation (single-use, shown once; enroll the owner client): ${"b".repeat(43)}\nSetup created no cube.\nNext: start the server with \`borg-mcp-server start\`.`,
+    );
   });
 
   it("requires an explicit unambiguous setup reinitialization flag", async () => {
@@ -104,10 +106,18 @@ describe("runCli", () => {
     expect(await runCli(["client-grant", clientId, cubeId, "write"], service, io)).toBe(0);
     expect(await runCli(["client-ungrant", clientId, cubeId], service, io)).toBe(0);
     expect(readSecret).toHaveBeenCalledTimes(2);
+    expect(readSecret).toHaveBeenNthCalledWith(1, "Recovery credential (hidden input): ");
+    expect(readSecret).toHaveBeenNthCalledWith(2, "Recovery credential (hidden input): ");
     expect(createClientInvitation).toHaveBeenCalledWith(recovery);
     expect(replaceOwnerInvitation).toHaveBeenCalledWith(recovery);
     expect(grantClient).toHaveBeenCalledWith(clientId, cubeId, "write");
     expect(ungrantClient).toHaveBeenCalledWith(clientId, cubeId);
+    expect(io.stdout).toHaveBeenCalledWith(
+      `Client enrollment invitation (single-use, shown once): ${"i".repeat(43)}`,
+    );
+    expect(io.stdout).toHaveBeenCalledWith(
+      `Owner enrollment invitation (single-use, shown once): ${"o".repeat(43)}`,
+    );
     expect(JSON.stringify(io.stdout.mock.calls)).not.toContain(recovery);
     expect(await runCli(["owner-invite", recovery], service, io)).toBe(1);
   });

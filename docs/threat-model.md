@@ -56,7 +56,7 @@ v1 scope.
   authentication closure cannot be positively confirmed, the process retains those resources and the
   lock, emits only a sanitized fatal message, and exits nonzero so the operating system closes sockets;
   operators must investigate before explicitly removing the resulting stale lock.
-- Setup intentionally prints the recovery credential and first invitation once to the invoking
+- Setup intentionally prints the recovery credential and owner enrollment invitation once to the invoking
   terminal. Rotation intentionally prints the new client credential once. These are the only
   secret-output exceptions: operators must use a private terminal and must not capture command output
   in shared logs. Runtime request headers, request bodies, credentials, and internal errors are never

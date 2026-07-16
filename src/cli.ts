@@ -15,8 +15,8 @@ Commands:
   client-revoke <client-id>  Revoke one client and its credentials offline
   client-grant <client-id> <cube-id> <read|write|manage>  Set one offline cube grant
   client-ungrant <client-id> <cube-id>  Remove one offline cube grant
-  client-invite  Create one ordinary client invitation using a private recovery prompt
-  owner-invite   Replace the unclaimed owner invitation using a private recovery prompt
+  client-invite  Create one client enrollment invitation using a hidden recovery prompt
+  owner-invite   Replace the unclaimed owner enrollment invitation using a hidden recovery prompt
   help     Show this help
 
 Start options:
@@ -50,7 +50,7 @@ export async function runCli(
         return 1;
       }
       const result = await service.setup({ reinitialize: extraArgs[0] === "--reinitialize" });
-      io.stdout(`Server setup complete.\nRecovery credential (shown once): ${result.recoveryCredential}\nInitial enrollment invitation (shown once): ${result.initialInvitation}`);
+      io.stdout(`Server setup complete.\nRecovery credential (shown once; keep offline): ${result.recoveryCredential}\nOwner enrollment invitation (single-use, shown once; enroll the owner client): ${result.initialInvitation}\nSetup created no cube.\nNext: start the server with \`borg-mcp-server start\`.`);
       return 0;
     case "start":
       await service.start(extraArgs);
@@ -84,9 +84,11 @@ export async function runCli(
         ? service.createClientInvitation
         : service.replaceOwnerInvitation;
       if (operation === undefined) return invalidArguments(io);
-      const recovery = await io.readSecret("Recovery credential: ");
+      const recovery = await io.readSecret("Recovery credential (hidden input): ");
       const invitation = await operation(recovery);
-      io.stdout(`Enrollment invitation (shown once): ${invitation}`);
+      io.stdout(command === "client-invite"
+        ? `Client enrollment invitation (single-use, shown once): ${invitation}`
+        : `Owner enrollment invitation (single-use, shown once): ${invitation}`);
       return 0;
     }
     case "help":

@@ -6,16 +6,15 @@ HTTPS.
 
 ## Release status
 
-The current source is the unpublished `0.1.1-preview` recovery release candidate.
+The current public preview is `borgmcp-server@0.1.1`, published on npm.
 Purpose-bound owner enrollment, idempotent multi-cube creation, and stable
 prior-seat reattachment have completed coordinated client/server security
 review and process dogfood against the audited exact `borgmcp-shared@0.3.0`
 registry release.
 
 Setup prepares local identity and storage and prints one-time recovery and
-owner-enrollment secrets; it creates no cube. The package remains unreleased
-until the exact release commit and tagged artifact complete the documented
-review, authorization, and protected-publication gates.
+owner-enrollment secrets; it creates no cube. Version `0.1.1` completed the
+documented exact-source, tagged-artifact, and protected-publication gates.
 
 ## Requirements
 
@@ -23,12 +22,9 @@ review, authorization, and protected-publication gates.
 - npm 10 or later
 - A private local data directory with sufficient disk space
 
-## Install after publication
+## Install
 
-The global package command becomes available only after the pending npm release
-completes. Until then, source and preview reviewers should follow the release
-status above and the [release runbook](docs/releasing.md), not expect this
-registry install to succeed.
+Install the current public preview from npm:
 
 ```sh
 npm install --global borgmcp-server

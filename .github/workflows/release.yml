@@ -131,7 +131,14 @@ jobs:
         run: node scripts/verify-packed-artifact.mjs "release/${{ steps.pack.outputs.tarball }}" > release/artifact-report.json
 
       - name: Generate dependency SBOM from the locked release tree
-        run: npm sbom --sbom-format cyclonedx --registry=https://registry.npmjs.org > "release/borgmcp-server-${{ steps.release.outputs.version }}.cdx.json"
+        shell: bash
+        run: |
+          set -euo pipefail
+          raw_sbom="${RUNNER_TEMP}/borgmcp-server-${{ steps.release.outputs.version }}.raw.cdx.json"
+          release_sbom="release/borgmcp-server-${{ steps.release.outputs.version }}.cdx.json"
+          npm sbom --sbom-format cyclonedx --registry=https://registry.npmjs.org > "${raw_sbom}"
+          node scripts/normalize-release-sbom.mjs "${raw_sbom}" "${release_sbom}"
+          node scripts/verify-release-sbom.mjs "${release_sbom}" > release/sbom-report.json
 
       - name: Record exact artifact checksums
         working-directory: release
@@ -151,6 +158,7 @@ jobs:
             release/${{ steps.pack.outputs.tarball }}
             release/artifact-report.json
             release/borgmcp-server-${{ steps.release.outputs.version }}.cdx.json
+            release/sbom-report.json
             release/SHA512SUMS
             release/run-evidence.txt
           if-no-files-found: error

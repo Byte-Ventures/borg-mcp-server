@@ -32,6 +32,14 @@ describe("server release lane", () => {
     expect(workflow).toContain("git merge-base --is-ancestor");
     expect(workflow).toContain("Download security-audited artifact");
     expect(workflow).toContain('node scripts/exercise-packed-artifact.mjs "./release/${{ steps.pack.outputs.tarball }}"');
+    const rawSbom = verification.indexOf("npm sbom --sbom-format cyclonedx");
+    const normalizeSbom = verification.indexOf("node scripts/normalize-release-sbom.mjs");
+    const verifySbom = verification.indexOf("node scripts/verify-release-sbom.mjs");
+    const uploadSbom = verification.lastIndexOf("release/sbom-report.json");
+    expect(rawSbom).toBeGreaterThan(-1);
+    expect(normalizeSbom).toBeGreaterThan(rawSbom);
+    expect(verifySbom).toBeGreaterThan(normalizeSbom);
+    expect(uploadSbom).toBeGreaterThan(verifySbom);
     const sourceLockVerification = verification.indexOf("node scripts/verify-source-lock.mjs");
     const dependencyInstall = verification.indexOf("npm ci --ignore-scripts");
     expect(sourceLockVerification).toBeGreaterThan(-1);

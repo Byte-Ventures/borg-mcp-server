@@ -26,7 +26,7 @@ Every item below must be complete before a release tag is authorized:
    the complete build and consumer trees without non-registry sources, and the production tree has no
    install scripts. Source maps reference shipped files, and
    `node scripts/verify-packed-artifact.mjs <tarball>` accepts the exact package. NOTICE, third-party
-   license disclosures, and the generated CycloneDX SBOM must match that tree.
+   license disclosures, and the normalized, fail-closed-verified CycloneDX SBOM must match that tree.
 8. The Coordinator has recorded a separate release authorization for the exact version, tag,
    and commit under the ratified `release-tag-coordinator-autonomy` decision after all prior gates.
 
@@ -49,8 +49,11 @@ Before any tag is authorized, the Coordinator configures and verifies:
   workflow permissions, and cannot approve pull requests.
 - Vulnerability alerts, Dependabot security updates, secret scanning, push protection, and code
   scanning are enabled where the repository plan supports them.
-- `main` requires pull requests, CR and SR approvals, passing `CI / test`, resolved conversations,
-  linear history, and no admin bypass.
+- `main` requires pull requests, resolved conversations, the strict current `test` status check, and
+  has no bypass actors; deletion and non-fast-forward updates are blocked. Merge commits are allowed.
+  The GitHub approval count is deliberately zero because there is one trusted repository operator;
+  independent CR, Security, and Release Quality approvals are enforced as cube exact-SHA release
+  gates rather than GitHub review approvals, avoiding a sole-operator deadlock.
 - An active tag ruleset protects `refs/tags/v*.*.*` from update, deletion, and non-fast-forward;
   only the designated release operator may create a tag after exact authorization by the Coordinator.
 - The `npm-publish` environment allows only `v*.*.*`, has no admin bypass, and requires the
@@ -83,9 +86,10 @@ separate exact-artifact CR/SR/Release Quality gates before any preview.
    registry metadata. The unprivileged `verify` job then installs with scripts disabled, audits
    dependencies, runs all checks, creates one npm tarball, binds its lock
    entries to official registry metadata, verifies its allowlist and entrypoints, installs/imports/runs
-   that exact tarball in clean consumer prefixes, generates a CycloneDX SBOM, records run evidence and
-   SHA-512, performs an npm dry run, and uploads the exact files. It has no environment, publish token,
-   or OIDC permission.
+   that exact tarball in clean consumer prefixes, normalizes npm's checkout-derived SBOM root name,
+   verifies the CycloneDX root identity, lock-bound components, hashes, distribution URLs, and complete
+   dependency graph, records run evidence and SHA-512, performs an npm dry run, and uploads only the
+   verified SBOM and exact files. It has no environment, publish token, or OIDC permission.
 6. SR downloads and audits the workflow artifact itself, including the tarball, report, SBOM, and
    checksum. Source review or a locally rebuilt tarball cannot substitute for this gate.
 7. After `SECURITY-APPROVED` names the exact SHA-512, the Coordinator sets the protected environment

@@ -3,6 +3,7 @@ import type { ServerService } from "./service.js";
 export interface CliIo {
   readonly stdout: (message: string) => void;
   readonly stderr: (message: string) => void;
+  readonly readSecret?: (prompt: string) => Promise<string>;
 }
 
 const usage = `Usage: borg-mcp-server <command> [options]
@@ -12,6 +13,10 @@ Commands:
   start    Start the server process
   client-rotate <client-id>  Rotate one client credential offline
   client-revoke <client-id>  Revoke one client and its credentials offline
+  client-grant <client-id> <cube-id> <read|write|manage>  Set one offline cube grant
+  client-ungrant <client-id> <cube-id>  Remove one offline cube grant
+  client-invite  Create one ordinary client invitation using a private recovery prompt
+  owner-invite   Replace the unclaimed owner invitation using a private recovery prompt
   help     Show this help
 
 Start options:
@@ -23,7 +28,7 @@ TLS files:
   BORG_SERVER_DATA_DIR (default: ~/.borg/server), or explicit
   BORG_SERVER_TLS_KEY_FILE, BORG_SERVER_TLS_CERT_FILE, and BORG_SERVER_TLS_CA_FILE
 
-Stop the server before running client-rotate or client-revoke.`;
+Stop the server before running offline client administration commands.`;
 
 export async function runCli(
   args: readonly string[],
@@ -54,6 +59,31 @@ export async function runCli(
       await service.revokeClient(extraArgs[0]!);
       io.stdout("Client revoked.");
       return 0;
+    case "client-grant": {
+      if (extraArgs.length !== 3 || service.grantClient === undefined) return invalidArguments(io);
+      const access = extraArgs[2];
+      if (access !== "read" && access !== "write" && access !== "manage") return invalidArguments(io);
+      await service.grantClient(extraArgs[0]!, extraArgs[1]!, access);
+      io.stdout("Client cube grant updated.");
+      return 0;
+    }
+    case "client-ungrant":
+      if (extraArgs.length !== 2 || service.ungrantClient === undefined) return invalidArguments(io);
+      await service.ungrantClient(extraArgs[0]!, extraArgs[1]!);
+      io.stdout("Client cube grant removed.");
+      return 0;
+    case "client-invite":
+    case "owner-invite": {
+      if (extraArgs.length !== 0 || io.readSecret === undefined) return invalidArguments(io);
+      const operation = command === "client-invite"
+        ? service.createClientInvitation
+        : service.replaceOwnerInvitation;
+      if (operation === undefined) return invalidArguments(io);
+      const recovery = await io.readSecret("Recovery credential: ");
+      const invitation = await operation(recovery);
+      io.stdout(`Enrollment invitation (shown once): ${invitation}`);
+      return 0;
+    }
     case "help":
     case "--help":
     case "-h":

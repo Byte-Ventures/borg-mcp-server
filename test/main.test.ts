@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, realpath, rm, symlink } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -38,7 +38,7 @@ describe("main operator errors", () => {
     ["START_PORT_INVALID", "Provide --port as an integer from 0 to 65535."],
     ["BIND_LAN_CONSENT", "Add --lan to consent to this private-LAN start."],
     ["SERVER_FILES_MISSING", "Configure BORG_SERVER_DATA_DIR or the required TLS file variables."],
-    ["RUNTIME_ACTIVE", "Stop the server before rotating or revoking client credentials."],
+    ["RUNTIME_ACTIVE", "Stop the server before running offline client administration."],
     ["DATABASE_LIMIT_INVALID", "Set BORG_SERVER_MAX_DATABASE_BYTES to a positive integer."],
   ] as const)("prints the actionable typed error: %s", async (code, publicMessage) => {
     const previousExitCode = process.exitCode;
@@ -69,6 +69,56 @@ describe("main operator errors", () => {
       expect(JSON.stringify(stderr.mock.calls)).not.toContain("attacker-value");
     } finally {
       process.exitCode = previousExitCode;
+    }
+  });
+
+  it("explains setup rejection of a symlinked data directory without disclosing paths", async () => {
+    const previousExitCode = process.exitCode;
+    const parent = await realpath(await mkdtemp(join(tmpdir(), "borg-main-setup-")));
+    const target = join(parent, "private-target");
+    const link = join(parent, "server-link");
+    const stderr = vi.fn();
+    try {
+      await bootstrapServer(target);
+      await symlink(target, link);
+      const service: ServerService = {
+        start: vi.fn(),
+        setup: () => bootstrapServer(link),
+      };
+
+      await runMain(["setup"], service, { stdout: vi.fn(), stderr });
+
+      expect(stderr).toHaveBeenCalledWith(
+        "Server command failed: Choose a BORG_SERVER_DATA_DIR path that contains no symbolic links.",
+      );
+      expect(JSON.stringify(stderr.mock.calls)).not.toContain(parent);
+      expect(process.exitCode).toBe(1);
+    } finally {
+      process.exitCode = previousExitCode;
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps non-file setup database paths opaque", async () => {
+    const previousExitCode = process.exitCode;
+    const parent = await realpath(await mkdtemp(join(tmpdir(), "borg-main-setup-leaf-")));
+    const dataDirectory = join(parent, "server");
+    const stderr = vi.fn();
+    try {
+      await mkdir(join(dataDirectory, "borg.db"), { recursive: true });
+      const service: ServerService = {
+        start: vi.fn(),
+        setup: () => bootstrapServer(dataDirectory),
+      };
+
+      await runMain(["setup"], service, { stdout: vi.fn(), stderr });
+
+      expect(stderr).toHaveBeenCalledWith("Server command failed.");
+      expect(JSON.stringify(stderr.mock.calls)).not.toContain(parent);
+      expect(process.exitCode).toBe(1);
+    } finally {
+      process.exitCode = previousExitCode;
+      await rm(parent, { recursive: true, force: true });
     }
   });
 
@@ -123,7 +173,7 @@ describe("main operator errors", () => {
         "00000000-0000-4000-8000-000000000001",
       ], offline, { stdout: vi.fn(), stderr });
       expect(stderr).toHaveBeenLastCalledWith(
-        "Server command failed: Stop the server before rotating or revoking client credentials.",
+        "Server command failed: Stop the server before running offline client administration.",
       );
       await lock.release();
       await runMain([
@@ -160,7 +210,7 @@ describe("main operator errors", () => {
     const previousExitCode = process.exitCode;
     const stderr = vi.fn();
     const service: ServerService = {
-      start: vi.fn().mockRejectedValue(new Error("Stop the server before rotating or revoking client credentials.")),
+      start: vi.fn().mockRejectedValue(new Error("Stop the server before running offline client administration.")),
     };
     try {
       await runMain(["start"], service, { stdout: vi.fn(), stderr });
@@ -294,7 +344,7 @@ describe("main operator errors", () => {
       );
       expect(process.exitCode).toBe(1);
       expect(stderr).toHaveBeenCalledWith(
-        "Server command failed: Stop the server before rotating or revoking client credentials.",
+        "Server command failed: Stop the server before running offline client administration.",
       );
     } finally {
       process.exitCode = previousExitCode;

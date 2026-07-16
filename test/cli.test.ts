@@ -64,6 +64,33 @@ describe("runCli", () => {
     expect(listen).not.toHaveBeenCalled();
   });
 
+  it("administers invitations and grants without accepting recovery secrets in argv", async () => {
+    const recovery = "r".repeat(43);
+    const readSecret = vi.fn().mockResolvedValue(recovery);
+    const createClientInvitation = vi.fn().mockResolvedValue("i".repeat(43));
+    const replaceOwnerInvitation = vi.fn().mockResolvedValue("o".repeat(43));
+    const grantClient = vi.fn().mockResolvedValue(undefined);
+    const ungrantClient = vi.fn().mockResolvedValue(undefined);
+    const service: ServerService = {
+      start: vi.fn(), createClientInvitation, replaceOwnerInvitation, grantClient, ungrantClient,
+    };
+    const io = { ...createIo(), readSecret } satisfies CliIo;
+    const clientId = "00000000-0000-4000-8000-000000000001";
+    const cubeId = "00000000-0000-4000-8000-000000000002";
+
+    expect(await runCli(["client-invite"], service, io)).toBe(0);
+    expect(await runCli(["owner-invite"], service, io)).toBe(0);
+    expect(await runCli(["client-grant", clientId, cubeId, "write"], service, io)).toBe(0);
+    expect(await runCli(["client-ungrant", clientId, cubeId], service, io)).toBe(0);
+    expect(readSecret).toHaveBeenCalledTimes(2);
+    expect(createClientInvitation).toHaveBeenCalledWith(recovery);
+    expect(replaceOwnerInvitation).toHaveBeenCalledWith(recovery);
+    expect(grantClient).toHaveBeenCalledWith(clientId, cubeId, "write");
+    expect(ungrantClient).toHaveBeenCalledWith(clientId, cubeId);
+    expect(JSON.stringify(io.stdout.mock.calls)).not.toContain(recovery);
+    expect(await runCli(["owner-invite", recovery], service, io)).toBe(1);
+  });
+
   it("rejects malformed offline credential commands without exposing a service", async () => {
     const service: ServerService = {
       start: vi.fn(),

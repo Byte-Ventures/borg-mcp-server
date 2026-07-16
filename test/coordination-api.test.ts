@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,6 +9,7 @@ import {
   CredentialAuthority,
   CredentialDigester,
   LiveCredentialRegistry,
+  generateSecret,
 } from "../src/credentials.js";
 import { openStore, type StoreRuntime } from "../src/store.js";
 
@@ -35,10 +37,13 @@ describe("coordination stream setup", () => {
     const registry = new LiveCredentialRegistry();
     const authority = new CredentialAuthority(runtime.credentials, digester, () => new Date(), registry);
     const invitation = authority.createBootstrapInvitation(60_000);
-    const enrollment = authority.exchangeInvitation({ invitation });
+    const credential = generateSecret();
+    const enrollment = authority.exchangeInvitation({
+      invitation, retryKey: randomUUID(), clientCredential: credential,
+    });
     expect(enrollment).not.toBeNull();
     const clientId = enrollment!.clientId;
-    const principal = authority.authenticate(`Bearer ${enrollment!.credential}`)!;
+    const principal = authority.authenticate(`Bearer ${credential}`)!;
     const cubeId = "00000000-0000-4000-8000-000000000021";
     runtime.maintenance.createCube({ id: cubeId, name: "Authorized", directive: "" });
     runtime.maintenance.grantClientCube({ clientId, cubeId, access: "manage" });
@@ -111,8 +116,13 @@ describe("coordination stream setup", () => {
     });
     digester = new CredentialDigester(Buffer.alloc(32, 5));
     const authority = new CredentialAuthority(runtime.credentials, digester);
-    const enrollment = authority.exchangeInvitation({ invitation: authority.createBootstrapInvitation(60_000) })!;
-    const principal = authority.authenticate(`Bearer ${enrollment.credential}`)!;
+    const credential = generateSecret();
+    const enrollment = authority.exchangeInvitation({
+      invitation: authority.createBootstrapInvitation(60_000),
+      retryKey: randomUUID(),
+      clientCredential: credential,
+    })!;
+    const principal = authority.authenticate(`Bearer ${credential}`)!;
     const cubeId = "00000000-0000-4000-8000-000000000025";
     runtime.maintenance.createCube({ id: cubeId, name: "Capacity", directive: "" });
     runtime.maintenance.grantClientCube({ clientId: enrollment.clientId, cubeId, access: "manage" });

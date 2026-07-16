@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import { request as httpsRequest } from "node:https";
 import { tmpdir } from "node:os";
@@ -6,13 +7,14 @@ import { Server } from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { bootstrapServer, loadDigestKey } from "../src/bootstrap.js";
-import { CredentialAuthority, CredentialDigester } from "../src/credentials.js";
+import { CredentialAuthority, CredentialDigester, generateSecret } from "../src/credentials.js";
 import { CoordinationApi } from "../src/coordination-api.js";
 import { createEnrollmentExchange } from "../src/enrollment.js";
 import { startHttpsServer } from "../src/https-server.js";
 import { createPart2ProtocolInfo } from "../src/protocol-draft.js";
 import { acquireRuntimeLock, createOfflineCredentialService } from "../src/service.js";
 import { openStore } from "../src/store.js";
+import type { Principal } from "../src/principal.js";
 import { DEFAULT_SERVICE_LIMITS } from "../src/https-server.js";
 
 const directories: string[] = [];
@@ -26,26 +28,68 @@ afterEach(async () => {
 });
 
 describe("offline operator flow", () => {
+  it("grants and removes only the named client cube authority while stopped", async () => {
+    const parent = await realpath(await mkdtemp(join(tmpdir(), "borg-operator-grant-")));
+    directories.push(parent);
+    const dataDirectory = join(parent, "server");
+    const bootstrap = await bootstrapServer(dataDirectory);
+    const credential = generateSecret();
+    const enrolled = await withAuthority(dataDirectory, (authority) => authority.exchangeInvitation({
+      invitation: bootstrap.initialInvitation,
+      retryKey: randomUUID(),
+      clientCredential: credential,
+      clientName: "grant-client",
+    }));
+    if (enrolled === null) throw new Error("Enrollment failed.");
+    const cubeId = "00000000-0000-4000-8000-000000000031";
+    const runtime = await openStore({ path: bootstrap.paths.database });
+    runtime.maintenance.createCube({ id: cubeId, name: "Explicit grant", directive: "" });
+    runtime.close();
+    const service = createOfflineCredentialService(dataDirectory);
+
+    await service.grantClient(enrolled.clientId, cubeId, "read");
+    expect(await withAuthority(dataDirectory, (authority) => {
+      const principal = authority.authenticate(`Bearer ${credential}`);
+      if (principal === null) throw new Error("Authentication failed.");
+      return openScopedCubes(dataDirectory, principal);
+    })).toEqual([cubeId]);
+    await service.ungrantClient(enrolled.clientId, cubeId);
+    expect(await withAuthority(dataDirectory, (authority) => {
+      const principal = authority.authenticate(`Bearer ${credential}`);
+      if (principal === null) throw new Error("Authentication failed.");
+      return openScopedCubes(dataDirectory, principal);
+    })).toEqual([]);
+    await expect(service.ungrantClient(enrolled.clientId, cubeId)).rejects.toThrow(
+      "Provide an existing client cube grant.",
+    );
+  });
+
   it("rotates and revokes a hashed client credential without a listener", async () => {
     const listen = vi.spyOn(Server.prototype, "listen");
     const parent = await realpath(await mkdtemp(join(tmpdir(), "borg-operator-credential-")));
     directories.push(parent);
     const dataDirectory = join(parent, "server");
     const bootstrap = await bootstrapServer(dataDirectory);
+    const credential = generateSecret();
     const enrolled = await withAuthority(dataDirectory, (authority) =>
-      authority.exchangeInvitation({ invitation: bootstrap.initialInvitation, clientName: "operator" }));
+      authority.exchangeInvitation({
+        invitation: bootstrap.initialInvitation,
+        retryKey: randomUUID(),
+        clientCredential: credential,
+        clientName: "operator",
+      }));
     expect(enrolled).not.toBeNull();
     const service = createOfflineCredentialService(dataDirectory);
 
     const running = await acquireRuntimeLock(dataDirectory);
     await expect(service.rotateClient(enrolled!.clientId)).rejects.toThrow(
-      "Stop the server before rotating or revoking client credentials.",
+      "Stop the server before running offline client administration.",
     );
     await running.release();
 
     const rotated = await service.rotateClient(enrolled!.clientId);
     expect(await withAuthority(dataDirectory, (authority) =>
-      authority.authenticate(`Bearer ${enrolled!.credential}`))).toBeNull();
+      authority.authenticate(`Bearer ${credential}`))).toBeNull();
     expect(await withAuthority(dataDirectory, (authority) =>
       authority.authenticate(`Bearer ${rotated}`))).toMatchObject({ kind: "client", id: enrolled!.clientId });
 
@@ -64,8 +108,11 @@ describe("offline operator flow", () => {
     const digester = new CredentialDigester(digestKey);
     digestKey.fill(0);
     const authority = new CredentialAuthority(runtime.credentials, digester);
+    const credential = generateSecret();
     const enrolled = authority.exchangeInvitation({
       invitation: bootstrap.initialInvitation,
+      retryKey: randomUUID(),
+      clientCredential: credential,
       clientName: "quota-client",
     })!;
     const cubeId = "00000000-0000-4000-8000-000000000021";
@@ -74,7 +121,7 @@ describe("offline operator flow", () => {
     runtime.maintenance.createCube({ id: cubeId, name: "Quota cube", directive: "" });
     runtime.maintenance.grantClientCube({ clientId: enrolled.clientId, cubeId, access: "manage" });
     runtime.maintenance.createRole({ id: roleId, cubeId, name: "Builder" });
-    const principal = authority.authenticate(`Bearer ${enrolled.credential}`)!;
+    const principal = authority.authenticate(`Bearer ${credential}`)!;
     const issued = authority.attachSeat(runtime.forPrincipal(principal), { cubeId, roleId, retryKey });
     const reissued = authority.attachSeat(runtime.forPrincipal(principal), { cubeId, roleId, retryKey });
     expect(authority.authenticate(`Bearer ${issued.credential}`)).toBeNull();
@@ -99,14 +146,14 @@ describe("offline operator flow", () => {
     const ca = await readFile(bootstrap.paths.caCertificate);
     try {
       expect((await request(
-        server.origin, ca, "/api/cubes", undefined, `Bearer ${enrolled.credential}`,
+        server.origin, ca, "/api/cubes", undefined, `Bearer ${credential}`,
       )).status).toBe(200);
       expect((await request(
         server.origin, ca, "/api/cubes", undefined, `Bearer ${reissued.credential}`,
       )).status).toBe(200);
 
       const rotated = authority.rotateClient(enrolled.clientId);
-      expect(authority.authenticate(`Bearer ${enrolled.credential}`)).toBeNull();
+      expect(authority.authenticate(`Bearer ${credential}`)).toBeNull();
       expect((await request(
         server.origin, ca, "/api/cubes", undefined, `Bearer ${rotated}`,
       )).status).toBe(200);
@@ -187,29 +234,49 @@ describe("offline operator flow", () => {
         JSON.stringify({
           protocol_version: "1",
           request_id: "request-1234",
-          payload: { invitation: bootstrap.initialInvitation, client_name: "operator-laptop" },
+          payload: {
+            invitation: bootstrap.initialInvitation,
+            retry_key: "00000000-0000-4000-8000-000000000101",
+            client_credential: `${"z".repeat(42)}A`,
+            client_name: "operator-laptop",
+          },
         }),
       );
       expect(enrollment.status).toBe(201);
       const payload = (JSON.parse(enrollment.body) as {
-        payload: { client_id: string; credential: string };
+        payload: { client_id: string; purpose: "owner"; server_capabilities: ["create_cube"] };
       }).payload;
-      const cubeId = "00000000-0000-4000-8000-000000000011";
-      runtime.maintenance.createCube({ id: cubeId, name: "Offline cube", directive: "" });
-      runtime.maintenance.grantClientCube({
-        clientId: payload.client_id,
-        cubeId,
-        access: "manage",
-      });
-      const roleId = "00000000-0000-4000-8000-000000000012";
-      runtime.maintenance.createRole({ id: roleId, cubeId, name: "Builder" });
+      const clientCredential = `${"z".repeat(42)}A`;
+      expect(payload).toMatchObject({ purpose: "owner", server_capabilities: ["create_cube"] });
+      expect(runtime.maintenance.observeAuthorityState()).toMatchObject({ cubes: 0, roles: 0, grants: 0 });
+      const creation = await request(
+        server.origin,
+        await readFile(bootstrap.paths.caCertificate),
+        "/api/cubes",
+        JSON.stringify({
+          protocol_version: "1",
+          request_id: "create-1234",
+          payload: {
+            retry_key: "00000000-0000-4000-8000-000000000102",
+            name: "Offline cube",
+            template: "default",
+          },
+        }),
+        `Bearer ${clientCredential}`,
+      );
+      expect(creation.status).toBe(201);
+      const created = (JSON.parse(creation.body) as { payload: {
+        cube_id: string; default_worker_role_id: string;
+      } }).payload;
+      const cubeId = created.cube_id;
+      const roleId = created.default_worker_role_id;
 
       expect((await request(
         server.origin,
         await readFile(bootstrap.paths.caCertificate),
         "/api/protocol",
         undefined,
-        `Bearer ${payload.credential}`,
+        `Bearer ${clientCredential}`,
       )).status).toBe(200);
 
       const attachment = await request(
@@ -225,7 +292,7 @@ describe("offline operator flow", () => {
             retry_key: "00000000-0000-4000-8000-000000000013",
           },
         }),
-        `Bearer ${payload.credential}`,
+        `Bearer ${clientCredential}`,
       );
       expect(attachment.status).toBe(201);
       const attached = (JSON.parse(attachment.body) as {
@@ -251,7 +318,7 @@ describe("offline operator flow", () => {
           await readFile(bootstrap.paths.caCertificate),
           path,
           undefined,
-          `Bearer ${payload.credential}`,
+          `Bearer ${clientCredential}`,
         )).status).toBe(200);
       }
 
@@ -264,7 +331,7 @@ describe("offline operator flow", () => {
           request_id: "append-1234",
           payload: { message: "offline coordination" },
         }),
-        `Bearer ${payload.credential}`,
+        `Bearer ${clientCredential}`,
       );
       expect(append.status).toBe(201);
       const read = await request(
@@ -276,7 +343,7 @@ describe("offline operator flow", () => {
           request_id: "read-12345",
           payload: { cursor: null, limit: 10 },
         }),
-        `Bearer ${payload.credential}`,
+        `Bearer ${clientCredential}`,
         "PUT",
       );
       expect(read.status).toBe(200);
@@ -288,7 +355,7 @@ describe("offline operator flow", () => {
         await readFile(bootstrap.paths.caCertificate),
         `/api/cubes/${cubeId}/logs`,
         "x".repeat(DEFAULT_SERVICE_LIMITS.maxRequestBodyBytes + 1),
-        `Bearer ${payload.credential}`,
+        `Bearer ${clientCredential}`,
       );
       expect(oversized.status).toBe(413);
       expect((JSON.parse(oversized.body) as { error: { code: string } }).error.code)
@@ -298,7 +365,7 @@ describe("offline operator flow", () => {
         server.origin,
         await readFile(bootstrap.paths.caCertificate),
         `/api/cubes/${cubeId}/stream`,
-        `Bearer ${payload.credential}`,
+        `Bearer ${clientCredential}`,
       );
       authority.revokeClient(payload.client_id);
       await expect(Promise.race([
@@ -310,14 +377,14 @@ describe("offline operator flow", () => {
         await readFile(bootstrap.paths.caCertificate),
         "/api/protocol",
         undefined,
-        `Bearer ${payload.credential}`,
+        `Bearer ${clientCredential}`,
       )).status).toBe(401);
       expect((await request(
         server.origin,
         await readFile(bootstrap.paths.caCertificate),
         `/api/cubes/${cubeId}/stream`,
         undefined,
-        `Bearer ${payload.credential}`,
+        `Bearer ${clientCredential}`,
       )).status).toBe(401);
     } finally {
       await server.close();
@@ -339,6 +406,15 @@ async function withAuthority<T>(
     return operation(new CredentialAuthority(runtime.credentials, digester));
   } finally {
     digester.destroy();
+    runtime.close();
+  }
+}
+
+async function openScopedCubes(dataDirectory: string, principal: Principal): Promise<string[]> {
+  const runtime = await openStore({ path: join(dataDirectory, "borg.db") });
+  try {
+    return runtime.forPrincipal(principal).listCubes().map((cube) => cube.id);
+  } finally {
     runtime.close();
   }
 }

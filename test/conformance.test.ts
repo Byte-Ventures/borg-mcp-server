@@ -29,6 +29,13 @@ afterEach(async () => {
 });
 
 describe("borgmcp-shared server adapter", () => {
+  it("advertises the breaking retry-safe enrollment contract as shared 0.3.0", () => {
+    expect(createPart2ProtocolInfo(DEFAULT_SERVICE_LIMITS).package).toEqual({
+      name: "borgmcp-shared",
+      version: "0.3.0",
+    });
+  });
+
   it("passes the full forward conformance suite", async () => {
     const fixture = await conformanceEnvironment();
     try {
@@ -64,6 +71,15 @@ async function conformanceEnvironment(): Promise<{
   const principalCubes = new Map<string, string>();
   const invitations = new Map<string, string>();
   const enrolledClients = new Map<string, string>();
+  const principalCredentials = new Map<string, string>();
+  const createdByPrincipal = new Map<string, {
+    cube_id: string;
+    human_seat_role_id: string;
+    default_worker_role_id: string;
+    access: "manage";
+  }>();
+  const pendingCreateCapability = new Set<string>();
+  const recovery = authority.createRecoveryCredential();
   const material = await generate([{ name: "commonName", value: "localhost" }], {
     algorithm: "sha256",
     keyType: "ec",
@@ -90,7 +106,15 @@ async function conformanceEnvironment(): Promise<{
 
   const environment: ConformanceEnvironment = {
     admin: {
-      reset: async () => undefined,
+      reset: async () => {
+        runtime.maintenance.resetAuthorityState();
+        principalCubes.clear();
+        invitations.clear();
+        enrolledClients.clear();
+        principalCredentials.clear();
+        createdByPrincipal.clear();
+        pendingCreateCapability.clear();
+      },
       createPrincipal: async () => ({ id: randomUUID() }),
       createCube: async (name) => {
         const id = randomUUID();
@@ -99,12 +123,55 @@ async function conformanceEnvironment(): Promise<{
       },
       grantCube: async (principal, cube) => {
         principalCubes.set(principal.id, cube.id);
+        const clientId = enrolledClients.get(principal.id);
+        if (clientId !== undefined) {
+          runtime.maintenance.grantClientCube({ clientId, cubeId: cube.id, access: "manage" });
+        }
       },
-      issueSingleUseInvitation: async (principal) => {
-        const invitation = authority.createBootstrapInvitation(60_000);
+      grantCreateCubeCapability: async (principal) => {
+        const clientId = enrolledClients.get(principal.id);
+        if (clientId === undefined) pendingCreateCapability.add(principal.id);
+        else runtime.maintenance.grantCreateCubeCapability(clientId);
+      },
+      issueDroneSession: async (principal) => {
+        const clientId = enrolledClients.get(principal.id);
+        if (clientId === undefined) throw new Error("Principal is not enrolled.");
+        const cubeId = randomUUID();
+        const roleId = randomUUID();
+        runtime.maintenance.createCube({ id: cubeId, ownerId: clientId, name: "Session fixture", directive: "" });
+        runtime.maintenance.createRole({ id: roleId, cubeId, name: "Worker" });
+        runtime.maintenance.grantClientCube({ clientId, cubeId, access: "manage" });
+        return authority.attachSeat(runtime.forPrincipal(authority.authenticate(
+          `Bearer ${principalCredentials.get(principal.id) ?? ""}`,
+        )!), {
+          cubeId,
+          roleId,
+          retryKey: randomUUID(),
+        }).credential;
+      },
+      issueSingleUseInvitation: async (principal, purpose) => {
+        const invitation = purpose === "owner"
+          ? authority.createBootstrapInvitation(60_000)
+          : authority.createInvitation(recovery, 60_000);
+        if (invitation === null) throw new Error("Invitation creation failed.");
         invitations.set(invitation, principal.id);
         return invitation;
       },
+      observeAuthorityState: async () => runtime.maintenance.observeAuthorityState(),
+      inspectCreatedCube: async (creator, response) => {
+        const clientId = enrolledClients.get(creator.id);
+        if (clientId === undefined) throw new Error("Creator is not enrolled.");
+        return runtime.maintenance.inspectCreatedCube(clientId, {
+          cubeId: response.cube_id,
+          humanSeatRoleId: response.human_seat_role_id,
+          defaultWorkerRoleId: response.default_worker_role_id,
+          access: response.access,
+        });
+      },
+      inspectEnrollmentPrincipal: async (principal, responseClientId) => ({
+        response_client_matches: enrolledClients.get(principal.id) === responseClientId,
+        ...runtime.maintenance.inspectEnrollmentPrincipal(responseClientId),
+      }),
       revokePrincipal: async (principal) => {
         const clientId = enrolledClients.get(principal.id);
         if (clientId !== undefined) authority.revokeClient(clientId);
@@ -125,20 +192,38 @@ async function conformanceEnvironment(): Promise<{
         );
         if (result.status === 201) {
           const record = request as {
-            payload: { invitation: string };
+            payload: { invitation: string; client_credential: string };
           };
           const body = result.body as {
             payload: { client_id: string };
           };
           const principalId = invitations.get(record.payload.invitation);
           const cubeId = principalId === undefined ? undefined : principalCubes.get(principalId);
-          if (principalId !== undefined && cubeId !== undefined) {
+          if (principalId !== undefined) {
             enrolledClients.set(principalId, body.payload.client_id);
-            runtime.maintenance.grantClientCube({
-              clientId: body.payload.client_id,
-              cubeId,
-              access: "manage",
+            principalCredentials.set(principalId, record.payload.client_credential);
+            if (cubeId !== undefined) runtime.maintenance.grantClientCube({
+              clientId: body.payload.client_id, cubeId, access: "manage",
             });
+            if (pendingCreateCapability.has(principalId)) {
+              runtime.maintenance.grantCreateCubeCapability(body.payload.client_id);
+            }
+          }
+        }
+        return result;
+      },
+      createCube: async (credential, request) => {
+        const result = await transport.request("POST", "/api/cubes", JSON.stringify(request), credential);
+        if (result.status === 201 && credential !== null) {
+          const principalId = [...principalCredentials.entries()]
+            .find(([, candidate]) => candidate === credential)?.[0];
+          if (principalId !== undefined) {
+            createdByPrincipal.set(principalId, (result.body as { payload: {
+              cube_id: string;
+              human_seat_role_id: string;
+              default_worker_role_id: string;
+              access: "manage";
+            } }).payload);
           }
         }
         return result;

@@ -23,12 +23,17 @@ import { resolveBindOptions } from "./network-policy.js";
 import { operatorErrors, type OperatorErrorCode } from "./operator-error.js";
 import { parseStartOptions } from "./start-options.js";
 import { DEFAULT_STORAGE_LIMITS, openStore, type StorageLimits } from "./store.js";
+import type { CubeAccess } from "./store.js";
 
 export interface ServerService {
   readonly start: (args: readonly string[]) => Promise<void>;
   readonly setup?: () => Promise<BootstrapResult>;
   readonly rotateClient?: (clientId: string) => Promise<string>;
   readonly revokeClient?: (clientId: string) => Promise<void>;
+  readonly grantClient?: (clientId: string, cubeId: string, access: CubeAccess) => Promise<void>;
+  readonly ungrantClient?: (clientId: string, cubeId: string) => Promise<void>;
+  readonly createClientInvitation?: (recoveryCredential: string) => Promise<string>;
+  readonly replaceOwnerInvitation?: (recoveryCredential: string) => Promise<string>;
 }
 
 export interface ServerEnvironment {
@@ -342,8 +347,14 @@ function resolveSetupBindHost(environment: ServerEnvironment): string {
 
 export function createOfflineCredentialService(
   offlineDataDirectory: string,
-): Pick<Required<ServerService>, "rotateClient" | "revokeClient"> {
-  const withAuthority = async <T>(operation: (authority: CredentialAuthority) => T): Promise<T> => {
+): Pick<Required<ServerService>,
+  "rotateClient" | "revokeClient" | "grantClient" | "ungrantClient" |
+  "createClientInvitation" | "replaceOwnerInvitation"
+> {
+  const withAuthority = async <T>(operation: (
+    authority: CredentialAuthority,
+    runtime: Awaited<ReturnType<typeof openStore>>,
+  ) => T): Promise<T> => {
     const runtimeLock = await acquireRuntimeLock(offlineDataDirectory);
     let runtime: Awaited<ReturnType<typeof openStore>> | undefined;
     let digester: CredentialDigester | undefined;
@@ -352,7 +363,7 @@ export function createOfflineCredentialService(
       const digestKey = await loadDigestKey(join(offlineDataDirectory, "credential-digest.key"));
       digester = new CredentialDigester(digestKey);
       digestKey.fill(0);
-      return operation(new CredentialAuthority(runtime.credentials, digester));
+      return operation(new CredentialAuthority(runtime.credentials, digester), runtime);
     } finally {
       digester?.destroy();
       runtime?.close();
@@ -362,6 +373,28 @@ export function createOfflineCredentialService(
   return {
     rotateClient: (clientId) => withAuthority((authority) => authority.rotateClient(clientId)),
     revokeClient: (clientId) => withAuthority((authority) => authority.revokeClient(clientId)),
+    grantClient: (clientId, cubeId, access) => withAuthority((_authority, runtime) => {
+      if (!runtime.credentials.clientIsActive(clientId)) {
+        throw operatorErrors.CLIENT_NOT_FOUND;
+      }
+      runtime.maintenance.grantClientCube({ clientId, cubeId, access });
+    }),
+    ungrantClient: (clientId, cubeId) => withAuthority((_authority, runtime) => {
+      if (!runtime.credentials.clientIsActive(clientId)) throw operatorErrors.CLIENT_NOT_FOUND;
+      if (!runtime.maintenance.removeClientCubeGrant(clientId, cubeId)) {
+        throw operatorErrors.GRANT_NOT_FOUND;
+      }
+    }),
+    createClientInvitation: (recoveryCredential) => withAuthority((authority) => {
+      const invitation = authority.createInvitation(recoveryCredential, 15 * 60_000);
+      if (invitation === null) throw operatorErrors.RECOVERY_INVALID;
+      return invitation;
+    }),
+    replaceOwnerInvitation: (recoveryCredential) => withAuthority((authority) => {
+      const invitation = authority.replaceOwnerInvitation(recoveryCredential, 15 * 60_000);
+      if (invitation === null) throw operatorErrors.RECOVERY_INVALID;
+      return invitation;
+    }),
   };
 }
 

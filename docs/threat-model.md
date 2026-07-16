@@ -14,12 +14,26 @@ v1 scope.
 
 ## Assets and trust boundaries
 
-- The recovery credential creates short-lived enrollment invitations. Invitations create independent
-  client credentials. Client credentials can access only explicitly granted cubes and mint narrower,
-  expiring drone-session credentials for attached seats. Product role labels never grant authority.
+- The recovery credential creates short-lived purpose-bound enrollment invitations. Clients generate
+  and persist their own credential and retry key before exchange; exact credential-proven retries
+  return stable non-secret identity. The one owner invitation grants only persisted `create_cube`;
+  ordinary invitations grant no server capability or cube. Client credentials can access only
+  explicitly granted cubes and mint narrower, expiring drone-session credentials for attached seats.
+  Product role labels and cube owner metadata never grant authority.
+- Authenticated `POST /api/cubes` requires an active parent client with `create_cube`. It atomically
+  creates one cube, fixed human/default-worker roles, the creator's `manage` grant, and an idempotency
+  binding. Exact retries are non-mutating; ordinary clients and drone sessions are denied. Per-client
+  and server cube quotas bound growth.
 - Persisted credentials are keyed lookup and verifier digests, never plaintext. Recovery, invitation,
   client, and drone-session digests use separate HMAC domains. Rotation revokes prior client
-  credentials; revocation also invalidates child sessions.
+  credentials; revocation also invalidates child sessions. Unknown, expired, revoked, and
+  consumed-with-another-tuple invitation claims execute the same sentinel-row lookup, tuple checks,
+  and digest comparisons before returning the same public failure.
+- Client attach accepts an optional prior seat identity. A caller may reattach only its own un-evicted
+  drone in the target cube; foreign, evicted, and wrong-cube identities follow the ordinary authorized
+  mint path without disclosing why they were ineligible. Permanent per-client retry bindings include
+  the complete cube, role, and prior-seat tuple, so later fresh-key reattachment cannot erase or
+  repurpose an older retry key.
 - `credential-digest.key`, `server.key`, and `borg.db` are runtime secrets. They remain mode `0600`
   under an operator-controlled mode `0700` directory. The long-running service does not load
   `ca.key`. After setup, operators deploying on a LAN must move `ca.key` to offline storage that the
@@ -44,10 +58,10 @@ v1 scope.
   in shared logs. Runtime request headers, request bodies, credentials, and internal errors are never
   logged.
 - The CLI prints actionable stderr only for server-typed operator errors with static copy: malformed
-  start flags, bind/LAN policy, missing data/TLS prerequisites, offline lock state, unknown clients,
-  and invalid storage-bound environment settings. Unknown exceptions, fatal teardown, filesystem
-  paths, TLS/SQLite internals, credentials, tokens, and caller-controlled values always collapse to
-  `Server command failed.`
+  start flags, bind/LAN policy, missing data/TLS prerequisites, symlinked data paths, offline lock
+  state, unknown clients, and invalid storage-bound environment settings. Unknown exceptions, fatal
+  teardown, filesystem paths, TLS/SQLite internals, credentials, tokens, and caller-controlled values
+  always collapse to `Server command failed.`
 
 ## Network and transport boundary
 
@@ -101,15 +115,17 @@ v1 scope.
 
 | Remote growth surface | Capacity-gated mutation |
 | --- | --- |
-| Enrollment exchange | Invitation consumption plus client and client-credential insertion |
-| Client attach/retry | Drone/session/credential insertion and prior-session revocation |
+| Enrollment exchange | Purpose-bound invitation claim, client-generated credential digest, retry binding, and owner capability insertion |
+| Cube creation | Cube, two fixed roles, creator manage grant, and retry-result binding |
+| Client attach/retry | Permanent retry binding, eligible prior-seat reattachment or drone insertion, session/credential insertion, and prior-session revocation |
 | Cube directive update | Directive replacement and SQLite index/page growth |
 | Activity append | Log/recipient insertion, cursor tombstone insertion, and pruning cascades |
 | Activity acknowledgement/claim | Acknowledgement insertion |
 | Decision ratification | Active-decision supersession and immutable history insertion |
 
 - Network routes map only to fixed coordination operations. Production source contains no subprocess,
-  shell, dynamic-code, remote-tool, outbound-cloud, or arbitrary SQL execution surface.
+  shell, dynamic-code, remote-tool, outbound-cloud, or arbitrary SQL execution surface. Offline
+  bootstrap is also exercised with TCP, UDP, and `fetch` egress actively intercepted.
 
 ## Acceptance matrix
 
@@ -119,9 +135,9 @@ v1 scope.
 | Loopback default, explicit LAN consent, no discovery | `network-policy.ts`, `start-options.ts`, bind negatives, and static discovery boundary test. |
 | Verified TLS for non-loopback | Exact SAN/EKU/validity checks plus mandatory bounded root/intermediate path verification for LAN mode; trusted/untrusted/direct/intermediate LAN certificate tests. |
 | Authentication on all REST and SSE | All application REST/SSE routes authenticate; invitation exchange is one-time authenticated; the ratified shared-contract health exception is data-free; missing/invalid SSE/route matrix is release-gating. |
-| Hashed per-client rotate/revoke tokens | Digest-only SQLite schema, atomic rotation/revocation, offline CLI flow, plaintext-absence and revocation tests. |
+| Hashed per-client rotate/revoke tokens | Digest-only SQLite schema, atomic rotation/revocation, offline CLI flow, rejection timing-class regression, generated-file/config/database-sidecar/backup-copy plaintext scans, and revocation tests. |
 | Rate, body, connection, and storage limits | Fair per-address and parent-client request rates plus handshake, connection, per-verified-credential SSE, activity-retention, database-size, and disk-reserve bounds beneath global caps; bounded state, `429`, and `CAPACITY_EXCEEDED`; body/header/socket/deadline/pruning/capacity tests. |
-| No remote tool or subprocess execution | Fixed route surface and static production-source boundary tests. |
+| No remote tool or subprocess execution | Fixed route surface, static production-source boundary tests, and actively intercepted offline-bootstrap egress test. |
 | Threat model | This document, reviewed with the exact release commit. |
 | Negative bind/auth/CORS/log-secret tests | Network policy, HTTPS, operator flow, credential, cross-cube, and runtime-boundary suites. |
 

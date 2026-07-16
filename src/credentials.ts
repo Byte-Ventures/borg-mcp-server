@@ -24,13 +24,15 @@ type CredentialPurpose = "recovery" | "invitation" | "client" | "drone-session";
 
 export interface EnrollmentRequest {
   readonly invitation: string;
+  readonly retryKey: string;
+  readonly clientCredential: string;
   readonly clientName?: string;
 }
 
 export interface EnrollmentResponse {
+  readonly purpose: "owner" | "client";
   readonly clientId: string;
-  readonly credential: string;
-  readonly credentialExpiresAt: null;
+  readonly serverCapabilities: readonly [] | readonly ["create_cube"];
 }
 
 export interface SeatAttachResponse extends SeatAttachRecord {
@@ -152,26 +154,34 @@ export class CredentialAuthority {
   }
 
   createBootstrapInvitation(ttlMs: number): string {
-    return this.#createInvitation(ttlMs);
+    return this.#createInvitation("owner", ttlMs);
   }
 
   createInvitation(recoveryCredential: string, ttlMs: number): string | null {
     const digest = safeDigest(this.#digester, recoveryCredential, "recovery");
     const stored = this.#store.findRecoveryCredential(digest.lookup);
     if (!this.#digester.verify(recoveryCredential, "recovery", stored?.verifier)) return null;
-    return this.#createInvitation(ttlMs);
+    return this.#createInvitation("client", ttlMs);
   }
 
-  #createInvitation(ttlMs: number): string {
+  replaceOwnerInvitation(recoveryCredential: string, ttlMs: number): string | null {
+    const digest = safeDigest(this.#digester, recoveryCredential, "recovery");
+    const stored = this.#store.findRecoveryCredential(digest.lookup);
+    if (!this.#digester.verify(recoveryCredential, "recovery", stored?.verifier)) return null;
+    return this.#createInvitation("owner", ttlMs);
+  }
+
+  #createInvitation(purpose: "owner" | "client", ttlMs: number): string {
     if (!Number.isSafeInteger(ttlMs) || ttlMs < 1_000 || ttlMs > 86_400_000) {
       throw new Error("Invitation TTL must be an integer from 1000 to 86400000 milliseconds.");
     }
     const secret = generateSecret();
-    this.#store.createInvitation(
-      randomUUID(),
-      this.#digester.digest(secret, "invitation"),
-      new Date(this.#clock().getTime() + ttlMs).toISOString(),
-    );
+    this.#store.createInvitation({
+      id: randomUUID(),
+      digest: this.#digester.digest(secret, "invitation"),
+      expiresAt: new Date(this.#clock().getTime() + ttlMs).toISOString(),
+      purpose,
+    });
     return secret;
   }
 
@@ -183,19 +193,20 @@ export class CredentialAuthority {
       "invitation",
       stored?.verifier,
     );
-    if (!verified || stored?.expiresAt === undefined || stored.consumedAt != null ||
-        stored.expiresAt <= this.#clock().toISOString()) return null;
-
-    const credential = generateSecret();
     const clientId = randomUUID();
-    const consumed = this.#store.consumeInvitation({
-      invitationId: stored.id,
+    const claimed = this.#store.claimInvitation({
+      invitationId: stored?.id ?? "00000000-0000-4000-8000-000000000000",
       clientId,
-      clientName: request.clientName ?? "Local client",
+      requestedClientName: request.clientName ?? null,
+      retryKey: request.retryKey,
       credentialId: randomUUID(),
-      credentialDigest: this.#digester.digest(credential, "client"),
+      credentialDigest: safeDigest(this.#digester, request.clientCredential, "client"),
     });
-    return consumed ? { clientId, credential, credentialExpiresAt: null } : null;
+    return !verified || stored?.expiresAt === undefined || claimed === null ? null : {
+      purpose: claimed.purpose,
+      clientId: claimed.clientId,
+      serverCapabilities: claimed.serverCapabilities,
+    };
   }
 
   authenticate(authorization: string | undefined): Principal | null {
@@ -236,7 +247,12 @@ export class CredentialAuthority {
 
   attachSeat(
     store: ScopedStore,
-    request: { readonly cubeId: string; readonly roleId: string; readonly retryKey: string },
+    request: {
+      readonly cubeId: string;
+      readonly roleId: string;
+      readonly retryKey: string;
+      readonly priorDroneId?: string;
+    },
   ): SeatAttachResponse {
     const credential = generateSecret();
     const record = store.attachSeat({

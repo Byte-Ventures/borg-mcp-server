@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,7 +9,7 @@ import {
   droneSessionPrincipal,
   operatorPrincipal,
 } from "../src/principal.js";
-import { CredentialAuthority, CredentialDigester } from "../src/credentials.js";
+import { CredentialAuthority, CredentialDigester, generateSecret } from "../src/credentials.js";
 import {
   CursorExpiredError,
   ScopedStoreError,
@@ -362,7 +363,12 @@ describe("Principal to ScopedStore isolation", () => {
         credentialDigest: { lookup: Buffer.alloc(16), verifier: Buffer.alloc(32) },
         expiresAt: "2026-07-15T12:00:00.000Z",
       }),
-      () => authority.exchangeInvitation({ invitation, clientName: "blocked enrollment" }),
+      () => authority.exchangeInvitation({
+        invitation,
+        retryKey: randomUUID(),
+        clientCredential: generateSecret(),
+        clientName: "blocked enrollment",
+      }),
     ];
     for (const mutation of denied) expect(mutation).toThrow(StorageCapacityError);
 
@@ -371,7 +377,12 @@ describe("Principal to ScopedStore isolation", () => {
     expect(client.listDecisions(ids.cubeA)).toEqual([]);
     expect(client.listDrones(ids.cubeA)).toEqual(beforeDrones);
     capacity = { databaseBytes: 0, freeDiskBytes: 2_000_000 };
-    expect(authority.exchangeInvitation({ invitation, clientName: "allowed enrollment" })).not.toBeNull();
+    expect(authority.exchangeInvitation({
+      invitation,
+      retryKey: randomUUID(),
+      clientCredential: generateSecret(),
+      clientName: "allowed enrollment",
+    })).not.toBeNull();
     digester.destroy();
   });
 

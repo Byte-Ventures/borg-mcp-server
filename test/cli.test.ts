@@ -122,6 +122,42 @@ describe("runCli", () => {
     expect(await runCli(["owner-invite", recovery], service, io)).toBe(1);
   });
 
+  it("prints the resolved cube, full ID, effective grant, and capability summary", async () => {
+    const cubeId = "00000000-0000-4000-8000-000000000042";
+    const createClientInvitation = vi.fn().mockResolvedValue({
+      invitation: "i".repeat(43),
+      cubeId,
+      cubeName: "release-tooling",
+      access: "write",
+    });
+    const io = {
+      ...createIo(),
+      readSecret: vi.fn().mockResolvedValue("r".repeat(43)),
+    } satisfies CliIo;
+    const service: ServerService = { start: vi.fn(), createClientInvitation };
+
+    expect(await runCli(["client-invite", "release-tooling"], service, io)).toBe(0);
+    expect(createClientInvitation).toHaveBeenCalledWith(
+      "r".repeat(43),
+      "release-tooling",
+      undefined,
+    );
+    expect(io.stdout).toHaveBeenCalledWith(
+      `Cube: "release-tooling" (${cubeId})\n` +
+      "Grant: write (coordinate - attach, read, post, acknowledge, and receive directed wakes)\n" +
+      `Client enrollment invitation (single-use, shown once): ${"i".repeat(43)}`,
+    );
+
+    expect(await runCli(
+      ["client-invite", cubeId, "--access", "manage"],
+      service,
+      io,
+    )).toBe(0);
+    expect(createClientInvitation).toHaveBeenLastCalledWith("r".repeat(43), cubeId, "manage");
+    expect(await runCli(["client-invite", "release-tooling", "--access", "owner"], service, io))
+      .toBe(1);
+  });
+
   it("rejects malformed offline credential commands without exposing a service", async () => {
     const service: ServerService = {
       start: vi.fn(),

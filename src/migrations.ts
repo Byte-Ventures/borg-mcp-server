@@ -325,6 +325,31 @@ export const STORE_MIGRATIONS: readonly Migration[] = Object.freeze([
         ON roles (cube_id) WHERE is_default = 1;
     `,
   },
+  {
+    version: 8,
+    name: "cube_scoped_invitations",
+    sql: `
+      ALTER TABLE enrollment_invitations ADD COLUMN cube_id TEXT;
+      ALTER TABLE enrollment_invitations ADD COLUMN access TEXT
+        CHECK (access IS NULL OR access IN ('read', 'write', 'manage'));
+
+      CREATE TRIGGER enrollment_invitations_scope_insert
+      BEFORE INSERT ON enrollment_invitations
+      WHEN (NEW.cube_id IS NULL) <> (NEW.access IS NULL)
+        OR (NEW.cube_id IS NOT NULL AND NEW.purpose <> 'client')
+      BEGIN
+        SELECT RAISE(ABORT, 'invalid invitation cube scope');
+      END;
+
+      CREATE TRIGGER enrollment_invitations_scope_update
+      BEFORE UPDATE OF cube_id, access, purpose ON enrollment_invitations
+      WHEN (NEW.cube_id IS NULL) <> (NEW.access IS NULL)
+        OR (NEW.cube_id IS NOT NULL AND NEW.purpose <> 'client')
+      BEGIN
+        SELECT RAISE(ABORT, 'invalid invitation cube scope');
+      END;
+    `,
+  },
 ]);
 
 interface AppliedMigrationRow {

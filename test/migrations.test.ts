@@ -34,7 +34,7 @@ describe("SQLite migrations", () => {
     expect(first.diagnostics()).toEqual({
       journalMode: "wal",
       foreignKeys: true,
-      schemaVersions: [1, 2, 3, 4, 5, 6, 7],
+      schemaVersions: [1, 2, 3, 4, 5, 6, 7, 8],
     });
     expect((await stat(join(directory, "data"))).mode & 0o777).toBe(0o700);
     expect((await stat(databasePath)).mode & 0o777).toBe(0o600);
@@ -43,7 +43,7 @@ describe("SQLite migrations", () => {
     first.close();
 
     const second = await openStore({ path: databasePath });
-    expect(second.diagnostics().schemaVersions).toEqual([1, 2, 3, 4, 5, 6, 7]);
+    expect(second.diagnostics().schemaVersions).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
     second.close();
     await expect(access(databasePath)).resolves.toBeUndefined();
   });
@@ -158,6 +158,40 @@ describe("SQLite migrations", () => {
       drone_id: droneId,
       prior_drone_id: null,
     });
+    database.close();
+  });
+
+  it("adds nullable client-only cube invitation scope without changing existing invitations", () => {
+    const database = new DatabaseSync(":memory:");
+    applyMigrations(database, STORE_MIGRATIONS.slice(0, 7));
+    database.prepare(`
+      INSERT INTO enrollment_invitations (
+        id, lookup_digest, verifier_digest, expires_at, created_at, purpose, owner_epoch
+      ) VALUES (?, ?, ?, ?, ?, 'client', NULL)
+    `).run(
+      "00000000-0000-4000-8000-000000000021",
+      Buffer.alloc(16, 1),
+      Buffer.alloc(32, 2),
+      "2026-07-16T01:00:00.000Z",
+      "2026-07-16T00:00:00.000Z",
+    );
+
+    applyMigrations(database, STORE_MIGRATIONS);
+
+    expect(database.prepare("SELECT cube_id, access FROM enrollment_invitations").get())
+      .toEqual({ cube_id: null, access: null });
+    expect(() => database.prepare(`
+      UPDATE enrollment_invitations SET cube_id = ? WHERE id = ?
+    `).run(
+      "00000000-0000-4000-8000-000000000022",
+      "00000000-0000-4000-8000-000000000021",
+    )).toThrow("invalid invitation cube scope");
+    expect(() => database.prepare(`
+      UPDATE enrollment_invitations SET cube_id = ?, access = 'read', purpose = 'owner' WHERE id = ?
+    `).run(
+      "00000000-0000-4000-8000-000000000022",
+      "00000000-0000-4000-8000-000000000021",
+    )).toThrow("invalid invitation cube scope");
     database.close();
   });
 

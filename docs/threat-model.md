@@ -16,9 +16,11 @@ v1 scope.
 
 - The recovery credential creates short-lived purpose-bound enrollment invitations. Clients generate
   and persist their own credential and retry key before exchange; exact credential-proven retries
-  return stable non-secret identity. The one owner invitation grants only persisted `create_cube`;
-  ordinary invitations grant no server capability or cube. Client credentials can access only
-  explicitly granted cubes and mint narrower, expiring drone-session credentials for attached seats.
+  return stable non-secret identity. The one owner invitation grants only persisted `create_cube`.
+  A plain client invitation grants no server capability or cube; a cube-scoped client invitation
+  carries exactly one predeclared `read`, `write`, or `manage` grant and still grants no server
+  capability. Client credentials can access only explicitly granted cubes and mint narrower,
+  expiring drone-session credentials for attached seats.
   Product role labels and cube owner metadata never grant authority.
 - Authenticated `POST /api/cubes` requires an active parent client with `create_cube`. It atomically
   creates one cube, fixed human/default-worker roles, the creator's `manage` grant, and an idempotency
@@ -53,12 +55,18 @@ v1 scope.
   an offline database change.
 - Client and pre-claim owner invitation minting remain local CLI operations with no network route, but
   may execute beside a live server because they invalidate no live authority. Client minting adds one
-  purpose-bound digest row; owner replacement revokes prior unclaimed owner invitations and advances the
-  owner epoch. A live-path connection never migrates: it requires the exact migration version/name/checksum
+  purpose-bound digest row, optionally with a cube ID and access snapshot; owner replacement revokes prior
+  unclaimed owner invitations and advances the owner epoch. Cube selection and invitation insertion share
+  one immediate transaction: full canonical IDs resolve directly, names require one exact case-sensitive
+  match, and unknown or duplicate selectors create no invitation. A live-path connection never migrates:
+  it requires the exact migration version/name/checksum
   chain used by the running CLI and fails closed on mismatch. A separate short-lived invitation-mutation
   lock prevents concurrent invitation commands and
   excludes setup, reinitialization, rotation, revocation, and grant changes. The live server observes the
-  committed WAL write on its next enrollment read without restart; SQLite contention fails closed.
+  committed WAL write on its next enrollment read without restart; SQLite contention fails closed. Scoped
+  claim inserts the client, credential digest, one cube grant, retry binding, and invitation consumption in
+  one immediate transaction. A cube removed after mint but before claim produces the same rejected
+  enrollment result with no partial client or grant.
 - Setup acquires the same PID-bound runtime lock before inspecting or changing identity state. It
   refuses any existing or partial installation by default; only the explicit destructive
   `setup --reinitialize` path removes the known identity/database files, and it can never run while
@@ -80,9 +88,10 @@ v1 scope.
   counts, and canonical IDs only. Authorization headers, credentials, invitations, recovery material,
   request/message/decision bodies, tokens, raw paths, exceptions, and arbitrary metadata never enter the
   output schema; no network log sink or remote level-change route exists.
-- The CLI prints actionable stderr only for server-typed operator errors with static copy: malformed
+- The CLI prints actionable stderr only for server-typed operator errors with bounded copy: malformed
   start flags, bind/LAN policy, missing data/TLS prerequisites, symlinked data paths, offline lock
-  state, unknown clients, and invalid storage-bound environment settings. Unknown exceptions, fatal
+  state, unknown clients, invitation selector failures, and invalid storage-bound environment settings.
+  Duplicate-name copy may contain only validated canonical candidate cube IDs. Unknown exceptions, fatal
   teardown, filesystem paths, TLS/SQLite internals, credentials, tokens, and caller-controlled values
   always collapse to `Server command failed.`
 
@@ -138,7 +147,7 @@ v1 scope.
 
 | Remote growth surface | Capacity-gated mutation |
 | --- | --- |
-| Enrollment exchange | Purpose-bound invitation claim, client-generated credential digest, retry binding, and owner capability insertion |
+| Enrollment exchange | Purpose-bound invitation claim, client-generated credential digest, retry binding, optional scoped cube-grant insertion, and owner capability insertion |
 | Cube creation | Cube, two fixed roles, creator manage grant, and retry-result binding |
 | Client attach/retry | Permanent retry binding, eligible prior-seat reattachment or drone insertion, session/credential insertion, and prior-session revocation |
 | Cube directive update | Directive replacement and SQLite index/page growth |

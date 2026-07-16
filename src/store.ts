@@ -172,6 +172,25 @@ export interface StoredSecretDigest extends DigestPair {
 export interface StoredInvitationDigest extends StoredSecretDigest {
   readonly purpose: "owner" | "client";
   readonly ownerEpoch: number | null;
+  readonly cubeId: string | null;
+  readonly access: CubeAccess | null;
+}
+
+export interface InvitationCubeScope {
+  readonly cubeId: string;
+  readonly cubeName: string;
+  readonly access: CubeAccess;
+}
+
+export class InvitationCubeNotFoundError extends Error {}
+
+export class InvitationCubeAmbiguousError extends Error {
+  readonly candidateIds: readonly string[];
+
+  constructor(candidateIds: readonly string[]) {
+    super("Cube name is ambiguous.");
+    this.candidateIds = Object.freeze([...candidateIds]);
+  }
 }
 
 export interface EnrollmentClaimResult {
@@ -196,7 +215,9 @@ export interface CredentialStore {
     readonly digest: DigestPair;
     readonly expiresAt: string;
     readonly purpose: "owner" | "client";
-  }) => void;
+    readonly cubeSelector?: { readonly kind: "id" | "name"; readonly value: string };
+    readonly access?: CubeAccess;
+  }) => InvitationCubeScope | null;
   readonly findInvitation: (lookup: Buffer) => StoredInvitationDigest | null;
   readonly claimInvitation: (input: {
     readonly invitationId: string;
@@ -1822,12 +1843,39 @@ class SqliteCredentialStore implements CredentialStore {
     readonly digest: DigestPair;
     readonly expiresAt: string;
     readonly purpose: "owner" | "client";
-  }): void {
+    readonly cubeSelector?: { readonly kind: "id" | "name"; readonly value: string };
+    readonly access?: CubeAccess;
+  }): InvitationCubeScope | null {
     assertCanonicalUuid(input.id, "Invitation id");
     validateDigest(input.digest);
     validateTimestamp(input.expiresAt);
     this.#database.exec("BEGIN IMMEDIATE");
     try {
+      let scope: InvitationCubeScope | null = null;
+      if (input.cubeSelector !== undefined) {
+        if (input.purpose !== "client" || input.access === undefined) {
+          throw new Error("Only client invitations may carry a complete cube scope.");
+        }
+        if (input.access !== "read" && input.access !== "write" && input.access !== "manage") {
+          throw new Error("Unknown cube access grant.");
+        }
+        const rows = input.cubeSelector.kind === "id"
+          ? this.#database.prepare("SELECT id, name FROM cubes WHERE id = ?").all(input.cubeSelector.value)
+          : this.#database.prepare("SELECT id, name FROM cubes WHERE name = ? ORDER BY id").all(input.cubeSelector.value);
+        if (rows.length === 0) throw new InvitationCubeNotFoundError();
+        if (rows.length > 1) {
+          throw new InvitationCubeAmbiguousError(rows.map((row) => requiredText(row, "id")));
+        }
+        const cubeId = requiredText(rows[0]!, "id");
+        assertCanonicalUuid(cubeId, "Resolved cube id");
+        scope = {
+          cubeId,
+          cubeName: requiredText(rows[0]!, "name"),
+          access: input.access,
+        };
+      } else if (input.access !== undefined) {
+        throw new Error("Invitation access requires a cube selector.");
+      }
       let ownerEpoch: number | null = null;
       if (input.purpose === "owner") {
         const state = this.#database.prepare(
@@ -1852,13 +1900,15 @@ class SqliteCredentialStore implements CredentialStore {
       }
       this.#database.prepare(`
         INSERT INTO enrollment_invitations (
-          id, lookup_digest, verifier_digest, expires_at, created_at, purpose, owner_epoch
-        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+          id, lookup_digest, verifier_digest, expires_at, created_at, purpose, owner_epoch,
+          cube_id, access
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         input.id, input.digest.lookup, input.digest.verifier, input.expiresAt,
-        this.#now(), input.purpose, ownerEpoch,
+        this.#now(), input.purpose, ownerEpoch, scope?.cubeId ?? null, scope?.access ?? null,
       );
       this.#database.exec("COMMIT");
+      return scope;
     } catch (error) {
       try { this.#database.exec("ROLLBACK"); } catch { /* Preserve the original failure. */ }
       throw error;
@@ -1875,7 +1925,7 @@ class SqliteCredentialStore implements CredentialStore {
              COALESCE(invitation.expires_at, '') AS expires_at,
              invitation.consumed_at, invitation.revoked_at,
              COALESCE(invitation.purpose, 'client') AS purpose,
-             invitation.owner_epoch
+             invitation.owner_epoch, invitation.cube_id, invitation.access
       FROM (SELECT 1) AS seed
       LEFT JOIN enrollment_invitations AS invitation ON invitation.lookup_digest = ?
     `).get(lookup);
@@ -1906,7 +1956,8 @@ class SqliteCredentialStore implements CredentialStore {
                COALESCE(invitation.purpose, 'client') AS purpose,
                invitation.owner_epoch,
                COALESCE(invitation.expires_at, '') AS expires_at,
-               invitation.consumed_at, invitation.revoked_at
+               invitation.consumed_at, invitation.revoked_at,
+               invitation.cube_id, invitation.access
         FROM (SELECT 1) AS seed
         LEFT JOIN enrollment_invitations AS invitation ON invitation.id = ?
       `).get(input.invitationId);
@@ -1954,6 +2005,12 @@ class SqliteCredentialStore implements CredentialStore {
       const ownerEpoch = invitation["owner_epoch"] === null
         ? null
         : requiredInteger(invitation, "owner_epoch");
+      const cubeId = nullableText(invitation, "cube_id");
+      const accessValue = nullableText(invitation, "access");
+      const access = accessValue === null ? null : cubeAccess(accessValue);
+      if ((cubeId === null) !== (access === null) || (cubeId !== null && purpose !== "client")) {
+        throw new Error("Invalid invitation cube scope.");
+      }
       if (purpose === "owner") {
         const state = this.#database.prepare(`
           SELECT epoch, claimed_client_id FROM owner_enrollment_state WHERE singleton = 1
@@ -1963,6 +2020,10 @@ class SqliteCredentialStore implements CredentialStore {
           this.#database.exec("ROLLBACK");
           return null;
         }
+      }
+      if (cubeId !== null && this.#database.prepare("SELECT 1 FROM cubes WHERE id = ?").get(cubeId) === undefined) {
+        this.#database.exec("ROLLBACK");
+        return null;
       }
       this.#capacityGuard.assertCanGrow(Buffer.byteLength(input.requestedClientName ?? "") + 8_192);
       this.#database.prepare(
@@ -1987,6 +2048,13 @@ class SqliteCredentialStore implements CredentialStore {
           VALUES (?, 'create_cube', ?)
         `).run(input.clientId, now);
         this.#mutationHook?.("enrollment.insert-capability");
+      }
+      if (cubeId !== null && access !== null) {
+        this.#database.prepare(`
+          INSERT INTO client_cube_grants (client_id, cube_id, access, created_at)
+          VALUES (?, ?, ?, ?)
+        `).run(input.clientId, cubeId, access, now);
+        this.#mutationHook?.("enrollment.insert-grant");
       }
       this.#database.prepare(`
         INSERT INTO enrollment_claims (
@@ -2442,7 +2510,20 @@ function storedInvitationDigest(row: Record<string, unknown>): StoredInvitationD
   }
   const epochValue = row["owner_epoch"];
   const ownerEpoch = epochValue === null ? null : requiredInteger(row, "owner_epoch");
-  return { ...digest, purpose, ownerEpoch };
+  const cubeId = nullableText(row, "cube_id");
+  const accessValue = nullableText(row, "access");
+  const access = accessValue === null ? null : cubeAccess(accessValue);
+  if ((cubeId === null) !== (access === null) || (cubeId !== null && purpose !== "client")) {
+    throw new Error("Database contains invalid invitation cube scope.");
+  }
+  return { ...digest, purpose, ownerEpoch, cubeId, access };
+}
+
+function cubeAccess(value: string): CubeAccess {
+  if (value !== "read" && value !== "write" && value !== "manage") {
+    throw new Error("Database contains invalid cube access.");
+  }
+  return value;
 }
 
 function enrollmentClaimResult(

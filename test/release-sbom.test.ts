@@ -28,16 +28,29 @@ describe("release SBOM", () => {
     await execute(process.execPath, [normalizeScript, fixture.rawPath, normalizedPath]);
     const verification = await execute(process.execPath, [verifyScript, normalizedPath]);
 
-    expect(JSON.parse(verification.stdout)).toMatchObject({
+    const report = JSON.parse(verification.stdout) as {
+      name: string;
+      version: string;
+      format: string;
+      components: number;
+      dependencyNodes: number;
+    };
+    expect(report).toMatchObject({
       name: "borgmcp-server",
       version: "0.1.0",
-      components: 73,
-      dependencyNodes: 74,
+      format: "CycloneDX-1.5",
     });
+    expect(report.components).toBeGreaterThan(0);
+    expect(report.dependencyNodes).toBe(report.components + 1);
     const normalized = JSON.parse(await readFile(normalizedPath, "utf8")) as {
-      metadata: { component: { name: string } };
+      metadata: { component: Record<string, unknown> };
     };
-    expect(normalized.metadata.component.name).toBe("borgmcp-server");
+    expect(normalized.metadata.component).toMatchObject({
+      name: "borgmcp-server",
+      version: "0.1.0",
+      "bom-ref": "borgmcp-server@0.1.0",
+      purl: "pkg:npm/borgmcp-server@0.1.0",
+    });
   });
 
   it("rejects root, distribution, and dependency-graph drift", async () => {

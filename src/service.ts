@@ -11,6 +11,7 @@ import {
 } from "./bootstrap.js";
 import { CredentialAuthority, CredentialDigester } from "./credentials.js";
 import { CoordinationApi } from "./coordination-api.js";
+import { createDebugLogger, disabledDebugLogger } from "./debug-log.js";
 import { createEnrollmentExchange } from "./enrollment.js";
 import {
   DEFAULT_SERVICE_LIMITS,
@@ -63,6 +64,7 @@ interface ServiceDependencies {
   readonly startServer: (options: HttpsServerOptions) => Promise<RunningServer>;
   readonly onStarted: (origin: string) => void;
   readonly waitForShutdown: (server: RunningServer, signal?: AbortSignal) => Promise<void>;
+  readonly debugOutput?: (line: string) => void;
   readonly installShutdownHandlers?: () => { readonly signal: AbortSignal; readonly dispose: () => void };
   readonly openStore?: typeof openStore;
   readonly onStartupPhase?: (
@@ -100,17 +102,27 @@ export function createNodeServerService(dependencies: ServiceDependencies): Serv
   return {
     async start(args): Promise<void> {
       const shutdown = dependencies.installShutdownHandlers?.();
-      let bind: ReturnType<typeof parseStartOptions>;
+      let bind: ReturnType<typeof parseStartOptions>["bind"];
+      let debugLogger = disabledDebugLogger;
       let dataDirectory: string | undefined;
       let storageLimits: StorageLimits;
       try {
         throwIfShutdown(shutdown?.signal);
         await dependencies.onStartupPhase?.("pre-lock");
         throwIfShutdown(shutdown?.signal);
-        bind = parseStartOptions(args);
-        const bindMode = resolveBindOptions(bind).mode;
+        const parsed = parseStartOptions(args);
+        bind = parsed.bind;
+        debugLogger = createDebugLogger(parsed.logLevel === "debug" ? dependencies.debugOutput : undefined);
+        const resolvedBind = resolveBindOptions(bind);
+        const bindMode = resolvedBind.mode;
         dataDirectory = dependencies.environment.BORG_SERVER_DATA_DIR;
         storageLimits = resolveStorageLimits(dependencies.environment);
+        debugLogger.emit({
+          event: "startup",
+          bindMode,
+          port: resolvedBind.port,
+          dataDirectory: dataDirectory === undefined ? "tls_only" : "configured",
+        });
         if (bindMode === "lan" && dataDirectory !== undefined) {
           await assertLanCaKeyOffline(dataDirectory);
           throwIfShutdown(shutdown?.signal);
@@ -178,8 +190,14 @@ export function createNodeServerService(dependencies: ServiceDependencies): Serv
           } finally {
             digestKey.fill(0);
           }
-          authority = new CredentialAuthority(authRuntime.credentials, digester);
-          coordinationApi = new CoordinationApi(authRuntime, authority);
+          authority = new CredentialAuthority(
+            authRuntime.credentials,
+            digester,
+            () => new Date(),
+            undefined,
+            debugLogger,
+          );
+          coordinationApi = new CoordinationApi(authRuntime, authority, debugLogger);
         }
         await dependencies.onStartupPhase?.("pre-listen");
         throwIfShutdown(shutdown?.signal);
@@ -206,6 +224,7 @@ export function createNodeServerService(dependencies: ServiceDependencies): Serv
           ...(coordinationApi === undefined
             ? {}
             : { handleCoordination: (request) => coordinationApi.handle(request) }),
+          debugLogger,
         });
         throwIfShutdown(shutdown?.signal);
       } catch (error) {
@@ -226,6 +245,7 @@ export function createNodeServerService(dependencies: ServiceDependencies): Serv
       try {
         throwIfShutdown(shutdown?.signal);
         dependencies.onStarted(running.origin);
+        debugLogger.emit({ event: "lifecycle", action: "listening" });
         await dependencies.waitForShutdown(running, shutdown?.signal);
       } catch (error) {
         failed = true;
@@ -233,6 +253,7 @@ export function createNodeServerService(dependencies: ServiceDependencies): Serv
       }
       try {
         await teardownRuntime({ running, authRuntime, digester, runtimeLock });
+        debugLogger.emit({ event: "lifecycle", action: "stopped" });
       } catch (cleanupError) {
         shutdown?.dispose();
         throw fatalTeardownError(failed ? failure : undefined, cleanupError);
@@ -338,6 +359,7 @@ const startOnlyService = createNodeServerService({
     return handlers;
   },
   waitForShutdown,
+  debugOutput: (line) => console.error(line),
 });
 export const nodeServerService: ServerService = {
   start: startOnlyService.start,

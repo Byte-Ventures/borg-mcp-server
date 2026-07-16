@@ -67,6 +67,11 @@ v1 scope.
   secret-output exceptions: operators must use a private terminal and must not capture command output
   in shared logs. Runtime request headers, request bodies, credentials, and internal errors are never
   logged.
+- Operator debug diagnostics are disabled by default and can be enabled only for one local process start.
+  A central closed-schema projection writes structured records to stderr and accepts operational enums,
+  counts, and canonical IDs only. Authorization headers, credentials, invitations, recovery material,
+  request/message/decision bodies, tokens, raw paths, exceptions, and arbitrary metadata never enter the
+  output schema; no network log sink or remote level-change route exists.
 - The CLI prints actionable stderr only for server-typed operator errors with static copy: malformed
   start flags, bind/LAN policy, missing data/TLS prerequisites, symlinked data paths, offline lock
   state, unknown clients, and invalid storage-bound environment settings. Unknown exceptions, fatal

@@ -6,6 +6,7 @@ import { createHash, X509Certificate } from "node:crypto";
 import { resolveBindOptions, type BindOptionsInput } from "./network-policy.js";
 import type { CoordinationRequest, CoordinationResponse } from "./coordination-api.js";
 import type { Principal } from "./principal.js";
+import { disabledDebugLogger, type DebugLogger, type DebugRoute } from "./debug-log.js";
 
 export interface ProtocolInfoDocument {
   readonly protocol_version: string;
@@ -74,6 +75,7 @@ export interface RequestHandlerContext {
     signal: AbortSignal,
   ) => Promise<Principal | "missing" | "invalid" | "revoked">;
   readonly handleCoordination?: (request: CoordinationRequest) => Promise<CoordinationResponse>;
+  readonly debugLogger: DebugLogger;
 }
 
 export interface HttpsServerOptions {
@@ -89,6 +91,7 @@ export interface HttpsServerOptions {
   readonly authorizeCoordination?: RequestHandlerContext["authorizeCoordination"];
   readonly handleCoordination?: RequestHandlerContext["handleCoordination"];
   readonly limits?: ServiceLimits;
+  readonly debugLogger?: DebugLogger;
   readonly testHooks?: {
     readonly identifyRemoteAddress?: (socket: Socket) => string;
   };
@@ -126,8 +129,14 @@ export async function startHttpsServer(options: HttpsServerOptions): Promise<Run
 
   const acceptedSockets = applyServerLimits(server, limits);
   server.on("secureConnection", (socket) => socket.disableRenegotiation());
-  server.on("tlsClientError", (_error, socket) => socket.destroy());
-  server.on("clientError", (_error, socket) => socket.end("HTTP/1.1 400 Bad Request\r\n\r\n"));
+  server.on("tlsClientError", (_error, socket) => {
+    handlerContext.debugLogger.emit({ event: "transport_rejection", reason: "tls_client_error" });
+    socket.destroy();
+  });
+  server.on("clientError", (_error, socket) => {
+    handlerContext.debugLogger.emit({ event: "transport_rejection", reason: "http_parser_error" });
+    socket.end("HTTP/1.1 400 Bad Request\r\n\r\n");
+  });
   server.on("checkContinue", (_request, response) => sendEmpty(response, 417, true));
 
   try {
@@ -170,6 +179,7 @@ export function createRequestHandlerContext(
     ...(options.handleCoordination === undefined
       ? {}
       : { handleCoordination: options.handleCoordination }),
+    debugLogger: options.debugLogger ?? disabledDebugLogger,
   });
 }
 
@@ -182,6 +192,32 @@ function createRequestListener(
   const credentialRateLimiter = new RequestRateLimiter(limits, limits.maxRequestsPerWindow);
   const streamQuota = new ConcurrentQuota(limits.maxStreamsPerCredential);
   return (request, response) => {
+    const startedAt = Date.now();
+    const trace: RequestTrace = {
+      route: debugRoute(request.url),
+      method: debugMethod(request.method),
+      authentication: "not_required",
+    };
+    let debugEmitted = false;
+    const emitDebug = (): void => {
+      if (debugEmitted) return;
+      debugEmitted = true;
+      const status = response.headersSent ? response.statusCode : 0;
+      context.debugLogger.emit({
+        event: "request",
+        route: trace.route,
+        method: trace.method,
+        authentication: trace.authentication,
+        authorization: trace.authentication === "accepted"
+          ? status === 403 || status === 404 ? "denied_or_not_found" : "accepted"
+          : "not_checked",
+        ...(trace.principal === undefined ? {} : { principal: trace.principal }),
+        status,
+        durationMs: Math.max(0, Date.now() - startedAt),
+      });
+    };
+    response.once("finish", emitDebug);
+    response.once("close", emitDebug);
     const controller = new AbortController();
     response.once("close", () => controller.abort());
     let timer: NodeJS.Timeout | undefined;
@@ -202,6 +238,7 @@ function createRequestListener(
       streamQuota,
       identifyRemoteAddress,
       controller.signal,
+      trace,
     )
       .then(() => "handled" as const);
 
@@ -226,6 +263,7 @@ async function handleRequest(
   streamQuota: ConcurrentQuota,
   identifyRemoteAddress: (socket: Socket) => string,
   signal: AbortSignal,
+  trace: RequestTrace,
 ): Promise<void> {
   const addressIdentity = `address:${identifyRemoteAddress(request.socket)}`;
   const preAuthRetry = admissionLimiter.consume(addressIdentity);
@@ -261,6 +299,7 @@ async function handleRequest(
   if (path === "/api/protocol") {
     if (requestBody.length !== 0) return sendEmpty(response, 400, true);
     const authorized = await context.authorizeProtocol(request.headers.authorization, signal);
+    trace.authentication = authorized === true ? "accepted" : authorized === false ? "invalid" : authorized;
     if (signal.aborted) return;
     if (authorized !== true) {
       const code = authorized === "revoked"
@@ -330,6 +369,7 @@ async function handleRequest(
       return;
     }
     const authentication = await authorizeCoordination(authorization, signal);
+    trace.authentication = typeof authentication === "string" ? authentication : "accepted";
     if (signal.aborted) return;
     if (typeof authentication === "string") {
       const code = authentication === "revoked"
@@ -338,6 +378,7 @@ async function handleRequest(
       sendJson(response, 401, protocolError(code, "Authentication failed."));
       return;
     }
+    trace.principal = authentication;
     const clientIdentity = `client:${authentication.kind === "drone-session"
       ? authentication.clientId
       : authentication.id}`;
@@ -376,6 +417,38 @@ async function handleRequest(
   }
 
   sendEmpty(response, 404);
+}
+
+interface RequestTrace {
+  readonly route: DebugRoute;
+  readonly method: string;
+  authentication: "not_required" | "missing" | "invalid" | "revoked" | "accepted";
+  principal?: Principal;
+}
+
+function debugMethod(method: string | undefined): string {
+  return method === "GET" || method === "POST" || method === "PUT" ||
+    method === "PATCH" || method === "DELETE" ? method : "OTHER";
+}
+
+function debugRoute(rawUrl: string | undefined): DebugRoute {
+  const path = parseRequestPath(rawUrl);
+  if (path === null) return "unknown";
+  if (path === "/healthz") return "health";
+  if (path === "/api/protocol") return "protocol";
+  if (path === "/api/enrollment/exchange") return "enrollment_exchange";
+  if (path === "/api/client/attach") return "client_attach";
+  if (path === "/api/cubes") return "cubes";
+  if (/^\/api\/cubes\/[0-9a-f-]{36}$/iu.test(path)) return "cube";
+  if (/^\/api\/cubes\/[0-9a-f-]{36}\/roles$/iu.test(path)) return "cube_roles";
+  if (/^\/api\/cubes\/[0-9a-f-]{36}\/roles\/[0-9a-f-]{36}$/iu.test(path)) return "cube_role";
+  if (/^\/api\/cubes\/[0-9a-f-]{36}\/roles\/[0-9a-f-]{36}\/section-patch$/iu.test(path)) return "cube_role_section_patch";
+  if (/^\/api\/cubes\/[0-9a-f-]{36}\/drones$/iu.test(path)) return "cube_drones";
+  if (/^\/api\/cubes\/[0-9a-f-]{36}\/logs$/iu.test(path)) return "cube_logs";
+  if (/^\/api\/cubes\/[0-9a-f-]{36}\/acks$/iu.test(path)) return "cube_acks";
+  if (/^\/api\/cubes\/[0-9a-f-]{36}\/decisions$/iu.test(path)) return "cube_decisions";
+  if (/^\/api\/cubes\/[0-9a-f-]{36}\/stream$/iu.test(path)) return "cube_stream";
+  return "unknown";
 }
 
 async function closeRejectedStream(stream: AsyncIterable<string>): Promise<void> {

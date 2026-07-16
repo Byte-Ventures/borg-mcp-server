@@ -15,6 +15,7 @@ import {
   type RunningServer,
 } from "../src/https-server.js";
 import { clientPrincipal, droneSessionPrincipal } from "../src/principal.js";
+import { createDebugLogger, disabledDebugLogger } from "../src/debug-log.js";
 
 const protocolInfo: ProtocolInfoDocument = {
   protocol_version: "1",
@@ -169,6 +170,45 @@ describe("HTTPS service", () => {
     } finally {
       for (const sink of sinks) sink.mockRestore();
     }
+  });
+
+  it("emits normalized opt-in request diagnostics without URLs or authorization values", async () => {
+    const lines: string[] = [];
+    const debugServer = await startHttpsServer({
+      bind: { port: 0 },
+      tls: { key, cert: certificate },
+      protocolInfo,
+      authorizeProtocol: async (authorization) => authorization === "Bearer accepted-debug-token"
+        ? true
+        : authorization === undefined ? "missing" : "invalid",
+      debugLogger: createDebugLogger((line) => lines.push(line)),
+    });
+    const urlSecret = "secret-url-component";
+    const bearerSecret = "secret-bearer-component";
+    try {
+      await request(debugServer.origin, certificate, `/api/${urlSecret}`, {
+        authorization: `Bearer ${bearerSecret}`,
+      });
+      await request(debugServer.origin, certificate, "/api/protocol", {
+        authorization: "Bearer accepted-debug-token",
+      });
+    } finally {
+      await debugServer.close();
+    }
+
+    const output = lines.join("\n");
+    expect(output).not.toContain(urlSecret);
+    expect(output).not.toContain(bearerSecret);
+    expect(lines.map((line) => JSON.parse(line))).toEqual(expect.arrayContaining([
+      expect.objectContaining({ event: "request", route: "unknown", method: "GET", status: 404 }),
+      expect.objectContaining({
+        event: "request",
+        route: "protocol",
+        authentication: "accepted",
+        authorization: "accepted",
+        status: 200,
+      }),
+    ]));
   });
 
   it("returns protocol readiness and capabilities only after authorization", async () => {
@@ -416,7 +456,7 @@ describe("HTTPS service", () => {
       authorizeProtocol,
     });
 
-    expect(context).toEqual({ protocolInfo, authorizeProtocol });
+    expect(context).toEqual({ protocolInfo, authorizeProtocol, debugLogger: disabledDebugLogger });
     expect("tls" in context).toBe(false);
   });
 

@@ -17,6 +17,7 @@ import type {
   SeatAttachRecord,
 } from "./store.js";
 import { operatorErrors } from "./operator-error.js";
+import { disabledDebugLogger, type DebugLogger } from "./debug-log.js";
 
 const tokenPattern = /^[A-Za-z0-9_-]{43,1024}$/u;
 const dummyVerifier = Buffer.alloc(32);
@@ -131,17 +132,20 @@ export class CredentialAuthority {
   readonly #digester: CredentialDigester;
   readonly #clock: () => Date;
   readonly #registry: LiveCredentialRegistry;
+  readonly #debugLogger: DebugLogger;
 
   constructor(
     store: CredentialStore,
     digester: CredentialDigester,
     clock: () => Date = () => new Date(),
     registry = new LiveCredentialRegistry(),
+    debugLogger: DebugLogger = disabledDebugLogger,
   ) {
     this.#store = store;
     this.#digester = digester;
     this.#clock = clock;
     this.#registry = registry;
+    this.#debugLogger = debugLogger;
   }
 
   createRecoveryCredential(): string {
@@ -182,6 +186,7 @@ export class CredentialAuthority {
       expiresAt: new Date(this.#clock().getTime() + ttlMs).toISOString(),
       purpose,
     });
+    this.#debugLogger.emit({ event: "credential", action: "invitation_created", purpose });
     return secret;
   }
 
@@ -202,11 +207,20 @@ export class CredentialAuthority {
       credentialId: randomUUID(),
       credentialDigest: safeDigest(this.#digester, request.clientCredential, "client"),
     });
-    return !verified || stored?.expiresAt === undefined || claimed === null ? null : {
+    const result = !verified || stored?.expiresAt === undefined || claimed === null ? null : {
       purpose: claimed.purpose,
       clientId: claimed.clientId,
       serverCapabilities: claimed.serverCapabilities,
     };
+    this.#debugLogger.emit(result === null
+      ? { event: "credential", action: "enrollment_rejected" }
+      : {
+          event: "credential",
+          action: "enrollment_accepted",
+          purpose: result.purpose,
+          clientId: result.clientId,
+        });
+    return result;
   }
 
   authenticate(authorization: string | undefined): Principal | null {
@@ -263,7 +277,18 @@ export class CredentialAuthority {
       credentialDigest: this.#digester.digest(credential, "drone-session"),
       expiresAt: new Date(this.#clock().getTime() + 86_400_000).toISOString(),
     });
-    for (const sessionId of record.revokedSessionIds) this.#registry.invalidate(sessionId);
+    for (const sessionId of record.revokedSessionIds) {
+      this.#registry.invalidate(sessionId);
+      this.#debugLogger.emit({ event: "credential", action: "session_revoked", sessionId });
+    }
+    this.#debugLogger.emit({
+      event: "credential",
+      action: "session_created",
+      sessionId: record.sessionId,
+      cubeId: record.cube.id,
+      droneId: record.drone.id,
+      generation: record.generation,
+    });
     return { ...record, credential };
   }
 
@@ -277,6 +302,7 @@ export class CredentialAuthority {
     });
     if (!rotated) throw operatorErrors.CLIENT_NOT_FOUND;
     this.#registry.invalidate(clientId);
+    this.#debugLogger.emit({ event: "credential", action: "client_rotated", clientId });
     return secret;
   }
 
@@ -284,6 +310,7 @@ export class CredentialAuthority {
     if (!this.#store.clientExists(clientId)) throw operatorErrors.CLIENT_NOT_FOUND;
     this.#store.revokeClientCredentials(clientId);
     this.#registry.invalidate(clientId);
+    this.#debugLogger.emit({ event: "credential", action: "client_revoked", clientId });
   }
 
   registerLiveSession(principal: string | Principal) {

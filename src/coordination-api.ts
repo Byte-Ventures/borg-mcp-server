@@ -169,11 +169,11 @@ export class CoordinationApi {
       return failure(404, "NOT_FOUND", "The requested resource was not found.");
     }
     const cubeId = (roleMatch?.[1] ?? match?.[1])!;
-    if (!uuidPattern.test(cubeId)) {
+    const roleId = roleMatch?.[2];
+    if (!uuidPattern.test(cubeId) || (roleId !== undefined && !uuidPattern.test(roleId))) {
       return failure(404, "NOT_FOUND", "The requested resource was not found.");
     }
     const resource = roleMatch === null ? match?.[2] : "role";
-    const roleId = roleMatch?.[2];
     const sectionPatch = roleMatch?.[3] !== undefined;
     const store = this.#runtime.forPrincipal(authentication);
 

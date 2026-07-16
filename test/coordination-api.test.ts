@@ -203,6 +203,27 @@ describe("coordination stream setup", () => {
       expiresAt: "2026-07-16T13:00:00.000Z",
     });
     const manager = clientPrincipal(managerId);
+    const malformedRoleId = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    for (const [method, suffix, payload] of [
+      ["PATCH", "", { name: "Malformed" }],
+      ["POST", "/section-patch", { action: "delete", heading: "Workflow" }],
+    ] as const) {
+      const malformedRole = await api.handle({
+        method,
+        path: `/api/cubes/${cubeId}/roles/${malformedRoleId}${suffix}`,
+        principal: manager,
+        body: {
+          protocol_version: "1",
+          request_id: "malformed-role-id",
+          payload,
+        },
+        signal: new AbortController().signal,
+      });
+      expect(malformedRole).toMatchObject({
+        status: 404,
+        body: { error: { code: "NOT_FOUND" } },
+      });
+    }
     const payload = {
       name: "Security Auditor",
       short_description: "Audits security boundaries",

@@ -6,16 +6,16 @@ HTTPS.
 
 ## Release status
 
-The `0.1.0` release preparation remains gated on the `#5` owner-enrollment and
-cube bootstrap work. The server-side source implements purpose-bound owner
-enrollment and idempotent multi-cube creation against the audited exact
-`borgmcp-shared@0.3.0` registry release. It is not release-ready until the
-coordinated client flow has been security-reviewed and dogfooded.
+The current source is the unpublished `0.1.0-preview` release candidate.
+Purpose-bound owner enrollment, idempotent multi-cube creation, and stable
+prior-seat reattachment have completed coordinated client/server security
+review and process dogfood against the audited exact `borgmcp-shared@0.3.0`
+registry release.
 
 Setup prepares local identity and storage and prints one-time recovery and
-owner-enrollment secrets; it creates no cube. Supported client onboarding and
-local dogfooding remain unavailable until the coordinated `#5` gates pass and
-this notice is removed.
+owner-enrollment secrets; it creates no cube. The package remains unreleased
+until the exact release commit and tagged artifact complete the documented
+review, authorization, and protected-publication gates.
 
 ## Requirements
 

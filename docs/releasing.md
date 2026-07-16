@@ -28,7 +28,7 @@ Every item below must be complete before a release tag is authorized:
    `node scripts/verify-packed-artifact.mjs <tarball>` accepts the exact package. NOTICE, third-party
    license disclosures, and the generated CycloneDX SBOM must match that tree.
 8. The Coordinator has recorded a separate release authorization for the exact version, tag,
-   and commit. The `client-server-release-lanes-autonomy` decision authorizes lane preparation only.
+   and commit under the ratified `release-tag-coordinator-autonomy` decision after all prior gates.
 
 The verify job enforces these approvals by exact value rather than by presence:
 
@@ -52,7 +52,7 @@ Before any tag is authorized, the Coordinator configures and verifies:
 - `main` requires pull requests, CR and SR approvals, passing `CI / test`, resolved conversations,
   linear history, and no admin bypass.
 - An active tag ruleset protects `refs/tags/v*.*.*` from update, deletion, and non-fast-forward;
-  only the designated Queen operator may create a release tag.
+  only the designated release operator may create a tag after exact authorization by the Coordinator.
 - The `npm-publish` environment allows only `v*.*.*`, has no admin bypass, and requires the
   designated Queen operator to approve the exact artifact after SR.
 - npm ownership is verified and Trusted Publishing is bound to this repository and
@@ -101,19 +101,22 @@ separate exact-artifact CR/SR/Release Quality gates before any preview.
 ## Current audit state
 
 The repository is public; visibility is complete and is no longer a release blocker. The canonical
-license, standalone public documentation, version `0.1.0` package metadata, exact registry
+FSL-1.1-ALv2 license bytes and notice are committed and verified under the ratified `server-license`
+decision. Coordinated `#5` owner-enrollment, multi-cube, reattach, and client/server process dogfood is
+complete. Standalone public documentation, version `0.1.0` package metadata, exact registry
 dependencies, publishable shrinkwrap, source-map closure, and disclosure files are prepared on the
-release-readiness branch. They do not become approved merely by being committed. The exact source and
-packed artifact still require the mandated CR, SR, Release Quality, license-byte, public-boundary, and
-consumer-install gates before a tag can be authorized.
+release-readiness branch. The exact release source and packed artifact still require fresh CR,
+Security, Release Quality, public-boundary, artifact, SBOM, and consumer-install gates before a tag
+can be authorized.
 
 The protected `npm-publish` environment contains the encrypted first-publication bootstrap token and
 the expected-owner/unclaimed-package controls. Their presence is bootstrap preparation only. The
 release remains blocked on a separate authorization naming the exact protected-main commit and tag,
-and on completion of the least-privilege fresh-bootstrap/grant dogfood gate. No source change or
-workflow runbook statement authorizes tag creation, npm publication, deployment, or preview.
+followed by exact tagged-artifact Security review and Queen approval of the server npm-publish
+environment. No source change or workflow runbook statement authorizes tag creation, npm publication,
+deployment, or preview.
 
-The `#5` branch consumes the audited exact `borgmcp-shared@0.3.0` registry release. Its shrinkwrap must
-retain the canonical registry tarball URL and matching SRI, and the source-lock, artifact, audit,
-signature, SBOM, and consumer gates must pass without Git dependencies before integration or release
-review.
+The release candidate consumes the audited exact `borgmcp-shared@0.3.0` registry release. Its
+shrinkwrap must retain the canonical registry tarball URL and matching SRI, and the source-lock,
+artifact, audit, signature, SBOM, and consumer gates must pass without Git dependencies before
+release review.

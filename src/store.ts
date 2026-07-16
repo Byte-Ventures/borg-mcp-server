@@ -1881,9 +1881,7 @@ class SqliteCredentialStore implements CredentialStore {
 async function prepareDatabasePath(path: string): Promise<string> {
   if (path === ":memory:") throw new Error("The server store requires a file-backed database.");
   const databasePath = resolve(path);
-  const directory = dirname(databasePath);
-  await ensureDirectoryTree(directory);
-  await chmod(directory, 0o700);
+  const directory = await preparePrivateDataDirectory(dirname(databasePath));
   try {
     const handle = await open(databasePath, "ax", 0o600);
     await handle.close();
@@ -1896,6 +1894,13 @@ async function prepareDatabasePath(path: string): Promise<string> {
   await assertDirectoryTreeHasNoSymlinks(directory);
   await chmod(databasePath, 0o600);
   return databasePath;
+}
+
+export async function preparePrivateDataDirectory(path: string): Promise<string> {
+  const directory = resolve(path);
+  await ensureDirectoryTree(directory);
+  await chmod(directory, 0o700);
+  return directory;
 }
 
 async function ensureDirectoryTree(directory: string): Promise<void> {

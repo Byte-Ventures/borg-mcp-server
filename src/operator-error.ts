@@ -13,6 +13,7 @@ export type OperatorErrorCode =
   | "BIND_LAN_CONSENT"
   | "SERVER_FILES_MISSING"
   | "DATA_PATH_SYMLINK"
+  | "INSTALLATION_EXISTS"
   | "LAN_CA_KEY_ONLINE"
   | "RUNTIME_ACTIVE"
   | "RUNTIME_LOCK_UNSAFE"
@@ -40,8 +41,9 @@ const publicMessages: Readonly<Record<OperatorErrorCode, string>> = Object.freez
   BIND_LAN_CONSENT: "Add --lan to consent to this private-LAN start.",
   SERVER_FILES_MISSING: "Configure BORG_SERVER_DATA_DIR or the required TLS file variables.",
   DATA_PATH_SYMLINK: "Choose a BORG_SERVER_DATA_DIR path that contains no symbolic links.",
+  INSTALLATION_EXISTS: "An installation already exists in BORG_SERVER_DATA_DIR. To destroy and recreate it, stop the server and run borg-mcp-server setup --reinitialize.",
   LAN_CA_KEY_ONLINE: "Move ca.key out of the runtime data directory before private-LAN startup.",
-  RUNTIME_ACTIVE: "Stop the server before running offline client administration.",
+  RUNTIME_ACTIVE: "Stop the server before running setup or offline administration.",
   RUNTIME_LOCK_UNSAFE: "Ensure runtime.lock is a private regular file before retrying.",
   RUNTIME_LOCK_INVALID: "Confirm the server is stopped, then remove the invalid runtime.lock.",
   RUNTIME_LOCK_STALE: "Confirm the recorded server process is stopped, then remove runtime.lock.",

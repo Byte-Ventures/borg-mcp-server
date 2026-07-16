@@ -9,7 +9,7 @@ export interface CliIo {
 const usage = `Usage: borg-mcp-server <command> [options]
 
 Commands:
-  setup    Prepare an offline server installation
+  setup [--reinitialize]  Prepare an offline server installation
   start    Start the server process
   client-rotate <client-id>  Rotate one client credential offline
   client-revoke <client-id>  Revoke one client and its credentials offline
@@ -24,11 +24,14 @@ Start options:
   --port <number>  Listen port (default: 7091)
   --lan            Consent to this start on a private LAN address
 
+Setup options:
+  --reinitialize   Destroy and recreate the existing server identity and database
+
 TLS files:
   BORG_SERVER_DATA_DIR (default: ~/.borg/server), or explicit
   BORG_SERVER_TLS_KEY_FILE, BORG_SERVER_TLS_CERT_FILE, and BORG_SERVER_TLS_CA_FILE
 
-Stop the server before running offline client administration commands.`;
+Stop the server before running setup or offline administration commands.`;
 
 export async function runCli(
   args: readonly string[],
@@ -39,12 +42,14 @@ export async function runCli(
 
   switch (command) {
     case "setup":
-      if (extraArgs.length !== 0) return invalidArguments(io);
+      if (extraArgs.length > 1 || (extraArgs.length === 1 && extraArgs[0] !== "--reinitialize")) {
+        return invalidArguments(io);
+      }
       if (service.setup === undefined) {
         io.stderr("Server setup is unavailable.");
         return 1;
       }
-      const result = await service.setup();
+      const result = await service.setup({ reinitialize: extraArgs[0] === "--reinitialize" });
       io.stdout(`Server setup complete.\nRecovery credential (shown once): ${result.recoveryCredential}\nInitial enrollment invitation (shown once): ${result.initialInvitation}`);
       return 0;
     case "start":

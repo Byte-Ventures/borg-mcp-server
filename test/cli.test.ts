@@ -30,9 +30,30 @@ describe("runCli", () => {
 
     expect(exitCode).toBe(0);
     expect(service.start).not.toHaveBeenCalled();
-    expect(service.setup).toHaveBeenCalledOnce();
+    expect(service.setup).toHaveBeenCalledWith({ reinitialize: false });
     expect(listen).not.toHaveBeenCalled();
     expect(io.stdout).toHaveBeenCalledWith(expect.stringContaining("shown once"));
+  });
+
+  it("requires an explicit unambiguous setup reinitialization flag", async () => {
+    const setup = vi.fn().mockResolvedValue({
+      recoveryCredential: "a".repeat(43),
+      initialInvitation: "b".repeat(43),
+    });
+    const service: ServerService = { start: vi.fn(), setup };
+
+    expect(await runCli(["setup", "--reinitialize"], service, createIo())).toBe(0);
+    expect(setup).toHaveBeenCalledWith({ reinitialize: true });
+    setup.mockClear();
+    expect(await runCli(["setup", "--reinitialize", "--reinitialize"], service, createIo())).toBe(1);
+    expect(await runCli(["setup", "--force"], service, createIo())).toBe(1);
+    expect(setup).not.toHaveBeenCalled();
+
+    const help = createIo();
+    expect(await runCli(["help"], service, help)).toBe(0);
+    expect(help.stdout).toHaveBeenCalledWith(expect.stringContaining(
+      "--reinitialize   Destroy and recreate the existing server identity and database",
+    ));
   });
 
   it("delegates explicit start to the service boundary", async () => {

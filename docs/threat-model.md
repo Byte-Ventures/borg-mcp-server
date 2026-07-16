@@ -45,6 +45,10 @@ v1 scope.
   changes while the service is live. Stale locks fail closed and require explicit removal only after
   confirming the recorded PID is stopped; an old cross-process SSE stream therefore cannot survive
   an offline database change.
+- Setup acquires the same PID-bound runtime lock before inspecting or changing identity state. It
+  refuses any existing or partial installation by default; only the explicit destructive
+  `setup --reinitialize` path removes the known identity/database files, and it can never run while
+  the server lock is live. Unrelated files in the data directory are not removed.
 - SIGINT/SIGTERM handlers are installed before runtime-lock acquisition. A signal observed during key,
   certificate, store, or listener startup completes that in-flight phase only to acquire cleanup
   ownership, then closes any listener, destroys authentication state, wipes the loaded key, and removes

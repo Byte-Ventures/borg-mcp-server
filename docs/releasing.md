@@ -116,21 +116,17 @@ separate exact-artifact CR/SR/Release Quality gates before any preview.
 
 ## Current audit state
 
-The repository is public; visibility is complete and is no longer a release blocker. The canonical
-FSL-1.1-ALv2 license bytes and notice are committed and verified under the ratified `server-license`
-decision. Coordinated `#5` owner-enrollment, multi-cube, reattach, and client/server process dogfood is
-complete. Standalone public documentation, version `0.1.1` package metadata, exact registry
-dependencies, publishable shrinkwrap, source-map closure, and disclosure files are prepared on the
-release-readiness branch. The exact release source and packed artifact still require fresh CR,
-Security, Release Quality, public-boundary, artifact, SBOM, and consumer-install gates before a tag
-can be authorized.
+The repository is public; visibility is complete, and `borgmcp-server@0.1.1` is live on npm under the
+sole expected maintainer.
+First-publication run `29495546749` built and published the exact audited artifact, but its publish job
+concluded `failure` when the immediate postpublish ownership read returned HTTP 404 before registry
+propagation completed. The run and tag remain immutable and must not be rerun, moved, or reused.
 
-The protected `npm-publish` environment contains the encrypted first-publication bootstrap token and
-the expected-owner/unclaimed-package controls. Their presence is bootstrap preparation only. The
-release remains blocked on a separate authorization naming the exact protected-main commit and tag,
-followed by exact tagged-artifact Security review and Queen approval of the server npm-publish
-environment. No source change or workflow runbook statement authorizes tag creation, npm publication,
-deployment, or preview.
+Future postpublish version, ownership, and provenance reads retry only transient HTTP 404 propagation
+responses. The production envelope performs at most 18 reads over approximately three and a half
+minutes (1, 2, 4, and 8 second waits, then a 15 second cap). Every non-404 response proceeds directly
+to the existing terminal status or content verification; integrity, owner, provenance, workflow, tag,
+commit, and builder mismatches remain immediate failures.
 
 The immutable annotated `v0.1.0` tag object
 `0f454997ced06802f0d3a0518c2e294af5a73b56` and first-attempt workflow run `29494436948`
@@ -140,7 +136,7 @@ artifacts were produced, and `borgmcp-server` remained unclaimed in the npm regi
 move, delete, or reuse that tag. Recovery uses separately authorized version `0.1.1`, a fresh reviewed
 source and merge commit, pre-tag repository-variable evidence, and a never-before-used annotated tag.
 
-The release candidate consumes the audited exact `borgmcp-shared@0.3.0` registry release. Its
+The published package consumes the audited exact `borgmcp-shared@0.3.0` registry release. Its
 shrinkwrap must retain the canonical registry tarball URL and matching SRI, and the source-lock,
 artifact, audit, signature, SBOM, and consumer gates must pass without Git dependencies before
 release review.

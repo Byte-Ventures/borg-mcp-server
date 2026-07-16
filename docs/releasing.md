@@ -119,7 +119,7 @@ separate exact-artifact CR/SR/Release Quality gates before any preview.
 The repository is public; visibility is complete and is no longer a release blocker. The canonical
 FSL-1.1-ALv2 license bytes and notice are committed and verified under the ratified `server-license`
 decision. Coordinated `#5` owner-enrollment, multi-cube, reattach, and client/server process dogfood is
-complete. Standalone public documentation, version `0.1.0` package metadata, exact registry
+complete. Standalone public documentation, version `0.1.1` package metadata, exact registry
 dependencies, publishable shrinkwrap, source-map closure, and disclosure files are prepared on the
 release-readiness branch. The exact release source and packed artifact still require fresh CR,
 Security, Release Quality, public-boundary, artifact, SBOM, and consumer-install gates before a tag
@@ -131,6 +131,14 @@ release remains blocked on a separate authorization naming the exact protected-m
 followed by exact tagged-artifact Security review and Queen approval of the server npm-publish
 environment. No source change or workflow runbook statement authorizes tag creation, npm publication,
 deployment, or preview.
+
+The immutable annotated `v0.1.0` tag object
+`0f454997ced06802f0d3a0518c2e294af5a73b56` and first-attempt workflow run `29494436948`
+are preserved as failed release evidence. The verify job failed closed before dependency installation
+because its four required repository-level gate variables were unset; publish was skipped, zero
+artifacts were produced, and `borgmcp-server` remained unclaimed in the npm registry. Never rerun,
+move, delete, or reuse that tag. Recovery uses separately authorized version `0.1.1`, a fresh reviewed
+source and merge commit, pre-tag repository-variable evidence, and a never-before-used annotated tag.
 
 The release candidate consumes the audited exact `borgmcp-shared@0.3.0` registry release. Its
 shrinkwrap must retain the canonical registry tarball URL and matching SRI, and the source-lock,

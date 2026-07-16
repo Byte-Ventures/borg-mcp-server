@@ -28,7 +28,7 @@ describe("server threat model", () => {
     expect(releaseWorkflow).toContain('test "${SERVER_1016_APPROVED_SHA}" = "${release_commit}"');
     expect(manifest).toMatchObject({
       private: false,
-      version: "0.1.0",
+      version: "0.1.1",
       license: "SEE LICENSE IN LICENSE",
     });
   });

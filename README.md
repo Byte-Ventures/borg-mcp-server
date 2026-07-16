@@ -6,7 +6,7 @@ HTTPS.
 
 ## Release status
 
-The current source is the unpublished `0.1.0-preview` release candidate.
+The current source is the unpublished `0.1.1-preview` recovery release candidate.
 Purpose-bound owner enrollment, idempotent multi-cube creation, and stable
 prior-seat reattachment have completed coordinated client/server security
 review and process dogfood against the audited exact `borgmcp-shared@0.3.0`

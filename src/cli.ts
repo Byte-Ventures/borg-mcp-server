@@ -32,7 +32,8 @@ TLS files:
   BORG_SERVER_DATA_DIR (default: ~/.borg/server), or explicit
   BORG_SERVER_TLS_KEY_FILE, BORG_SERVER_TLS_CERT_FILE, and BORG_SERVER_TLS_CA_FILE
 
-Stop the server before running setup or offline administration commands.`;
+Invitation commands may run alongside a live server. Stop the server before
+setup, rotation, revocation, grant changes, or reinitialization.`;
 
 export async function runCli(
   args: readonly string[],

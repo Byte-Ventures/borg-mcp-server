@@ -27,7 +27,10 @@ export type OperatorErrorCode =
   | "DISK_RESERVE_INVALID"
   | "CLIENT_NOT_FOUND"
   | "GRANT_NOT_FOUND"
-  | "RECOVERY_INVALID";
+  | "RECOVERY_INVALID"
+  | "INVITATION_BUSY"
+  | "INVITATION_CONTENTION"
+  | "INVITATION_SCHEMA_MISMATCH";
 
 const publicMessages: Readonly<Record<OperatorErrorCode, string>> = Object.freeze({
   START_LAN_DUPLICATE: "Provide --lan only once.",
@@ -59,6 +62,9 @@ const publicMessages: Readonly<Record<OperatorErrorCode, string>> = Object.freez
   CLIENT_NOT_FOUND: "Provide an existing active client ID.",
   GRANT_NOT_FOUND: "Provide an existing client cube grant.",
   RECOVERY_INVALID: "Provide the active recovery credential through the private prompt.",
+  INVITATION_BUSY: "Confirm no invitation or offline administration command is running, then remove invitation-mint.lock.",
+  INVITATION_CONTENTION: "Retry invitation minting after the current server database write completes.",
+  INVITATION_SCHEMA_MISMATCH: "Invitation minting is unavailable while a server with an incompatible schema is running. Stop the server and rerun this command, or use the CLI version that matches the running server.",
 });
 
 const operatorErrorCodes = new WeakMap<object, OperatorErrorCode>();

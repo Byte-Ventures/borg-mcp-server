@@ -4,7 +4,7 @@ import { chmod, lstat, mkdir, open } from "node:fs/promises";
 import { dirname, join, parse, relative, resolve, sep } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
-import { applyMigrations } from "./migrations.js";
+import { applyMigrations, assertMigrationsCurrent } from "./migrations.js";
 import { operatorErrors } from "./operator-error.js";
 import {
   assertCanonicalUuid,
@@ -118,6 +118,7 @@ export interface OpenStoreOptions {
   readonly capacityProbe?: () => StorageCapacity;
   readonly cubeLimits?: CubeLimits;
   readonly mutationHook?: (phase: string) => void;
+  readonly migrationMode?: "apply" | "require-current";
 }
 
 export interface CubeLimits {
@@ -527,8 +528,13 @@ export async function openStore(options: OpenStoreOptions): Promise<StoreRuntime
   });
   const clock = options.clock ?? (() => new Date());
   try {
-    configureDatabase(database);
-    applyMigrations(database);
+    if (options.migrationMode === "require-current") {
+      configureExistingDatabase(database);
+      assertMigrationsCurrent(database);
+    } else {
+      configureDatabase(database);
+      applyMigrations(database);
+    }
   } catch (error) {
     database.close();
     throw error;
@@ -2205,6 +2211,19 @@ function configureDatabase(database: DatabaseSync): void {
   database.exec(`
     PRAGMA foreign_keys = ON;
     PRAGMA journal_mode = WAL;
+    PRAGMA synchronous = FULL;
+    PRAGMA trusted_schema = OFF;
+    PRAGMA secure_delete = ON;
+    PRAGMA busy_timeout = 5000;
+  `);
+  if (readPragma(database, "journal_mode") !== "wal") {
+    throw new Error("SQLite WAL mode is required.");
+  }
+}
+
+function configureExistingDatabase(database: DatabaseSync): void {
+  database.exec(`
+    PRAGMA foreign_keys = ON;
     PRAGMA synchronous = FULL;
     PRAGMA trusted_schema = OFF;
     PRAGMA secure_delete = ON;

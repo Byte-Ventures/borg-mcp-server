@@ -1,14 +1,19 @@
+import { randomUUID } from "node:crypto";
 import { access, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it, vi } from "vitest";
 
-import { bootstrapServer } from "../src/bootstrap.js";
+import { bootstrapServer, loadDigestKey } from "../src/bootstrap.js";
+import { CredentialAuthority, CredentialDigester, generateSecret } from "../src/credentials.js";
+import { applyMigrations, STORE_MIGRATIONS } from "../src/migrations.js";
 import type { HttpsServerOptions, RunningServer } from "../src/https-server.js";
 import { openStore } from "../src/store.js";
 import {
   assertLanCaKeyOffline,
   acquireRuntimeLock,
+  acquireInvitationMintLock,
   createNodeServerService,
   createOfflineCredentialService,
   isFatalTeardownError,
@@ -228,6 +233,143 @@ describe("node server service", () => {
         "Confirm the recorded server process is stopped, then remove runtime.lock.",
       );
     } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("mints owner and client invitations beside a live server and enrolls immediately", async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-live-invitation-")));
+    let runtime: Awaited<ReturnType<typeof openStore>> | undefined;
+    let digester: CredentialDigester | undefined;
+    let running: Awaited<ReturnType<typeof acquireRuntimeLock>> | undefined;
+    try {
+      const installation = await bootstrapServer(directory);
+      runtime = await openStore({ path: installation.paths.database });
+      const digestKey = await loadDigestKey(installation.paths.digestKey);
+      digester = new CredentialDigester(digestKey);
+      digestKey.fill(0);
+      const liveAuthority = new CredentialAuthority(runtime.credentials, digester);
+      running = await acquireRuntimeLock(directory, "server");
+      const administration = createOfflineCredentialService(directory);
+
+      const ownerInvitation = await administration.replaceOwnerInvitation(installation.recoveryCredential);
+      const owner = liveAuthority.exchangeInvitation({
+        invitation: ownerInvitation,
+        retryKey: randomUUID(),
+        clientCredential: generateSecret(),
+      });
+      expect(owner).toMatchObject({ purpose: "owner", serverCapabilities: ["create_cube"] });
+
+      const clientInvitation = await administration.createClientInvitation(installation.recoveryCredential);
+      const client = liveAuthority.exchangeInvitation({
+        invitation: clientInvitation,
+        retryKey: randomUUID(),
+        clientCredential: generateSecret(),
+      });
+      expect(client).toMatchObject({ purpose: "client", serverCapabilities: [] });
+
+      await expect(administration.rotateClient(client!.clientId)).rejects.toThrow(
+        "Stop the server before running setup or offline administration.",
+      );
+      await expect(administration.revokeClient(client!.clientId)).rejects.toThrow(
+        "Stop the server before running setup or offline administration.",
+      );
+      await expect(administration.grantClient(
+        client!.clientId,
+        "00000000-0000-4000-8000-000000000081",
+        "read",
+      )).rejects.toThrow("Stop the server before running setup or offline administration.");
+    } finally {
+      await running?.release();
+      digester?.destroy();
+      runtime?.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("fails invitation contention and exclusive-admin overlap without leaking locks", async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-invitation-contention-")));
+    try {
+      const installation = await bootstrapServer(directory);
+      const administration = createOfflineCredentialService(directory);
+      const invitationLock = await acquireInvitationMintLock(directory);
+      await expect(administration.createClientInvitation(installation.recoveryCredential))
+        .rejects.toThrow("Confirm no invitation or offline administration command is running");
+      await expect(setupNodeServerInstallation(directory, "127.0.0.1", { reinitialize: true }))
+        .rejects.toThrow("Confirm no invitation or offline administration command is running");
+      await invitationLock.release();
+
+      const exclusive = await acquireRuntimeLock(directory);
+      await expect(administration.createClientInvitation(installation.recoveryCredential))
+        .rejects.toThrow("Stop the server before running setup or offline administration.");
+      await exclusive.release();
+      const recovered = await acquireRuntimeLock(directory);
+      await recovered.release();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("maps bounded SQLite invitation contention to actionable static copy", async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-invitation-sqlite-busy-")));
+    let blocker: DatabaseSync | undefined;
+    try {
+      const installation = await bootstrapServer(directory);
+      blocker = new DatabaseSync(installation.paths.database);
+      blocker.exec("BEGIN IMMEDIATE");
+      const administration = createOfflineCredentialService(directory);
+
+      await expect(administration.createClientInvitation(installation.recoveryCredential))
+        .rejects.toThrow("Retry invitation minting after the current server database write completes.");
+      expect(await access(join(directory, "invitation-mint.lock")).then(
+        () => false,
+        (error: NodeJS.ErrnoException) => error.code === "ENOENT",
+      )).toBe(true);
+    } finally {
+      try { blocker?.exec("ROLLBACK"); } catch { /* Preserve cleanup. */ }
+      blocker?.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  }, 10_000);
+
+  it("refuses live invitation minting on a prior schema without migrating or mutating", async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-live-prior-schema-")));
+    const databasePath = join(directory, "borg.db");
+    let running: Awaited<ReturnType<typeof acquireRuntimeLock>> | undefined;
+    try {
+      const prior = new DatabaseSync(databasePath);
+      prior.exec("PRAGMA journal_mode = WAL");
+      applyMigrations(prior, STORE_MIGRATIONS.slice(0, -1));
+      const beforeMigrations = prior.prepare(
+        "SELECT version, name, checksum FROM schema_migrations ORDER BY version",
+      ).all();
+      const beforeSchema = prior.prepare(`
+        SELECT type, name, tbl_name, sql FROM sqlite_schema
+        WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name
+      `).all();
+      prior.close();
+
+      running = await acquireRuntimeLock(directory, "server");
+      const administration = createOfflineCredentialService(directory);
+      await expect(administration.createClientInvitation("unused-recovery-value"))
+        .rejects.toThrow(
+          "Invitation minting is unavailable while a server with an incompatible schema is running. Stop the server and rerun this command, or use the CLI version that matches the running server.",
+        );
+
+      const after = new DatabaseSync(databasePath, { readOnly: true });
+      expect(after.prepare(
+        "SELECT version, name, checksum FROM schema_migrations ORDER BY version",
+      ).all()).toEqual(beforeMigrations);
+      expect(after.prepare(`
+        SELECT type, name, tbl_name, sql FROM sqlite_schema
+        WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name
+      `).all()).toEqual(beforeSchema);
+      expect(after.prepare("SELECT COUNT(*) AS count FROM enrollment_invitations").get())
+        .toEqual({ count: 0 });
+      after.close();
+      await expect(access(join(directory, "invitation-mint.lock"))).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await running?.release();
       await rm(directory, { recursive: true, force: true });
     }
   });

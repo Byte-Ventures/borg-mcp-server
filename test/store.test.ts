@@ -12,6 +12,7 @@ import {
 import { CredentialAuthority, CredentialDigester, generateSecret } from "../src/credentials.js";
 import {
   CursorExpiredError,
+  DefaultRoleRequiredError,
   RoleConflictError,
   ScopedStoreError,
   StorageCapacityError,
@@ -318,6 +319,8 @@ describe("Principal to ScopedStore isolation", () => {
     const first = manager.createRole(ids.cubeA, { name: "First", isDefault: true });
     const second = manager.createRole(ids.cubeA, { name: "Second" });
 
+    expect(() => manager.updateRole(ids.cubeA, first.id, { isDefault: false }))
+      .toThrow(DefaultRoleRequiredError);
     expect(() => manager.updateRole(ids.cubeA, second.id, { name: first.name, isDefault: true }))
       .toThrow(RoleConflictError);
     expect(() => manager.updateRole(ids.cubeA, second.id, {})).toThrow(TypeError);

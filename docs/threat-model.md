@@ -37,8 +37,9 @@ v1 scope.
 - Role creation, sparse role update, and granular role-section patch routes require the cube's
   `manage` grant. Drone sessions and lesser client grants receive the same `NOT_FOUND` response as
   foreign or missing cube/role tuples. Default promotion and role mutation recheck authority inside
-  one immediate transaction; section patches alter one plain-label section while preserving the
-  remainder of the stored playbook.
+  one immediate transaction. A current default cannot be explicitly demoted; promoting another role
+  is the only default transition, preserving exactly one default. Section patches alter one
+  plain-label section while preserving the remainder of the stored playbook.
 - `credential-digest.key`, `server.key`, and `borg.db` are runtime secrets. They remain mode `0600`
   under an operator-controlled mode `0700` directory. The long-running service does not load
   `ca.key`. After setup, operators deploying on a LAN must move `ca.key` to offline storage that the

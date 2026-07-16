@@ -256,6 +256,21 @@ describe("coordination stream setup", () => {
     });
     const createdRoleId = runtime.forPrincipal(manager).listRoles(cubeId)
       .find((role) => role.name === payload.name)!.id;
+    const demoted = await api.handle({
+      method: "PATCH",
+      path: `/api/cubes/${cubeId}/roles/${createdRoleId}`,
+      principal: manager,
+      body: {
+        protocol_version: "1",
+        request_id: "role-demote-request",
+        payload: { is_default: false },
+      },
+      signal: new AbortController().signal,
+    });
+    expect(demoted).toMatchObject({
+      status: 409,
+      body: { request_id: "role-demote-request", error: { code: "DEFAULT_ROLE_REQUIRED" } },
+    });
     const updated = await api.handle({
       method: "PATCH",
       path: `/api/cubes/${cubeId}/roles/${createdRoleId}`,
@@ -263,7 +278,7 @@ describe("coordination stream setup", () => {
       body: {
         protocol_version: "1",
         request_id: "role-update-request",
-        payload: { name: "Release Quality", is_default: false, is_mandatory: false },
+        payload: { name: "Release Quality", is_mandatory: false },
       },
       signal: new AbortController().signal,
     });
@@ -272,7 +287,7 @@ describe("coordination stream setup", () => {
       body: { request_id: "role-update-request", payload: { role: {
         id: createdRoleId,
         name: "Release Quality",
-        is_default: false,
+        is_default: true,
         is_mandatory: false,
       } } },
     });

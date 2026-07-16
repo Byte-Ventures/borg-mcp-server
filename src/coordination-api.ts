@@ -6,6 +6,7 @@ import {
   AttachConflictError,
   AccessDeniedError,
   CreateCubeConflictError,
+  DefaultRoleRequiredError,
   RoleConflictError,
   RoleSectionConflictError,
   ScopedStoreError,
@@ -351,6 +352,9 @@ export class CoordinationApi {
         return failure(404, "NOT_FOUND", error.message);
       }
       if (error instanceof RoleConflictError) {
+        return failure(409, error.code, error.message, safeRequestId(request.body));
+      }
+      if (error instanceof DefaultRoleRequiredError) {
         return failure(409, error.code, error.message, safeRequestId(request.body));
       }
       if (error instanceof RoleSectionConflictError) {

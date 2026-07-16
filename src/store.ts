@@ -398,6 +398,15 @@ export class RoleConflictError extends Error {
   }
 }
 
+export class DefaultRoleRequiredError extends Error {
+  readonly code = "DEFAULT_ROLE_REQUIRED";
+
+  constructor() {
+    super("A cube must retain one default role.");
+    this.name = "DefaultRoleRequiredError";
+  }
+}
+
 export class RoleSectionConflictError extends Error {
   readonly code = "ROLE_SECTION_CONFLICT";
 
@@ -854,6 +863,9 @@ class SqliteScopedStore implements ScopedStore {
       `).get(roleId, cubeId);
       if (existingRow === undefined) throw new ScopedStoreError();
       const existing = roleRecord(existingRow);
+      if (input.isDefault === false && existing.is_default) {
+        throw new DefaultRoleRequiredError();
+      }
       if (input.name !== undefined && input.name !== existing.name) {
         const duplicate = this.#database.prepare(
           "SELECT 1 AS present FROM roles WHERE cube_id = ? AND name = ? AND id <> ?",

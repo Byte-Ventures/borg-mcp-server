@@ -83,7 +83,7 @@ describe("offline operator flow", () => {
 
     const running = await acquireRuntimeLock(dataDirectory);
     await expect(service.rotateClient(enrolled!.clientId)).rejects.toThrow(
-      "Stop the server before running offline client administration.",
+      "Stop the server before running setup or offline administration.",
     );
     await running.release();
 

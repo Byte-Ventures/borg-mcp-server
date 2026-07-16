@@ -1,4 +1,4 @@
-import { access, mkdtemp, realpath, rm } from "node:fs/promises";
+import { access, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import { fork, spawn, type ChildProcess } from "node:child_process";
 import { connect, type Socket } from "node:net";
 import { tmpdir } from "node:os";
@@ -72,6 +72,46 @@ describe("production process signal lifecycle", () => {
       expect(fatalOutput).toContain("Server command failed.\n");
       expect(fatalOutput).not.toContain("secret child close detail");
     } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  }, 10_000);
+
+  it("refuses setup and reinitialization while the production server is live", async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-main-live-setup-")));
+    let running: ChildProcess | undefined;
+    try {
+      const installation = await bootstrapServer(directory);
+      const before = await Promise.all(Object.values(installation.paths).map((path) => readFile(path)));
+      const mainPath = fileURLToPath(new URL("../dist/main.js", import.meta.url));
+      running = fork(mainPath, ["start", "--port", "0"], {
+        env: { ...process.env, BORG_SERVER_DATA_DIR: directory },
+        stdio: ["ignore", "pipe", "pipe", "ipc"],
+      });
+      const runningOutput = captureOutput(running);
+      await waitForListeningOrigin(running);
+
+      for (const args of [["setup"], ["setup", "--reinitialize"]]) {
+        const setup = fork(mainPath, args, {
+          env: { ...process.env, BORG_SERVER_DATA_DIR: directory },
+          stdio: ["ignore", "pipe", "pipe", "ipc"],
+        });
+        const output = captureOutput(setup);
+        await expect(waitForExit(setup, 3_000)).resolves.toMatchObject({ code: 1, signal: null });
+        expect(await output).toContain(
+          "Server command failed: Stop the server before running setup or offline administration.",
+        );
+      }
+      const after = await Promise.all(Object.values(installation.paths).map((path) => readFile(path)));
+      expect(after).toEqual(before);
+      running.kill("SIGTERM");
+      await expect(waitForExit(running, 3_000)).resolves.toMatchObject({ code: 0, signal: null });
+      expect(await runningOutput).not.toMatch(/credential|invitation|private-key|secret/iu);
+      running = undefined;
+    } finally {
+      if (running !== undefined) {
+        running.kill("SIGKILL");
+        await waitForExit(running, 3_000).catch(() => undefined);
+      }
       await rm(directory, { recursive: true, force: true });
     }
   }, 10_000);

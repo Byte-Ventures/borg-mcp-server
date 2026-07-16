@@ -38,7 +38,8 @@ describe("main operator errors", () => {
     ["START_PORT_INVALID", "Provide --port as an integer from 0 to 65535."],
     ["BIND_LAN_CONSENT", "Add --lan to consent to this private-LAN start."],
     ["SERVER_FILES_MISSING", "Configure BORG_SERVER_DATA_DIR or the required TLS file variables."],
-    ["RUNTIME_ACTIVE", "Stop the server before running offline client administration."],
+    ["INSTALLATION_EXISTS", "An installation already exists in BORG_SERVER_DATA_DIR. To destroy and recreate it, stop the server and run borg-mcp-server setup --reinitialize."],
+    ["RUNTIME_ACTIVE", "Stop the server before running setup or offline administration."],
     ["DATABASE_LIMIT_INVALID", "Set BORG_SERVER_MAX_DATABASE_BYTES to a positive integer."],
   ] as const)("prints the actionable typed error: %s", async (code, publicMessage) => {
     const previousExitCode = process.exitCode;
@@ -173,7 +174,7 @@ describe("main operator errors", () => {
         "00000000-0000-4000-8000-000000000001",
       ], offline, { stdout: vi.fn(), stderr });
       expect(stderr).toHaveBeenLastCalledWith(
-        "Server command failed: Stop the server before running offline client administration.",
+        "Server command failed: Stop the server before running setup or offline administration.",
       );
       await lock.release();
       await runMain([
@@ -210,7 +211,7 @@ describe("main operator errors", () => {
     const previousExitCode = process.exitCode;
     const stderr = vi.fn();
     const service: ServerService = {
-      start: vi.fn().mockRejectedValue(new Error("Stop the server before running offline client administration.")),
+      start: vi.fn().mockRejectedValue(new Error("Stop the server before running setup or offline administration.")),
     };
     try {
       await runMain(["start"], service, { stdout: vi.fn(), stderr });
@@ -344,7 +345,7 @@ describe("main operator errors", () => {
       );
       expect(process.exitCode).toBe(1);
       expect(stderr).toHaveBeenCalledWith(
-        "Server command failed: Stop the server before running offline client administration.",
+        "Server command failed: Stop the server before running setup or offline administration.",
       );
     } finally {
       process.exitCode = previousExitCode;

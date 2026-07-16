@@ -1,4 +1,4 @@
-import { access, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { access, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -14,6 +14,7 @@ import {
   isFatalTeardownError,
   resolveStorageLimits,
   selectServerEnvironment,
+  setupNodeServerInstallation,
 } from "../src/service.js";
 
 describe("node server service", () => {
@@ -176,7 +177,7 @@ describe("node server service", () => {
     try {
       const running = await acquireRuntimeLock(directory);
       await expect(acquireRuntimeLock(directory)).rejects.toThrow(
-        "Stop the server before running offline client administration.",
+        "Stop the server before running setup or offline administration.",
       );
       await running.release();
       const offline = await acquireRuntimeLock(directory);
@@ -189,6 +190,85 @@ describe("node server service", () => {
       await expect(acquireRuntimeLock(directory)).rejects.toThrow(
         "Confirm the recorded server process is stopped, then remove runtime.lock.",
       );
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps fresh setup behavior and refuses an existing installation without mutation", async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-setup-existing-")));
+    try {
+      const first = await setupNodeServerInstallation(directory, "127.0.0.1", { reinitialize: false });
+      expect(first.recoveryCredential).toMatch(/^[A-Za-z0-9_-]{43}$/u);
+      expect(first.initialInvitation).toMatch(/^[A-Za-z0-9_-]{43}$/u);
+      const before = await Promise.all(Object.values(first.paths).map((path) => readFile(path)));
+
+      await expect(setupNodeServerInstallation(directory, "127.0.0.1", { reinitialize: false }))
+        .rejects.toThrow(
+          "An installation already exists in BORG_SERVER_DATA_DIR. To destroy and recreate it, stop the server and run borg-mcp-server setup --reinitialize.",
+        );
+      const after = await Promise.all(Object.values(first.paths).map((path) => readFile(path)));
+      expect(after).toEqual(before);
+      await expect(access(join(directory, "runtime.lock"))).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("reinitializes only through the explicit destructive path", async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-setup-reinitialize-")));
+    try {
+      const first = await setupNodeServerInstallation(directory, "127.0.0.1", { reinitialize: false });
+      const runtime = await openStore({ path: first.paths.database });
+      runtime.maintenance.createClient({
+        id: "00000000-0000-4000-8000-000000000071",
+        name: "Must be removed",
+      });
+      runtime.maintenance.createCube({
+        id: "00000000-0000-4000-8000-000000000072",
+        name: "Must be removed",
+        directive: "old state",
+      });
+      runtime.close();
+      const unrelated = join(directory, "operator-notes.txt");
+      await writeFile(unrelated, "preserve me", { mode: 0o600 });
+
+      const second = await setupNodeServerInstallation(directory, "127.0.0.1", { reinitialize: true });
+      expect(second.serverId).not.toBe(first.serverId);
+      expect(second.caFingerprint).not.toBe(first.caFingerprint);
+      expect(await readFile(unrelated, "utf8")).toBe("preserve me");
+      const freshRuntime = await openStore({ path: second.paths.database });
+      expect(freshRuntime.maintenance.observeAuthorityState()).toMatchObject({
+        enrolled_clients: 0,
+        cubes: 0,
+        roles: 0,
+        grants: 0,
+      });
+      freshRuntime.close();
+      await expect(access(join(directory, "runtime.lock"))).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses all setup modes while the runtime lock is live", async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-setup-live-lock-")));
+    try {
+      const installation = await setupNodeServerInstallation(directory, "127.0.0.1", {
+        reinitialize: false,
+      });
+      const before = await Promise.all(Object.values(installation.paths).map((path) => readFile(path)));
+      const running = await acquireRuntimeLock(directory);
+      try {
+        for (const reinitialize of [false, true]) {
+          await expect(setupNodeServerInstallation(directory, "127.0.0.1", { reinitialize }))
+            .rejects.toThrow("Stop the server before running setup or offline administration.");
+        }
+        const after = await Promise.all(Object.values(installation.paths).map((path) => readFile(path)));
+        expect(after).toEqual(before);
+      } finally {
+        await running.release();
+      }
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
@@ -248,7 +328,7 @@ describe("node server service", () => {
         await closeStarted;
         await expect(createOfflineCredentialService(directory).revokeClient(
           "00000000-0000-4000-8000-000000000001",
-        )).rejects.toThrow("Stop the server before running offline client administration.");
+        )).rejects.toThrow("Stop the server before running setup or offline administration.");
         releaseClose();
 
         expect(await result).toBe(failure);
@@ -389,9 +469,9 @@ describe("node server service", () => {
       expect(authCloseCalls).toBe(0);
       await expect(createOfflineCredentialService(directory).rotateClient(
         "00000000-0000-4000-8000-000000000001",
-      )).rejects.toThrow("Stop the server before running offline client administration.");
+      )).rejects.toThrow("Stop the server before running setup or offline administration.");
       await expect(acquireRuntimeLock(directory)).rejects.toThrow(
-        "Stop the server before running offline client administration.",
+        "Stop the server before running setup or offline administration.",
       );
     } finally {
       await rm(directory, { recursive: true, force: true });

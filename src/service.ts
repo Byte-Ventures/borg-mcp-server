@@ -22,18 +22,27 @@ import { createPart2ProtocolInfo } from "./protocol-draft.js";
 import { resolveBindOptions } from "./network-policy.js";
 import { operatorErrors, type OperatorErrorCode } from "./operator-error.js";
 import { parseStartOptions } from "./start-options.js";
-import { DEFAULT_STORAGE_LIMITS, openStore, type StorageLimits } from "./store.js";
+import {
+  DEFAULT_STORAGE_LIMITS,
+  openStore,
+  preparePrivateDataDirectory,
+  type StorageLimits,
+} from "./store.js";
 import type { CubeAccess } from "./store.js";
 
 export interface ServerService {
   readonly start: (args: readonly string[]) => Promise<void>;
-  readonly setup?: () => Promise<BootstrapResult>;
+  readonly setup?: (options: SetupOptions) => Promise<BootstrapResult>;
   readonly rotateClient?: (clientId: string) => Promise<string>;
   readonly revokeClient?: (clientId: string) => Promise<void>;
   readonly grantClient?: (clientId: string, cubeId: string, access: CubeAccess) => Promise<void>;
   readonly ungrantClient?: (clientId: string, cubeId: string) => Promise<void>;
   readonly createClientInvitation?: (recoveryCredential: string) => Promise<string>;
   readonly replaceOwnerInvitation?: (recoveryCredential: string) => Promise<string>;
+}
+
+export interface SetupOptions {
+  readonly reinitialize: boolean;
 }
 
 export interface ServerEnvironment {
@@ -332,9 +341,61 @@ const startOnlyService = createNodeServerService({
 });
 export const nodeServerService: ServerService = {
   start: startOnlyService.start,
-  setup: () => bootstrapServer(dataDirectory, resolveSetupBindHost(serverEnvironment)),
+  setup: (options) => setupNodeServerInstallation(
+    dataDirectory,
+    resolveSetupBindHost(serverEnvironment),
+    options,
+  ),
   ...createOfflineCredentialService(dataDirectory),
 };
+
+const managedInstallationFiles = Object.freeze([
+  "borg.db",
+  "borg.db-wal",
+  "borg.db-shm",
+  "borg.db-journal",
+  "credential-digest.key",
+  "ca.key",
+  "ca.crt",
+  "server.key",
+  "server.crt",
+  "server.json",
+]);
+
+export async function setupNodeServerInstallation(
+  setupDataDirectory: string,
+  bindHost: string,
+  options: SetupOptions,
+): Promise<BootstrapResult> {
+  const directory = await preparePrivateDataDirectory(setupDataDirectory);
+  const runtimeLock = await acquireRuntimeLock(directory);
+  try {
+    const existing = await inspectManagedInstallation(directory);
+    if (existing.length !== 0 && !options.reinitialize) throw operatorErrors.INSTALLATION_EXISTS;
+    if (options.reinitialize) {
+      for (const path of existing) await unlink(path);
+    }
+    return await bootstrapServer(directory, bindHost);
+  } finally {
+    await runtimeLock.release();
+  }
+}
+
+async function inspectManagedInstallation(directory: string): Promise<string[]> {
+  const existing: string[] = [];
+  for (const name of managedInstallationFiles) {
+    const path = join(directory, name);
+    try {
+      const metadata = await lstat(path);
+      if (metadata.isSymbolicLink()) throw operatorErrors.DATA_PATH_SYMLINK;
+      if (!metadata.isFile()) throw new Error("Managed installation paths must be regular files.");
+      existing.push(path);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
+  return existing;
+}
 
 function resolveSetupBindHost(environment: ServerEnvironment): string {
   return resolveBindOptions({

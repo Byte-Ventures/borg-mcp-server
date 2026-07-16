@@ -7,6 +7,13 @@ export interface Migration {
   readonly sql: string;
 }
 
+export class MigrationCompatibilityError extends Error {
+  constructor() {
+    super("Database migrations do not exactly match this server version.");
+    this.name = "MigrationCompatibilityError";
+  }
+}
+
 export const STORE_MIGRATIONS: readonly Migration[] = Object.freeze([
   {
     version: 1,
@@ -378,6 +385,33 @@ export function applyMigrations(
       }
       throw error;
     }
+  }
+}
+
+export function assertMigrationsCurrent(
+  database: DatabaseSync,
+  migrations: readonly Migration[] = STORE_MIGRATIONS,
+): void {
+  validateMigrationOrder(migrations);
+  let rows: Record<string, unknown>[];
+  try {
+    rows = database.prepare(
+      "SELECT version, name, checksum FROM schema_migrations ORDER BY version",
+    ).all();
+  } catch {
+    throw new MigrationCompatibilityError();
+  }
+  if (rows.length !== migrations.length) throw new MigrationCompatibilityError();
+  for (let index = 0; index < migrations.length; index += 1) {
+    let applied: AppliedMigrationRow;
+    try {
+      applied = appliedMigrationRow(rows[index]!);
+    } catch {
+      throw new MigrationCompatibilityError();
+    }
+    const expected = migrations[index]!;
+    if (applied.version !== expected.version || applied.name !== expected.name ||
+        applied.checksum !== checksum(expected)) throw new MigrationCompatibilityError();
   }
 }
 

@@ -7,6 +7,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { bootstrapServer, loadDigestKey } from "../src/bootstrap.js";
 import { CredentialAuthority, CredentialDigester, generateSecret } from "../src/credentials.js";
+import { applyMigrations, STORE_MIGRATIONS } from "../src/migrations.js";
 import type { HttpsServerOptions, RunningServer } from "../src/https-server.js";
 import { openStore } from "../src/store.js";
 import {
@@ -330,6 +331,48 @@ describe("node server service", () => {
       await rm(directory, { recursive: true, force: true });
     }
   }, 10_000);
+
+  it("refuses live invitation minting on a prior schema without migrating or mutating", async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-live-prior-schema-")));
+    const databasePath = join(directory, "borg.db");
+    let running: Awaited<ReturnType<typeof acquireRuntimeLock>> | undefined;
+    try {
+      const prior = new DatabaseSync(databasePath);
+      prior.exec("PRAGMA journal_mode = WAL");
+      applyMigrations(prior, STORE_MIGRATIONS.slice(0, -1));
+      const beforeMigrations = prior.prepare(
+        "SELECT version, name, checksum FROM schema_migrations ORDER BY version",
+      ).all();
+      const beforeSchema = prior.prepare(`
+        SELECT type, name, tbl_name, sql FROM sqlite_schema
+        WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name
+      `).all();
+      prior.close();
+
+      running = await acquireRuntimeLock(directory, "server");
+      const administration = createOfflineCredentialService(directory);
+      await expect(administration.createClientInvitation("unused-recovery-value"))
+        .rejects.toThrow(
+          "Invitation minting is unavailable while a server with an incompatible schema is running. Stop the server and rerun this command, or use the CLI version that matches the running server.",
+        );
+
+      const after = new DatabaseSync(databasePath, { readOnly: true });
+      expect(after.prepare(
+        "SELECT version, name, checksum FROM schema_migrations ORDER BY version",
+      ).all()).toEqual(beforeMigrations);
+      expect(after.prepare(`
+        SELECT type, name, tbl_name, sql FROM sqlite_schema
+        WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name
+      `).all()).toEqual(beforeSchema);
+      expect(after.prepare("SELECT COUNT(*) AS count FROM enrollment_invitations").get())
+        .toEqual({ count: 0 });
+      after.close();
+      await expect(access(join(directory, "invitation-mint.lock"))).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await running?.release();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
 
   it("keeps fresh setup behavior and refuses an existing installation without mutation", async () => {
     const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-setup-existing-")));

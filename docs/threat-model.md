@@ -52,8 +52,11 @@ v1 scope.
   confirming the recorded PID is stopped; an old cross-process SSE stream therefore cannot survive
   an offline database change.
 - Client and pre-claim owner invitation minting remain local CLI operations with no network route, but
-  may execute beside a live server because they add one purpose-bound digest row and invalidate no live
-  authority. A separate short-lived invitation-mutation lock prevents concurrent invitation commands and
+  may execute beside a live server because they invalidate no live authority. Client minting adds one
+  purpose-bound digest row; owner replacement revokes prior unclaimed owner invitations and advances the
+  owner epoch. A live-path connection never migrates: it requires the exact migration version/name/checksum
+  chain used by the running CLI and fails closed on mismatch. A separate short-lived invitation-mutation
+  lock prevents concurrent invitation commands and
   excludes setup, reinitialization, rotation, revocation, and grant changes. The live server observes the
   committed WAL write on its next enrollment read without restart; SQLite contention fails closed.
 - Setup acquires the same PID-bound runtime lock before inspecting or changing identity state. It

@@ -12,6 +12,7 @@ import {
 import { CredentialAuthority, CredentialDigester } from "./credentials.js";
 import { CoordinationApi } from "./coordination-api.js";
 import { createDebugLogger, disabledDebugLogger } from "./debug-log.js";
+import { MigrationCompatibilityError } from "./migrations.js";
 import { createEnrollmentExchange } from "./enrollment.js";
 import {
   DEFAULT_SERVICE_LIMITS,
@@ -461,22 +462,29 @@ export function createOfflineCredentialService(
   };
   const withInvitationAuthority = async <T>(operation: (authority: CredentialAuthority) => T): Promise<T> => {
     const invitationLock = await acquireInvitationMintLock(offlineDataDirectory);
+    let offlineRuntimeLock: RuntimeLock | undefined;
     let runtime: Awaited<ReturnType<typeof openStore>> | undefined;
     let digester: CredentialDigester | undefined;
     try {
-      await assertInvitationRuntimeCompatible(offlineDataDirectory);
-      runtime = await openStore({ path: join(offlineDataDirectory, "borg.db") });
+      const runtimeState = await invitationRuntimeState(offlineDataDirectory);
+      if (runtimeState === "offline") offlineRuntimeLock = await acquireRuntimeLock(offlineDataDirectory);
+      runtime = await openStore({
+        path: join(offlineDataDirectory, "borg.db"),
+        migrationMode: runtimeState === "live" ? "require-current" : "apply",
+      });
       const digestKey = await loadDigestKey(join(offlineDataDirectory, "credential-digest.key"));
       digester = new CredentialDigester(digestKey);
       digestKey.fill(0);
       return operation(new CredentialAuthority(runtime.credentials, digester));
     } catch (error) {
+      if (error instanceof MigrationCompatibilityError) throw operatorErrors.INVITATION_SCHEMA_MISMATCH;
       if (isSqliteContention(error)) throw operatorErrors.INVITATION_CONTENTION;
       throw error;
     } finally {
       digester?.destroy();
       runtime?.close();
-      await invitationLock.release();
+      if (offlineRuntimeLock === undefined) await invitationLock.release();
+      else await offlineRuntimeLock.release().finally(() => invitationLock.release());
     }
   };
   return {
@@ -628,13 +636,13 @@ export async function acquireInvitationMintLock(runtimeDataDirectory: string): P
   }
 }
 
-async function assertInvitationRuntimeCompatible(runtimeDataDirectory: string): Promise<void> {
+async function invitationRuntimeState(runtimeDataDirectory: string): Promise<"live" | "offline"> {
   const path = join(runtimeDataDirectory, "runtime.lock");
   let metadata;
   try {
     metadata = await lstat(path);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return "offline";
     throw error;
   }
   if (!metadata.isFile() || metadata.isSymbolicLink() || (metadata.mode & 0o077) !== 0) {
@@ -652,6 +660,7 @@ async function assertInvitationRuntimeCompatible(runtimeDataDirectory: string): 
   }
   if (!processIsAlive(pid)) throw operatorErrors.RUNTIME_LOCK_STALE;
   if (purpose !== "server") throw operatorErrors.RUNTIME_ACTIVE;
+  return "live";
 }
 
 function isSqliteContention(error: unknown): boolean {

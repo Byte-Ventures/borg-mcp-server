@@ -51,6 +51,7 @@ describe("server release lane", () => {
     expect(publication).toContain("NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}");
     expect(workflow).not.toContain("registry-url:");
     expect(workflow).not.toContain("npm install --global");
+    expect(workflow).not.toContain("verify-main-ruleset.mjs");
     expect(workflow).not.toMatch(/uses: [^\n]+@(v|main|master)\b/u);
     for (const job of [verification, publication]) {
       const attemptGuard = job.indexOf('test "${GITHUB_RUN_ATTEMPT}" = "1"');
@@ -139,6 +140,8 @@ describe("server release lane", () => {
       "ARTIFACT_SR_SHA512",
       "separate release authorization",
       "Never move, reuse, force-update, or rerun a failed release tag",
+      'GITHUB_TOKEN="$(gh auth token)" node scripts/verify-main-ruleset.mjs',
+      "tag authorization record must name the reviewed verifier commit",
     ]) {
       expect(runbook).toContain(gate);
     }

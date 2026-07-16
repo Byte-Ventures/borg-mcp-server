@@ -67,6 +67,18 @@ Before any tag is authorized, the Coordinator configures and verifies:
 Repository visibility must not be changed under this runbook. Visibility requires its own explicit
 authorization after all public-boundary and license gates.
 
+The tag workflow's read-only token cannot read repository-administration controls. Immediately before
+authorizing a tag, an authorized operator must run the fail-closed live guard with an
+administration-capable token:
+
+```sh
+GITHUB_TOKEN="$(gh auth token)" node scripts/verify-main-ruleset.mjs
+```
+
+The tag authorization record must name the reviewed verifier commit and include its fresh JSON result.
+Any authentication, API, ruleset-ID, scope, enforcement, pull-request, status-check, merge-method,
+history-protection, or bypass mismatch blocks authorization; never skip or substitute a manual check.
+
 This workflow covers the npm service artifact only. It does not authorize or manufacture an OCI
 image, native installer, service unit, signing key, or update channel. The hardened OCI and native
 service artifacts required by the server architecture remain part of `#1016`: they must derive from

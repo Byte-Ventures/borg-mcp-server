@@ -1855,9 +1855,8 @@ async function prepareDatabasePath(path: string): Promise<string> {
   } catch (error) {
     if (!isAlreadyExists(error)) throw error;
     const metadata = await lstat(databasePath);
-    if (!metadata.isFile() || metadata.isSymbolicLink()) {
-      throw operatorErrors.DATA_PATH_SYMLINK;
-    }
+    if (metadata.isSymbolicLink()) throw operatorErrors.DATA_PATH_SYMLINK;
+    if (!metadata.isFile()) throw new Error("Database path must be a regular file.");
   }
   await assertDirectoryTreeHasNoSymlinks(directory);
   await chmod(databasePath, 0o600);

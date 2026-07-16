@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, realpath, rm, symlink } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -91,6 +91,29 @@ describe("main operator errors", () => {
       expect(stderr).toHaveBeenCalledWith(
         "Server command failed: Choose a BORG_SERVER_DATA_DIR path that contains no symbolic links.",
       );
+      expect(JSON.stringify(stderr.mock.calls)).not.toContain(parent);
+      expect(process.exitCode).toBe(1);
+    } finally {
+      process.exitCode = previousExitCode;
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps non-file setup database paths opaque", async () => {
+    const previousExitCode = process.exitCode;
+    const parent = await realpath(await mkdtemp(join(tmpdir(), "borg-main-setup-leaf-")));
+    const dataDirectory = join(parent, "server");
+    const stderr = vi.fn();
+    try {
+      await mkdir(join(dataDirectory, "borg.db"), { recursive: true });
+      const service: ServerService = {
+        start: vi.fn(),
+        setup: () => bootstrapServer(dataDirectory),
+      };
+
+      await runMain(["setup"], service, { stdout: vi.fn(), stderr });
+
+      expect(stderr).toHaveBeenCalledWith("Server command failed.");
       expect(JSON.stringify(stderr.mock.calls)).not.toContain(parent);
       expect(process.exitCode).toBe(1);
     } finally {

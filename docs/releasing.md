@@ -26,9 +26,9 @@ Every item below must be complete before a release tag is authorized:
    the complete build and consumer trees without non-registry sources, and the production tree has no
    install scripts. Source maps reference shipped files, and
    `node scripts/verify-packed-artifact.mjs <tarball>` accepts the exact package. NOTICE, third-party
-   license disclosures, and the generated CycloneDX SBOM must match that tree.
+   license disclosures, and the normalized, fail-closed-verified CycloneDX SBOM must match that tree.
 8. The Coordinator has recorded a separate release authorization for the exact version, tag,
-   and commit. The `client-server-release-lanes-autonomy` decision authorizes lane preparation only.
+   and commit under the ratified `release-tag-coordinator-autonomy` decision after all prior gates.
 
 The verify job enforces these approvals by exact value rather than by presence:
 
@@ -49,10 +49,13 @@ Before any tag is authorized, the Coordinator configures and verifies:
   workflow permissions, and cannot approve pull requests.
 - Vulnerability alerts, Dependabot security updates, secret scanning, push protection, and code
   scanning are enabled where the repository plan supports them.
-- `main` requires pull requests, CR and SR approvals, passing `CI / test`, resolved conversations,
-  linear history, and no admin bypass.
+- `main` requires pull requests, resolved conversations, the strict current `test` status check, and
+  has no bypass actors; deletion and non-fast-forward updates are blocked. Merge commits are allowed.
+  The GitHub approval count is deliberately zero because there is one trusted repository operator;
+  independent CR, Security, and Release Quality approvals are enforced as cube exact-SHA release
+  gates rather than GitHub review approvals, avoiding a sole-operator deadlock.
 - An active tag ruleset protects `refs/tags/v*.*.*` from update, deletion, and non-fast-forward;
-  only the designated Queen operator may create a release tag.
+  only the designated release operator may create a tag after exact authorization by the Coordinator.
 - The `npm-publish` environment allows only `v*.*.*`, has no admin bypass, and requires the
   designated Queen operator to approve the exact artifact after SR.
 - npm ownership is verified and Trusted Publishing is bound to this repository and
@@ -63,6 +66,18 @@ Before any tag is authorized, the Coordinator configures and verifies:
 
 Repository visibility must not be changed under this runbook. Visibility requires its own explicit
 authorization after all public-boundary and license gates.
+
+The tag workflow's read-only token cannot read repository-administration controls. Immediately before
+authorizing a tag, an authorized operator must run the fail-closed live guard with an
+administration-capable token:
+
+```sh
+GITHUB_TOKEN="$(gh auth token)" node scripts/verify-main-ruleset.mjs
+```
+
+The tag authorization record must name the reviewed verifier commit and include its fresh JSON result.
+Any authentication, API, ruleset-ID, scope, enforcement, pull-request, status-check, merge-method,
+history-protection, or bypass mismatch blocks authorization; never skip or substitute a manual check.
 
 This workflow covers the npm service artifact only. It does not authorize or manufacture an OCI
 image, native installer, service unit, signing key, or update channel. The hardened OCI and native
@@ -83,9 +98,10 @@ separate exact-artifact CR/SR/Release Quality gates before any preview.
    registry metadata. The unprivileged `verify` job then installs with scripts disabled, audits
    dependencies, runs all checks, creates one npm tarball, binds its lock
    entries to official registry metadata, verifies its allowlist and entrypoints, installs/imports/runs
-   that exact tarball in clean consumer prefixes, generates a CycloneDX SBOM, records run evidence and
-   SHA-512, performs an npm dry run, and uploads the exact files. It has no environment, publish token,
-   or OIDC permission.
+   that exact tarball in clean consumer prefixes, normalizes npm's checkout-derived SBOM root name,
+   verifies the CycloneDX root identity, lock-bound components, hashes, distribution URLs, and complete
+   dependency graph, records run evidence and SHA-512, performs an npm dry run, and uploads only the
+   verified SBOM and exact files. It has no environment, publish token, or OIDC permission.
 6. SR downloads and audits the workflow artifact itself, including the tarball, report, SBOM, and
    checksum. Source review or a locally rebuilt tarball cannot substitute for this gate.
 7. After `SECURITY-APPROVED` names the exact SHA-512, the Coordinator sets the protected environment
@@ -101,19 +117,22 @@ separate exact-artifact CR/SR/Release Quality gates before any preview.
 ## Current audit state
 
 The repository is public; visibility is complete and is no longer a release blocker. The canonical
-license, standalone public documentation, version `0.1.0` package metadata, exact registry
+FSL-1.1-ALv2 license bytes and notice are committed and verified under the ratified `server-license`
+decision. Coordinated `#5` owner-enrollment, multi-cube, reattach, and client/server process dogfood is
+complete. Standalone public documentation, version `0.1.0` package metadata, exact registry
 dependencies, publishable shrinkwrap, source-map closure, and disclosure files are prepared on the
-release-readiness branch. They do not become approved merely by being committed. The exact source and
-packed artifact still require the mandated CR, SR, Release Quality, license-byte, public-boundary, and
-consumer-install gates before a tag can be authorized.
+release-readiness branch. The exact release source and packed artifact still require fresh CR,
+Security, Release Quality, public-boundary, artifact, SBOM, and consumer-install gates before a tag
+can be authorized.
 
 The protected `npm-publish` environment contains the encrypted first-publication bootstrap token and
 the expected-owner/unclaimed-package controls. Their presence is bootstrap preparation only. The
 release remains blocked on a separate authorization naming the exact protected-main commit and tag,
-and on completion of the least-privilege fresh-bootstrap/grant dogfood gate. No source change or
-workflow runbook statement authorizes tag creation, npm publication, deployment, or preview.
+followed by exact tagged-artifact Security review and Queen approval of the server npm-publish
+environment. No source change or workflow runbook statement authorizes tag creation, npm publication,
+deployment, or preview.
 
-The `#5` branch consumes the audited exact `borgmcp-shared@0.3.0` registry release. Its shrinkwrap must
-retain the canonical registry tarball URL and matching SRI, and the source-lock, artifact, audit,
-signature, SBOM, and consumer gates must pass without Git dependencies before integration or release
-review.
+The release candidate consumes the audited exact `borgmcp-shared@0.3.0` registry release. Its
+shrinkwrap must retain the canonical registry tarball URL and matching SRI, and the source-lock,
+artifact, audit, signature, SBOM, and consumer gates must pass without Git dependencies before
+release review.

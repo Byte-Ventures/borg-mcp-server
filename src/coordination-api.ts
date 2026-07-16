@@ -6,6 +6,7 @@ import {
   AttachConflictError,
   AccessDeniedError,
   CreateCubeConflictError,
+  RoleConflictError,
   ScopedStoreError,
   StorageCapacityError,
   type EnrichedActivityRecord,
@@ -187,6 +188,29 @@ export class CoordinationApi {
       if (resource === "roles" && request.method === "GET") {
         return success(200, "roles-read", { roles: store.listRoles(cubeId) });
       }
+      if (resource === "roles" && request.method === "POST") {
+        const envelope = decodeEnvelope(request.body);
+        exactKeys(envelope.payload, ["name"], [
+          "short_description",
+          "detailed_description",
+          "is_default",
+          "is_mandatory",
+          "is_human_seat",
+          "can_broadcast",
+          "receives_all_direct",
+        ]);
+        const role = store.createRole(cubeId, {
+          name: requiredRoleName(envelope.payload, "name"),
+          shortDescription: optionalText(envelope.payload, "short_description", 1_024) ?? "",
+          detailedDescription: optionalText(envelope.payload, "detailed_description", 51_200) ?? "",
+          isDefault: optionalBoolean(envelope.payload["is_default"]),
+          isMandatory: optionalBoolean(envelope.payload["is_mandatory"]),
+          isHumanSeat: optionalBoolean(envelope.payload["is_human_seat"]),
+          canBroadcast: optionalBoolean(envelope.payload["can_broadcast"]),
+          receivesAllDirect: optionalBoolean(envelope.payload["receives_all_direct"]),
+        });
+        return success(201, envelope.requestId, { role });
+      }
       if (resource === "drones" && request.method === "GET") {
         return success(200, "drones-read", { drones: store.listDrones(cubeId) });
       }
@@ -252,6 +276,9 @@ export class CoordinationApi {
       }
       if (error instanceof ScopedStoreError) {
         return failure(404, "NOT_FOUND", error.message);
+      }
+      if (error instanceof RoleConflictError) {
+        return failure(409, error.code, error.message, safeRequestId(request.body));
       }
       if (error instanceof StorageCapacityError) {
         return failure(507, "CAPACITY_EXCEEDED", error.message, safeRequestId(request.body));
@@ -403,6 +430,12 @@ function requiredPresentationName(record: Record<string, unknown>, key: string):
   return value;
 }
 
+function requiredRoleName(record: Record<string, unknown>, key: string): string {
+  const value = record[key];
+  if (typeof value !== "string" || value.length < 1 || value.length > 64) throw new InputError();
+  return value;
+}
+
 function optionalString(
   record: Record<string, unknown>,
   key: string,
@@ -411,6 +444,23 @@ function optionalString(
   const value = record[key];
   if (value === undefined) return undefined;
   return requiredString(record, key, maxBytes);
+}
+
+function optionalText(
+  record: Record<string, unknown>,
+  key: string,
+  maxCharacters: number,
+): string | undefined {
+  const value = record[key];
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || value.length > maxCharacters) throw new InputError();
+  return value;
+}
+
+function optionalBoolean(value: unknown): boolean {
+  if (value === undefined) return false;
+  if (typeof value !== "boolean") throw new InputError();
+  return value;
 }
 
 function requiredUuid(record: Record<string, unknown>, key: string): string {

@@ -12,6 +12,7 @@ import {
   generateSecret,
 } from "../src/credentials.js";
 import { openStore, type StoreRuntime } from "../src/store.js";
+import { clientPrincipal, droneSessionPrincipal } from "../src/principal.js";
 
 const directories: string[] = [];
 let runtime: StoreRuntime | undefined;
@@ -149,5 +150,131 @@ describe("coordination stream setup", () => {
     });
     expect(JSON.stringify(response.body)).not.toContain("secret-capacity-payload");
     expect(runtime.forPrincipal(principal).readLog(cubeId, null, 10).entries).toEqual([]);
+
+    const roleResponse = await api.handle({
+      method: "POST",
+      path: `/api/cubes/${cubeId}/roles`,
+      principal,
+      body: {
+        protocol_version: "1",
+        request_id: "capacity-role-request",
+        payload: { name: "secret-capacity-role" },
+      },
+      signal: new AbortController().signal,
+    });
+    expect(roleResponse).toMatchObject({
+      status: 507,
+      body: { error: { code: "CAPACITY_EXCEEDED" } },
+    });
+    expect(JSON.stringify(roleResponse.body)).not.toContain("secret-capacity-role");
+    expect(runtime.forPrincipal(principal).listRoles(cubeId)).toEqual([]);
+  });
+
+  it("creates full roles only for cube managers and rejects malformed or duplicate requests", async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-api-roles-")));
+    directories.push(directory);
+    runtime = await openStore({
+      path: join(directory, "borg.db"),
+      clock: () => new Date("2026-07-16T12:00:00.000Z"),
+    });
+    digester = new CredentialDigester(Buffer.alloc(32, 6));
+    const authority = new CredentialAuthority(runtime.credentials, digester);
+    const api = new CoordinationApi(runtime, authority);
+    const managerId = "00000000-0000-4000-8000-000000000041";
+    const readerId = "00000000-0000-4000-8000-000000000042";
+    const cubeId = "00000000-0000-4000-8000-000000000043";
+    const droneRoleId = "00000000-0000-4000-8000-000000000044";
+    const droneId = "00000000-0000-4000-8000-000000000045";
+    const sessionId = "00000000-0000-4000-8000-000000000046";
+    runtime.maintenance.createClient({ id: managerId, name: "Manager" });
+    runtime.maintenance.createClient({ id: readerId, name: "Reader" });
+    runtime.maintenance.createCube({ id: cubeId, name: "Roles", directive: "" });
+    runtime.maintenance.grantClientCube({ clientId: managerId, cubeId, access: "manage" });
+    runtime.maintenance.grantClientCube({ clientId: readerId, cubeId, access: "read" });
+    runtime.maintenance.createRole({ id: droneRoleId, cubeId, name: "Queen", roleClass: "queen" });
+    runtime.maintenance.createDrone({
+      id: droneId, cubeId, roleId: droneRoleId, clientId: managerId, label: "queen-seat",
+    });
+    runtime.maintenance.createDroneSession({
+      id: sessionId,
+      clientId: managerId,
+      cubeId,
+      droneId,
+      expiresAt: "2026-07-16T13:00:00.000Z",
+    });
+    const manager = clientPrincipal(managerId);
+    const payload = {
+      name: "Security Auditor",
+      short_description: "Audits security boundaries",
+      detailed_description: "Security workflow:\nReview exact evidence.",
+      is_default: true,
+      is_mandatory: true,
+      is_human_seat: false,
+      can_broadcast: true,
+      receives_all_direct: true,
+    };
+    const body = { protocol_version: "1", request_id: "role-create-request", payload };
+
+    const created = await api.handle({
+      method: "POST",
+      path: `/api/cubes/${cubeId}/roles`,
+      principal: manager,
+      body,
+      signal: new AbortController().signal,
+    });
+    expect(created).toMatchObject({
+      status: 201,
+      body: {
+        request_id: "role-create-request",
+        payload: { role: {
+          ...payload,
+          cube_id: cubeId,
+          role_class: "worker",
+        } },
+      },
+    });
+
+    for (const principal of [
+      clientPrincipal(readerId),
+      droneSessionPrincipal({ id: sessionId, clientId: managerId, cubeId, droneId }),
+    ]) {
+      const denied = await api.handle({
+        method: "POST",
+        path: `/api/cubes/${cubeId}/roles`,
+        principal,
+        body: { ...body, request_id: "role-denied-request", payload: { name: "Denied" } },
+        signal: new AbortController().signal,
+      });
+      expect(denied).toMatchObject({ status: 404, body: { error: { code: "NOT_FOUND" } } });
+    }
+
+    const duplicate = await api.handle({
+      method: "POST",
+      path: `/api/cubes/${cubeId}/roles`,
+      principal: manager,
+      body,
+      signal: new AbortController().signal,
+    });
+    expect(duplicate).toMatchObject({
+      status: 409,
+      body: { request_id: "role-create-request", error: { code: "ROLE_ALREADY_EXISTS" } },
+    });
+    const malformed = await api.handle({
+      method: "POST",
+      path: `/api/cubes/${cubeId}/roles`,
+      principal: manager,
+      body: {
+        ...body,
+        request_id: "role-invalid-request",
+        payload: { ...payload, role_class: "queen" },
+      },
+      signal: new AbortController().signal,
+    });
+    expect(malformed).toMatchObject({
+      status: 400,
+      body: { request_id: "role-invalid-request", error: { code: "INVALID_INPUT" } },
+    });
+    expect(runtime.forPrincipal(manager).listRoles(cubeId).map((role) => role.name))
+      .toEqual(["Queen", "Security Auditor"]);
   });
 });

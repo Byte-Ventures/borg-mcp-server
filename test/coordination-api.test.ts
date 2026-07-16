@@ -233,6 +233,61 @@ describe("coordination stream setup", () => {
         } },
       },
     });
+    const createdRoleId = runtime.forPrincipal(manager).listRoles(cubeId)
+      .find((role) => role.name === payload.name)!.id;
+    const updated = await api.handle({
+      method: "PATCH",
+      path: `/api/cubes/${cubeId}/roles/${createdRoleId}`,
+      principal: manager,
+      body: {
+        protocol_version: "1",
+        request_id: "role-update-request",
+        payload: { name: "Release Quality", is_default: false, is_mandatory: false },
+      },
+      signal: new AbortController().signal,
+    });
+    expect(updated).toMatchObject({
+      status: 200,
+      body: { request_id: "role-update-request", payload: { role: {
+        id: createdRoleId,
+        name: "Release Quality",
+        is_default: false,
+        is_mandatory: false,
+      } } },
+    });
+    const patched = await api.handle({
+      method: "POST",
+      path: `/api/cubes/${cubeId}/roles/${createdRoleId}/section-patch`,
+      principal: manager,
+      body: {
+        protocol_version: "1",
+        request_id: "role-section-request",
+        payload: { action: "replace", heading: "Release workflow", body: "Review exact SHA." },
+      },
+      signal: new AbortController().signal,
+    });
+    expect(patched).toMatchObject({
+      status: 409,
+      body: { request_id: "role-section-request", error: { code: "ROLE_SECTION_CONFLICT" } },
+    });
+    const inserted = await api.handle({
+      method: "POST",
+      path: `/api/cubes/${cubeId}/roles/${createdRoleId}/section-patch`,
+      principal: manager,
+      body: {
+        protocol_version: "1",
+        request_id: "role-section-insert",
+        payload: { action: "insert", heading: "Release workflow", body: "Review exact SHA." },
+      },
+      signal: new AbortController().signal,
+    });
+    expect(inserted).toMatchObject({
+      status: 200,
+      body: { payload: { role: {
+        id: createdRoleId,
+        detailed_description: expect.stringContaining("Release workflow:\nReview exact SHA.\n"),
+      } } },
+    });
 
     for (const principal of [
       clientPrincipal(readerId),
@@ -246,13 +301,21 @@ describe("coordination stream setup", () => {
         signal: new AbortController().signal,
       });
       expect(denied).toMatchObject({ status: 404, body: { error: { code: "NOT_FOUND" } } });
+      const updateDenied = await api.handle({
+        method: "PATCH",
+        path: `/api/cubes/${cubeId}/roles/${createdRoleId}`,
+        principal,
+        body: { ...body, request_id: "role-update-denied", payload: { name: "Denied" } },
+        signal: new AbortController().signal,
+      });
+      expect(updateDenied).toMatchObject({ status: 404, body: { error: { code: "NOT_FOUND" } } });
     }
 
     const duplicate = await api.handle({
       method: "POST",
       path: `/api/cubes/${cubeId}/roles`,
       principal: manager,
-      body,
+      body: { ...body, payload: { ...payload, name: "Release Quality" } },
       signal: new AbortController().signal,
     });
     expect(duplicate).toMatchObject({
@@ -274,7 +337,18 @@ describe("coordination stream setup", () => {
       status: 400,
       body: { request_id: "role-invalid-request", error: { code: "INVALID_INPUT" } },
     });
+    const emptyUpdate = await api.handle({
+      method: "PATCH",
+      path: `/api/cubes/${cubeId}/roles/${createdRoleId}`,
+      principal: manager,
+      body: { ...body, request_id: "role-update-empty", payload: {} },
+      signal: new AbortController().signal,
+    });
+    expect(emptyUpdate).toMatchObject({
+      status: 400,
+      body: { request_id: "role-update-empty", error: { code: "INVALID_INPUT" } },
+    });
     expect(runtime.forPrincipal(manager).listRoles(cubeId).map((role) => role.name))
-      .toEqual(["Queen", "Security Auditor"]);
+      .toEqual(["Queen", "Release Quality"]);
   });
 });

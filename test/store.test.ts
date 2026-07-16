@@ -271,6 +271,99 @@ describe("Principal to ScopedStore isolation", () => {
     expect(roles.some((role) => role.name === "Oversized")).toBe(false);
   });
 
+  it("updates role fields and promotes a new default atomically", () => {
+    const client = runtime.forPrincipal(clientPrincipal(ids.clientA));
+    const builder = client.createRole(ids.cubeA, { name: "Builder", isDefault: true });
+    const reviewer = client.createRole(ids.cubeA, {
+      name: "Reviewer",
+      detailedDescription: "Workflow:\n- review\n",
+    });
+
+    const updated = client.updateRole(ids.cubeA, reviewer.id, {
+      name: "Code Reviewer",
+      shortDescription: "Reviews completed branches",
+      detailedDescription: "Workflow:\n- verify exact SHA\n",
+      isDefault: true,
+      isMandatory: true,
+      isHumanSeat: true,
+      canBroadcast: true,
+      receivesAllDirect: true,
+    });
+
+    expect(updated).toMatchObject({
+      id: reviewer.id,
+      name: "Code Reviewer",
+      short_description: "Reviews completed branches",
+      detailed_description: "Workflow:\n- verify exact SHA\n",
+      is_default: true,
+      is_mandatory: true,
+      is_human_seat: true,
+      can_broadcast: true,
+      receives_all_direct: true,
+      role_class: "worker",
+      created_at: reviewer.created_at,
+    });
+    expect(client.listRoles(ids.cubeA).find((role) => role.id === builder.id)?.is_default).toBe(false);
+  });
+
+  it("rejects unauthorized, duplicate, empty, and oversized role updates without mutation", () => {
+    const manager = runtime.forPrincipal(clientPrincipal(ids.clientA));
+    const foreignManager = runtime.forPrincipal(clientPrincipal(ids.clientB));
+    const drone = runtime.forPrincipal(droneSessionPrincipal({
+      id: ids.sessionA,
+      clientId: ids.clientA,
+      cubeId: ids.cubeA,
+      droneId: ids.droneA,
+    }));
+    const first = manager.createRole(ids.cubeA, { name: "First", isDefault: true });
+    const second = manager.createRole(ids.cubeA, { name: "Second" });
+
+    expect(() => manager.updateRole(ids.cubeA, second.id, { name: first.name, isDefault: true }))
+      .toThrow(RoleConflictError);
+    expect(() => manager.updateRole(ids.cubeA, second.id, {})).toThrow(TypeError);
+    expect(() => manager.updateRole(ids.cubeA, second.id, {
+      detailedDescription: "x".repeat(51_201),
+    })).toThrow(RangeError);
+    expect(() => foreignManager.updateRole(ids.cubeA, second.id, { name: "Foreign" }))
+      .toThrow(ScopedStoreError);
+    expect(() => drone.updateRole(ids.cubeA, second.id, { name: "Escalated" }))
+      .toThrow(ScopedStoreError);
+    expect(() => manager.updateRole(ids.cubeB, second.id, { name: "Wrong cube" }))
+      .toThrow(ScopedStoreError);
+    expect(manager.listRoles(ids.cubeA).find((role) => role.id === first.id)?.is_default).toBe(true);
+    expect(manager.listRoles(ids.cubeA).find((role) => role.id === second.id)?.name).toBe("Second");
+  });
+
+  it("patches one role section transactionally and preserves all other role fields", () => {
+    const client = runtime.forPrincipal(clientPrincipal(ids.clientA));
+    const role = client.createRole(ids.cubeA, {
+      name: "Builder",
+      shortDescription: "Builds changes",
+      detailedDescription: "Preamble.\n\nWorkflow:\n- old\n\nConventions:\n- TDD.\n",
+      canBroadcast: true,
+    });
+
+    const replaced = client.patchRoleSection(ids.cubeA, role.id, {
+      action: "replace", heading: "Workflow", body: "- new",
+    });
+    expect(replaced).toMatchObject({
+      short_description: role.short_description,
+      detailed_description: "Preamble.\n\nWorkflow:\n- new\nConventions:\n- TDD.\n",
+      can_broadcast: true,
+      created_at: role.created_at,
+    });
+    const inserted = client.patchRoleSection(ids.cubeA, role.id, {
+      action: "insert", heading: "Review", body: "- exact SHA", after: "Workflow",
+    });
+    expect(inserted.detailed_description).toContain("Workflow:\n- new\nReview:\n- exact SHA\nConventions:");
+    expect(client.patchRoleSection(ids.cubeA, role.id, {
+      action: "delete", heading: "Review",
+    }).detailed_description).toBe(replaced.detailed_description);
+    expect(() => client.patchRoleSection(ids.cubeA, role.id, {
+      action: "delete", heading: "Missing",
+    })).toThrowError(expect.objectContaining({ code: "ROLE_SECTION_CONFLICT" }));
+  });
+
   it("exposes named stores without a raw database or generic admin escape hatch", () => {
     expect(Object.keys(runtime).sort()).toEqual([
       "close",
@@ -416,6 +509,10 @@ describe("Principal to ScopedStore isolation", () => {
     const client = runtime.forPrincipal(clientPrincipal(ids.clientA));
     const baseline = client.appendLog(ids.cubeA, { message: "baseline" });
     const beforeDrones = client.listDrones(ids.cubeA);
+    const mutableRole = client.createRole(ids.cubeA, {
+      name: "Mutable role",
+      detailedDescription: "Workflow:\n- retained\n",
+    });
     const digester = new CredentialDigester(Buffer.alloc(32, 9));
     const authority = new CredentialAuthority(runtime.credentials, digester);
     const invitation = authority.createBootstrapInvitation(60_000);
@@ -427,6 +524,10 @@ describe("Principal to ScopedStore isolation", () => {
       () => client.acknowledge(ids.cubeA, baseline.id, "claim"),
       () => client.recordDecision(ids.cubeA, { topic: "blocked", decision: "blocked" }),
       () => client.createRole(ids.cubeA, { name: "Blocked role" }),
+      () => client.updateRole(ids.cubeA, mutableRole.id, { detailedDescription: "blocked update" }),
+      () => client.patchRoleSection(ids.cubeA, mutableRole.id, {
+        action: "replace", heading: "Workflow", body: "blocked section",
+      }),
       () => client.attachSeat({
         cubeId: ids.cubeA,
         roleId: ids.roleA,
@@ -450,6 +551,8 @@ describe("Principal to ScopedStore isolation", () => {
     expect(client.readLog(ids.cubeA, null, 10)).toMatchObject({ entries: [baseline], claims: [] });
     expect(client.listDecisions(ids.cubeA)).toEqual([]);
     expect(client.listDrones(ids.cubeA)).toEqual(beforeDrones);
+    expect(client.listRoles(ids.cubeA).find((role) => role.id === mutableRole.id)?.detailed_description)
+      .toBe("Workflow:\n- retained\n");
     capacity = { databaseBytes: 0, freeDiskBytes: 2_000_000 };
     expect(authority.exchangeInvitation({
       invitation,

@@ -34,6 +34,11 @@ v1 scope.
   mint path without disclosing why they were ineligible. Permanent per-client retry bindings include
   the complete cube, role, and prior-seat tuple, so later fresh-key reattachment cannot erase or
   repurpose an older retry key.
+- Role creation, sparse role update, and granular role-section patch routes require the cube's
+  `manage` grant. Drone sessions and lesser client grants receive the same `NOT_FOUND` response as
+  foreign or missing cube/role tuples. Default promotion and role mutation recheck authority inside
+  one immediate transaction; section patches alter one plain-label section while preserving the
+  remainder of the stored playbook.
 - `credential-digest.key`, `server.key`, and `borg.db` are runtime secrets. They remain mode `0600`
   under an operator-controlled mode `0700` directory. The long-running service does not load
   `ca.key`. After setup, operators deploying on a LAN must move `ca.key` to offline storage that the
@@ -123,6 +128,7 @@ v1 scope.
 | Cube creation | Cube, two fixed roles, creator manage grant, and retry-result binding |
 | Client attach/retry | Permanent retry binding, eligible prior-seat reattachment or drone insertion, session/credential insertion, and prior-session revocation |
 | Cube directive update | Directive replacement and SQLite index/page growth |
+| Role create/update/section patch | Role insertion, sparse field replacement, default transition, or targeted playbook fragment replacement |
 | Activity append | Log/recipient insertion, cursor tombstone insertion, and pruning cascades |
 | Activity acknowledgement/claim | Acknowledgement insertion |
 | Decision ratification | Active-decision supersession and immutable history insertion |

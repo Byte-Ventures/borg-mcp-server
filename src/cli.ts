@@ -23,6 +23,7 @@ Start options:
   --host <ip>      Explicit bind address (default: 127.0.0.1)
   --port <number>  Listen port (default: 7091)
   --lan            Consent to this start on a private LAN address
+  --log-level debug  Emit centrally redacted structured diagnostics to stderr
 
 Setup options:
   --reinitialize   Destroy and recreate the existing server identity and database

@@ -1,10 +1,16 @@
 import type { BindOptionsInput } from "./network-policy.js";
 import { operatorErrors, type OperatorErrorCode } from "./operator-error.js";
 
-export function parseStartOptions(args: readonly string[]): BindOptionsInput {
+export interface ParsedStartOptions {
+  readonly bind: BindOptionsInput;
+  readonly logLevel?: "debug";
+}
+
+export function parseStartOptions(args: readonly string[]): ParsedStartOptions {
   let host: string | undefined;
   let port: number | undefined;
   let lanConsent = false;
+  let logLevel: "debug" | undefined;
 
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index];
@@ -27,13 +33,24 @@ export function parseStartOptions(args: readonly string[]): BindOptionsInput {
       index += 1;
       continue;
     }
+    if (argument === "--log-level") {
+      if (logLevel !== undefined) throw operatorErrors.START_LOG_LEVEL_DUPLICATE;
+      const value = requiredValue(args, index, "START_LOG_LEVEL_MISSING");
+      if (value !== "debug") throw operatorErrors.START_LOG_LEVEL_INVALID;
+      logLevel = value;
+      index += 1;
+      continue;
+    }
     throw operatorErrors.START_OPTION_UNKNOWN;
   }
 
   return {
-    ...(host === undefined ? {} : { host }),
-    ...(port === undefined ? {} : { port }),
-    ...(lanConsent ? { lanConsent: true } : {}),
+    bind: {
+      ...(host === undefined ? {} : { host }),
+      ...(port === undefined ? {} : { port }),
+      ...(lanConsent ? { lanConsent: true } : {}),
+    },
+    ...(logLevel === undefined ? {} : { logLevel }),
   };
 }
 

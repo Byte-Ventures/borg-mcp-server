@@ -1,5 +1,7 @@
+import { randomUUID } from "node:crypto";
 import type { Principal } from "./principal.js";
 import { assertServerDerivedPrincipal } from "./principal.js";
+import { disabledDebugLogger, type DebugLogger } from "./debug-log.js";
 import type { CredentialAuthority } from "./credentials.js";
 import {
   CursorExpiredError,
@@ -45,11 +47,17 @@ interface ReplayBarrier {
 export class CoordinationApi {
   readonly #runtime: StoreRuntime;
   readonly #authority: CredentialAuthority;
+  readonly #debugLogger: DebugLogger;
   #replayBarrier: ReplayBarrier | undefined;
 
-  constructor(runtime: StoreRuntime, authority: CredentialAuthority) {
+  constructor(
+    runtime: StoreRuntime,
+    authority: CredentialAuthority,
+    debugLogger: DebugLogger = disabledDebugLogger,
+  ) {
     this.#runtime = runtime;
     this.#authority = authority;
+    this.#debugLogger = debugLogger;
   }
 
   armReplayTransition(): { readonly reached: Promise<void>; readonly release: () => void } {
@@ -303,6 +311,15 @@ export class CoordinationApi {
           ...(visibility === undefined ? {} : { visibility }),
           ...(recipientDroneIds === undefined ? {} : { recipientDroneIds }),
         });
+        this.#debugLogger.emit({
+          event: "activity_append",
+          cubeId,
+          entryId: entry.id,
+          principal: authentication,
+          droneId: entry.drone_id,
+          visibility: entry.visibility,
+          recipientDroneIds: entry.recipient_drone_ids,
+        });
         return success(201, envelope.requestId, { entry });
       }
       if (resource === "logs" && request.method === "PUT") {
@@ -310,7 +327,17 @@ export class CoordinationApi {
         exactKeys(envelope.payload, ["cursor"], ["limit"]);
         const cursor = decodeCursor(envelope.payload["cursor"]);
         const limit = optionalLimit(envelope.payload["limit"]);
-        return success(200, envelope.requestId, store.readLog(cubeId, cursor, limit));
+        const page = store.readLog(cubeId, cursor, limit);
+        this.#debugLogger.emit({
+          event: "cursor_replay",
+          mode: "page",
+          cubeId,
+          cursorId: cursor?.id ?? null,
+          returnedCount: page.entries.length,
+          behindBy: page.behind_by,
+          truncated: page.has_more,
+        });
+        return success(200, envelope.requestId, page);
       }
       if (resource === "acks" && request.method === "POST") {
         const envelope = decodeEnvelope(request.body);
@@ -319,6 +346,7 @@ export class CoordinationApi {
         if (kind !== "ack" && kind !== "claim") throw new InputError();
         exactKeys(envelope.payload, ["entry_id", "kind"]);
         store.acknowledge(cubeId, entryId, kind);
+        this.#debugLogger.emit({ event: "ack_write", cubeId, entryId, kind, principal: authentication });
         return { status: 204 };
       }
       if (resource === "decisions" && request.method === "POST") {
@@ -327,13 +355,18 @@ export class CoordinationApi {
         const topic = requiredString(envelope.payload, "topic", 120);
         const decision = requiredString(envelope.payload, "decision", 100_000);
         const rationale = optionalString(envelope.payload, "rationale", 100_000);
-        return success(201, envelope.requestId, {
-          decision: store.recordDecision(cubeId, {
+        const decisionRecord = store.recordDecision(cubeId, {
             topic,
             decision,
             ...(rationale === undefined ? {} : { rationale }),
-          }),
+          });
+        this.#debugLogger.emit({
+          event: "decision_write",
+          cubeId,
+          decisionId: decisionRecord.id,
+          principal: authentication,
         });
+        return success(201, envelope.requestId, { decision: decisionRecord });
       }
       if (resource === "decisions" && request.method === "PUT") {
         const envelope = decodeEnvelope(request.body);
@@ -377,13 +410,25 @@ export class CoordinationApi {
     requestSignal: AbortSignal,
   ): Promise<CoordinationResponse> {
     const store = this.#runtime.forPrincipal(principal);
+    const connectionId = randomUUID();
     const session = this.#authority.registerLiveSession(principal);
     const signal = AbortSignal.any([requestSignal, session.signal]);
     let unsubscribe = (): void => undefined;
+    let subscribed = false;
+    let deliveryCount = 0;
     const queue = new AsyncStringQueue(() => {
       unsubscribe();
       session.release();
-    });
+      if (subscribed) {
+        this.#debugLogger.emit({
+          event: "sse_unsubscribe",
+          connectionId,
+          cubeId,
+          principal,
+          deliveryCount,
+        });
+      }
+    }, () => { deliveryCount += 1; });
     const pending: EnrichedActivityRecord[] = [];
     let live = false;
     try {
@@ -397,7 +442,17 @@ export class CoordinationApi {
         else pending.push(entry);
       });
       signal.addEventListener("abort", () => queue.close(), { once: true });
-      const replay = store.readLog(cubeId, cursor, 200).entries;
+      const replayPage = store.readLog(cubeId, cursor, 200);
+      const replay = replayPage.entries;
+      this.#debugLogger.emit({
+        event: "cursor_replay",
+        mode: "sse",
+        cubeId,
+        cursorId: cursor?.id ?? null,
+        returnedCount: replay.length,
+        behindBy: replayPage.behind_by,
+        truncated: replayPage.has_more,
+      });
       const barrier = this.#replayBarrier;
       this.#replayBarrier = undefined;
       if (barrier !== undefined) {
@@ -418,6 +473,15 @@ export class CoordinationApi {
         replay_complete: true,
       })}\n\n`);
       live = true;
+      subscribed = true;
+      this.#debugLogger.emit({
+        event: "sse_subscribe",
+        connectionId,
+        cubeId,
+        principal,
+        replayCount: replay.length,
+        truncated: replayPage.has_more,
+      });
       return { status: 200, stream: queue };
     } catch (error) {
       queue.close();
@@ -434,10 +498,12 @@ class AsyncStringQueue implements AsyncIterable<string> {
   readonly #values: string[] = [];
   readonly #waiters: Array<(result: IteratorResult<string>) => void> = [];
   readonly #cleanup: () => void;
+  readonly #onDelivered: () => void;
   #closed = false;
 
-  constructor(cleanup: () => void) {
+  constructor(cleanup: () => void, onDelivered: () => void = () => undefined) {
     this.#cleanup = cleanup;
+    this.#onDelivered = onDelivered;
   }
 
   push(value: string): void {
@@ -448,7 +514,10 @@ class AsyncStringQueue implements AsyncIterable<string> {
     }
     const waiter = this.#waiters.shift();
     if (waiter === undefined) this.#values.push(value);
-    else waiter({ value, done: false });
+    else {
+      this.#onDelivered();
+      waiter({ value, done: false });
+    }
   }
 
   close(): void {
@@ -462,7 +531,10 @@ class AsyncStringQueue implements AsyncIterable<string> {
     return {
       next: async () => {
         const value = this.#values.shift();
-        if (value !== undefined) return { value, done: false };
+        if (value !== undefined) {
+          this.#onDelivered();
+          return { value, done: false };
+        }
         if (this.#closed) return { value: undefined, done: true };
         return new Promise<IteratorResult<string>>((resolve) => this.#waiters.push(resolve));
       },

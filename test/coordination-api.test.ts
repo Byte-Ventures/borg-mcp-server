@@ -13,6 +13,7 @@ import {
 } from "../src/credentials.js";
 import { openStore, type StoreRuntime } from "../src/store.js";
 import { clientPrincipal, droneSessionPrincipal } from "../src/principal.js";
+import { createDebugLogger } from "../src/debug-log.js";
 
 const directories: string[] = [];
 let runtime: StoreRuntime | undefined;
@@ -386,5 +387,104 @@ describe("coordination stream setup", () => {
     });
     expect(runtime.forPrincipal(manager).listRoles(cubeId).map((role) => role.name))
       .toEqual(["Queen", "Release Quality"]);
+  });
+
+  it("logs coordination routing and stream semantics without content bodies", async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-api-debug-")));
+    directories.push(directory);
+    runtime = await openStore({ path: join(directory, "borg.db") });
+    digester = new CredentialDigester(Buffer.alloc(32, 11));
+    const authority = new CredentialAuthority(runtime.credentials, digester);
+    const lines: string[] = [];
+    const api = new CoordinationApi(
+      runtime,
+      authority,
+      createDebugLogger((line) => lines.push(line)),
+    );
+    const clientId = "00000000-0000-4000-8000-000000000051";
+    const cubeId = "00000000-0000-4000-8000-000000000052";
+    const roleId = "00000000-0000-4000-8000-000000000053";
+    const droneId = "00000000-0000-4000-8000-000000000054";
+    runtime.maintenance.createClient({ id: clientId, name: "Debug manager" });
+    runtime.maintenance.createCube({ id: cubeId, name: "Debug cube", directive: "" });
+    runtime.maintenance.grantClientCube({ clientId, cubeId, access: "manage" });
+    runtime.maintenance.createRole({ id: roleId, cubeId, name: "Builder" });
+    runtime.maintenance.createDrone({ id: droneId, cubeId, roleId, clientId, label: "builder-one" });
+    const principal = clientPrincipal(clientId);
+    const signal = new AbortController().signal;
+    const message = "secret-message-body";
+    const decisionText = "secret-decision-body";
+
+    const appended = await api.handle({
+      method: "POST",
+      path: `/api/cubes/${cubeId}/logs`,
+      principal,
+      body: {
+        protocol_version: "1",
+        request_id: "debug-append-request",
+        payload: { message, visibility: "direct", recipientDroneIds: [droneId] },
+      },
+      signal,
+    });
+    const entryId = (appended.body as any).payload.entry.id as string;
+    await api.handle({
+      method: "PUT",
+      path: `/api/cubes/${cubeId}/logs`,
+      principal,
+      body: {
+        protocol_version: "1",
+        request_id: "debug-replay-request",
+        payload: { cursor: null },
+      },
+      signal,
+    });
+    await api.handle({
+      method: "POST",
+      path: `/api/cubes/${cubeId}/acks`,
+      principal,
+      body: {
+        protocol_version: "1",
+        request_id: "debug-ack-request",
+        payload: { entry_id: entryId, kind: "ack" },
+      },
+      signal,
+    });
+    await api.handle({
+      method: "POST",
+      path: `/api/cubes/${cubeId}/decisions`,
+      principal,
+      body: {
+        protocol_version: "1",
+        request_id: "debug-decision-request",
+        payload: { topic: "secret-topic", decision: decisionText, rationale: "secret-rationale" },
+      },
+      signal,
+    });
+    const streamed = await api.handle({
+      method: "GET",
+      path: `/api/cubes/${cubeId}/stream`,
+      principal,
+      signal,
+    });
+    const iterator = streamed.stream![Symbol.asyncIterator]();
+    await iterator.next();
+    await iterator.return?.();
+
+    const output = lines.join("\n");
+    for (const secret of [message, decisionText, "secret-topic", "secret-rationale", "debug-append-request"]) {
+      expect(output).not.toContain(secret);
+    }
+    const events = lines.map((line) => JSON.parse(line));
+    expect(events).toContainEqual(expect.objectContaining({
+      event: "activity_append",
+      visibility: "direct",
+      recipient_count: 1,
+      recipient_drone_ids: [droneId],
+    }));
+    expect(events).toContainEqual(expect.objectContaining({ event: "cursor_replay", mode: "page" }));
+    expect(events).toContainEqual(expect.objectContaining({ event: "ack_write", entry_id: entryId }));
+    expect(events).toContainEqual(expect.objectContaining({ event: "decision_write" }));
+    expect(events).toContainEqual(expect.objectContaining({ event: "sse_subscribe", replay_count: 1 }));
+    expect(events).toContainEqual(expect.objectContaining({ event: "sse_unsubscribe", delivery_count: 1 }));
   });
 });

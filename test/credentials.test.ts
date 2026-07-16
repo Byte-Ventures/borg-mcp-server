@@ -11,6 +11,7 @@ import {
   generateSecret,
 } from "../src/credentials.js";
 import { type StoreRuntime, openStore } from "../src/store.js";
+import { createDebugLogger } from "../src/debug-log.js";
 
 let directory: string;
 let runtime: StoreRuntime;
@@ -34,6 +35,48 @@ afterEach(async () => {
 });
 
 describe("credential authority", () => {
+  it("logs only credential lifecycle identifiers through the central projection", () => {
+    const lines: string[] = [];
+    const debugAuthority = new CredentialAuthority(
+      runtime.credentials,
+      new CredentialDigester(Buffer.alloc(32, 8)),
+      () => now,
+      undefined,
+      createDebugLogger((line) => lines.push(line)),
+    );
+    const recovery = debugAuthority.createRecoveryCredential();
+    const invitation = debugAuthority.createInvitation(recovery, 60_000)!;
+    const clientCredential = generateSecret();
+    const retryKey = randomUUID();
+    const enrolled = debugAuthority.exchangeInvitation({
+      invitation,
+      retryKey,
+      clientCredential,
+      clientName: "secret-client-name",
+    });
+    expect(enrolled).not.toBeNull();
+    debugAuthority.exchangeInvitation({
+      invitation: generateSecret(),
+      retryKey: randomUUID(),
+      clientCredential: generateSecret(),
+      clientName: "rejected-secret-name",
+    });
+    debugAuthority.rotateClient(enrolled!.clientId);
+    debugAuthority.revokeClient(enrolled!.clientId);
+
+    const output = lines.join("\n");
+    for (const secret of [recovery, invitation, clientCredential, retryKey, "secret-client-name", "rejected-secret-name"]) {
+      expect(output).not.toContain(secret);
+    }
+    expect(lines.map((line) => JSON.parse(line).action)).toEqual([
+      "invitation_created",
+      "enrollment_accepted",
+      "enrollment_rejected",
+      "client_rotated",
+      "client_revoked",
+    ]);
+  });
+
   it("generates independent 256-bit unpadded base64url secrets", () => {
     const first = generateSecret();
     const second = generateSecret();

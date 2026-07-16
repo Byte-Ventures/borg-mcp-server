@@ -5,6 +5,9 @@ export type OperatorErrorCode =
   | "START_HOST_MISSING"
   | "START_PORT_MISSING"
   | "START_PORT_INVALID"
+  | "START_LOG_LEVEL_DUPLICATE"
+  | "START_LOG_LEVEL_MISSING"
+  | "START_LOG_LEVEL_INVALID"
   | "START_OPTION_UNKNOWN"
   | "BIND_PORT_INVALID"
   | "BIND_HOST_INVALID"
@@ -33,6 +36,9 @@ const publicMessages: Readonly<Record<OperatorErrorCode, string>> = Object.freez
   START_HOST_MISSING: "Provide an IP address after --host.",
   START_PORT_MISSING: "Provide a port number after --port.",
   START_PORT_INVALID: "Provide --port as an integer from 0 to 65535.",
+  START_LOG_LEVEL_DUPLICATE: "Provide --log-level only once.",
+  START_LOG_LEVEL_MISSING: "Provide debug after --log-level.",
+  START_LOG_LEVEL_INVALID: "Use --log-level debug or omit the option.",
   START_OPTION_UNKNOWN: "Use only documented start options; run borg-mcp-server help.",
   BIND_PORT_INVALID: "Configure the listen port as an integer from 0 to 65535.",
   BIND_HOST_INVALID: "Configure --host as an explicit IP address.",

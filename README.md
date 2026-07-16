@@ -69,6 +69,22 @@ TLS files may instead be supplied explicitly with
 `BORG_SERVER_TLS_CA_FILE`. Run `borg-mcp-server help` for the complete command
 summary.
 
+## Debugging
+
+Debug diagnostics are off by default. A local operator can enable centrally
+redacted, one-line JSON records on stderr for one server run:
+
+```sh
+borg-mcp-server start --log-level debug
+```
+
+Records include normalized routes, principal and coordination IDs, authorization
+outcomes, recipient fan-out, cursor replay, SSE lifecycle, and credential-session
+events. They never include authorization headers, credentials, invitations,
+recovery material, request or message bodies, decision text, tokens, raw paths, or
+exceptions. Operational IDs are still private data; capture stderr only in a
+private local sink. The log level cannot be changed through the network API.
+
 ## Offline credential administration
 
 Stop the server before all offline client administration:

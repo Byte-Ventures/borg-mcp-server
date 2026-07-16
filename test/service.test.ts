@@ -18,6 +18,43 @@ import {
 } from "../src/service.js";
 
 describe("node server service", () => {
+  it("emits a redacted startup record only when debug is explicitly enabled", async () => {
+    const lines: string[] = [];
+    const service = createNodeServerService({
+      environment: {
+        BORG_SERVER_TLS_KEY_FILE: "/private/server.key",
+        BORG_SERVER_TLS_CERT_FILE: "/private/server.crt",
+      },
+      readFile: vi.fn().mockResolvedValue(Buffer.from("certificate")),
+      readPrivateKey: vi.fn().mockResolvedValue(Buffer.from("private-key")),
+      startServer: vi.fn(async (): Promise<RunningServer> => ({
+        origin: "https://127.0.0.1:7091",
+        limits: {} as never,
+        close: vi.fn().mockResolvedValue(undefined),
+      })),
+      onStarted: vi.fn(),
+      waitForShutdown: vi.fn().mockResolvedValue(undefined),
+      debugOutput: (line) => lines.push(line),
+    });
+
+    await service.start([]);
+    expect(lines).toEqual([]);
+    await service.start(["--log-level", "debug"]);
+    expect(lines).toHaveLength(3);
+    expect(JSON.parse(lines[0]!)).toEqual({
+      level: "debug",
+      event: "startup",
+      bind_mode: "loopback",
+      port: 7091,
+      data_directory: "tls_only",
+    });
+    expect(lines[0]).not.toContain("/private/");
+    expect(lines.slice(1).map((line) => JSON.parse(line))).toEqual([
+      { level: "debug", event: "lifecycle", action: "listening" },
+      { level: "debug", event: "lifecycle", action: "stopped" },
+    ]);
+  });
+
   it("loads configured TLS files and starts with a fail-closed protocol authorizer", async () => {
     const close = vi.fn().mockResolvedValue(undefined);
     const keyBuffer = Buffer.from("test-key-material");

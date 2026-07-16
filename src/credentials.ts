@@ -247,7 +247,12 @@ export class CredentialAuthority {
 
   attachSeat(
     store: ScopedStore,
-    request: { readonly cubeId: string; readonly roleId: string; readonly retryKey: string },
+    request: {
+      readonly cubeId: string;
+      readonly roleId: string;
+      readonly retryKey: string;
+      readonly priorDroneId?: string;
+    },
   ): SeatAttachResponse {
     const credential = generateSecret();
     const record = store.attachSeat({

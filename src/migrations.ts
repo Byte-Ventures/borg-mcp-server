@@ -275,6 +275,34 @@ export const STORE_MIGRATIONS: readonly Migration[] = Object.freeze([
         WHERE consumed_at IS NULL AND revoked_at IS NULL;
     `,
   },
+  {
+    version: 6,
+    name: "seat_reattach_bindings",
+    sql: `
+      CREATE TABLE seat_attach_bindings (
+        client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+        retry_key TEXT NOT NULL,
+        cube_id TEXT NOT NULL,
+        requested_role_id TEXT NOT NULL,
+        drone_id TEXT NOT NULL,
+        prior_drone_id TEXT,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (client_id, retry_key),
+        FOREIGN KEY (requested_role_id, cube_id) REFERENCES roles(id, cube_id),
+        FOREIGN KEY (drone_id, client_id, cube_id)
+          REFERENCES drones(id, client_id, cube_id) ON DELETE CASCADE
+      ) STRICT, WITHOUT ROWID;
+
+      INSERT INTO seat_attach_bindings (
+        client_id, retry_key, cube_id, requested_role_id, drone_id, prior_drone_id, created_at
+      )
+      SELECT client_id, retry_key, cube_id, role_id, id, NULL, created_at
+      FROM drones WHERE retry_key IS NOT NULL;
+
+      CREATE INDEX seat_attach_bindings_drone_idx
+        ON seat_attach_bindings (drone_id, client_id, cube_id);
+    `,
+  },
 ]);
 
 interface AppliedMigrationRow {

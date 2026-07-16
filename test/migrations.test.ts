@@ -34,7 +34,7 @@ describe("SQLite migrations", () => {
     expect(first.diagnostics()).toEqual({
       journalMode: "wal",
       foreignKeys: true,
-      schemaVersions: [1, 2, 3, 4, 5],
+      schemaVersions: [1, 2, 3, 4, 5, 6],
     });
     expect((await stat(join(directory, "data"))).mode & 0o777).toBe(0o700);
     expect((await stat(databasePath)).mode & 0o777).toBe(0o600);
@@ -43,7 +43,7 @@ describe("SQLite migrations", () => {
     first.close();
 
     const second = await openStore({ path: databasePath });
-    expect(second.diagnostics().schemaVersions).toEqual([1, 2, 3, 4, 5]);
+    expect(second.diagnostics().schemaVersions).toEqual([1, 2, 3, 4, 5, 6]);
     second.close();
     await expect(access(databasePath)).resolves.toBeUndefined();
   });
@@ -107,6 +107,48 @@ describe("SQLite migrations", () => {
     expect(() => applyMigrations(database, STORE_MIGRATIONS)).not.toThrow();
     expect(database.prepare("SELECT COUNT(*) AS count FROM owner_enrollment_state").get())
       .toEqual({ count: 0 });
+    database.close();
+  });
+
+  it("backfills permanent retry bindings for v5 attached seats", () => {
+    const database = new DatabaseSync(":memory:");
+    applyMigrations(database, STORE_MIGRATIONS.slice(0, 5));
+    const clientId = "00000000-0000-4000-8000-000000000011";
+    const cubeId = "00000000-0000-4000-8000-000000000012";
+    const roleId = "00000000-0000-4000-8000-000000000013";
+    const droneId = "00000000-0000-4000-8000-000000000014";
+    const retryKey = "00000000-0000-4000-8000-000000000015";
+    const createdAt = "2026-07-16T00:00:00.000Z";
+    database.prepare("INSERT INTO clients (id, name, created_at) VALUES (?, 'client', ?)")
+      .run(clientId, createdAt);
+    database.prepare(`
+      INSERT INTO cubes (id, name, directive, created_at, updated_at, owner_id)
+      VALUES (?, 'cube', '', ?, ?, ?)
+    `).run(cubeId, createdAt, createdAt, clientId);
+    database.prepare(`
+      INSERT INTO roles (id, cube_id, name, created_at, role_class)
+      VALUES (?, ?, 'Builder', ?, 'worker')
+    `).run(roleId, cubeId, createdAt);
+    database.prepare(`
+      INSERT INTO drones (
+        id, cube_id, role_id, client_id, label, created_at, last_seen, retry_key,
+        attach_generation
+      ) VALUES (?, ?, ?, ?, 'builder-seat', ?, ?, ?, 1)
+    `).run(droneId, cubeId, roleId, clientId, createdAt, createdAt, retryKey);
+
+    applyMigrations(database, STORE_MIGRATIONS);
+
+    expect(database.prepare(`
+      SELECT client_id, retry_key, cube_id, requested_role_id, drone_id, prior_drone_id
+      FROM seat_attach_bindings
+    `).get()).toEqual({
+      client_id: clientId,
+      retry_key: retryKey,
+      cube_id: cubeId,
+      requested_role_id: roleId,
+      drone_id: droneId,
+      prior_drone_id: null,
+    });
     database.close();
   });
 

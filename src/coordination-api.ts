@@ -71,13 +71,17 @@ export class CoordinationApi {
       const requestId = safeRequestId(request.body);
       try {
         const envelope = decodeEnvelope(request.body);
-        exactKeys(envelope.payload, ["cube_id", "role_id", "retry_key"]);
+        exactKeys(envelope.payload, ["cube_id", "role_id", "retry_key"], ["prior_drone_id"]);
+        const priorDroneId = envelope.payload["prior_drone_id"] === undefined
+          ? undefined
+          : requiredUuid(envelope.payload, "prior_drone_id");
         const attachment = this.#authority.attachSeat(
           this.#runtime.forPrincipal(authentication),
           {
             cubeId: requiredUuid(envelope.payload, "cube_id"),
             roleId: requiredUuid(envelope.payload, "role_id"),
             retryKey: requiredUuid(envelope.payload, "retry_key"),
+            ...(priorDroneId === undefined ? {} : { priorDroneId }),
           },
         );
         return success(201, envelope.requestId, {

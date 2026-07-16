@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { CoordinationApi } from "../src/coordination-api.js";
@@ -86,6 +87,138 @@ describe("client seat attach", () => {
     });
     expect((await readFile(databasePath)).includes(Buffer.from(second.payload.session.token)))
       .toBe(false);
+  });
+
+  it("reattaches an owned active prior seat across fresh retry keys without adding a drone", async () => {
+    const first = await attach(api, clientA.credential, ids.cubeA, ids.roleA, ids.retryA, "attach-prior-001");
+    const second = await attach(
+      api,
+      clientA.credential,
+      ids.cubeA,
+      ids.roleA,
+      "00000000-0000-4000-8000-000000000110",
+      "attach-prior-002",
+      first.payload.drone.id,
+    );
+
+    expect(second.payload.drone).toEqual(first.payload.drone);
+    expect(second.payload).toMatchObject({ reattached: true, session: { generation: 2 } });
+    const concurrent = await Promise.all([
+      attach(
+        api, clientA.credential, ids.cubeA, ids.roleA,
+        "00000000-0000-4000-8000-000000000118", "attach-prior-003", first.payload.drone.id,
+      ),
+      attach(
+        api, clientA.credential, ids.cubeA, ids.roleA,
+        "00000000-0000-4000-8000-000000000119", "attach-prior-004", first.payload.drone.id,
+      ),
+    ]);
+    expect(concurrent.map((response) => response.payload.drone.id))
+      .toEqual([first.payload.drone.id, first.payload.drone.id]);
+    expect(concurrent.map((response) => response.payload.session.generation).sort())
+      .toEqual([3, 4]);
+    expect(runtime.forPrincipal(authenticatedPrincipal(clientA.credential)).listDrones(ids.cubeA))
+      .toHaveLength(1);
+  });
+
+  it("reattaches only an owned active prior seat in the target cube", async () => {
+    const own = await attach(api, clientA.credential, ids.cubeA, ids.roleA, ids.retryA, "attach-prior-101");
+    const foreign = await attach(
+      api,
+      clientB.credential,
+      ids.cubeB,
+      ids.roleB,
+      "00000000-0000-4000-8000-000000000111",
+      "attach-prior-102",
+    );
+    const foreignFallback = await attach(
+      api,
+      clientA.credential,
+      ids.cubeA,
+      ids.roleA,
+      "00000000-0000-4000-8000-000000000112",
+      "attach-prior-103",
+      foreign.payload.drone.id,
+    );
+    expect(foreignFallback.payload).toMatchObject({ reattached: false });
+    expect(foreignFallback.payload.drone.id).not.toBe(foreign.payload.drone.id);
+
+    runtime.maintenance.grantClientCube({ clientId: clientA.clientId, cubeId: ids.cubeB, access: "read" });
+    const wrongCubeFallback = await attach(
+      api,
+      clientA.credential,
+      ids.cubeB,
+      ids.roleB,
+      "00000000-0000-4000-8000-000000000113",
+      "attach-prior-104",
+      own.payload.drone.id,
+    );
+    expect(wrongCubeFallback.payload).toMatchObject({ reattached: false });
+    expect(wrongCubeFallback.payload.drone.id).not.toBe(own.payload.drone.id);
+
+    const database = new DatabaseSync(databasePath);
+    database.prepare("UPDATE drones SET evicted_at = ? WHERE id = ?")
+      .run(now.toISOString(), foreignFallback.payload.drone.id);
+    database.close();
+    const evictedFallback = await attach(
+      api,
+      clientA.credential,
+      ids.cubeA,
+      ids.roleA,
+      "00000000-0000-4000-8000-000000000114",
+      "attach-prior-105",
+      foreignFallback.payload.drone.id,
+    );
+    expect(evictedFallback.payload).toMatchObject({ reattached: false });
+    expect(evictedFallback.payload.drone.id).not.toBe(foreignFallback.payload.drone.id);
+
+    const differentRoleSelector = await attach(
+      api,
+      clientA.credential,
+      ids.cubeA,
+      ids.roleA2,
+      "00000000-0000-4000-8000-000000000115",
+      "attach-prior-106",
+      own.payload.drone.id,
+    );
+    expect(differentRoleSelector.payload).toMatchObject({
+      reattached: true,
+      drone: own.payload.drone,
+      role: { id: ids.roleA },
+    });
+  });
+
+  it("permanently binds each retry tuple while allowing fresh-key reattach", async () => {
+    const first = await attach(api, clientA.credential, ids.cubeA, ids.roleA, ids.retryA, "attach-retry-001");
+    const retryB = "00000000-0000-4000-8000-000000000116";
+    const reattached = await attach(
+      api, clientA.credential, ids.cubeA, ids.roleA, retryB, "attach-retry-002", first.payload.drone.id,
+    );
+    const exact = await attach(
+      api, clientA.credential, ids.cubeA, ids.roleA, retryB, "attach-retry-003", first.payload.drone.id,
+    );
+    expect(reattached.payload.drone.id).toBe(first.payload.drone.id);
+    expect(exact.payload.drone.id).toBe(first.payload.drone.id);
+
+    const mismatch = await attach(
+      api,
+      clientA.credential,
+      ids.cubeA,
+      ids.roleA,
+      retryB,
+      "attach-retry-004",
+      "00000000-0000-4000-8000-000000000117",
+    );
+    expect(mismatch).toMatchObject({ status: 409, error: { code: "INVALID_INPUT" } });
+    expect(authority.authenticateStatus(`Bearer ${exact.payload.session.token}`))
+      .toMatchObject({ kind: "drone-session", droneId: first.payload.drone.id });
+
+    const oldExact = await attach(
+      api, clientA.credential, ids.cubeA, ids.roleA, ids.retryA, "attach-retry-005",
+    );
+    expect(oldExact.payload.drone.id).toBe(first.payload.drone.id);
+    expect(runtime.forPrincipal(authenticatedPrincipal(clientA.credential)).listDrones(ids.cubeA))
+      .toHaveLength(1);
   });
 
   it("serializes concurrent first attach and lets generation reject a delayed response", async () => {
@@ -284,6 +417,19 @@ describe("client seat attach", () => {
   });
 
   it("rejects unsupported protocol input before creating an attachment", async () => {
+    const invalidPrior = await api.handle({
+      method: "POST",
+      path: "/api/client/attach",
+      principal: authenticatedPrincipal(clientA.credential),
+      body: envelope("attach-900", {
+        cube_id: ids.cubeA,
+        role_id: ids.roleA,
+        retry_key: ids.retryA,
+        prior_drone_id: "not-a-uuid",
+      }),
+      signal: new AbortController().signal,
+    });
+    expect(invalidPrior.status).toBe(400);
     const malformed = await api.handle({
       method: "POST",
       path: "/api/client/attach",
@@ -337,6 +483,7 @@ async function attach(
   roleId: string,
   retryKey: string,
   requestId: string,
+  priorDroneId?: string,
 ): Promise<{
   readonly status: number;
   readonly payload: {
@@ -356,7 +503,12 @@ async function attach(
     method: "POST",
     path: "/api/client/attach",
     principal: authenticatedPrincipal(credential),
-    body: envelope(requestId, { cube_id: cubeId, role_id: roleId, retry_key: retryKey }),
+    body: envelope(requestId, {
+      cube_id: cubeId,
+      role_id: roleId,
+      retry_key: retryKey,
+      ...(priorDroneId === undefined ? {} : { prior_drone_id: priorDroneId }),
+    }),
     signal: new AbortController().signal,
   });
   const body = response.body as {

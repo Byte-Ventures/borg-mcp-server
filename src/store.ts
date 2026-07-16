@@ -84,8 +84,12 @@ export interface RoleRecord {
   readonly cube_id: string;
   readonly name: string;
   readonly short_description: string;
+  readonly detailed_description: string;
   readonly is_default: boolean;
+  readonly is_mandatory: boolean;
   readonly is_human_seat: boolean;
+  readonly can_broadcast: boolean;
+  readonly receives_all_direct: boolean;
   readonly role_class: "queen" | "worker";
   readonly created_at: string;
 }
@@ -220,6 +224,7 @@ export interface ScopedStore {
   readonly appendActivity: (cubeId: string, message: string) => ActivityRecord;
   readonly readActivity: (cubeId: string, limit: number) => ActivityRecord[];
   readonly listRoles: (cubeId: string) => RoleRecord[];
+  readonly createRole: (cubeId: string, input: CreateRoleInput) => RoleRecord;
   readonly listDrones: (cubeId: string) => DroneRecord[];
   readonly appendLog: (cubeId: string, input: {
     readonly message: string;
@@ -239,6 +244,17 @@ export interface ScopedStore {
     listener: (entry: EnrichedActivityRecord) => void,
   ) => (() => void);
   readonly attachSeat: (input: SeatAttachInput) => SeatAttachRecord;
+}
+
+export interface CreateRoleInput {
+  readonly name: string;
+  readonly shortDescription?: string;
+  readonly detailedDescription?: string;
+  readonly isDefault?: boolean;
+  readonly isMandatory?: boolean;
+  readonly isHumanSeat?: boolean;
+  readonly canBroadcast?: boolean;
+  readonly receivesAllDirect?: boolean;
 }
 
 export interface CreateCubeInput {
@@ -356,6 +372,15 @@ export class ScopedStoreError extends Error {
   constructor() {
     super("The requested resource was not found.");
     this.name = "ScopedStoreError";
+  }
+}
+
+export class RoleConflictError extends Error {
+  readonly code = "ROLE_ALREADY_EXISTS";
+
+  constructor() {
+    super("A role with that name already exists.");
+    this.name = "RoleConflictError";
   }
 }
 
@@ -693,11 +718,80 @@ class SqliteScopedStore implements ScopedStore {
   listRoles(cubeId: string): RoleRecord[] {
     this.#requireCube(cubeId, "read");
     const rows = this.#database.prepare(`
-      SELECT id, cube_id, name, short_description, is_default, is_human_seat,
-             role_class, created_at
+      SELECT id, cube_id, name, short_description, detailed_description,
+             is_default, is_mandatory, is_human_seat, can_broadcast,
+             receives_all_direct, role_class, created_at
       FROM roles WHERE cube_id = ? ORDER BY name, id
     `).all(cubeId);
     return rows.map(roleRecord);
+  }
+
+  createRole(cubeId: string, input: CreateRoleInput): RoleRecord {
+    assertCanonicalUuid(cubeId, "Cube id");
+    validateRoleName(input.name);
+    const shortDescription = input.shortDescription ?? "";
+    const detailedDescription = input.detailedDescription ?? "";
+    validateRoleShortDescription(shortDescription);
+    assertRoleTextWriteAllowed(detailedDescription);
+    for (const value of [
+      input.isDefault,
+      input.isMandatory,
+      input.isHumanSeat,
+      input.canBroadcast,
+      input.receivesAllDirect,
+    ]) {
+      if (value !== undefined && typeof value !== "boolean") throw new TypeError("Role flags must be boolean.");
+    }
+    const isDefault = input.isDefault ?? false;
+    const isMandatory = input.isMandatory ?? false;
+    const isHumanSeat = input.isHumanSeat ?? false;
+    const canBroadcast = input.canBroadcast ?? false;
+    const receivesAllDirect = input.receivesAllDirect ?? false;
+    this.#requireCube(cubeId, "manage");
+    this.#capacityGuard.assertCanGrow(
+      Buffer.byteLength(input.name) + Buffer.byteLength(shortDescription) +
+      Buffer.byteLength(detailedDescription) + 8_192,
+    );
+
+    this.#database.exec("BEGIN IMMEDIATE");
+    try {
+      this.#requireCube(cubeId, "manage");
+      const duplicate = this.#database.prepare(
+        "SELECT 1 AS present FROM roles WHERE cube_id = ? AND name = ?",
+      ).get(cubeId, input.name);
+      if (duplicate !== undefined) throw new RoleConflictError();
+      if (isDefault) {
+        this.#database.prepare("UPDATE roles SET is_default = 0 WHERE cube_id = ? AND is_default = 1")
+          .run(cubeId);
+        this.#mutationHook?.("role.demote-default");
+      }
+      const id = randomUUID();
+      this.#database.prepare(`
+        INSERT INTO roles (
+          id, cube_id, name, short_description, detailed_description,
+          is_default, is_mandatory, is_human_seat, can_broadcast,
+          receives_all_direct, role_class, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'worker', ?)
+      `).run(
+        id, cubeId, input.name, shortDescription, detailedDescription,
+        booleanInteger(isDefault), booleanInteger(isMandatory), booleanInteger(isHumanSeat),
+        booleanInteger(canBroadcast), booleanInteger(receivesAllDirect), this.#now(),
+      );
+      this.#mutationHook?.("role.insert");
+      const row = this.#database.prepare(`
+        SELECT id, cube_id, name, short_description, detailed_description,
+               is_default, is_mandatory, is_human_seat, can_broadcast,
+               receives_all_direct, role_class, created_at
+        FROM roles WHERE id = ? AND cube_id = ?
+      `).get(id, cubeId);
+      if (row === undefined) throw new ScopedStoreError();
+      this.#database.exec("COMMIT");
+      this.#mutationHook?.("role.after-commit");
+      return roleRecord(row);
+    } catch (error) {
+      try { this.#database.exec("ROLLBACK"); } catch { /* Preserve the original failure. */ }
+      throw error;
+    }
   }
 
   listDrones(cubeId: string): DroneRecord[] {
@@ -2083,8 +2177,12 @@ function roleRecord(row: Record<string, unknown>): RoleRecord {
     cube_id: requiredText(row, "cube_id"),
     name: requiredText(row, "name"),
     short_description: requiredText(row, "short_description"),
+    detailed_description: requiredText(row, "detailed_description"),
     is_default: requiredInteger(row, "is_default") === 1,
+    is_mandatory: requiredInteger(row, "is_mandatory") === 1,
     is_human_seat: requiredInteger(row, "is_human_seat") === 1,
+    can_broadcast: requiredInteger(row, "can_broadcast") === 1,
+    receives_all_direct: requiredInteger(row, "receives_all_direct") === 1,
     role_class: roleClass,
     created_at: requiredText(row, "created_at"),
   };
@@ -2237,6 +2335,32 @@ function validatePresentationName(value: string): void {
       !/^[A-Za-z0-9][A-Za-z0-9 ._-]*$/u.test(value)) {
     throw new Error("Presentation name is invalid.");
   }
+}
+
+function validateRoleName(value: string): void {
+  if (typeof value !== "string" || value.length < 1 || value.length > 64) {
+    throw new Error("Role name must contain 1 to 64 characters.");
+  }
+}
+
+function validateRoleShortDescription(value: string): void {
+  if (typeof value !== "string" || value.length > 1_024) {
+    throw new Error("Role short description must contain at most 1024 characters.");
+  }
+}
+
+export const MAX_ROLE_DETAILED_DESCRIPTION_CHARS = 51_200;
+
+export function assertRoleTextWriteAllowed(value: string, previous?: string): void {
+  if (typeof value !== "string") throw new TypeError("Role detailed description must be text.");
+  if (value.length <= MAX_ROLE_DETAILED_DESCRIPTION_CHARS) return;
+  if (previous !== undefined && previous.length > MAX_ROLE_DETAILED_DESCRIPTION_CHARS &&
+      value.length < previous.length) return;
+  throw new RangeError("Role detailed description is too large.");
+}
+
+function booleanInteger(value: boolean): 0 | 1 {
+  return value ? 1 : 0;
 }
 
 function validateBoundedText(value: string, name: string, maxBytes: number): void {

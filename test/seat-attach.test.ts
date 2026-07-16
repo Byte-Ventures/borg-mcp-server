@@ -494,6 +494,7 @@ async function attach(
       readonly token: string;
       readonly expires_at: string;
       readonly generation: number;
+      readonly posture: "observer" | "participant";
     };
     readonly reattached: boolean;
   };

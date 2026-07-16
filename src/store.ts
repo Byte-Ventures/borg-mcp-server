@@ -102,6 +102,7 @@ export interface DroneRecord {
   readonly label: string;
   readonly last_seen: string;
   readonly hostname: string | null;
+  readonly posture: "observer" | "participant";
   readonly created_at: string;
 }
 
@@ -172,6 +173,25 @@ export interface StoredSecretDigest extends DigestPair {
 export interface StoredInvitationDigest extends StoredSecretDigest {
   readonly purpose: "owner" | "client";
   readonly ownerEpoch: number | null;
+  readonly cubeId: string | null;
+  readonly access: CubeAccess | null;
+}
+
+export interface InvitationCubeScope {
+  readonly cubeId: string;
+  readonly cubeName: string;
+  readonly access: CubeAccess;
+}
+
+export class InvitationCubeNotFoundError extends Error {}
+
+export class InvitationCubeAmbiguousError extends Error {
+  readonly candidateIds: readonly string[];
+
+  constructor(candidateIds: readonly string[]) {
+    super("Cube name is ambiguous.");
+    this.candidateIds = Object.freeze([...candidateIds]);
+  }
 }
 
 export interface EnrollmentClaimResult {
@@ -196,7 +216,9 @@ export interface CredentialStore {
     readonly digest: DigestPair;
     readonly expiresAt: string;
     readonly purpose: "owner" | "client";
-  }) => void;
+    readonly cubeSelector?: { readonly kind: "id" | "name"; readonly value: string };
+    readonly access?: CubeAccess;
+  }) => InvitationCubeScope | null;
   readonly findInvitation: (lookup: Buffer) => StoredInvitationDigest | null;
   readonly claimInvitation: (input: {
     readonly invitationId: string;
@@ -315,6 +337,7 @@ export interface SeatAttachRecord {
   readonly sessionId: string;
   readonly expiresAt: string;
   readonly generation: number;
+  readonly posture: "observer" | "participant";
   readonly reattached: boolean;
   readonly revokedSessionIds: readonly string[];
 }
@@ -968,9 +991,17 @@ class SqliteScopedStore implements ScopedStore {
   listDrones(cubeId: string): DroneRecord[] {
     this.#requireCube(cubeId, "read");
     const rows = this.#database.prepare(`
-      SELECT id, cube_id, role_id, label, COALESCE(last_seen, created_at) AS last_seen,
-             hostname, created_at
-      FROM drones WHERE cube_id = ? AND evicted_at IS NULL ORDER BY label, id
+      SELECT drone.id, drone.cube_id, drone.role_id, drone.label,
+             COALESCE(drone.last_seen, drone.created_at) AS last_seen,
+             drone.hostname, drone.created_at,
+             CASE WHEN client.revoked_at IS NULL AND grant_row.access IN ('write', 'manage')
+               THEN 'participant' ELSE 'observer' END AS posture
+      FROM drones AS drone
+      LEFT JOIN clients AS client ON client.id = drone.client_id
+      LEFT JOIN client_cube_grants AS grant_row
+        ON grant_row.client_id = drone.client_id AND grant_row.cube_id = drone.cube_id
+      WHERE drone.cube_id = ? AND drone.evicted_at IS NULL
+      ORDER BY drone.label, drone.id
     `).all(cubeId);
     return rows.map(droneRecord);
   }
@@ -1023,9 +1054,16 @@ class SqliteScopedStore implements ScopedStore {
       if (inserted.changes !== 1) throw new ScopedStoreError();
       if (recipients.length > 0) {
         const valid = this.#database.prepare(`
-          SELECT COUNT(*) AS count FROM drones
-          WHERE cube_id = ? AND evicted_at IS NULL
-            AND id IN (${recipients.map(() => "?").join(", ")})
+          SELECT COUNT(*) AS count
+          FROM drones AS recipient
+          JOIN clients AS recipient_client ON recipient_client.id = recipient.client_id
+          JOIN client_cube_grants AS recipient_grant
+            ON recipient_grant.client_id = recipient.client_id
+            AND recipient_grant.cube_id = recipient.cube_id
+          WHERE recipient.cube_id = ? AND recipient.evicted_at IS NULL
+            AND recipient_client.revoked_at IS NULL
+            AND recipient_grant.access IN ('write', 'manage')
+            AND recipient.id IN (${recipients.map(() => "?").join(", ")})
         `).get(cubeId, ...recipients);
         if (valid === undefined) throw new Error("Recipient count query returned no row.");
         if (requiredInteger(valid, "count") !== recipients.length) throw new ScopedStoreError();
@@ -1051,6 +1089,7 @@ class SqliteScopedStore implements ScopedStore {
       throw new Error("Activity read limit must be an integer from 1 to 500.");
     }
     this.#validateCursor(cubeId, cursor);
+    const broadcastOnly = !this.#allowsDirectedWork(cubeId);
     const cursorSql = cursor === null
       ? { sql: "1 = 1", parameters: [] as string[] }
       : {
@@ -1061,6 +1100,7 @@ class SqliteScopedStore implements ScopedStore {
       SELECT l.id
       FROM activity_log AS l
       WHERE l.cube_id = ? AND ${cursorSql.sql}
+        AND (${broadcastOnly ? "l.visibility = 'broadcast'" : "1 = 1"})
       ORDER BY l.created_at, l.id
       LIMIT ?
     `).all(cubeId, ...cursorSql.parameters, limit + 1);
@@ -1069,13 +1109,15 @@ class SqliteScopedStore implements ScopedStore {
     const nextCursor = entries.length === 0
       ? cursor
       : { id: entries.at(-1)!.id, created_at: entries.at(-1)!.created_at };
-    const behind = nextCursor === null ? this.#countAfter(cubeId, null) : this.#countAfter(cubeId, nextCursor);
+    const behind = nextCursor === null
+      ? this.#countAfter(cubeId, null, broadcastOnly)
+      : this.#countAfter(cubeId, nextCursor, broadcastOnly);
     return {
       entries,
       cursor: nextCursor,
       behind_by: behind,
       has_more: behind > 0,
-      claims: this.#claims(cubeId),
+      claims: this.#claims(cubeId, broadcastOnly),
     };
   }
 
@@ -1177,6 +1219,7 @@ class SqliteScopedStore implements ScopedStore {
         WHERE c.id = ? AND role.id = ? AND ${scope.sql}
       `).get(input.cubeId, input.roleId, ...scope.parameters);
       if (roleRow === undefined) throw new ScopedStoreError();
+      const posture = this.#allowsDirectedWork(input.cubeId) ? "participant" : "observer";
 
       const retryBinding = this.#database.prepare(`
         SELECT binding.cube_id AS binding_cube_id,
@@ -1313,6 +1356,7 @@ class SqliteScopedStore implements ScopedStore {
         sessionId: input.sessionId,
         expiresAt: input.expiresAt,
         generation,
+        posture,
         reattached,
         revokedSessionIds: oldSessions,
       };
@@ -1324,7 +1368,16 @@ class SqliteScopedStore implements ScopedStore {
 
   subscribeActivity(cubeId: string, listener: (entry: EnrichedActivityRecord) => void): () => void {
     this.#requireCube(cubeId, "read");
-    return this.#activityHub.subscribe(cubeId, listener);
+    return this.#activityHub.subscribe(cubeId, (entry) => {
+      if (entry.visibility === "broadcast" || this.#allowsDirectedWork(cubeId)) listener(entry);
+    });
+  }
+
+  #allowsDirectedWork(cubeId: string): boolean {
+    const scope = this.#scope("write");
+    return this.#database.prepare(`
+      SELECT 1 AS allowed FROM cubes AS c WHERE c.id = ? AND ${scope.sql}
+    `).get(cubeId, ...scope.parameters) !== undefined;
   }
 
   #requireCube(cubeId: string, access: CubeAccess): void {
@@ -1388,14 +1441,16 @@ class SqliteScopedStore implements ScopedStore {
     if (valid === undefined) throw new ScopedStoreError();
   }
 
-  #countAfter(cubeId: string, cursor: LogCursor | null): number {
+  #countAfter(cubeId: string, cursor: LogCursor | null, broadcastOnly: boolean): number {
+    const visibility = broadcastOnly ? "AND visibility = 'broadcast'" : "";
     const row = cursor === null
       ? this.#database.prepare(
-          "SELECT COUNT(*) AS count FROM activity_log WHERE cube_id = ?",
+          `SELECT COUNT(*) AS count FROM activity_log WHERE cube_id = ? ${visibility}`,
         ).get(cubeId)
       : this.#database.prepare(`
           SELECT COUNT(*) AS count FROM activity_log
           WHERE cube_id = ? AND (created_at > ? OR (created_at = ? AND id > ?))
+            ${visibility}
         `).get(cubeId, cursor.created_at, cursor.created_at, cursor.id);
     if (row === undefined) throw new Error("Activity count query returned no row.");
     return requiredInteger(row, "count");
@@ -1417,7 +1472,7 @@ class SqliteScopedStore implements ScopedStore {
     return enrichedActivityRecord(row, recipientRows.map((recipient) => requiredText(recipient, "drone_id")));
   }
 
-  #claims(cubeId: string): ClaimRecord[] {
+  #claims(cubeId: string, broadcastOnly: boolean): ClaimRecord[] {
     return this.#database.prepare(`
       SELECT acknowledgement.entry_id AS log_entry_id,
              acknowledgement.claimant_drone_id,
@@ -1431,6 +1486,7 @@ class SqliteScopedStore implements ScopedStore {
       LEFT JOIN roles AS role ON role.id = drone.role_id AND role.cube_id = drone.cube_id
       WHERE entry.cube_id = ? AND acknowledgement.kind = 'claim'
         AND acknowledgement.claimant_drone_id IS NOT NULL
+        AND (${broadcastOnly ? "entry.visibility = 'broadcast'" : "1 = 1"})
       ORDER BY acknowledgement.created_at, acknowledgement.entry_id,
                acknowledgement.claimant_drone_id
     `).all(cubeId).map(claimRecord);
@@ -1822,12 +1878,39 @@ class SqliteCredentialStore implements CredentialStore {
     readonly digest: DigestPair;
     readonly expiresAt: string;
     readonly purpose: "owner" | "client";
-  }): void {
+    readonly cubeSelector?: { readonly kind: "id" | "name"; readonly value: string };
+    readonly access?: CubeAccess;
+  }): InvitationCubeScope | null {
     assertCanonicalUuid(input.id, "Invitation id");
     validateDigest(input.digest);
     validateTimestamp(input.expiresAt);
     this.#database.exec("BEGIN IMMEDIATE");
     try {
+      let scope: InvitationCubeScope | null = null;
+      if (input.cubeSelector !== undefined) {
+        if (input.purpose !== "client" || input.access === undefined) {
+          throw new Error("Only client invitations may carry a complete cube scope.");
+        }
+        if (input.access !== "read" && input.access !== "write" && input.access !== "manage") {
+          throw new Error("Unknown cube access grant.");
+        }
+        const rows = input.cubeSelector.kind === "id"
+          ? this.#database.prepare("SELECT id, name FROM cubes WHERE id = ?").all(input.cubeSelector.value)
+          : this.#database.prepare("SELECT id, name FROM cubes WHERE name = ? ORDER BY id").all(input.cubeSelector.value);
+        if (rows.length === 0) throw new InvitationCubeNotFoundError();
+        if (rows.length > 1) {
+          throw new InvitationCubeAmbiguousError(rows.map((row) => requiredText(row, "id")));
+        }
+        const cubeId = requiredText(rows[0]!, "id");
+        assertCanonicalUuid(cubeId, "Resolved cube id");
+        scope = {
+          cubeId,
+          cubeName: requiredText(rows[0]!, "name"),
+          access: input.access,
+        };
+      } else if (input.access !== undefined) {
+        throw new Error("Invitation access requires a cube selector.");
+      }
       let ownerEpoch: number | null = null;
       if (input.purpose === "owner") {
         const state = this.#database.prepare(
@@ -1852,13 +1935,15 @@ class SqliteCredentialStore implements CredentialStore {
       }
       this.#database.prepare(`
         INSERT INTO enrollment_invitations (
-          id, lookup_digest, verifier_digest, expires_at, created_at, purpose, owner_epoch
-        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+          id, lookup_digest, verifier_digest, expires_at, created_at, purpose, owner_epoch,
+          cube_id, access
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         input.id, input.digest.lookup, input.digest.verifier, input.expiresAt,
-        this.#now(), input.purpose, ownerEpoch,
+        this.#now(), input.purpose, ownerEpoch, scope?.cubeId ?? null, scope?.access ?? null,
       );
       this.#database.exec("COMMIT");
+      return scope;
     } catch (error) {
       try { this.#database.exec("ROLLBACK"); } catch { /* Preserve the original failure. */ }
       throw error;
@@ -1875,7 +1960,7 @@ class SqliteCredentialStore implements CredentialStore {
              COALESCE(invitation.expires_at, '') AS expires_at,
              invitation.consumed_at, invitation.revoked_at,
              COALESCE(invitation.purpose, 'client') AS purpose,
-             invitation.owner_epoch
+             invitation.owner_epoch, invitation.cube_id, invitation.access
       FROM (SELECT 1) AS seed
       LEFT JOIN enrollment_invitations AS invitation ON invitation.lookup_digest = ?
     `).get(lookup);
@@ -1906,7 +1991,8 @@ class SqliteCredentialStore implements CredentialStore {
                COALESCE(invitation.purpose, 'client') AS purpose,
                invitation.owner_epoch,
                COALESCE(invitation.expires_at, '') AS expires_at,
-               invitation.consumed_at, invitation.revoked_at
+               invitation.consumed_at, invitation.revoked_at,
+               invitation.cube_id, invitation.access
         FROM (SELECT 1) AS seed
         LEFT JOIN enrollment_invitations AS invitation ON invitation.id = ?
       `).get(input.invitationId);
@@ -1954,6 +2040,12 @@ class SqliteCredentialStore implements CredentialStore {
       const ownerEpoch = invitation["owner_epoch"] === null
         ? null
         : requiredInteger(invitation, "owner_epoch");
+      const cubeId = nullableText(invitation, "cube_id");
+      const accessValue = nullableText(invitation, "access");
+      const access = accessValue === null ? null : cubeAccess(accessValue);
+      if ((cubeId === null) !== (access === null) || (cubeId !== null && purpose !== "client")) {
+        throw new Error("Invalid invitation cube scope.");
+      }
       if (purpose === "owner") {
         const state = this.#database.prepare(`
           SELECT epoch, claimed_client_id FROM owner_enrollment_state WHERE singleton = 1
@@ -1963,6 +2055,10 @@ class SqliteCredentialStore implements CredentialStore {
           this.#database.exec("ROLLBACK");
           return null;
         }
+      }
+      if (cubeId !== null && this.#database.prepare("SELECT 1 FROM cubes WHERE id = ?").get(cubeId) === undefined) {
+        this.#database.exec("ROLLBACK");
+        return null;
       }
       this.#capacityGuard.assertCanGrow(Buffer.byteLength(input.requestedClientName ?? "") + 8_192);
       this.#database.prepare(
@@ -1987,6 +2083,13 @@ class SqliteCredentialStore implements CredentialStore {
           VALUES (?, 'create_cube', ?)
         `).run(input.clientId, now);
         this.#mutationHook?.("enrollment.insert-capability");
+      }
+      if (cubeId !== null && access !== null) {
+        this.#database.prepare(`
+          INSERT INTO client_cube_grants (client_id, cube_id, access, created_at)
+          VALUES (?, ?, ?, ?)
+        `).run(input.clientId, cubeId, access, now);
+        this.#mutationHook?.("enrollment.insert-grant");
       }
       this.#database.prepare(`
         INSERT INTO enrollment_claims (
@@ -2387,6 +2490,10 @@ function createCubeRecord(row: Record<string, unknown>): CreateCubeRecord {
 }
 
 function droneRecord(row: Record<string, unknown>): DroneRecord {
+  const posture = requiredText(row, "posture");
+  if (posture !== "observer" && posture !== "participant") {
+    throw new Error("Database contains invalid drone posture.");
+  }
   return {
     id: requiredText(row, "id"),
     cube_id: requiredText(row, "cube_id"),
@@ -2394,6 +2501,7 @@ function droneRecord(row: Record<string, unknown>): DroneRecord {
     label: requiredText(row, "label"),
     last_seen: requiredText(row, "last_seen"),
     hostname: nullableText(row, "hostname"),
+    posture,
     created_at: requiredText(row, "created_at"),
   };
 }
@@ -2442,7 +2550,20 @@ function storedInvitationDigest(row: Record<string, unknown>): StoredInvitationD
   }
   const epochValue = row["owner_epoch"];
   const ownerEpoch = epochValue === null ? null : requiredInteger(row, "owner_epoch");
-  return { ...digest, purpose, ownerEpoch };
+  const cubeId = nullableText(row, "cube_id");
+  const accessValue = nullableText(row, "access");
+  const access = accessValue === null ? null : cubeAccess(accessValue);
+  if ((cubeId === null) !== (access === null) || (cubeId !== null && purpose !== "client")) {
+    throw new Error("Database contains invalid invitation cube scope.");
+  }
+  return { ...digest, purpose, ownerEpoch, cubeId, access };
+}
+
+function cubeAccess(value: string): CubeAccess {
+  if (value !== "read" && value !== "write" && value !== "manage") {
+    throw new Error("Database contains invalid cube access.");
+  }
+  return value;
 }
 
 function enrollmentClaimResult(

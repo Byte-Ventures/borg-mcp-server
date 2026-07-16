@@ -17,6 +17,14 @@ const enrollmentPhases = [
   "enrollment.claim-owner",
   "enrollment.after-commit",
 ] as const;
+const scopedEnrollmentPhases = [
+  "enrollment.insert-client",
+  "enrollment.insert-credential",
+  "enrollment.insert-grant",
+  "enrollment.insert-claim",
+  "enrollment.consume-invitation",
+  "enrollment.after-commit",
+] as const;
 const cubePhases = [
   "cube.insert-cube",
   "cube.insert-human-role",
@@ -66,6 +74,48 @@ describe("owner enrollment and multi-cube creation", () => {
       expect(state).toMatchObject({ enrolled_clients: 1, enrollment_claims: 1, server_capabilities: 1 });
     } else {
       expect(state).toMatchObject({ enrolled_clients: 0, enrollment_claims: 0, server_capabilities: 0 });
+    }
+    reopened.close();
+  });
+
+  it.each(scopedEnrollmentPhases)("leaves scoped enrollment wholly absent or committed after %s", async (phase) => {
+    const fixture = await authorityFixture();
+    const cubeId = randomUUID();
+    fixture.runtime.maintenance.createCube({ id: cubeId, name: "Scoped", directive: "" });
+    const recovery = fixture.authority.createRecoveryCredential();
+    fixture.runtime.close();
+    fixture.digester.destroy();
+    let failAt: string | undefined;
+    const runtime = await openStore({
+      path: fixture.path,
+      mutationHook: (current) => {
+        if (current === failAt) throw new Error(`fault:${current}`);
+      },
+    });
+    const digester = new CredentialDigester(Buffer.alloc(32, 7));
+    const authority = new CredentialAuthority(runtime.credentials, digester);
+    const minted = authority.createCubeInvitation(
+      recovery,
+      { kind: "id", value: cubeId },
+      "read",
+      60_000,
+    );
+    if (minted === null) throw new Error("Scoped invitation creation failed.");
+    failAt = phase;
+    expect(() => authority.exchangeInvitation({
+      invitation: minted.invitation,
+      retryKey: randomUUID(),
+      clientCredential: generateSecret(),
+    })).toThrow(`fault:${phase}`);
+    runtime.close();
+    digester.destroy();
+
+    const reopened = await openStore({ path: fixture.path });
+    const state = reopened.maintenance.observeAuthorityState();
+    if (phase === "enrollment.after-commit") {
+      expect(state).toMatchObject({ enrolled_clients: 1, enrollment_claims: 1, grants: 1 });
+    } else {
+      expect(state).toMatchObject({ enrolled_clients: 0, enrollment_claims: 0, grants: 0 });
     }
     reopened.close();
   });

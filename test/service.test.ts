@@ -8,6 +8,7 @@ import { describe, expect, it, vi } from "vitest";
 import { bootstrapServer, loadDigestKey } from "../src/bootstrap.js";
 import { CredentialAuthority, CredentialDigester, generateSecret } from "../src/credentials.js";
 import { applyMigrations, STORE_MIGRATIONS } from "../src/migrations.js";
+import { operatorPublicMessage } from "../src/operator-error.js";
 import type { HttpsServerOptions, RunningServer } from "../src/https-server.js";
 import { openStore } from "../src/store.js";
 import {
@@ -249,6 +250,12 @@ describe("node server service", () => {
       digester = new CredentialDigester(digestKey);
       digestKey.fill(0);
       const liveAuthority = new CredentialAuthority(runtime.credentials, digester);
+      const invitedCubeId = randomUUID();
+      const duplicateCubeIds = [randomUUID(), randomUUID()].sort();
+      runtime.maintenance.createCube({ id: invitedCubeId, name: "release-tooling", directive: "" });
+      for (const id of duplicateCubeIds) {
+        runtime.maintenance.createCube({ id, name: "duplicate", directive: "" });
+      }
       running = await acquireRuntimeLock(directory, "server");
       const administration = createOfflineCredentialService(directory);
 
@@ -261,12 +268,75 @@ describe("node server service", () => {
       expect(owner).toMatchObject({ purpose: "owner", serverCapabilities: ["create_cube"] });
 
       const clientInvitation = await administration.createClientInvitation(installation.recoveryCredential);
+      if (typeof clientInvitation !== "string") throw new Error("Expected a plain invitation.");
       const client = liveAuthority.exchangeInvitation({
         invitation: clientInvitation,
         retryKey: randomUUID(),
         clientCredential: generateSecret(),
       });
       expect(client).toMatchObject({ purpose: "client", serverCapabilities: [] });
+
+      const scopedInvitation = await administration.createClientInvitation(
+        installation.recoveryCredential,
+        "release-tooling",
+      );
+      if (typeof scopedInvitation === "string") throw new Error("Expected a scoped invitation.");
+      expect(scopedInvitation).toMatchObject({
+        cubeId: invitedCubeId,
+        cubeName: "release-tooling",
+        access: "write",
+      });
+      const scopedCredential = generateSecret();
+      const scoped = liveAuthority.exchangeInvitation({
+        invitation: scopedInvitation.invitation,
+        retryKey: randomUUID(),
+        clientCredential: scopedCredential,
+      });
+      expect(scoped).toMatchObject({ purpose: "client", serverCapabilities: [] });
+      const scopedPrincipal = liveAuthority.authenticate(`Bearer ${scopedCredential}`);
+      if (scopedPrincipal === null) throw new Error("Scoped authentication failed.");
+      expect(runtime.forPrincipal(scopedPrincipal).listCubes()).toEqual([
+        expect.objectContaining({ id: invitedCubeId, name: "release-tooling" }),
+      ]);
+      const idInvitation = await administration.createClientInvitation(
+        installation.recoveryCredential,
+        invitedCubeId,
+        "read",
+      );
+      expect(idInvitation).toMatchObject({ cubeId: invitedCubeId, access: "read" });
+      const invitationRowsBeforeFailures = new DatabaseSync(installation.paths.database, { readOnly: true });
+      const countBeforeFailures = invitationRowsBeforeFailures.prepare(
+        "SELECT COUNT(*) AS count FROM enrollment_invitations",
+      ).get();
+      invitationRowsBeforeFailures.close();
+      await expect(administration.createClientInvitation(
+        installation.recoveryCredential,
+        "missing",
+      )).rejects.toThrow("Provide an existing cube name or full cube ID.");
+      let ambiguous: unknown;
+      try {
+        await administration.createClientInvitation(installation.recoveryCredential, "duplicate");
+      } catch (error) {
+        ambiguous = error;
+      }
+      const ambiguousMessage =
+        `Cube name is ambiguous. Rerun with the full cube ID. Candidate cube IDs: ${duplicateCubeIds.join(", ")}`;
+      expect(ambiguous).toBeInstanceOf(Error);
+      expect((ambiguous as Error).message).toBe(ambiguousMessage);
+      expect(operatorPublicMessage(ambiguous)).toBe(ambiguousMessage);
+      await expect(administration.createClientInvitation(
+        installation.recoveryCredential,
+        invitedCubeId.toUpperCase(),
+      )).rejects.toThrow("Provide a full canonical cube UUID or an exact case-sensitive cube name.");
+      await expect(administration.createClientInvitation(
+        installation.recoveryCredential,
+        "Release-Tooling",
+      )).rejects.toThrow("Provide an existing cube name or full cube ID.");
+      const invitationRowsAfterFailures = new DatabaseSync(installation.paths.database, { readOnly: true });
+      expect(invitationRowsAfterFailures.prepare(
+        "SELECT COUNT(*) AS count FROM enrollment_invitations",
+      ).get()).toEqual(countBeforeFailures);
+      invitationRowsAfterFailures.close();
 
       await expect(administration.rotateClient(client!.clientId)).rejects.toThrow(
         "Stop the server before running setup or offline administration.",

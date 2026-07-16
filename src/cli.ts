@@ -15,7 +15,8 @@ Commands:
   client-revoke <client-id>  Revoke one client and its credentials offline
   client-grant <client-id> <cube-id> <read|write|manage>  Set one offline cube grant
   client-ungrant <client-id> <cube-id>  Remove one offline cube grant
-  client-invite  Create one client enrollment invitation using a hidden recovery prompt
+  client-invite [<cube-name-or-id>] [--access <read|write|manage>]
+             Create a client invitation; scoped invitations default to write
   owner-invite   Replace the unclaimed owner enrollment invitation using a hidden recovery prompt
   help     Show this help
 
@@ -33,7 +34,12 @@ TLS files:
   BORG_SERVER_TLS_KEY_FILE, BORG_SERVER_TLS_CERT_FILE, and BORG_SERVER_TLS_CA_FILE
 
 Invitation commands may run alongside a live server. Stop the server before
-setup, rotation, revocation, grant changes, or reinitialization.`;
+setup, rotation, revocation, grant changes, or reinitialization.
+
+Invitation access:
+  read    observe: discover, attach as observer, and read
+  write   coordinate: attach, read, post, acknowledge, and receive directed wakes (default)
+  manage  administer: coordinate plus cube administration; explicit only`;
 
 export async function runCli(
   args: readonly string[],
@@ -81,16 +87,32 @@ export async function runCli(
       return 0;
     case "client-invite":
     case "owner-invite": {
-      if (extraArgs.length !== 0 || io.readSecret === undefined) return invalidArguments(io);
+      if (io.readSecret === undefined) return invalidArguments(io);
+      const scoped = command === "client-invite" ? parseClientInviteArguments(extraArgs) : null;
+      if ((command === "owner-invite" && extraArgs.length !== 0) || scoped === undefined) {
+        return invalidArguments(io);
+      }
       const operation = command === "client-invite"
         ? service.createClientInvitation
         : service.replaceOwnerInvitation;
       if (operation === undefined) return invalidArguments(io);
       const recovery = await io.readSecret("Recovery credential (hidden input): ");
-      const invitation = await operation(recovery);
-      io.stdout(command === "client-invite"
-        ? `Client enrollment invitation (single-use, shown once): ${invitation}`
-        : `Owner enrollment invitation (single-use, shown once): ${invitation}`);
+      const result = command === "client-invite"
+        ? scoped?.cubeSelector === undefined
+          ? await operation(recovery)
+          : await operation(recovery, scoped.cubeSelector, scoped.access)
+        : await operation(recovery);
+      if (typeof result === "string") {
+        io.stdout(command === "client-invite"
+          ? `Client enrollment invitation (single-use, shown once): ${result}`
+          : `Owner enrollment invitation (single-use, shown once): ${result}`);
+      } else {
+        io.stdout(
+          `Cube: ${JSON.stringify(result.cubeName)} (${result.cubeId})\n` +
+          `Grant: ${grantSummary(result.access)}\n` +
+          `Client enrollment invitation (single-use, shown once): ${result.invitation}`,
+        );
+      }
       return 0;
     }
     case "help":
@@ -103,6 +125,25 @@ export async function runCli(
       io.stderr("Unknown command.");
       return 1;
   }
+}
+
+function parseClientInviteArguments(
+  args: readonly string[],
+): { readonly cubeSelector?: string; readonly access?: "read" | "write" | "manage" } | undefined {
+  if (args.length === 0) return {};
+  const cubeSelector = args[0];
+  if (cubeSelector === undefined || cubeSelector.startsWith("--")) return undefined;
+  if (args.length === 1) return { cubeSelector };
+  if (args.length !== 3 || args[1] !== "--access") return undefined;
+  const access = args[2];
+  if (access !== "read" && access !== "write" && access !== "manage") return undefined;
+  return { cubeSelector, access };
+}
+
+function grantSummary(access: "read" | "write" | "manage"): string {
+  if (access === "read") return "read (observe - discover, attach as observer, and read)";
+  if (access === "manage") return "manage (administer - coordinate plus cube administration)";
+  return "write (coordinate - attach, read, post, acknowledge, and receive directed wakes)";
 }
 
 function invalidArguments(io: CliIo): 1 {

@@ -3,6 +3,7 @@ import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
+import { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
@@ -111,6 +112,7 @@ describe("credential authority", () => {
       expect.objectContaining({ kind: "client", id: enrolled?.clientId }),
     );
     expect(authority.authenticate("Bearer invalid")).toBeNull();
+    expect(runtime.maintenance.observeAuthorityState()).toMatchObject({ grants: 0 });
   });
 
   it("rejects expired invitations with the same null result", () => {
@@ -157,6 +159,95 @@ describe("credential authority", () => {
     const recovery = authority.createRecoveryCredential();
     expect(authority.createInvitation(generateSecret(), 60_000)).toBeNull();
     expect(authority.createInvitation(recovery, 60_000)).toMatch(/^[A-Za-z0-9_-]{43}$/u);
+  });
+
+  it("atomically enrolls a client with exactly the invitation cube grant and retries stably", () => {
+    const cubeId = randomUUID();
+    runtime.maintenance.createCube({ id: cubeId, name: "release-tooling", directive: "" });
+    const recovery = authority.createRecoveryCredential();
+    const minted = authority.createCubeInvitation(
+      recovery,
+      { kind: "name", value: "release-tooling" },
+      "write",
+      60_000,
+    );
+    if (minted === null) throw new Error("Scoped invitation creation failed.");
+    expect(minted).toEqual({
+      invitation: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/u),
+      cubeId,
+      cubeName: "release-tooling",
+      access: "write",
+    });
+    const request = enrollmentRequest(minted.invitation);
+
+    const enrolled = authority.exchangeInvitation(request);
+
+    expect(enrolled).toMatchObject({ purpose: "client", serverCapabilities: [] });
+    expect(authority.exchangeInvitation(request)).toEqual(enrolled);
+    expect(runtime.maintenance.observeAuthorityState()).toMatchObject({
+      enrolled_clients: 1,
+      enrollment_claims: 1,
+      grants: 1,
+      server_capabilities: 0,
+    });
+    const principal = authority.authenticate(`Bearer ${request.clientCredential}`);
+    if (principal === null) throw new Error("Scoped client authentication failed.");
+    expect(runtime.forPrincipal(principal).listCubes()).toEqual([
+      expect.objectContaining({ id: cubeId, name: "release-tooling" }),
+    ]);
+    expect(() => runtime.forPrincipal(principal).appendActivity(cubeId, "ready")).not.toThrow();
+    expect(() => runtime.forPrincipal(principal).updateDirective(cubeId, "admin"))
+      .toThrow("The requested resource was not found.");
+  });
+
+  it("fails a scoped claim without enrollment mutation when its cube was deleted after mint", () => {
+    const cubeId = randomUUID();
+    runtime.maintenance.createCube({ id: cubeId, name: "temporary", directive: "" });
+    const recovery = authority.createRecoveryCredential();
+    const minted = authority.createCubeInvitation(
+      recovery,
+      { kind: "id", value: cubeId },
+      "write",
+      60_000,
+    );
+    if (minted === null) throw new Error("Scoped invitation creation failed.");
+    const deletion = new DatabaseSync(join(directory, "borg.db"));
+    deletion.prepare("DELETE FROM cubes WHERE id = ?").run(cubeId);
+    deletion.close();
+
+    expect(authority.exchangeInvitation(enrollmentRequest(minted.invitation))).toBeNull();
+    expect(runtime.maintenance.observeAuthorityState()).toMatchObject({
+      enrolled_clients: 0,
+      enrollment_claims: 0,
+      grants: 0,
+    });
+  });
+
+  it.each(["read", "manage"] as const)("preserves explicit %s invitation access", (access) => {
+    const cubeId = randomUUID();
+    runtime.maintenance.createCube({ id: cubeId, name: `scope-${access}`, directive: "" });
+    const recovery = authority.createRecoveryCredential();
+    const minted = authority.createCubeInvitation(
+      recovery,
+      { kind: "id", value: cubeId },
+      access,
+      60_000,
+    );
+    if (minted === null) throw new Error("Scoped invitation creation failed.");
+    const request = enrollmentRequest(minted.invitation);
+    const enrolled = authority.exchangeInvitation(request);
+    if (enrolled === null) throw new Error("Scoped enrollment failed.");
+    const principal = authority.authenticate(`Bearer ${request.clientCredential}`);
+    if (principal === null) throw new Error("Scoped authentication failed.");
+    const scoped = runtime.forPrincipal(principal);
+
+    expect(scoped.listCubes()).toHaveLength(1);
+    if (access === "read") {
+      expect(() => scoped.appendActivity(cubeId, "denied"))
+        .toThrow("The requested resource was not found.");
+    } else {
+      expect(() => scoped.updateDirective(cubeId, "managed")).not.toThrow();
+    }
   });
 
   it("purpose-binds owner authority and revokes the prior owner epoch on replacement", () => {

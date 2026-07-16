@@ -95,6 +95,7 @@ before running those commands.
 borg-mcp-server client-rotate <client-id>
 borg-mcp-server client-revoke <client-id>
 borg-mcp-server client-invite
+borg-mcp-server client-invite <cube-name-or-id> [--access <read|write|manage>]
 borg-mcp-server owner-invite
 borg-mcp-server client-grant <client-id> <cube-id> <read|write|manage>
 borg-mcp-server client-ungrant <client-id> <cube-id>
@@ -102,10 +103,28 @@ borg-mcp-server client-ungrant <client-id> <cube-id>
 
 Invitation commands visibly prompt with `Recovery credential (hidden input):`
 before reading the recovery credential from a private hidden terminal, never argv
-or environment. `owner-invite` prints an owner enrollment invitation;
-`client-invite` prints a client enrollment invitation. Both are single-use and
-shown once. Treat setup, enrollment, invitation, and rotation output as secrets;
-do not paste it into issues, logs, or chat.
+or environment. `owner-invite` prints an owner enrollment invitation. A plain
+`client-invite` remains an enroll-only invitation with no cube grant. Supplying a
+cube selector atomically binds one grant to the invitation. `read` attaches an
+observer that can discover the cube and read shared activity, but cannot post,
+acknowledge, claim, administer, be selected as a direct recipient, or receive
+directed stream events. `write` attaches a participant that can coordinate and is
+the default; explicit `manage` adds cube administration. Attach responses and
+drone listings identify the effective `observer` or `participant` posture. The
+command prints the resolved display name, full cube ID,
+effective access, and capability summary before the single-use invitation.
+
+For automation and duplicate-name environments, use the full lowercase canonical
+cube UUID. A display name must match exactly and case-sensitively. Unknown names,
+UUID-like malformed selectors, and duplicate names fail without creating or
+printing an invitation; duplicate-name errors list the candidate IDs so the
+operator can rerun unambiguously. Claiming a scoped invitation atomically creates
+the client credential binding and exactly that cube grant. It grants no server
+capability and no access to any other cube.
+
+Both invitation forms are single-use and shown once. Treat setup, enrollment,
+invitation, and rotation output as secrets; do not paste it into issues, logs, or
+chat.
 
 ## Capacity controls
 

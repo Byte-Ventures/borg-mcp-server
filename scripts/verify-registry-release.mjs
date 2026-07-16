@@ -4,6 +4,8 @@ import { fileURLToPath } from 'node:url';
 import { verifyPackedArtifact } from './verify-packed-artifact.mjs';
 
 const REGISTRY = 'https://registry.npmjs.org';
+const PROPAGATION_ATTEMPTS = 18;
+const PROPAGATION_MAX_DELAY_MS = 15_000;
 
 async function request(path) {
   return fetch(`${REGISTRY}/${path}`, { headers: { accept: 'application/json' }, cache: 'no-store' });
@@ -12,6 +14,26 @@ async function request(path) {
 async function responseJson(response, description) {
   if (!response.ok) throw new Error(`${description} returned HTTP ${response.status}.`);
   return response.json();
+}
+
+export async function readWithPropagationRetry(
+  read,
+  description,
+  {
+    attempts = PROPAGATION_ATTEMPTS,
+    maxDelayMs = PROPAGATION_MAX_DELAY_MS,
+    wait = delay,
+  } = {},
+) {
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    const response = await read();
+    if (response.status !== 404) return response;
+    if (attempt === attempts) {
+      throw new Error(`${description} remained HTTP 404 after ${attempts} attempts.`);
+    }
+    await wait(Math.min(1_000 * (2 ** (attempt - 1)), maxDelayMs));
+  }
+  throw new Error(`${description} retry loop terminated unexpectedly.`);
 }
 
 function verifyOwner(packument, expectedOwner) {
@@ -75,16 +97,12 @@ export function verifyProvenanceStatement(statement, payloadType, name, version,
   }
 }
 
-async function postpublish(name, version, integrity) {
-  let versionResponse;
-  for (let attempt = 1; attempt <= 12; attempt += 1) {
-    versionResponse = await request(`${encodeURIComponent(name)}/${encodeURIComponent(version)}`);
-    if (versionResponse.ok) break;
-    if (versionResponse.status !== 404 || attempt === 12) {
-      throw new Error(`Published version verification returned HTTP ${versionResponse.status}.`);
-    }
-    await delay(5_000);
-  }
+export async function postpublish(name, version, integrity, retryOptions = {}) {
+  const versionResponse = await readWithPropagationRetry(
+    () => request(`${encodeURIComponent(name)}/${encodeURIComponent(version)}`),
+    'Published version verification',
+    retryOptions,
+  );
   const published = await responseJson(versionResponse, 'Published version verification');
   if (published.dist?.integrity !== integrity) throw new Error('Registry integrity does not match audited artifact.');
   const attestationsUrl = published.dist?.attestations?.url;
@@ -96,19 +114,26 @@ async function postpublish(name, version, integrity) {
       !provenanceUrl.pathname.startsWith('/-/npm/v1/attestations/')) {
     throw new Error('Registry provenance URL is outside the trusted npm attestation endpoint.');
   }
-  const document = await responseJson(await fetch(attestationsUrl, {
-    headers: { accept: 'application/json' }, cache: 'no-store',
-  }), 'Provenance verification');
+  const provenanceResponse = await readWithPropagationRetry(
+    () => fetch(attestationsUrl, {
+      headers: { accept: 'application/json' }, cache: 'no-store',
+    }),
+    'Provenance verification',
+    retryOptions,
+  );
+  const document = await responseJson(provenanceResponse, 'Provenance verification');
   const attestation = document.attestations?.find((entry) => entry.predicateType === 'https://slsa.dev/provenance/v1');
   if (!attestation) throw new Error('Registry bundle lacks SLSA provenance statement.');
   verifyProvenanceStatement(
     decodePayload(attestation), attestation.bundle.dsseEnvelope.payloadType,
     name, version, integrity, process.env.GITHUB_SHA,
   );
-  verifyOwner(
-    await responseJson(await request(encodeURIComponent(name)), 'Post-publish ownership check'),
-    process.env.NPM_EXPECTED_OWNER,
+  const packageResponse = await readWithPropagationRetry(
+    () => request(encodeURIComponent(name)),
+    'Post-publish ownership check',
+    retryOptions,
   );
+  verifyOwner(await responseJson(packageResponse, 'Post-publish ownership check'), process.env.NPM_EXPECTED_OWNER);
   return { name, version, integrity, registryState: 'verified' };
 }
 

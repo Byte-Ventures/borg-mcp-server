@@ -12,7 +12,7 @@ const extractPreflightScript = (workflow: string): string => {
   return script?.replace(/^ {10}/gmu, "") ?? "";
 };
 
-const mockPreflightFetch = (exchangeStatus: number, exchangeBody: Record<string, unknown>): string => `
+const mockPreflightFetch = `
   const claims = {
     aud: "npm:registry.npmjs.org",
     repository: "Byte-Ventures/borg-mcp-server",
@@ -23,12 +23,26 @@ const mockPreflightFetch = (exchangeStatus: number, exchangeBody: Record<string,
     workflow_ref: "Byte-Ventures/borg-mcp-server/.github/workflows/release.yml@refs/heads/main",
   };
   const jwt = ["header", Buffer.from(JSON.stringify(claims)).toString("base64url"), "signature"].join(".");
+  const exchangeStatus = Number(process.env.MOCK_EXCHANGE_STATUS);
+  const exchangeBody = JSON.parse(process.env.MOCK_EXCHANGE_BODY);
   const responses = [
     { status: 200, text: async () => JSON.stringify({ value: jwt }) },
-    { status: ${exchangeStatus}, text: async () => ${JSON.stringify(JSON.stringify(exchangeBody))} },
+    { status: exchangeStatus, text: async () => JSON.stringify(exchangeBody) },
   ];
   global.fetch = async () => responses.shift();
 `;
+
+const mockPreflightEnvironment = (
+  exchangeStatus: number,
+  exchangeBody: Record<string, unknown>,
+  githubToken: string,
+): NodeJS.ProcessEnv => ({
+  ...process.env,
+  ACTIONS_ID_TOKEN_REQUEST_URL: "https://example.test/oidc",
+  ACTIONS_ID_TOKEN_REQUEST_TOKEN: githubToken,
+  MOCK_EXCHANGE_STATUS: String(exchangeStatus),
+  MOCK_EXCHANGE_BODY: JSON.stringify(exchangeBody),
+});
 
 describe("server release lane", () => {
   it("keeps verification unprivileged and publication exact-artifact gated", async () => {
@@ -147,20 +161,17 @@ describe("server release lane", () => {
     const workflow = await readFile(".github/workflows/release.yml", "utf8");
     const preflightScript = extractPreflightScript(workflow);
     expect(preflightScript).not.toBe("");
-    const mockFetch = mockPreflightFetch(403, {
+    expect(mockPreflightFetch).not.toContain("${");
+    const exchangeBody = {
       message: "publisher mismatch",
       token: "npm-sensitive-token",
       nested: { authorization: "nested-sensitive-authorization" },
-    });
+    };
     let failure: { stderr?: string; stdout?: string } | undefined;
 
     try {
-      await execute(process.execPath, ["-e", `${mockFetch}\n${preflightScript}`], {
-        env: {
-          ...process.env,
-          ACTIONS_ID_TOKEN_REQUEST_URL: "https://example.test/oidc",
-          ACTIONS_ID_TOKEN_REQUEST_TOKEN: "github-request-sensitive-token",
-        },
+      await execute(process.execPath, ["-e", `${mockPreflightFetch}\n${preflightScript}`], {
+        env: mockPreflightEnvironment(403, exchangeBody, "github-request-sensitive-token"),
       });
     } catch (error) {
       failure = error as { stderr?: string; stdout?: string };
@@ -187,19 +198,15 @@ describe("server release lane", () => {
     const preflightScript = extractPreflightScript(workflow);
     const npmToken = "npm-success-sensitive-token";
     const githubToken = "github-success-sensitive-token";
-    const mockFetch = mockPreflightFetch(201, {
+    const exchangeBody = {
       created: Math.floor(Date.now() / 1000),
       expires: Math.floor(Date.now() / 1000) + 900,
       token: npmToken,
       token_type: "oidc",
-    });
+    };
 
-    const result = await execute(process.execPath, ["-e", `${mockFetch}\n${preflightScript}`], {
-      env: {
-        ...process.env,
-        ACTIONS_ID_TOKEN_REQUEST_URL: "https://example.test/oidc",
-        ACTIONS_ID_TOKEN_REQUEST_TOKEN: githubToken,
-      },
+    const result = await execute(process.execPath, ["-e", `${mockPreflightFetch}\n${preflightScript}`], {
+      env: mockPreflightEnvironment(201, exchangeBody, githubToken),
     });
 
     expect(result.stdout).toBe("Trusted-publisher exchange accepted without publishing.\n");
@@ -212,21 +219,17 @@ describe("server release lane", () => {
     const workflow = await readFile(".github/workflows/release.yml", "utf8");
     const preflightScript = extractPreflightScript(workflow);
     const npmToken = "npm-expired-sensitive-token";
-    const mockFetch = mockPreflightFetch(201, {
+    const exchangeBody = {
       created: Math.floor(Date.now() / 1000) - 901,
       expires: Math.floor(Date.now() / 1000) - 1,
       token: npmToken,
       token_type: "oidc",
-    });
+    };
     let failure: { stderr?: string } | undefined;
 
     try {
-      await execute(process.execPath, ["-e", `${mockFetch}\n${preflightScript}`], {
-        env: {
-          ...process.env,
-          ACTIONS_ID_TOKEN_REQUEST_URL: "https://example.test/oidc",
-          ACTIONS_ID_TOKEN_REQUEST_TOKEN: "github-expired-sensitive-token",
-        },
+      await execute(process.execPath, ["-e", `${mockPreflightFetch}\n${preflightScript}`], {
+        env: mockPreflightEnvironment(201, exchangeBody, "github-expired-sensitive-token"),
       });
     } catch (error) {
       failure = error as { stderr?: string };
@@ -253,21 +256,17 @@ describe("server release lane", () => {
   ])("rejects %s as an npm exchange expiry", async (_name, expiry, expectedError) => {
     const workflow = await readFile(".github/workflows/release.yml", "utf8");
     const preflightScript = extractPreflightScript(workflow);
-    const mockFetch = mockPreflightFetch(201, {
+    const exchangeBody = {
       created: Math.floor(Date.now() / 1000),
       expires: expiry(),
       token: "npm-malformed-expiry-sensitive-token",
       token_type: "oidc",
-    });
+    };
     let failure: { stderr?: string } | undefined;
 
     try {
-      await execute(process.execPath, ["-e", `${mockFetch}\n${preflightScript}`], {
-        env: {
-          ...process.env,
-          ACTIONS_ID_TOKEN_REQUEST_URL: "https://example.test/oidc",
-          ACTIONS_ID_TOKEN_REQUEST_TOKEN: "github-malformed-expiry-sensitive-token",
-        },
+      await execute(process.execPath, ["-e", `${mockPreflightFetch}\n${preflightScript}`], {
+        env: mockPreflightEnvironment(201, exchangeBody, "github-malformed-expiry-sensitive-token"),
       });
     } catch (error) {
       failure = error as { stderr?: string };

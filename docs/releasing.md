@@ -120,7 +120,7 @@ separate exact-artifact CR/SR/Release Quality gates before any preview.
 10. The job verifies registry integrity, sole expected ownership, in-toto/SLSA provenance identity,
    Git commit, workflow/tag binding, and npm signatures/attestations.
 11. Stop immediately on any mismatch. Preserve the run and tag as immutable evidence; recovery uses
-   a newly reviewed source fix, a new version, and a newly authorized tag.
+    a newly reviewed source fix, a new version, and a newly authorized tag.
 
 ## Current audit state
 

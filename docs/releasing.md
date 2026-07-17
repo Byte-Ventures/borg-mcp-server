@@ -200,9 +200,9 @@ was absent from the failed `v0.1.3` job. The exchange probe then failed, but its
 specific assertion or HTTP failure, so the run cannot distinguish a branch-claim mismatch from npm
 Trusted Publisher rejection. Never rerun that failed attempt. A fresh source-only diagnostic change
 must report the error message and stack, both response statuses, and the npm response body with every
-token-, authorization-, credential-, and secret-like field recursively redacted. Non-JSON bodies are
-omitted rather than echoed. No GitHub or npm setting may change until a fresh, Queen-approved preflight
-provides that token-safe diagnostic evidence.
+credential-bearing token, authorization, credential, and secret field recursively redacted. Non-JSON
+bodies are omitted rather than echoed. No GitHub or npm setting may change until a fresh,
+Queen-approved preflight provides that token-safe diagnostic evidence.
 
 First-publication run `29495546749` built and published the exact audited artifact, but its publish job
 concluded `failure` when the immediate postpublish ownership read returned HTTP 404 before registry

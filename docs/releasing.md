@@ -193,6 +193,17 @@ an exchange credential, postpublication verification was skipped, and the regist
 binding, or environment approval. The source-only recovery first adds a protected-main, dispatch-only
 exchange preflight and fail-closed live-publish OIDC guards; it does not select the next version.
 
+The first protected-main preflight, workflow run `29573450568` attempt 1 at merge
+`4fa7f2c1b5e59201b5886a59ff01b70972c5e601`, passed every event, ref, runtime, empty-token, and OIDC
+request-variable guard. This proves GitHub now grants the effective `id-token: write` capability that
+was absent from the failed `v0.1.3` job. The exchange probe then failed, but its generic catch hid the
+specific assertion or HTTP failure, so the run cannot distinguish a branch-claim mismatch from npm
+Trusted Publisher rejection. Never rerun that failed attempt. A fresh source-only diagnostic change
+must report the error message and stack, both response statuses, and the npm response body with every
+credential-bearing token, authorization, credential, and secret field recursively redacted. Non-JSON
+bodies are omitted rather than echoed. No GitHub or npm setting may change until a fresh,
+Queen-approved preflight provides that token-safe diagnostic evidence.
+
 First-publication run `29495546749` built and published the exact audited artifact, but its publish job
 concluded `failure` when the immediate postpublish ownership read returned HTTP 404 before registry
 propagation completed. The run and tag remain immutable and must not be rerun, moved, or reused.

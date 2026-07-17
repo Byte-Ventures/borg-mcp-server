@@ -41,7 +41,45 @@ jobs:
           test -n "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}"
           test -z "${NODE_AUTH_TOKEN:-}"
           node <<'NODE'
-          const assert = require("node:assert/strict");
+          const diagnostics = {
+            idStatus: "request not completed",
+            exchangeStatus: "request not attempted",
+            exchangeBody: "response not received",
+          };
+
+          const redactTokenFields = (value) => {
+            if (Array.isArray(value)) {
+              return value.map(redactTokenFields);
+            }
+            if (value && typeof value === "object") {
+              return Object.fromEntries(Object.entries(value).map(([key, entry]) => [
+                key,
+                key !== "token_type" && /token|authorization|credential|secret/i.test(key)
+                  ? "[REDACTED]"
+                  : redactTokenFields(entry),
+              ]));
+            }
+            return value;
+          };
+
+          const parseJsonWithoutEcho = (text, source) => {
+            try {
+              return JSON.parse(text);
+            } catch {
+              throw new Error(`${source} response was not valid JSON; body omitted`);
+            }
+          };
+
+          const assertClaim = (claims, name, expected) => {
+            if (claims[name] !== expected) {
+              throw new Error(
+                `GitHub OIDC claim ${name} mismatch: expected ${JSON.stringify(expected)}, ` +
+                `received ${JSON.stringify(claims[name])}`,
+              );
+            }
+          };
+
+          let idToken;
 
           (async () => {
             const audience = "npm:registry.npmjs.org";
@@ -53,22 +91,34 @@ jobs:
                 authorization: `Bearer ${process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN}`,
               },
             });
-            assert.equal(idResponse.status, 200, "GitHub rejected the OIDC token request");
-            const idBody = await idResponse.json();
-            let idToken = idBody.value;
-            assert.equal(typeof idToken, "string");
-            assert.ok(idToken.length > 0);
+            diagnostics.idStatus = idResponse.status;
+            if (idResponse.status !== 200) {
+              throw new Error(`GitHub rejected the OIDC token request with status ${idResponse.status}`);
+            }
+            const idBody = parseJsonWithoutEcho(await idResponse.text(), "GitHub OIDC");
+            idToken = idBody.value;
+            if (typeof idToken !== "string" || idToken.length === 0) {
+              throw new Error("GitHub OIDC response did not contain a token");
+            }
             idBody.value = undefined;
 
             const tokenParts = idToken.split(".");
-            assert.equal(tokenParts.length, 3, "GitHub returned a malformed OIDC token");
-            const claims = JSON.parse(Buffer.from(tokenParts[1], "base64url").toString("utf8"));
-            assert.equal(claims.aud, audience);
-            assert.equal(claims.repository, "Byte-Ventures/borg-mcp-server");
-            assert.equal(claims.environment, "npm-publish");
-            assert.equal(claims.runner_environment, "github-hosted");
-            assert.equal(
-              claims.workflow_ref,
+            if (tokenParts.length !== 3) {
+              throw new Error("GitHub returned a malformed OIDC token");
+            }
+            const claims = parseJsonWithoutEcho(
+              Buffer.from(tokenParts[1], "base64url").toString("utf8"),
+              "GitHub OIDC claims",
+            );
+            assertClaim(claims, "aud", audience);
+            assertClaim(claims, "repository", "Byte-Ventures/borg-mcp-server");
+            assertClaim(claims, "environment", "npm-publish");
+            assertClaim(claims, "runner_environment", "github-hosted");
+            assertClaim(claims, "event_name", "workflow_dispatch");
+            assertClaim(claims, "ref", "refs/heads/main");
+            assertClaim(
+              claims,
+              "workflow_ref",
               "Byte-Ventures/borg-mcp-server/.github/workflows/release.yml@refs/heads/main",
             );
 
@@ -83,17 +133,38 @@ jobs:
               },
             );
             idToken = undefined;
-            assert.equal(exchangeResponse.status, 201, "npm rejected the trusted-publisher exchange");
-            const exchange = await exchangeResponse.json();
-            assert.equal(exchange.token_type, "oidc");
-            assert.equal(typeof exchange.token, "string");
-            assert.ok(exchange.token.length > 0);
-            assert.ok(Date.parse(exchange.expires) > Date.now(), "npm returned an expired exchange token");
+            diagnostics.exchangeStatus = exchangeResponse.status;
+            const exchangeText = await exchangeResponse.text();
+            const exchange = parseJsonWithoutEcho(exchangeText, "npm exchange");
+            diagnostics.exchangeBody = JSON.stringify(redactTokenFields(exchange));
+            const hasExchangeToken = typeof exchange.token === "string" && exchange.token.length > 0;
             exchange.token = undefined;
+            if (exchangeResponse.status !== 201) {
+              throw new Error(`npm rejected the trusted-publisher exchange with status ${exchangeResponse.status}`);
+            }
+            if (exchange.token_type !== "oidc") {
+              throw new Error("npm exchange response token_type was not oidc");
+            }
+            if (!hasExchangeToken) {
+              throw new Error("npm exchange response did not contain a token");
+            }
+            if (!(Date.parse(exchange.expires) > Date.now())) {
+              throw new Error("npm returned an expired exchange token");
+            }
             process.stdout.write("Trusted-publisher exchange accepted without publishing.\n");
-          })().catch(() => {
-            console.error("Trusted-publisher exchange validation failed.");
+          })().catch((error) => {
+            const message = error instanceof Error ? error.message : String(error);
+            const stack = error instanceof Error ? error.stack : undefined;
+            console.error(`Trusted-publisher exchange validation failed: ${message}`);
+            if (stack) {
+              console.error(stack);
+            }
+            console.error(`GitHub OIDC response status: ${diagnostics.idStatus}`);
+            console.error(`npm exchange response status: ${diagnostics.exchangeStatus}`);
+            console.error(`npm exchange response body: ${diagnostics.exchangeBody}`);
             process.exitCode = 1;
+          }).finally(() => {
+            idToken = undefined;
           });
           NODE
 

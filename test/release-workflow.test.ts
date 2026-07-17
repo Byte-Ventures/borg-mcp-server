@@ -7,6 +7,11 @@ import { describe, expect, it } from "vitest";
 
 const execute = promisify(execFile);
 
+const extractPreflightScript = (workflow: string): string => {
+  const script = workflow.match(/          node <<'NODE'\n([\s\S]*?)\n          NODE/u)?.[1];
+  return script?.replace(/^ {10}/gmu, "") ?? "";
+};
+
 describe("server release lane", () => {
   it("keeps verification unprivileged and publication exact-artifact gated", async () => {
     const workflow = await readFile(".github/workflows/release.yml", "utf8");
@@ -27,11 +32,19 @@ describe("server release lane", () => {
     expect(preflight).toContain('test -z "${NODE_AUTH_TOKEN:-}"');
     expect(preflight).toContain('const audience = "npm:registry.npmjs.org";');
     expect(preflight).toContain("/-/npm/v1/oidc/token/exchange/package/borgmcp-server");
-    expect(preflight).toContain('assert.equal(exchangeResponse.status, 201');
-    expect(preflight).toContain('assert.equal(exchange.token_type, "oidc")');
+    expect(preflight).toContain("diagnostics.idStatus = idResponse.status");
+    expect(preflight).toContain("diagnostics.exchangeStatus = exchangeResponse.status");
+    expect(preflight).toContain("diagnostics.exchangeBody = JSON.stringify(redactTokenFields(exchange))");
+    expect(preflight).toContain('key !== "token_type" && /token|authorization|credential|secret/i.test(key)');
+    expect(preflight).toContain('assertClaim(claims, "event_name", "workflow_dispatch")');
+    expect(preflight).toContain('assertClaim(claims, "ref", "refs/heads/main")');
     expect(preflight).toContain("Date.parse(exchange.expires) > Date.now()");
-    expect(preflight).toContain('console.error("Trusted-publisher exchange validation failed.")');
+    expect(preflight).toContain("Trusted-publisher exchange validation failed: ${message}");
+    expect(preflight).toContain("GitHub OIDC response status: ${diagnostics.idStatus}");
+    expect(preflight).toContain("npm exchange response status: ${diagnostics.exchangeStatus}");
+    expect(preflight).toContain("npm exchange response body: ${diagnostics.exchangeBody}");
     expect(preflight).not.toContain("console.error(error)");
+    expect(preflight).not.toContain("console.error(exchangeText)");
     expect(preflight).not.toContain("GITHUB_OUTPUT");
     expect(preflight).not.toContain("GITHUB_ENV");
     expect(preflight).not.toContain("actions/upload-artifact");
@@ -108,6 +121,61 @@ describe("server release lane", () => {
     }
   });
 
+  it("reports exchange failures without exposing either OIDC token", async () => {
+    const workflow = await readFile(".github/workflows/release.yml", "utf8");
+    const preflightScript = extractPreflightScript(workflow);
+    expect(preflightScript).not.toBe("");
+    const mockFetch = `
+      const claims = {
+        aud: "npm:registry.npmjs.org",
+        repository: "Byte-Ventures/borg-mcp-server",
+        environment: "npm-publish",
+        runner_environment: "github-hosted",
+        event_name: "workflow_dispatch",
+        ref: "refs/heads/main",
+        workflow_ref: "Byte-Ventures/borg-mcp-server/.github/workflows/release.yml@refs/heads/main",
+      };
+      const jwt = ["header", Buffer.from(JSON.stringify(claims)).toString("base64url"), "signature"].join(".");
+      const responses = [
+        { status: 200, text: async () => JSON.stringify({ value: jwt }) },
+        { status: 403, text: async () => JSON.stringify({
+          message: "publisher mismatch",
+          token: "npm-sensitive-token",
+          nested: { authorization: "nested-sensitive-authorization" },
+        }) },
+      ];
+      global.fetch = async () => responses.shift();
+    `;
+    let failure: { stderr?: string; stdout?: string } | undefined;
+
+    try {
+      await execute(process.execPath, ["-e", `${mockFetch}\n${preflightScript}`], {
+        env: {
+          ...process.env,
+          ACTIONS_ID_TOKEN_REQUEST_URL: "https://example.test/oidc",
+          ACTIONS_ID_TOKEN_REQUEST_TOKEN: "github-request-sensitive-token",
+        },
+      });
+    } catch (error) {
+      failure = error as { stderr?: string; stdout?: string };
+    }
+
+    expect(failure).toBeDefined();
+    expect(failure?.stderr).toContain(
+      "Trusted-publisher exchange validation failed: npm rejected the trusted-publisher exchange with status 403",
+    );
+    expect(failure?.stderr).toContain("GitHub OIDC response status: 200");
+    expect(failure?.stderr).toContain("npm exchange response status: 403");
+    expect(failure?.stderr).toContain(
+      'npm exchange response body: {"message":"publisher mismatch","token":"[REDACTED]",' +
+      '"nested":{"authorization":"[REDACTED]"}}',
+    );
+    expect(failure?.stderr).not.toContain("npm-sensitive-token");
+    expect(failure?.stderr).not.toContain("nested-sensitive-authorization");
+    expect(failure?.stderr).not.toContain("github-request-sensitive-token");
+    expect(failure?.stdout).toBe("");
+  });
+
   it("keeps pre-install source-lock verification builtin-only", async () => {
     for (const path of ["scripts/verify-source-lock.mjs", "scripts/verify-lock-registry.mjs"]) {
       const source = await readFile(path, "utf8");
@@ -174,6 +242,7 @@ describe("server release lane", () => {
       "separate release authorization",
       "Never move, reuse, force-update, or rerun a failed release tag",
       "first-attempt preflight from protected `main`",
+      "29573450568",
       'GITHUB_TOKEN="$(gh auth token)" node scripts/verify-main-ruleset.mjs',
       "tag authorization record must name the reviewed verifier commit",
     ]) {

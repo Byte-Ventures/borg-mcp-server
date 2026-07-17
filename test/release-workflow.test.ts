@@ -10,14 +10,39 @@ const execute = promisify(execFile);
 describe("server release lane", () => {
   it("keeps verification unprivileged and publication exact-artifact gated", async () => {
     const workflow = await readFile(".github/workflows/release.yml", "utf8");
-    const [verification = "", publication = ""] = workflow.split("\n  publish:\n");
+    const [, preflightAndRelease = ""] = workflow.split("\n  oidc-preflight:\n");
+    const [preflight = "", releaseJobs = ""] = preflightAndRelease.split("\n  verify:\n");
+    const [verification = "", publication = ""] = releaseJobs.split("\n  publish:\n");
 
     expect(workflow).toContain("tags: ['v*.*.*']");
-    expect(workflow).not.toContain("workflow_dispatch");
+    expect(workflow).toContain("workflow_dispatch:");
+    expect(preflight).toContain("if: github.event_name == 'workflow_dispatch'");
+    expect(preflight).toContain("environment:\n      name: npm-publish");
+    expect(preflight).toContain("id-token: write");
+    expect(preflight).toContain('test "${GITHUB_RUN_ATTEMPT}" = "1"');
+    expect(preflight).toContain('test "${GITHUB_REF}" = "refs/heads/main"');
+    expect(preflight).toContain('test "${GITHUB_REF_TYPE}" = "branch"');
+    expect(preflight).toContain('test -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}"');
+    expect(preflight).toContain('test -n "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}"');
+    expect(preflight).toContain('test -z "${NODE_AUTH_TOKEN:-}"');
+    expect(preflight).toContain('const audience = "npm:registry.npmjs.org";');
+    expect(preflight).toContain("/-/npm/v1/oidc/token/exchange/package/borgmcp-server");
+    expect(preflight).toContain('assert.equal(exchangeResponse.status, 201');
+    expect(preflight).toContain('assert.equal(exchange.token_type, "oidc")');
+    expect(preflight).toContain("Date.parse(exchange.expires) > Date.now()");
+    expect(preflight).toContain('console.error("Trusted-publisher exchange validation failed.")');
+    expect(preflight).not.toContain("console.error(error)");
+    expect(preflight).not.toContain("GITHUB_OUTPUT");
+    expect(preflight).not.toContain("GITHUB_ENV");
+    expect(preflight).not.toContain("actions/upload-artifact");
+    expect(preflight).not.toContain("npm publish");
+    expect(preflight).not.toContain("npm stage");
+    expect(verification).toContain("if: github.event_name == 'push'");
     expect(verification).not.toContain("id-token: write");
     expect(verification).not.toContain("environment:");
     expect(verification).not.toContain("NODE_AUTH_TOKEN");
     expect(publication).toContain("needs: verify");
+    expect(publication).toContain("if: github.event_name == 'push'");
     expect(publication).toContain("environment:\n      name: npm-publish");
     expect(publication).toContain("id-token: write");
     expect(workflow).toContain("SERVER_1016_APPROVED_SHA");
@@ -47,8 +72,16 @@ describe("server release lane", () => {
     expect(workflow).toContain("npm publish \"./release/${{ needs.verify.outputs.tarball }}\"");
     expect(workflow.match(/npm publish \"\.\/release\//g)).toHaveLength(2);
     expect(verification).not.toContain("NODE_AUTH_TOKEN");
-    expect(workflow.match(/NODE_AUTH_TOKEN/g)).toHaveLength(1);
-    expect(publication).toContain("NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}");
+    expect(workflow).not.toContain("secrets.NPM_TOKEN");
+    expect(publication).toContain('NPM_TOKEN_PRESENT: "false"');
+    expect(workflow).not.toContain("npm-publish-auth.npmrc");
+    expect(publication).toContain('test -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}"');
+    expect(publication).toContain('test -n "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}"');
+    expect(publication).toContain('test -z "${NODE_AUTH_TOKEN:-}"');
+    const publishCommand = publication.indexOf('npm publish "./release/${{ needs.verify.outputs.tarball }}"');
+    expect(publishCommand).toBeGreaterThan(publication.indexOf('test -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}"'));
+    expect(publishCommand).toBeGreaterThan(publication.indexOf('test -n "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}"'));
+    expect(publishCommand).toBeGreaterThan(publication.indexOf('test -z "${NODE_AUTH_TOKEN:-}"'));
     expect(workflow).not.toContain("registry-url:");
     expect(workflow).not.toContain("npm install --global");
     expect(workflow).not.toContain("verify-main-ruleset.mjs");
@@ -140,6 +173,7 @@ describe("server release lane", () => {
       "ARTIFACT_SR_SHA512",
       "separate release authorization",
       "Never move, reuse, force-update, or rerun a failed release tag",
+      "first-attempt preflight from protected `main`",
       'GITHUB_TOKEN="$(gh auth token)" node scripts/verify-main-ruleset.mjs',
       "tag authorization record must name the reviewed verifier commit",
     ]) {

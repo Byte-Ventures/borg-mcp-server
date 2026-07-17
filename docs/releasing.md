@@ -27,7 +27,10 @@ Every item below must be complete before a release tag is authorized:
    install scripts. Source maps reference shipped files, and
    `node scripts/verify-packed-artifact.mjs <tarball>` accepts the exact package. NOTICE, third-party
    license disclosures, and the normalized, fail-closed-verified CycloneDX SBOM must match that tree.
-8. The Coordinator has recorded a separate release authorization for the exact version, tag,
+8. After any tokenless authentication-path change or failed OIDC release, a Queen-approved,
+   first-attempt preflight from protected `main` has completed the GitHub-to-npm exchange without
+   publishing, staging, printing, storing, or uploading either token.
+9. The Coordinator has recorded a separate release authorization for the exact version, tag,
    and commit under the ratified `release-tag-coordinator-autonomy` decision after all prior gates.
 
 The verify job enforces these approvals by exact value rather than by presence:
@@ -56,8 +59,9 @@ Before any tag is authorized, the Coordinator configures and verifies:
   gates rather than GitHub review approvals, avoiding a sole-operator deadlock.
 - An active tag ruleset protects `refs/tags/v*.*.*` from update, deletion, and non-fast-forward;
   only the designated release operator may create a tag after exact authorization by the Coordinator.
-- The `npm-publish` environment allows only `v*.*.*`, has no admin bypass, and requires the
-  designated Queen operator to approve the exact artifact after SR.
+- The `npm-publish` environment allows protected `main` for the dispatch-only OIDC preflight and
+  `v*.*.*` for publication, has no admin bypass, and requires the designated Queen operator to
+  approve both preflight and exact-artifact deployments.
 - npm ownership is verified and Trusted Publishing is bound to this repository,
   `.github/workflows/release.yml`, and the `npm-publish` environment. Owned-package releases use
   tokenless OIDC: `ALLOW_UNCLAIMED_FIRST_PUBLISH` must be `false` and the environment must contain no
@@ -88,11 +92,14 @@ separate exact-artifact CR/SR/Release Quality gates before any preview.
 ## Verification and artifact audit
 
 1. Merge reviewed source to protected `main` and verify the merge commit and required CI checks.
-2. Obtain separate authorization naming the immutable version, annotated tag, and exact commit.
-3. Create the annotated tag once. Never move, reuse, force-update, or rerun a failed release tag.
-4. The tag-push workflow verifies the remote annotated tag object through an isolated ref, binds its
+2. After any tokenless authentication-path change or failed OIDC release, run the dispatch-only
+   preflight from exactly `refs/heads/main` in the Queen-approved `npm-publish` environment and require
+   an accepted, short-lived npm exchange token before selecting or preparing a recovery version.
+3. Obtain separate authorization naming the immutable version, annotated tag, and exact commit.
+4. Create the annotated tag once. Never move, reuse, force-update, or rerun a failed release tag.
+5. The tag-push workflow verifies the remote annotated tag object through an isolated ref, binds its
    peeled commit to `GITHUB_SHA`, and requires that commit to be on `origin/main`.
-5. Both jobs reject workflow reruns and repository npm configuration before bootstrapping exact npm
+6. Both jobs reject workflow reruns and repository npm configuration before bootstrapping exact npm
    from the official registry with isolated configuration. Before `npm ci` or any repository build
    tool runs, a builtins-only verifier binds every source-lock dependency to its exact official
    registry metadata. The unprivileged `verify` job then installs with scripts disabled, audits
@@ -102,35 +109,38 @@ separate exact-artifact CR/SR/Release Quality gates before any preview.
    verifies the CycloneDX root identity, lock-bound components, hashes, distribution URLs, and complete
    dependency graph, records run evidence and SHA-512, performs an npm dry run, and uploads only the
    verified SBOM and exact files. It has no environment, publish token, or OIDC permission.
-6. SR downloads and audits the workflow artifact itself, including the tarball, report, SBOM, and
+7. SR downloads and audits the workflow artifact itself, including the tarball, report, SBOM, and
    checksum. Source review or a locally rebuilt tarball cannot substitute for this gate.
-7. After `SECURITY-APPROVED` names the exact SHA-512, the Coordinator sets the protected environment
+8. After `SECURITY-APPROVED` names the exact SHA-512, the Coordinator sets the protected environment
    `ARTIFACT_SR_SHA512` to that value. The Queen operator separately reviews and approves the pending
    environment deployment.
-8. The publish job downloads rather than rebuilds the artifact, checks SHA-512, re-runs artifact and
-   registry ownership checks, and publishes that tarball with npm provenance.
-9. The job verifies registry integrity, sole expected ownership, in-toto/SLSA provenance identity,
+9. The publish job downloads rather than rebuilds the artifact, checks SHA-512, re-runs artifact and
+   registry ownership checks, requires GitHub to expose both OIDC request variables, rejects any
+   retained `NODE_AUTH_TOKEN`, and publishes that tarball with tokenless npm OIDC and provenance.
+10. The job verifies registry integrity, sole expected ownership, in-toto/SLSA provenance identity,
    Git commit, workflow/tag binding, and npm signatures/attestations.
-10. Stop immediately on any mismatch. Preserve the run and tag as immutable evidence; recovery uses
-    a newly reviewed source fix, a new version, and a newly authorized tag.
+11. Stop immediately on any mismatch. Preserve the run and tag as immutable evidence; recovery uses
+   a newly reviewed source fix, a new version, and a newly authorized tag.
 
 ## Current audit state
 
 The repository is public; visibility is complete, and `borgmcp-server@0.1.1` is live on npm under the
-sole expected maintainer. The current source is the unpublished `0.1.3` recovery
-candidate. Before `v0.1.3` may be created, its protected-main merge commit requires fresh exact-SHA
-Code Review, Security, Release Quality, public-boundary, threat-model, license, dependency, SBOM,
-consumer-install, and release-authorization evidence. The four repository variables must then bind
-that merge commit before the annotated tag is created. The tag workflow artifact requires its own
-Security approval by exact SHA-512 before the Coordinator sets `ARTIFACT_SR_SHA512`; publication still
-requires the Queen operator's protected-environment approval.
+sole expected maintainer. Versions `0.1.2` and `0.1.3` are unpublished immutable failure evidence and
+must never be customer, install, or dogfood targets. Before any recovery version is selected or
+prepared, the source-only OIDC fix must pass exact-SHA Code Review, Security, and Release Quality,
+merge to protected `main`, and complete a first-attempt `workflow_dispatch` preflight from exactly
+`refs/heads/main`. The Queen-approved preflight must run in the `npm-publish` environment and prove
+that GitHub exposes the OIDC request capability and npm accepts the repository, workflow, environment,
+runner, and audience claims by returning a valid short-lived exchange token. The preflight never
+publishes, stages, stores, prints, or uploads either token. A missing permission, claim mismatch,
+non-201 exchange, malformed response, or expired token blocks recovery before another tag is created.
 
 The immutable annotated `v0.1.1` tag object
 `e3f6ee268d5cd4f1e88adabdc6171c1e732cd096` peels to protected-main commit
 `f7f65ffb9af2853b0c4adb4bd9e2b0958db04e63`; it is the release-delta baseline and must never be
-moved, deleted, or reused. The `0.1.3` candidate retains that audited baseline: purpose-bound owner enrollment,
-idempotent multi-cube creation, the client attach lifecycle, and stable prior-seat reattachment. The
-protected-main changes after `v0.1.1` are exactly these reviewed merges:
+moved, deleted, or reused. The failed `0.1.3` candidate retained that audited baseline: purpose-bound
+owner enrollment, idempotent multi-cube creation, the client attach lifecycle, and stable prior-seat
+reattachment. The protected-main changes after `v0.1.1` are exactly these reviewed merges:
 
 - PR #17 (`73b31bd`) adds the bounded retry envelope for transient postpublication registry 404s.
 - PR #14 (`031ae96`) records the completed `0.1.1` publication state without changing runtime code.
@@ -147,8 +157,8 @@ protected-main changes after `v0.1.1` are exactly these reviewed merges:
 - PR #29 (`01d72d9`) adds cube-scoped invitations with exact selector resolution, atomic
   enroll-and-grant, and grant-derived observer/participant posture across attach, recipient, log, and
   stream enforcement.
-- PR #30 (`33ef975`) prepares the unpublished `0.1.2` package identity and release evidence without
-  changing runtime code; the failed publication attempt below makes `0.1.3` the required recovery.
+- PR #30 (`33ef975`) prepared the unpublished `0.1.2` package identity and release evidence without
+  changing runtime code; its failed publication led to the burned `0.1.3` recovery described below.
 
 The immutable annotated `v0.1.2` tag object
 `3886005f444a78acb6a63a8b769f494f134d25c5` peels to protected-main commit
@@ -162,14 +172,26 @@ postpublish registry, provenance, signature, and attestation steps were skipped;
 report only `0.1.1`. Run, tag, artifact approval, and environment approval are immutable failed
 evidence: never rerun, move, delete, reuse, or transfer any of them to `0.1.3`.
 
-Recovery removed the environment `NPM_TOKEN` and set `ALLOW_UNCLAIMED_FIRST_PUBLISH=false`, with
-readback confirming zero retained secrets. Before authorizing `v0.1.3`, the Queen operator must
-confirm npm Trusted Publishing for repository `Byte-Ventures/borg-mcp-server`, workflow
+Recovery for `0.1.3` removed the environment `NPM_TOKEN` and set
+`ALLOW_UNCLAIMED_FIRST_PUBLISH=false`, with readback confirming zero retained secrets. The Queen
+operator confirmed npm Trusted Publishing for repository `Byte-Ventures/borg-mcp-server`, workflow
 `release.yml`, and environment `npm-publish`. The complete source, tag, verify, exact-artifact
-Security, checksum-binding, and Queen environment-approval chain then runs fresh. Postpublication
-verification must prove the OIDC-signed provenance binds `refs/tags/v0.1.3` and its new protected-main
-merge commit. Sprint 7's published-version recovery rehearsal targets only a registry-verified
-`borgmcp-server@0.1.3`; unpublished `0.1.2` is never a customer release or dogfood target.
+Security, checksum-binding, and Queen environment-approval chain then ran fresh, but publication
+failed as described below. Sprint 7's published-version recovery rehearsal remains blocked until a
+future registry-verified recovery version is separately selected after the OIDC preflight succeeds;
+neither unpublished `0.1.2` nor unpublished `0.1.3` is a customer release or dogfood target.
+
+The immutable annotated `v0.1.3` tag object
+`84d5253eba551375eb6f2c064f8322686795f950` peels to protected-main commit
+`5508e8f3d0c5ee97db2e4536c8bfe658082008be`. Workflow run `29570177034`, attempt 1, built and passed
+Security review for the exact artifact, but publication failed closed with `ENEEDAUTH` before any
+registry write. The publish job's effective permission report contained only `Contents: read` and
+`Metadata: read`, despite the workflow declaring `id-token: write`; GitHub therefore did not expose
+the OIDC request capability needed by npm. The job's tokenless state was correct, npm never received
+an exchange credential, postpublication verification was skipped, and the registry remained at
+`0.1.1`. Never rerun, move, delete, reuse, or transfer this tag, run, artifact approval, checksum
+binding, or environment approval. The source-only recovery first adds a protected-main, dispatch-only
+exchange preflight and fail-closed live-publish OIDC guards; it does not select the next version.
 
 First-publication run `29495546749` built and published the exact audited artifact, but its publish job
 concluded `failure` when the immediate postpublish ownership read returned HTTP 404 before registry

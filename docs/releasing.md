@@ -58,11 +58,11 @@ Before any tag is authorized, the Coordinator configures and verifies:
   only the designated release operator may create a tag after exact authorization by the Coordinator.
 - The `npm-publish` environment allows only `v*.*.*`, has no admin bypass, and requires the
   designated Queen operator to approve the exact artifact after SR.
-- npm ownership is verified and Trusted Publishing is bound to this repository and
-  `.github/workflows/release.yml`. A bootstrap `NPM_TOKEN`, if first-publication ownership requires
-  one, exists only in the protected environment and is deleted immediately after ownership and OIDC
-  publishing are verified. `ALLOW_UNCLAIMED_FIRST_PUBLISH` must be disabled after the first verified
-  publication.
+- npm ownership is verified and Trusted Publishing is bound to this repository,
+  `.github/workflows/release.yml`, and the `npm-publish` environment. Owned-package releases use
+  tokenless OIDC: `ALLOW_UNCLAIMED_FIRST_PUBLISH` must be `false` and the environment must contain no
+  `NPM_TOKEN`. Bootstrap mode and its token were first-publication-only exceptions and must never be
+  restored for an owned package.
 
 Repository visibility must not be changed under this runbook. Visibility requires its own explicit
 authorization after all public-boundary and license gates.
@@ -117,8 +117,8 @@ separate exact-artifact CR/SR/Release Quality gates before any preview.
 ## Current audit state
 
 The repository is public; visibility is complete, and `borgmcp-server@0.1.1` is live on npm under the
-sole expected maintainer. The current source is the separately reviewed, unpublished `0.1.2`
-candidate. Before `v0.1.2` may be created, its protected-main merge commit requires fresh exact-SHA
+sole expected maintainer. The current source is the unpublished `0.1.3` recovery
+candidate. Before `v0.1.3` may be created, its protected-main merge commit requires fresh exact-SHA
 Code Review, Security, Release Quality, public-boundary, threat-model, license, dependency, SBOM,
 consumer-install, and release-authorization evidence. The four repository variables must then bind
 that merge commit before the annotated tag is created. The tag workflow artifact requires its own
@@ -128,7 +128,7 @@ requires the Queen operator's protected-environment approval.
 The immutable annotated `v0.1.1` tag object
 `e3f6ee268d5cd4f1e88adabdc6171c1e732cd096` peels to protected-main commit
 `f7f65ffb9af2853b0c4adb4bd9e2b0958db04e63`; it is the release-delta baseline and must never be
-moved, deleted, or reused. The `0.1.2` candidate retains that audited baseline: purpose-bound owner enrollment,
+moved, deleted, or reused. The `0.1.3` candidate retains that audited baseline: purpose-bound owner enrollment,
 idempotent multi-cube creation, the client attach lifecycle, and stable prior-seat reattachment. The
 protected-main changes after `v0.1.1` are exactly these reviewed merges:
 
@@ -147,6 +147,29 @@ protected-main changes after `v0.1.1` are exactly these reviewed merges:
 - PR #29 (`01d72d9`) adds cube-scoped invitations with exact selector resolution, atomic
   enroll-and-grant, and grant-derived observer/participant posture across attach, recipient, log, and
   stream enforcement.
+- PR #30 (`33ef975`) prepares the unpublished `0.1.2` package identity and release evidence without
+  changing runtime code; the failed publication attempt below makes `0.1.3` the required recovery.
+
+The immutable annotated `v0.1.2` tag object
+`3886005f444a78acb6a63a8b769f494f134d25c5` peels to protected-main commit
+`33ef975ae5f1f4c4149b8e46b8a30764f51d63d2`. Workflow run `29544456658`, attempt 1, verified that
+source and built the exact audited artifact, but the publish job failed closed before publication at
+`Verify registry ownership and version availability`. Its environment still had first-publication
+bootstrap posture (`ALLOW_UNCLAIMED_FIRST_PUBLISH=true` and `NPM_TOKEN_PRESENT=true`) even though
+`borgmcp-server@0.1.1` made the package owned. The guard rejected that state with
+`Owned package publishing requires OIDC and rejects bootstrap mode/token retention.` The publish,
+postpublish registry, provenance, signature, and attestation steps were skipped; npm continued to
+report only `0.1.1`. Run, tag, artifact approval, and environment approval are immutable failed
+evidence: never rerun, move, delete, reuse, or transfer any of them to `0.1.3`.
+
+Recovery removed the environment `NPM_TOKEN` and set `ALLOW_UNCLAIMED_FIRST_PUBLISH=false`, with
+readback confirming zero retained secrets. Before authorizing `v0.1.3`, the Queen operator must
+confirm npm Trusted Publishing for repository `Byte-Ventures/borg-mcp-server`, workflow
+`release.yml`, and environment `npm-publish`. The complete source, tag, verify, exact-artifact
+Security, checksum-binding, and Queen environment-approval chain then runs fresh. Postpublication
+verification must prove the OIDC-signed provenance binds `refs/tags/v0.1.3` and its new protected-main
+merge commit. Sprint 7's published-version recovery rehearsal targets only a registry-verified
+`borgmcp-server@0.1.3`; unpublished `0.1.2` is never a customer release or dogfood target.
 
 First-publication run `29495546749` built and published the exact audited artifact, but its publish job
 concluded `failure` when the immediate postpublish ownership read returned HTTP 404 before registry

@@ -6,22 +6,21 @@ HTTPS.
 
 ## Release status
 
-The current public preview remains `borgmcp-server@0.1.1`, published on npm.
+The current public preview is `borgmcp-server@0.1.4`, published on npm.
 Versions `0.1.2` and `0.1.3` were not published; their immutable tags are
 internal failed-release evidence and are not installation or dogfood targets.
-The current source is the unpublished `0.1.4` release candidate. It retains the
+Version `0.1.4` retains the
 reviewed owner-enrollment, idempotent multi-cube creation, and stable prior-seat
 reattachment baseline, and adds managed role creation and updates, fail-closed
 setup reinitialization, opt-in redacted debug logging, live-safe invitation
 minting, and atomic cube-scoped invitations with enforced observer posture.
-The candidate consumes the audited exact `borgmcp-shared@0.3.0` registry
-release.
+It consumes the audited exact `borgmcp-shared@0.3.0` registry release.
 
 Setup prepares local identity and storage and prints one-time recovery and
 owner-enrollment secrets; it creates no cube. Version `0.1.1` completed the
 documented exact-source, tagged-artifact, and protected-publication gates.
-Version `0.1.4` has no tag or publication authorization until its exact merged
-source and tagged artifact complete the gates in `docs/releasing.md`.
+Version `0.1.4` completed a fresh exact-source, tagged-artifact, tokenless OIDC
+publication, provenance, signature, and attestation gate chain.
 
 ## Requirements
 

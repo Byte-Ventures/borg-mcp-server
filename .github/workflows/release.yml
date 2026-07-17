@@ -148,7 +148,8 @@ jobs:
             if (!hasExchangeToken) {
               throw new Error("npm exchange response did not contain a token");
             }
-            if (!(Date.parse(exchange.expires) > Date.now())) {
+            const expiresAtSeconds = Number(exchange.expires);
+            if (!Number.isFinite(expiresAtSeconds) || !(expiresAtSeconds * 1000 > Date.now())) {
               throw new Error("npm returned an expired exchange token");
             }
             process.stdout.write("Trusted-publisher exchange accepted without publishing.\n");

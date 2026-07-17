@@ -12,6 +12,24 @@ const extractPreflightScript = (workflow: string): string => {
   return script?.replace(/^ {10}/gmu, "") ?? "";
 };
 
+const mockPreflightFetch = (exchangeStatus: number, exchangeBody: Record<string, unknown>): string => `
+  const claims = {
+    aud: "npm:registry.npmjs.org",
+    repository: "Byte-Ventures/borg-mcp-server",
+    environment: "npm-publish",
+    runner_environment: "github-hosted",
+    event_name: "workflow_dispatch",
+    ref: "refs/heads/main",
+    workflow_ref: "Byte-Ventures/borg-mcp-server/.github/workflows/release.yml@refs/heads/main",
+  };
+  const jwt = ["header", Buffer.from(JSON.stringify(claims)).toString("base64url"), "signature"].join(".");
+  const responses = [
+    { status: 200, text: async () => JSON.stringify({ value: jwt }) },
+    { status: ${exchangeStatus}, text: async () => ${JSON.stringify(JSON.stringify(exchangeBody))} },
+  ];
+  global.fetch = async () => responses.shift();
+`;
+
 describe("server release lane", () => {
   it("keeps verification unprivileged and publication exact-artifact gated", async () => {
     const workflow = await readFile(".github/workflows/release.yml", "utf8");
@@ -38,7 +56,9 @@ describe("server release lane", () => {
     expect(preflight).toContain('key !== "token_type" && /token|authorization|credential|secret/i.test(key)');
     expect(preflight).toContain('assertClaim(claims, "event_name", "workflow_dispatch")');
     expect(preflight).toContain('assertClaim(claims, "ref", "refs/heads/main")');
-    expect(preflight).toContain("Date.parse(exchange.expires) > Date.now()");
+    expect(preflight).toContain("const expiresAtSeconds = Number(exchange.expires)");
+    expect(preflight).toContain("Number.isFinite(expiresAtSeconds)");
+    expect(preflight).toContain("expiresAtSeconds * 1000 > Date.now()");
     expect(preflight).toContain("Trusted-publisher exchange validation failed: ${message}");
     expect(preflight).toContain("GitHub OIDC response status: ${diagnostics.idStatus}");
     expect(preflight).toContain("npm exchange response status: ${diagnostics.exchangeStatus}");
@@ -125,27 +145,11 @@ describe("server release lane", () => {
     const workflow = await readFile(".github/workflows/release.yml", "utf8");
     const preflightScript = extractPreflightScript(workflow);
     expect(preflightScript).not.toBe("");
-    const mockFetch = `
-      const claims = {
-        aud: "npm:registry.npmjs.org",
-        repository: "Byte-Ventures/borg-mcp-server",
-        environment: "npm-publish",
-        runner_environment: "github-hosted",
-        event_name: "workflow_dispatch",
-        ref: "refs/heads/main",
-        workflow_ref: "Byte-Ventures/borg-mcp-server/.github/workflows/release.yml@refs/heads/main",
-      };
-      const jwt = ["header", Buffer.from(JSON.stringify(claims)).toString("base64url"), "signature"].join(".");
-      const responses = [
-        { status: 200, text: async () => JSON.stringify({ value: jwt }) },
-        { status: 403, text: async () => JSON.stringify({
-          message: "publisher mismatch",
-          token: "npm-sensitive-token",
-          nested: { authorization: "nested-sensitive-authorization" },
-        }) },
-      ];
-      global.fetch = async () => responses.shift();
-    `;
+    const mockFetch = mockPreflightFetch(403, {
+      message: "publisher mismatch",
+      token: "npm-sensitive-token",
+      nested: { authorization: "nested-sensitive-authorization" },
+    });
     let failure: { stderr?: string; stdout?: string } | undefined;
 
     try {
@@ -174,6 +178,61 @@ describe("server release lane", () => {
     expect(failure?.stderr).not.toContain("nested-sensitive-authorization");
     expect(failure?.stderr).not.toContain("github-request-sensitive-token");
     expect(failure?.stdout).toBe("");
+  });
+
+  it("accepts an unexpired npm exchange token whose expiry is Unix seconds", async () => {
+    const workflow = await readFile(".github/workflows/release.yml", "utf8");
+    const preflightScript = extractPreflightScript(workflow);
+    const npmToken = "npm-success-sensitive-token";
+    const githubToken = "github-success-sensitive-token";
+    const mockFetch = mockPreflightFetch(201, {
+      created: Math.floor(Date.now() / 1000),
+      expires: Math.floor(Date.now() / 1000) + 900,
+      token: npmToken,
+      token_type: "oidc",
+    });
+
+    const result = await execute(process.execPath, ["-e", `${mockFetch}\n${preflightScript}`], {
+      env: {
+        ...process.env,
+        ACTIONS_ID_TOKEN_REQUEST_URL: "https://example.test/oidc",
+        ACTIONS_ID_TOKEN_REQUEST_TOKEN: githubToken,
+      },
+    });
+
+    expect(result.stdout).toBe("Trusted-publisher exchange accepted without publishing.\n");
+    expect(result.stderr).toBe("");
+    expect(result.stdout).not.toContain(npmToken);
+    expect(result.stdout).not.toContain(githubToken);
+  });
+
+  it("rejects an expired npm exchange token whose expiry is Unix seconds", async () => {
+    const workflow = await readFile(".github/workflows/release.yml", "utf8");
+    const preflightScript = extractPreflightScript(workflow);
+    const npmToken = "npm-expired-sensitive-token";
+    const mockFetch = mockPreflightFetch(201, {
+      created: Math.floor(Date.now() / 1000) - 901,
+      expires: Math.floor(Date.now() / 1000) - 1,
+      token: npmToken,
+      token_type: "oidc",
+    });
+    let failure: { stderr?: string } | undefined;
+
+    try {
+      await execute(process.execPath, ["-e", `${mockFetch}\n${preflightScript}`], {
+        env: {
+          ...process.env,
+          ACTIONS_ID_TOKEN_REQUEST_URL: "https://example.test/oidc",
+          ACTIONS_ID_TOKEN_REQUEST_TOKEN: "github-expired-sensitive-token",
+        },
+      });
+    } catch (error) {
+      failure = error as { stderr?: string };
+    }
+
+    expect(failure?.stderr).toContain("npm returned an expired exchange token");
+    expect(failure?.stderr).not.toContain(npmToken);
+    expect(failure?.stderr).toContain('"token":"[REDACTED]"');
   });
 
   it("keeps pre-install source-lock verification builtin-only", async () => {
@@ -243,6 +302,7 @@ describe("server release lane", () => {
       "Never move, reuse, force-update, or rerun a failed release tag",
       "first-attempt preflight from protected `main`",
       "29573450568",
+      "29574615810",
       'GITHUB_TOKEN="$(gh auth token)" node scripts/verify-main-ruleset.mjs',
       "tag authorization record must name the reviewed verifier commit",
     ]) {

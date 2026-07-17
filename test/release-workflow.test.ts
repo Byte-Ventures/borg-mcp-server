@@ -56,9 +56,11 @@ describe("server release lane", () => {
     expect(preflight).toContain('key !== "token_type" && /token|authorization|credential|secret/i.test(key)');
     expect(preflight).toContain('assertClaim(claims, "event_name", "workflow_dispatch")');
     expect(preflight).toContain('assertClaim(claims, "ref", "refs/heads/main")');
-    expect(preflight).toContain("const expiresAtSeconds = Number(exchange.expires)");
-    expect(preflight).toContain("Number.isFinite(expiresAtSeconds)");
-    expect(preflight).toContain("expiresAtSeconds * 1000 > Date.now()");
+    expect(preflight).toContain("const expiresAtSeconds = exchange.expires");
+    expect(preflight).toContain('typeof expiresAtSeconds !== "number"');
+    expect(preflight).toContain("Number.isSafeInteger(expiresAtSeconds)");
+    expect(preflight).toContain("expiresAtSeconds > nowSeconds");
+    expect(preflight).toContain("expiresAtSeconds > nowSeconds + maxExchangeLifetimeSeconds");
     expect(preflight).toContain("Trusted-publisher exchange validation failed: ${message}");
     expect(preflight).toContain("GitHub OIDC response status: ${diagnostics.idStatus}");
     expect(preflight).toContain("npm exchange response status: ${diagnostics.exchangeStatus}");
@@ -232,6 +234,48 @@ describe("server release lane", () => {
 
     expect(failure?.stderr).toContain("npm returned an expired exchange token");
     expect(failure?.stderr).not.toContain(npmToken);
+    expect(failure?.stderr).toContain('"token":"[REDACTED]"');
+  });
+
+  it.each([
+    ["a coercible array", () => [Math.floor(Date.now() / 1000) + 900], "invalid exchange token expiry"],
+    [
+      "a coercible numeric string",
+      () => String(Math.floor(Date.now() / 1000) + 900),
+      "invalid exchange token expiry",
+    ],
+    [
+      "a safe integer beyond the allowed lifetime",
+      () => Math.floor(Date.now() / 1000) + 7200,
+      "exchange token expiry outside the allowed range",
+    ],
+    ["an unsafe integer", () => Number.MAX_SAFE_INTEGER + 1, "invalid exchange token expiry"],
+  ])("rejects %s as an npm exchange expiry", async (_name, expiry, expectedError) => {
+    const workflow = await readFile(".github/workflows/release.yml", "utf8");
+    const preflightScript = extractPreflightScript(workflow);
+    const mockFetch = mockPreflightFetch(201, {
+      created: Math.floor(Date.now() / 1000),
+      expires: expiry(),
+      token: "npm-malformed-expiry-sensitive-token",
+      token_type: "oidc",
+    });
+    let failure: { stderr?: string } | undefined;
+
+    try {
+      await execute(process.execPath, ["-e", `${mockFetch}\n${preflightScript}`], {
+        env: {
+          ...process.env,
+          ACTIONS_ID_TOKEN_REQUEST_URL: "https://example.test/oidc",
+          ACTIONS_ID_TOKEN_REQUEST_TOKEN: "github-malformed-expiry-sensitive-token",
+        },
+      });
+    } catch (error) {
+      failure = error as { stderr?: string };
+    }
+
+    expect(failure).toBeDefined();
+    expect(failure?.stderr).toContain(expectedError);
+    expect(failure?.stderr).not.toContain("npm-malformed-expiry-sensitive-token");
     expect(failure?.stderr).toContain('"token":"[REDACTED]"');
   });
 

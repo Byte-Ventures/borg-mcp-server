@@ -118,23 +118,25 @@ separate exact-artifact CR/SR/Release Quality gates before any preview.
    registry ownership checks, requires GitHub to expose both OIDC request variables, rejects any
    retained `NODE_AUTH_TOKEN`, and publishes that tarball with tokenless npm OIDC and provenance.
 10. The job verifies registry integrity, sole expected ownership, in-toto/SLSA provenance identity,
-   Git commit, workflow/tag binding, and npm signatures/attestations.
-11. Stop immediately on any mismatch. Preserve the run and tag as immutable evidence; recovery uses
+    Git commit, workflow/tag binding, and npm signatures/attestations.
+11. After successful registry verification, update the README and this runbook in a fresh reviewed
+    documentation change so public release claims match the shipped package.
+12. Stop immediately on any mismatch. Preserve the run and tag as immutable evidence; recovery uses
     a newly reviewed source fix, a new version, and a newly authorized tag.
 
 ## Current audit state
 
-The repository is public; visibility is complete, and `borgmcp-server@0.1.1` is live on npm under the
-sole expected maintainer. Versions `0.1.2` and `0.1.3` are unpublished immutable failure evidence and
-must never be customer, install, or dogfood targets. Version `0.1.4` is the separately selected
-recovery candidate. Preparation authorizes its package, shrinkwrap, SBOM, and release evidence only;
-it does not authorize a tag or publication. Its exact merged source and tagged artifact must complete
-the remaining release gates below.
+The repository is public; visibility is complete, and `borgmcp-server@0.1.1` and
+`borgmcp-server@0.1.4` are live on npm under the sole expected maintainer. The `latest` tag resolves to
+`0.1.4`. Versions `0.1.2` and `0.1.3` are unpublished immutable failure evidence and must never be
+customer, install, or dogfood targets. Version `0.1.4` completed the full exact-source,
+tagged-artifact, tokenless OIDC publication, registry verification, provenance, signature, and
+attestation gate chain recorded below.
 
 The immutable annotated `v0.1.1` tag object
 `e3f6ee268d5cd4f1e88adabdc6171c1e732cd096` peels to protected-main commit
 `f7f65ffb9af2853b0c4adb4bd9e2b0958db04e63`; it is the release-delta baseline and must never be
-moved, deleted, or reused. The `0.1.4` candidate retains that audited baseline: purpose-bound
+moved, deleted, or reused. Version `0.1.4` retains that audited baseline: purpose-bound
 owner enrollment, idempotent multi-cube creation, the client attach lifecycle, and stable prior-seat
 reattachment. The protected-main changes after `v0.1.1` are exactly these reviewed merges:
 
@@ -216,8 +218,7 @@ expects a date string and returned `NaN`. This was a preflight-only false negati
 credential or Trusted Publisher failure. At that point, recovery remained blocked until reviewed
 source validated a numeric safe-integer `expires` value directly against current Unix seconds,
 rejected values beyond a one-hour maximum lifetime, and a fresh Queen-approved preflight completed
-green. Never rerun the
-failed attempt; no package version or tag is selected by this correction.
+green. Never rerun that failed attempt; no package version or tag is selected by this correction.
 
 Protected-main preflight run `29575906933` attempt 1 at merge
 `fb6e66bcd21eb961a3bdb42af8e26171696411ab` completed green. GitHub's OIDC endpoint returned 200,
@@ -233,6 +234,21 @@ OIDC exchange credential. The preflight never publishes, stages, stores, prints,
 token. A missing permission, retained long-lived token, claim mismatch, non-201 exchange, malformed
 response, invalid expiry, or failed readback blocks the release; recovery always uses a new version
 and never moves, deletes, reuses, or reruns a failed tag or tag-triggered workflow.
+
+The immutable annotated `v0.1.4` tag object
+`1604077e6249c7c0f7ce17b3f2848caad2bc773e` peels to protected-main merge
+`1f7e60a695f27d92b2d46233b0e3cad5aa43bd0d`, whose tree is byte-identical to reviewed source
+`9f47c5669e0cd1c3d6cc6e78571daa639f5410ad`. Workflow run `29576759082`, attempt 1, built the exact
+79-file audited artifact and completed all verify and publish steps. Its tarball SHA-512 is
+`c0ad07ec30e1e7a94c7b9f1faf2b3cbcf252d00673a52fd9ee2bcfd04375c0adb383d21b8c883af4bbc10d9a6bbe4386a8fde52145dd6aaf33efc53061db2366`,
+matching npm integrity
+`sha512-wK0H7DDh56lMe58frys8vPJS0AZzpS/Z7ivP0EN1wK2zg9IbjIg69LvBDZprvkOGqP3lIUXdaq8z78UwYdsjZg==`.
+The tokenless OIDC publication and postpublication checks verified registry integrity and ownership,
+SLSA provenance bound to `refs/tags/v0.1.4` and the merge commit, and npm signatures and attestations.
+Independent clean-room installation resolved the canonical registry tarball, reproduced its integrity,
+and reported 71 packages with verified registry signatures and 35 with verified attestations, with
+zero failures. Registry reads completed without a transient 404, confirming the bounded retry
+envelope did not mask any terminal mismatch.
 
 First-publication run `29495546749` built and published the exact audited artifact, but its publish job
 concluded `failure` when the immediate postpublish ownership read returned HTTP 404 before registry

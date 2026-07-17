@@ -346,6 +346,7 @@ describe("server release lane", () => {
       "first-attempt preflight from protected `main`",
       "29573450568",
       "29574615810",
+      "29575906933",
       'GITHUB_TOKEN="$(gh auth token)" node scripts/verify-main-ruleset.mjs',
       "tag authorization record must name the reviewed verifier commit",
     ]) {

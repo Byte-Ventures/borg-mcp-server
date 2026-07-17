@@ -126,19 +126,15 @@ separate exact-artifact CR/SR/Release Quality gates before any preview.
 
 The repository is public; visibility is complete, and `borgmcp-server@0.1.1` is live on npm under the
 sole expected maintainer. Versions `0.1.2` and `0.1.3` are unpublished immutable failure evidence and
-must never be customer, install, or dogfood targets. Before any recovery version is selected or
-prepared, the source-only OIDC fix must pass exact-SHA Code Review, Security, and Release Quality,
-merge to protected `main`, and complete a first-attempt `workflow_dispatch` preflight from exactly
-`refs/heads/main`. The Queen-approved preflight must run in the `npm-publish` environment and prove
-that GitHub exposes the OIDC request capability and npm accepts the repository, workflow, environment,
-runner, and audience claims by returning a valid short-lived exchange token. The preflight never
-publishes, stages, stores, prints, or uploads either token. A missing permission, claim mismatch,
-non-201 exchange, malformed response, or expired token blocks recovery before another tag is created.
+must never be customer, install, or dogfood targets. Version `0.1.4` is the separately selected
+recovery candidate. Preparation authorizes its package, shrinkwrap, SBOM, and release evidence only;
+it does not authorize a tag or publication. Its exact merged source and tagged artifact must complete
+the remaining release gates below.
 
 The immutable annotated `v0.1.1` tag object
 `e3f6ee268d5cd4f1e88adabdc6171c1e732cd096` peels to protected-main commit
 `f7f65ffb9af2853b0c4adb4bd9e2b0958db04e63`; it is the release-delta baseline and must never be
-moved, deleted, or reused. The failed `0.1.3` candidate retained that audited baseline: purpose-bound
+moved, deleted, or reused. The `0.1.4` candidate retains that audited baseline: purpose-bound
 owner enrollment, idempotent multi-cube creation, the client attach lifecycle, and stable prior-seat
 reattachment. The protected-main changes after `v0.1.1` are exactly these reviewed merges:
 
@@ -159,6 +155,14 @@ reattachment. The protected-main changes after `v0.1.1` are exactly these review
   stream enforcement.
 - PR #30 (`33ef975`) prepared the unpublished `0.1.2` package identity and release evidence without
   changing runtime code; its failed publication led to the burned `0.1.3` recovery described below.
+- PR #31 (`5508e8f`) prepared the unpublished `0.1.3` tokenless recovery identity and release evidence
+  without changing runtime code; its failed publication exposed the missing effective OIDC path.
+- PR #33 (`4fa7f2c`) removed long-lived npm credentials from the owned-package release path, added
+  fail-closed live-publish OIDC guards, and introduced the protected-main non-publishing preflight.
+- PR #34 (`9b16bd7`) added token-safe preflight diagnostics that exposed the npm Trusted Publisher
+  binding failure and then the numeric expiry parsing defect.
+- PR #35 (`fb6e66b`) validates npm's numeric Unix-seconds expiry response strictly and removes dynamic
+  test code construction while retaining the redaction and failure-path coverage.
 
 The immutable annotated `v0.1.2` tag object
 `3886005f444a78acb6a63a8b769f494f134d25c5` peels to protected-main commit
@@ -173,13 +177,13 @@ report only `0.1.1`. Run, tag, artifact approval, and environment approval are i
 evidence: never rerun, move, delete, reuse, or transfer any of them to `0.1.3`.
 
 Recovery for `0.1.3` removed the environment `NPM_TOKEN` and set
-`ALLOW_UNCLAIMED_FIRST_PUBLISH=false`, with readback confirming zero retained secrets. The Queen
-operator confirmed npm Trusted Publishing for repository `Byte-Ventures/borg-mcp-server`, workflow
+`ALLOW_UNCLAIMED_FIRST_PUBLISH=false`, with readback confirming zero retained secrets. The intended
+npm Trusted Publisher identity was repository `Byte-Ventures/borg-mcp-server`, workflow
 `release.yml`, and environment `npm-publish`. The complete source, tag, verify, exact-artifact
 Security, checksum-binding, and Queen environment-approval chain then ran fresh, but publication
-failed as described below. Sprint 7's published-version recovery rehearsal remains blocked until a
-future registry-verified recovery version is separately selected after the OIDC preflight succeeds;
-neither unpublished `0.1.2` nor unpublished `0.1.3` is a customer release or dogfood target.
+failed as described below because the package binding and effective exchange path were not yet
+proven. Neither unpublished `0.1.2` nor unpublished `0.1.3` is a customer release or dogfood target;
+their approvals and artifacts do not transfer to `0.1.4`.
 
 The immutable annotated `v0.1.3` tag object
 `84d5253eba551375eb6f2c064f8322686795f950` peels to protected-main commit
@@ -209,10 +213,26 @@ After the Queen re-established the npm Trusted Publisher binding, protected-main
 with `token_type` `oidc`, a redacted token, and numeric `created` and `expires` Unix timestamps in
 seconds. The probe still failed because it passed the numeric `expires` value to `Date.parse`, which
 expects a date string and returned `NaN`. This was a preflight-only false negative, not an expired
-credential or Trusted Publisher failure. Recovery remains blocked until reviewed source validates a
-numeric safe-integer `expires` value directly against current Unix seconds, rejects values beyond a
-one-hour maximum lifetime, and a fresh Queen-approved preflight completes green. Never rerun the
+credential or Trusted Publisher failure. At that point, recovery remained blocked until reviewed
+source validated a numeric safe-integer `expires` value directly against current Unix seconds,
+rejected values beyond a one-hour maximum lifetime, and a fresh Queen-approved preflight completed
+green. Never rerun the
 failed attempt; no package version or tag is selected by this correction.
+
+Protected-main preflight run `29575906933` attempt 1 at merge
+`fb6e66bcd21eb961a3bdb42af8e26171696411ab` completed green. GitHub's OIDC endpoint returned 200,
+npm's Trusted Publisher exchange returned 201, and the response contained a valid short-lived token
+with a strictly validated numeric Unix-seconds expiry. The dispatch ran in the protected
+`npm-publish` environment from exactly `refs/heads/main` and published nothing. This proves the
+repository, workflow, environment, runner, audience, and effective `id-token: write` path before a
+new immutable tag is created.
+
+The owned-package publish path is tokenless: no repository or environment `NPM_TOKEN` may exist, and
+`ALLOW_UNCLAIMED_FIRST_PUBLISH` must remain `false`. Publication must use only the job's short-lived
+OIDC exchange credential. The preflight never publishes, stages, stores, prints, or uploads either
+token. A missing permission, retained long-lived token, claim mismatch, non-201 exchange, malformed
+response, invalid expiry, or failed readback blocks the release; recovery always uses a new version
+and never moves, deletes, reuses, or reruns a failed tag or tag-triggered workflow.
 
 First-publication run `29495546749` built and published the exact audited artifact, but its publish job
 concluded `failure` when the immediate postpublish ownership read returned HTTP 404 before registry

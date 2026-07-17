@@ -1,9 +1,9 @@
 # Release runbook
 
-This repository does not currently have release authorization. The workflow in
-`.github/workflows/release.yml` is preparation for a future public npm release;
-committing or merging it does not authorize a tag, repository visibility change,
-preview, package publication, or deployment.
+Each release requires separate exact-source and exact-artifact authorization.
+The workflow in `.github/workflows/release.yml` supports the existing public npm
+package, but committing or merging release preparation does not authorize a tag,
+package publication, or deployment.
 
 ## Hard blockers
 
@@ -117,7 +117,37 @@ separate exact-artifact CR/SR/Release Quality gates before any preview.
 ## Current audit state
 
 The repository is public; visibility is complete, and `borgmcp-server@0.1.1` is live on npm under the
-sole expected maintainer.
+sole expected maintainer. The current source is the separately reviewed, unpublished `0.1.2`
+candidate. Before `v0.1.2` may be created, its protected-main merge commit requires fresh exact-SHA
+Code Review, Security, Release Quality, public-boundary, threat-model, license, dependency, SBOM,
+consumer-install, and release-authorization evidence. The four repository variables must then bind
+that merge commit before the annotated tag is created. The tag workflow artifact requires its own
+Security approval by exact SHA-512 before the Coordinator sets `ARTIFACT_SR_SHA512`; publication still
+requires the Queen operator's protected-environment approval.
+
+The immutable annotated `v0.1.1` tag object
+`e3f6ee268d5cd4f1e88adabdc6171c1e732cd096` peels to protected-main commit
+`f7f65ffb9af2853b0c4adb4bd9e2b0958db04e63`; it is the release-delta baseline and must never be
+moved, deleted, or reused. The `0.1.2` candidate retains that audited baseline: purpose-bound owner enrollment,
+idempotent multi-cube creation, the client attach lifecycle, and stable prior-seat reattachment. The
+protected-main changes after `v0.1.1` are exactly these reviewed merges:
+
+- PR #17 (`73b31bd`) adds the bounded retry envelope for transient postpublication registry 404s.
+- PR #14 (`031ae96`) records the completed `0.1.1` publication state without changing runtime code.
+- PR #12 (`b1eefb7`) adds server #8 group 1 slice 1: manage-scoped worker-role creation and atomic
+  default-role transition.
+- PR #19 (`c86d7af`) makes repeated setup fail closed, adds explicit destructive
+  `setup --reinitialize`, and aligns the canonical owner-enrollment transcript and terminology.
+- PR #21 (`9a13f22`) adds server #8 group 1 slice 2: sparse role updates, atomic default promotion,
+  and granular role-playbook section patches. Role deletion and later server #8 groups are not part
+  of this release.
+- PR #25 (`c18ec95`) adds explicit per-run, centrally redacted operator debug logging to local stderr.
+- PR #27 (`570f37c`) permits live-safe local client and pre-claim owner invitation minting while
+  preserving exclusive setup, rotation, revocation, and grant administration.
+- PR #29 (`01d72d9`) adds cube-scoped invitations with exact selector resolution, atomic
+  enroll-and-grant, and grant-derived observer/participant posture across attach, recipient, log, and
+  stream enforcement.
+
 First-publication run `29495546749` built and published the exact audited artifact, but its publish job
 concluded `failure` when the immediate postpublish ownership read returned HTTP 404 before registry
 propagation completed. The run and tag remain immutable and must not be rerun, moved, or reused.

@@ -204,6 +204,16 @@ credential-bearing token, authorization, credential, and secret field recursivel
 bodies are omitted rather than echoed. No GitHub or npm setting may change until a fresh,
 Queen-approved preflight provides that token-safe diagnostic evidence.
 
+After the Queen re-established the npm Trusted Publisher binding, protected-main preflight run
+`29574615810` attempt 1 proved the complete exchange path: GitHub returned 200 and npm returned 201
+with `token_type` `oidc`, a redacted token, and numeric `created` and `expires` Unix timestamps in
+seconds. The probe still failed because it passed the numeric `expires` value to `Date.parse`, which
+expects a date string and returned `NaN`. This was a preflight-only false negative, not an expired
+credential or Trusted Publisher failure. Recovery remains blocked until reviewed source validates a
+numeric safe-integer `expires` value directly against current Unix seconds, rejects values beyond a
+one-hour maximum lifetime, and a fresh Queen-approved preflight completes green. Never rerun the
+failed attempt; no package version or tag is selected by this correction.
+
 First-publication run `29495546749` built and published the exact audited artifact, but its publish job
 concluded `failure` when the immediate postpublish ownership read returned HTTP 404 before registry
 propagation completed. The run and tag remain immutable and must not be rerun, moved, or reused.

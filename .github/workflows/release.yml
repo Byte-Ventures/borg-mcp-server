@@ -148,8 +148,17 @@ jobs:
             if (!hasExchangeToken) {
               throw new Error("npm exchange response did not contain a token");
             }
-            if (!(Date.parse(exchange.expires) > Date.now())) {
+            const expiresAtSeconds = exchange.expires;
+            if (typeof expiresAtSeconds !== "number" || !Number.isSafeInteger(expiresAtSeconds)) {
+              throw new Error("npm returned an invalid exchange token expiry");
+            }
+            const nowSeconds = Date.now() / 1000;
+            if (!(expiresAtSeconds > nowSeconds)) {
               throw new Error("npm returned an expired exchange token");
+            }
+            const maxExchangeLifetimeSeconds = 60 * 60;
+            if (expiresAtSeconds > nowSeconds + maxExchangeLifetimeSeconds) {
+              throw new Error("npm returned an exchange token expiry outside the allowed range");
             }
             process.stdout.write("Trusted-publisher exchange accepted without publishing.\n");
           })().catch((error) => {

@@ -534,7 +534,6 @@ describe("Principal to ScopedStore isolation", () => {
       () => client.attachSeat({
         cubeId: ids.cubeA,
         roleId: ids.roleA,
-        retryKey: "00000000-0000-4000-8000-000000000031",
         droneId: "00000000-0000-4000-8000-000000000032",
         sessionId: "00000000-0000-4000-8000-000000000033",
         credentialId: "00000000-0000-4000-8000-000000000034",

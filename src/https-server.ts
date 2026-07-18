@@ -2,26 +2,20 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { createServer, type Server as HttpsServer } from "node:https";
 import type { AddressInfo, Socket } from "node:net";
 import { createHash, X509Certificate } from "node:crypto";
+import {
+  ATTACH_PATH,
+  CUBES_PATH,
+  ENROLLMENT_EXCHANGE_PATH,
+  HEALTH_PATH,
+  PROTOCOL_INFO_PATH,
+  PROTOCOL_VERSION,
+  createProtocolTagPreflight,
+} from "borgmcp-shared/protocol";
 
 import { resolveBindOptions, type BindOptionsInput } from "./network-policy.js";
 import type { CoordinationRequest, CoordinationResponse } from "./coordination-api.js";
 import type { Principal } from "./principal.js";
 import { disabledDebugLogger, type DebugLogger, type DebugRoute } from "./debug-log.js";
-
-export interface ProtocolInfoDocument {
-  readonly protocol_version: string;
-  readonly package: {
-    readonly name: "borgmcp-shared";
-    readonly version: string;
-  };
-  readonly capabilities: readonly string[];
-  readonly limits: {
-    readonly max_request_bytes: number;
-    readonly max_log_message_bytes: number;
-    readonly max_read_page_size: number;
-    readonly max_replay_page_size: number;
-  };
-}
 
 export interface ServiceLimits {
   readonly maxConnections: number;
@@ -62,14 +56,9 @@ export const DEFAULT_SERVICE_LIMITS: ServiceLimits = {
 };
 
 export interface RequestHandlerContext {
-  readonly protocolInfo: ProtocolInfoDocument;
-  readonly authorizeProtocol: (
-    authorization: string | undefined,
-    signal: AbortSignal,
-  ) => Promise<boolean | "missing" | "invalid" | "revoked">;
   readonly exchangeEnrollment?: (
     body: unknown,
-  ) => Promise<{ readonly status: 201 | 400 | 401 | 507; readonly body?: unknown }>;
+  ) => Promise<{ readonly status: 201 | 400 | 401 | 426 | 507; readonly body?: unknown }>;
   readonly authorizeCoordination?: (
     authorization: string | undefined,
     signal: AbortSignal,
@@ -85,8 +74,6 @@ export interface HttpsServerOptions {
     readonly cert: string | Buffer;
     readonly ca?: string | Buffer;
   };
-  readonly protocolInfo: ProtocolInfoDocument;
-  readonly authorizeProtocol: RequestHandlerContext["authorizeProtocol"];
   readonly exchangeEnrollment?: RequestHandlerContext["exchangeEnrollment"];
   readonly authorizeCoordination?: RequestHandlerContext["authorizeCoordination"];
   readonly handleCoordination?: RequestHandlerContext["handleCoordination"];
@@ -168,8 +155,6 @@ export function createRequestHandlerContext(
   options: HttpsServerOptions,
 ): RequestHandlerContext {
   return Object.freeze({
-    protocolInfo: options.protocolInfo,
-    authorizeProtocol: options.authorizeProtocol,
     ...(options.exchangeEnrollment === undefined
       ? {}
       : { exchangeEnrollment: options.exchangeEnrollment }),
@@ -290,44 +275,23 @@ async function handleRequest(
     return;
   }
 
-  if (path === "/healthz") {
+  if (path === HEALTH_PATH) {
     if (requestBody.length !== 0) return sendEmpty(response, 400, true);
     sendEmpty(response, request.method === "GET" ? 204 : 405);
     return;
   }
 
-  if (path === "/api/protocol") {
+  if (path === PROTOCOL_INFO_PATH) {
     if (requestBody.length !== 0) return sendEmpty(response, 400, true);
-    const authorized = await context.authorizeProtocol(request.headers.authorization, signal);
-    trace.authentication = authorized === true ? "accepted" : authorized === false ? "invalid" : authorized;
-    if (signal.aborted) return;
-    if (authorized !== true) {
-      const code = authorized === "revoked"
-        ? "SESSION_REVOKED"
-        : authorized === "missing" || request.headers.authorization === undefined
-          ? "AUTH_MISSING"
-          : "AUTH_INVALID";
-      sendJson(response, 401, protocolError(code, "Authentication failed."));
-      return;
-    }
-    const credentialRetry = consumeAuthenticatedRateLimit(
-      request.headers.authorization,
-      credentialRateLimiter,
-    );
-    if (credentialRetry !== null) return sendRateLimited(response, credentialRetry);
     if (request.method !== "GET") {
       sendEmpty(response, 405);
       return;
     }
-    sendJson(response, 200, {
-      protocol_version: "1",
-      request_id: "protocol-info",
-      payload: context.protocolInfo,
-    });
+    sendJson(response, 200, createProtocolTagPreflight());
     return;
   }
 
-  if (path === "/api/enrollment/exchange") {
+  if (path === ENROLLMENT_EXCHANGE_PATH) {
     if (request.method !== "POST" || context.exchangeEnrollment === undefined) {
       sendEmpty(response, 405);
       return;
@@ -346,7 +310,9 @@ async function handleRequest(
     if (signal.aborted) return;
     if (result.body === undefined) sendEmpty(response, result.status, result.status === 400);
     else if (result.status === 400) sendJson(response, 400, result.body, true);
-    else if (result.status === 401 || result.status === 507) sendJson(response, result.status, result.body);
+    else if (result.status === 401 || result.status === 426 || result.status === 507) {
+      sendJson(response, result.status, result.body);
+    }
     else sendJson(response, 201, result.body);
     return;
   }
@@ -434,10 +400,10 @@ function debugMethod(method: string | undefined): string {
 function debugRoute(rawUrl: string | undefined): DebugRoute {
   const path = parseRequestPath(rawUrl);
   if (path === null) return "unknown";
-  if (path === "/healthz") return "health";
-  if (path === "/api/protocol") return "protocol";
-  if (path === "/api/enrollment/exchange") return "enrollment_exchange";
-  if (path === "/api/client/attach") return "client_attach";
+  if (path === HEALTH_PATH) return "health";
+  if (path === PROTOCOL_INFO_PATH) return "protocol";
+  if (path === ENROLLMENT_EXCHANGE_PATH) return "enrollment_exchange";
+  if (path === ATTACH_PATH) return "client_attach";
   if (path === "/api/cubes") return "cubes";
   if (/^\/api\/cubes\/[0-9a-f-]{36}$/iu.test(path)) return "cube";
   if (/^\/api\/cubes\/[0-9a-f-]{36}\/roles$/iu.test(path)) return "cube_roles";
@@ -590,7 +556,7 @@ function waitForDrain(response: ServerResponse): Promise<void> {
 }
 
 function protocolError(code: string, message: string): object {
-  return { protocol_version: "1", error: { code, message } };
+  return { protocol_version: PROTOCOL_VERSION, error: { code, message } };
 }
 
 const INVALID_COORDINATION_QUERY = Symbol("invalid-coordination-query");
@@ -618,7 +584,7 @@ function parseCursorParameter(
 }
 
 function isCoordinationPath(path: string | null): path is string {
-  return path === "/api/client/attach" || path === "/api/cubes" ||
+  return path === ATTACH_PATH || path === CUBES_PATH ||
     path?.startsWith("/api/cubes/") === true;
 }
 
@@ -992,14 +958,6 @@ export class ConcurrentQuota {
 function credentialIdentity(authorization: string | undefined): string | null {
   if (authorization === undefined) return null;
   return `credential:${createHash("sha256").update(authorization).digest("base64url")}`;
-}
-
-function consumeAuthenticatedRateLimit(
-  authorization: string | undefined,
-  rateLimiter: RequestRateLimiter,
-): number | null {
-  const identity = credentialIdentity(authorization);
-  return identity === null ? null : rateLimiter.consume(identity);
 }
 
 function listen(server: HttpsServer, port: number, host: string): Promise<void> {

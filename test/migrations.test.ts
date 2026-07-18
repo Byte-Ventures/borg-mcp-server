@@ -34,7 +34,7 @@ describe("SQLite migrations", () => {
     expect(first.diagnostics()).toEqual({
       journalMode: "wal",
       foreignKeys: true,
-      schemaVersions: [1, 2, 3, 4, 5, 6, 7, 8],
+      schemaVersions: [1, 2, 3, 4, 5, 6, 7, 8, 9],
     });
     expect((await stat(join(directory, "data"))).mode & 0o777).toBe(0o700);
     expect((await stat(databasePath)).mode & 0o777).toBe(0o600);
@@ -43,7 +43,7 @@ describe("SQLite migrations", () => {
     first.close();
 
     const second = await openStore({ path: databasePath });
-    expect(second.diagnostics().schemaVersions).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+    expect(second.diagnostics().schemaVersions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
     second.close();
     await expect(access(databasePath)).resolves.toBeUndefined();
   });
@@ -119,7 +119,7 @@ describe("SQLite migrations", () => {
     database.close();
   });
 
-  it("backfills permanent retry bindings for v5 attached seats", () => {
+  it("removes legacy seat retry bindings and generation columns", () => {
     const database = new DatabaseSync(":memory:");
     applyMigrations(database, STORE_MIGRATIONS.slice(0, 5));
     const clientId = "00000000-0000-4000-8000-000000000011";
@@ -147,17 +147,13 @@ describe("SQLite migrations", () => {
 
     applyMigrations(database, STORE_MIGRATIONS);
 
-    expect(database.prepare(`
-      SELECT client_id, retry_key, cube_id, requested_role_id, drone_id, prior_drone_id
-      FROM seat_attach_bindings
-    `).get()).toEqual({
-      client_id: clientId,
-      retry_key: retryKey,
-      cube_id: cubeId,
-      requested_role_id: roleId,
-      drone_id: droneId,
-      prior_drone_id: null,
-    });
+    expect(database.prepare(
+      "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'seat_attach_bindings'",
+    ).get()).toBeUndefined();
+    const columns = database.prepare("PRAGMA table_info(drones)").all()
+      .map((row) => (row as { name: string }).name);
+    expect(columns).not.toContain("retry_key");
+    expect(columns).not.toContain("attach_generation");
     database.close();
   });
 

@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import { statfsSync, statSync } from "node:fs";
 import { chmod, lstat, mkdir, open } from "node:fs/promises";
 import { dirname, join, parse, relative, resolve, sep } from "node:path";
@@ -232,6 +232,7 @@ export interface CredentialStore {
   readonly clientExists: (clientId: string) => boolean;
   readonly clientIsActive: (clientId: string) => boolean;
   readonly findDroneSessionCredential: (lookup: Buffer) => StoredDroneSessionDigest | null;
+  readonly findActiveDroneSessionExpiry: (sessionId: string) => string | null;
   readonly rotateClientCredential: (input: {
     readonly clientId: string;
     readonly credentialId: string;
@@ -310,7 +311,6 @@ export interface CreateCubeRecord {
 export interface SeatAttachInput {
   readonly cubeId: string;
   readonly roleId: string;
-  readonly retryKey: string;
   readonly priorDroneId?: string;
   readonly droneId: string;
   readonly sessionId: string;
@@ -336,10 +336,7 @@ export interface SeatAttachRecord {
   };
   readonly sessionId: string;
   readonly expiresAt: string;
-  readonly generation: number;
-  readonly posture: "observer" | "participant";
-  readonly reattached: boolean;
-  readonly revokedSessionIds: readonly string[];
+  readonly result: "created" | "reused";
 }
 
 export interface MaintenanceStore {
@@ -449,12 +446,12 @@ export class CursorExpiredError extends Error {
   }
 }
 
-export class AttachConflictError extends Error {
-  readonly code = "ATTACH_CONFLICT";
+export class AttachSessionRejectedError extends Error {
+  readonly code = "SESSION_REJECTED";
 
   constructor() {
-    super("The attach request conflicts with an existing attachment.");
-    this.name = "AttachConflictError";
+    super("The saved session is not accepted for this seat.");
+    this.name = "AttachSessionRejectedError";
   }
 }
 
@@ -1194,7 +1191,6 @@ class SqliteScopedStore implements ScopedStore {
     if (this.#principal.kind !== "client") throw new ScopedStoreError();
     assertCanonicalUuid(input.cubeId, "Cube id");
     assertCanonicalUuid(input.roleId, "Role id");
-    assertCanonicalUuid(input.retryKey, "Retry key");
     if (input.priorDroneId !== undefined) assertCanonicalUuid(input.priorDroneId, "Prior drone id");
     assertCanonicalUuid(input.droneId, "Drone id");
     assertCanonicalUuid(input.sessionId, "Drone session id");
@@ -1219,95 +1215,94 @@ class SqliteScopedStore implements ScopedStore {
         WHERE c.id = ? AND role.id = ? AND ${scope.sql}
       `).get(input.cubeId, input.roleId, ...scope.parameters);
       if (roleRow === undefined) throw new ScopedStoreError();
-      const posture = this.#allowsDirectedWork(input.cubeId) ? "participant" : "observer";
+      const bound = this.#database.prepare(`
+        SELECT credential.verifier_digest, credential.revoked_at AS credential_revoked_at,
+               session.id AS session_id, session.client_id, session.cube_id, session.drone_id,
+               session.expires_at, session.revoked_at AS session_revoked_at,
+               drone.role_id, drone.label, drone.evicted_at
+        FROM drone_session_credentials AS credential
+        JOIN drone_sessions AS session ON session.id = credential.session_id
+        JOIN drones AS drone ON drone.id = session.drone_id
+          AND drone.client_id = session.client_id AND drone.cube_id = session.cube_id
+        WHERE credential.lookup_digest = ?
+      `).get(input.credentialDigest.lookup);
+      if (bound !== undefined) {
+        const verifier = requiredBuffer(bound, "verifier_digest");
+        if (!timingSafeEqual(verifier, input.credentialDigest.verifier) ||
+            optionalText(bound, "credential_revoked_at") !== null ||
+            optionalText(bound, "session_revoked_at") !== null ||
+            optionalText(bound, "evicted_at") !== null ||
+            requiredText(bound, "expires_at") <= now ||
+            requiredText(bound, "client_id") !== this.#principal.id ||
+            requiredText(bound, "cube_id") !== input.cubeId ||
+            requiredText(bound, "role_id") !== input.roleId ||
+            (input.priorDroneId !== undefined &&
+              requiredText(bound, "drone_id") !== input.priorDroneId)) {
+          throw new AttachSessionRejectedError();
+        }
+        const droneId = requiredText(bound, "drone_id");
+        this.#database.prepare("UPDATE drones SET last_seen = ? WHERE id = ?").run(now, droneId);
+        const attachedRoleRow = this.#database.prepare(`
+          SELECT id AS role_id, name AS role_name, role_class, is_human_seat
+          FROM roles WHERE id = ? AND cube_id = ?
+        `).get(requiredText(bound, "role_id"), input.cubeId);
+        if (attachedRoleRow === undefined) throw new Error("Attached drone role is unavailable.");
+        const roleClass = requiredText(attachedRoleRow, "role_class");
+        if (roleClass !== "queen" && roleClass !== "worker") {
+          throw new Error("Database contains invalid role class.");
+        }
+        this.#database.exec("COMMIT");
+        return {
+          cube: {
+            id: requiredText(roleRow, "cube_id"),
+            name: requiredText(roleRow, "cube_name"),
+          },
+          role: {
+            id: requiredText(attachedRoleRow, "role_id"),
+            name: requiredText(attachedRoleRow, "role_name"),
+            role_class: roleClass,
+            is_human_seat: requiredInteger(attachedRoleRow, "is_human_seat") === 1,
+          },
+          drone: { id: droneId, label: requiredText(bound, "label") },
+          sessionId: requiredText(bound, "session_id"),
+          expiresAt: requiredText(bound, "expires_at"),
+          result: "reused",
+        };
+      }
 
-      const retryBinding = this.#database.prepare(`
-        SELECT binding.cube_id AS binding_cube_id,
-               binding.requested_role_id AS binding_requested_role_id,
-               binding.prior_drone_id, drone.id, drone.label,
-               drone.attach_generation, drone.evicted_at
-        FROM seat_attach_bindings AS binding
-        JOIN drones AS drone ON drone.id = binding.drone_id
-        WHERE binding.client_id = ? AND binding.retry_key = ?
-      `).get(this.#principal.id, input.retryKey);
+      const priorSeat = input.priorDroneId === undefined ? undefined : this.#database.prepare(`
+        SELECT id, role_id, label FROM drones
+        WHERE id = ? AND client_id = ? AND cube_id = ? AND evicted_at IS NULL
+      `).get(input.priorDroneId, this.#principal.id, input.cubeId);
       let droneId: string;
       let droneLabel: string;
-      let reattached: boolean;
-      let generation: number;
-      if (retryBinding !== undefined) {
-        if (optionalText(retryBinding, "evicted_at") != null) throw new ScopedStoreError();
-        if (requiredText(retryBinding, "binding_cube_id") !== input.cubeId ||
-            requiredText(retryBinding, "binding_requested_role_id") !== input.roleId ||
-            nullableText(retryBinding, "prior_drone_id") !== (input.priorDroneId ?? null)) {
-          throw new AttachConflictError();
+      if (priorSeat !== undefined) {
+        const priorSeatId = requiredText(priorSeat, "id");
+        if (requiredText(priorSeat, "role_id") !== input.roleId) {
+          throw new AttachSessionRejectedError();
         }
-        droneId = requiredText(retryBinding, "id");
-        droneLabel = requiredText(retryBinding, "label");
-        generation = requiredInteger(retryBinding, "attach_generation") + 1;
-        this.#database.prepare(`
-          UPDATE drones SET last_seen = ?, attach_generation = ? WHERE id = ?
-        `).run(now, generation, droneId);
-        reattached = true;
+        const occupied = this.#database.prepare(`
+          SELECT 1 FROM drone_sessions AS session
+          JOIN drone_session_credentials AS credential ON credential.session_id = session.id
+          WHERE session.drone_id = ? AND session.client_id = ? AND session.cube_id = ?
+            AND session.revoked_at IS NULL AND credential.revoked_at IS NULL
+            AND session.expires_at > ?
+        `).get(priorSeatId, this.#principal.id, input.cubeId, now);
+        if (occupied !== undefined) throw new AttachSessionRejectedError();
+        droneId = priorSeatId;
+        droneLabel = requiredText(priorSeat, "label");
+        this.#database.prepare("UPDATE drones SET last_seen = ? WHERE id = ?").run(now, droneId);
       } else {
-        const priorSeat = input.priorDroneId === undefined ? undefined : this.#database.prepare(`
-          SELECT id, label, attach_generation
-          FROM drones
-          WHERE id = ? AND client_id = ? AND cube_id = ? AND evicted_at IS NULL
-        `).get(input.priorDroneId, this.#principal.id, input.cubeId);
-        if (priorSeat !== undefined) {
-          droneId = requiredText(priorSeat, "id");
-          droneLabel = requiredText(priorSeat, "label");
-          generation = requiredInteger(priorSeat, "attach_generation") + 1;
-          this.#database.prepare(`
-            UPDATE drones SET last_seen = ?, attach_generation = ? WHERE id = ?
-          `).run(now, generation, droneId);
-          reattached = true;
-        } else {
-          droneId = input.droneId;
-          droneLabel = seatLabel(requiredText(roleRow, "role_name"), droneId);
-          this.#database.prepare(`
-            INSERT INTO drones (
-              id, cube_id, role_id, client_id, label, created_at, last_seen, retry_key,
-              attach_generation
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
-          `).run(
-            droneId,
-            input.cubeId,
-            input.roleId,
-            this.#principal.id,
-            droneLabel,
-            now,
-            now,
-            input.retryKey,
-          );
-          reattached = false;
-          generation = 1;
-        }
+        droneId = input.droneId;
+        droneLabel = seatLabel(requiredText(roleRow, "role_name"), droneId);
         this.#database.prepare(`
-          INSERT INTO seat_attach_bindings (
-            client_id, retry_key, cube_id, requested_role_id, drone_id, prior_drone_id, created_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?)
+          INSERT INTO drones (id, cube_id, role_id, client_id, label, created_at, last_seen)
+          VALUES (?, ?, ?, ?, ?, ?, ?)
         `).run(
-          this.#principal.id, input.retryKey, input.cubeId, input.roleId,
-          droneId, input.priorDroneId ?? null, now,
+          droneId, input.cubeId, input.roleId, this.#principal.id, droneLabel, now, now,
         );
       }
 
-      const oldSessions = this.#database.prepare(
-        "SELECT id FROM drone_sessions WHERE drone_id = ? AND client_id = ? AND cube_id = ?",
-      ).all(droneId, this.#principal.id, input.cubeId)
-        .map((row) => requiredText(row, "id"));
-      if (oldSessions.length > 0) {
-        const placeholders = oldSessions.map(() => "?").join(", ");
-        this.#database.prepare(`
-          UPDATE drone_session_credentials SET revoked_at = ?
-          WHERE session_id IN (${placeholders}) AND revoked_at IS NULL
-        `).run(now, ...oldSessions);
-        this.#database.prepare(`
-          UPDATE drone_sessions SET revoked_at = ?
-          WHERE id IN (${placeholders}) AND revoked_at IS NULL
-        `).run(now, ...oldSessions);
-      }
       this.#database.prepare(`
         INSERT INTO drone_sessions (
           id, client_id, cube_id, drone_id, created_at, expires_at
@@ -1355,10 +1350,7 @@ class SqliteScopedStore implements ScopedStore {
         drone: { id: droneId, label: droneLabel },
         sessionId: input.sessionId,
         expiresAt: input.expiresAt,
-        generation,
-        posture,
-        reattached,
-        revokedSessionIds: oldSessions,
+        result: "created",
       };
     } catch (error) {
       try { this.#database.exec("ROLLBACK"); } catch { /* Preserve the original failure. */ }
@@ -1644,7 +1636,7 @@ class SqliteMaintenanceStore implements MaintenanceStore {
       for (const table of [
         "cube_create_bindings", "activity_acks", "activity_log_recipients", "activity_log",
         "decisions", "expired_activity_cursors", "drone_session_credentials", "drone_sessions",
-        "seat_attach_bindings", "drones", "roles", "client_cube_grants", "cubes", "client_server_capabilities",
+        "drones", "roles", "client_cube_grants", "cubes", "client_server_capabilities",
         "enrollment_claims", "client_credentials", "owner_enrollment_state", "clients",
         "enrollment_invitations",
       ]) this.#database.exec(`DELETE FROM ${table}`);
@@ -2173,6 +2165,21 @@ class SqliteCredentialStore implements CredentialStore {
     return row === undefined ? null : storedDroneSessionDigest(row);
   }
 
+  findActiveDroneSessionExpiry(sessionId: string): string | null {
+    assertCanonicalUuid(sessionId, "Drone session id");
+    const row = this.#database.prepare(`
+      SELECT session.expires_at
+      FROM drone_sessions AS session
+      JOIN clients AS client ON client.id = session.client_id
+      JOIN drones AS drone ON drone.id = session.drone_id
+        AND drone.client_id = session.client_id
+        AND drone.cube_id = session.cube_id
+      WHERE session.id = ? AND session.revoked_at IS NULL
+        AND client.revoked_at IS NULL AND drone.evicted_at IS NULL
+    `).get(sessionId);
+    return row === undefined ? null : requiredText(row, "expires_at");
+  }
+
   rotateClientCredential(input: {
     readonly clientId: string;
     readonly credentialId: string;
@@ -2193,6 +2200,16 @@ class SqliteCredentialStore implements CredentialStore {
       const now = this.#now();
       this.#database.prepare(`
         UPDATE client_credentials SET revoked_at = ?
+        WHERE client_id = ? AND revoked_at IS NULL
+      `).run(now, input.clientId);
+      this.#database.prepare(`
+        UPDATE drone_session_credentials SET revoked_at = ?
+        WHERE revoked_at IS NULL AND session_id IN (
+          SELECT id FROM drone_sessions WHERE client_id = ?
+        )
+      `).run(now, input.clientId);
+      this.#database.prepare(`
+        UPDATE drone_sessions SET revoked_at = ?
         WHERE client_id = ? AND revoked_at IS NULL
       `).run(now, input.clientId);
       this.#database.prepare(`

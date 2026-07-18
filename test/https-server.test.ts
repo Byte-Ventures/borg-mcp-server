@@ -11,26 +11,10 @@ import {
   RequestRateLimiter,
   startHttpsServer,
   validateTlsCertificate,
-  type ProtocolInfoDocument,
   type RunningServer,
 } from "../src/https-server.js";
 import { clientPrincipal, droneSessionPrincipal } from "../src/principal.js";
 import { createDebugLogger, disabledDebugLogger } from "../src/debug-log.js";
-
-const protocolInfo: ProtocolInfoDocument = {
-  protocol_version: "1",
-  package: {
-    name: "borgmcp-shared",
-    version: "0.2.0-draft",
-  },
-  capabilities: ["transport.tls", "authority.no-cloud-fallback"],
-  limits: {
-    max_request_bytes: 1_024,
-    max_log_message_bytes: 10_240,
-    max_read_page_size: 500,
-    max_replay_page_size: 200,
-  },
-};
 
 interface TestResponse {
   readonly status: number;
@@ -60,8 +44,6 @@ describe("HTTPS service", () => {
     server = await startHttpsServer({
       bind: { port: 0 },
       tls: { key, cert: certificate },
-      protocolInfo,
-      authorizeProtocol: async (authorization) => authorization === "Bearer accepted-test-token",
       authorizeCoordination: async (authorization) => authorization === "Bearer accepted-test-token"
         ? clientPrincipal("00000000-0000-4000-8000-000000000200")
         : authorization === undefined ? "missing" : "invalid",
@@ -70,7 +52,7 @@ describe("HTTPS service", () => {
           return {
             status: 400,
             body: {
-              protocol_version: "1",
+              protocol_version: "2",
               error: { code: "INVALID_INPUT", message: "Invalid enrollment request." },
             },
           };
@@ -79,7 +61,7 @@ describe("HTTPS service", () => {
           return {
             status: 401,
             body: {
-              protocol_version: "1",
+              protocol_version: "2",
               request_id: "request-1234",
               error: { code: "AUTH_INVALID", message: "Enrollment authentication failed." },
             },
@@ -87,12 +69,12 @@ describe("HTTPS service", () => {
         }
         return {
           status: 201,
-          body: { protocol_version: "1", request_id: "request-1234", payload: { ok: true } },
+          body: { protocol_version: "2", request_id: "request-1234", payload: { ok: true } },
         };
       },
       handleCoordination: async () => {
         coordinationCalls += 1;
-        return { status: 200, body: { protocol_version: "1", request_id: "unexpected" } };
+        return { status: 200, body: { protocol_version: "2", request_id: "unexpected" } };
       },
       limits: {
         maxConnections: 4,
@@ -128,16 +110,14 @@ describe("HTTPS service", () => {
     expect(response.headers["x-powered-by"]).toBeUndefined();
   });
 
-  it("returns canonical 401 errors for missing and invalid protocol authorization", async () => {
+  it("serves the exact protocol tag without reading authorization", async () => {
     const missing = await request(server.origin, certificate, "/api/protocol");
     const invalid = await request(server.origin, certificate, "/api/protocol", {
       authorization: "Bearer invalid-test-token",
     });
 
-    expect(missing.status).toBe(401);
-    expect(invalid.status).toBe(401);
-    expect(JSON.parse(missing.body).error.code).toBe("AUTH_MISSING");
-    expect(JSON.parse(invalid.body).error.code).toBe("AUTH_INVALID");
+    expect(missing).toMatchObject({ status: 200, body: '{"protocol_version":"2"}' });
+    expect(invalid).toMatchObject({ status: 200, body: '{"protocol_version":"2"}' });
   });
 
   it("does not log secret-bearing authentication or enrollment failures", async () => {
@@ -150,7 +130,7 @@ describe("HTTPS service", () => {
     ];
     const secret = "secret-material-that-must-never-reach-runtime-logs";
     try {
-      const authentication = await request(server.origin, certificate, "/api/protocol", {
+      const authentication = await request(server.origin, certificate, "/api/cubes", {
         authorization: `Bearer ${secret}`,
       });
       const enrollment = await request(
@@ -177,10 +157,6 @@ describe("HTTPS service", () => {
     const debugServer = await startHttpsServer({
       bind: { port: 0 },
       tls: { key, cert: certificate },
-      protocolInfo,
-      authorizeProtocol: async (authorization) => authorization === "Bearer accepted-debug-token"
-        ? true
-        : authorization === undefined ? "missing" : "invalid",
       debugLogger: createDebugLogger((line) => lines.push(line)),
     });
     const urlSecret = "secret-url-component";
@@ -189,9 +165,7 @@ describe("HTTPS service", () => {
       await request(debugServer.origin, certificate, `/api/${urlSecret}`, {
         authorization: `Bearer ${bearerSecret}`,
       });
-      await request(debugServer.origin, certificate, "/api/protocol", {
-        authorization: "Bearer accepted-debug-token",
-      });
+      await request(debugServer.origin, certificate, "/api/protocol");
     } finally {
       await debugServer.close();
     }
@@ -204,24 +178,18 @@ describe("HTTPS service", () => {
       expect.objectContaining({
         event: "request",
         route: "protocol",
-        authentication: "accepted",
-        authorization: "accepted",
+        authentication: "not_required",
+        authorization: "not_checked",
         status: 200,
       }),
     ]));
   });
 
-  it("returns protocol readiness and capabilities only after authorization", async () => {
-    const response = await request(server.origin, certificate, "/api/protocol", {
-      authorization: "Bearer accepted-test-token",
-    });
+  it("returns only the protocol tag without authorization", async () => {
+    const response = await request(server.origin, certificate, "/api/protocol");
 
     expect(response.status).toBe(200);
-    expect(JSON.parse(response.body)).toEqual({
-      protocol_version: "1",
-      request_id: "protocol-info",
-      payload: protocolInfo,
-    });
+    expect(JSON.parse(response.body)).toEqual({ protocol_version: "2" });
     expect(response.headers["cache-control"]).toBe("no-store");
   });
 
@@ -267,8 +235,6 @@ describe("HTTPS service", () => {
     await expect(startHttpsServer({
       bind: { port: 0 },
       tls: { key, cert: certificate },
-      protocolInfo,
-      authorizeProtocol: async () => true,
       handleCoordination: async () => ({ status: 204 }),
     })).rejects.toThrow("Coordination routes require server-derived principal authentication.");
   });
@@ -279,13 +245,13 @@ describe("HTTPS service", () => {
       certificate,
       "/api/enrollment/exchange",
       { "content-type": "application/json" },
-      JSON.stringify({ protocol_version: "1", request_id: "request-1234", payload: {} }),
+      JSON.stringify({ protocol_version: "2", request_id: "request-1234", payload: {} }),
       "POST",
     );
 
     expect(response.status).toBe(201);
     expect(JSON.parse(response.body)).toEqual({
-      protocol_version: "1",
+      protocol_version: "2",
       request_id: "request-1234",
       payload: { ok: true },
     });
@@ -303,7 +269,7 @@ describe("HTTPS service", () => {
 
     expect(response.status).toBe(400);
     expect(JSON.parse(response.body)).toEqual({
-      protocol_version: "1",
+      protocol_version: "2",
       error: { code: "INVALID_INPUT", message: "Invalid enrollment request." },
     });
   });
@@ -320,7 +286,7 @@ describe("HTTPS service", () => {
 
     expect(response.status).toBe(401);
     expect(JSON.parse(response.body)).toEqual({
-      protocol_version: "1",
+      protocol_version: "2",
       request_id: "request-1234",
       error: { code: "AUTH_INVALID", message: "Enrollment authentication failed." },
     });
@@ -377,57 +343,10 @@ describe("HTTPS service", () => {
     });
   });
 
-  it("aborts a stalled authorizer and releases the connection within the handler deadline", async () => {
-    let authorizationSignal: AbortSignal | undefined;
-    const stalled = await startHttpsServer({
-      bind: { port: 0 },
-      tls: { key, cert: certificate },
-      protocolInfo,
-      authorizeProtocol: async (_authorization, signal) => {
-        authorizationSignal = signal;
-        return new Promise<boolean>(() => undefined);
-      },
-      limits: {
-        maxConnections: 1,
-        maxConnectionsPerAddress: 1,
-        maxRequestsPerWindow: 10,
-        maxRequestsPerAddressWindow: 20,
-        maxRequestsGlobalWindow: 100,
-        rateLimitWindowMs: 60_000,
-        maxRateLimitEntries: 4,
-        maxStreamsPerCredential: 1,
-        maxHeaderBytes: 8_192,
-        maxRequestBodyBytes: 8,
-        maxRequestsPerSocket: 2,
-        requestTimeoutMs: 200,
-        tlsHandshakeTimeoutMs: 100,
-        headersTimeoutMs: 100,
-        keepAliveTimeoutMs: 50,
-        handlerTimeoutMs: 30,
-      },
-    });
-
-    try {
-      const startedAt = Date.now();
-      const response = await request(stalled.origin, certificate, "/api/protocol", {
-        authorization: "Bearer stalled-test-token",
-      });
-
-      expect(response).toMatchObject({ status: 503, body: "" });
-      expect(response.headers.connection).toBe("close");
-      expect(Date.now() - startedAt).toBeLessThan(500);
-      expect(authorizationSignal?.aborted).toBe(true);
-    } finally {
-      await stalled.close();
-    }
-  });
-
   it("destroys incomplete TLS handshakes and releases connection capacity", async () => {
     const bounded = await startHttpsServer({
       bind: { port: 0 },
       tls: { key, cert: certificate },
-      protocolInfo,
-      authorizeProtocol: async () => true,
       limits: {
         ...server.limits,
         maxConnections: 1,
@@ -449,14 +368,11 @@ describe("HTTPS service", () => {
   });
 
   it("constructs a route context without retaining TLS material", async () => {
-    const authorizeProtocol = async (): Promise<boolean> => false;
     const context = createRequestHandlerContext({
       tls: { key, cert: certificate },
-      protocolInfo,
-      authorizeProtocol,
     });
 
-    expect(context).toEqual({ protocolInfo, authorizeProtocol, debugLogger: disabledDebugLogger });
+    expect(context).toEqual({ debugLogger: disabledDebugLogger });
     expect("tls" in context).toBe(false);
   });
 
@@ -640,8 +556,6 @@ describe("HTTPS service", () => {
     const limited = await startHttpsServer({
       bind: { port: 0 },
       tls: { key, cert: certificate },
-      protocolInfo,
-      authorizeProtocol: async () => true,
       testHooks: {
         identifyRemoteAddress: () => {
           connection += 1;
@@ -706,8 +620,12 @@ describe("HTTPS service", () => {
     const limited = await startHttpsServer({
       bind: { port: 0 },
       tls: { key, cert: certificate },
-      protocolInfo,
-      authorizeProtocol: async () => true,
+      authorizeCoordination: async (authorization) => authorization === "Bearer accepted-test-token"
+        ? clientPrincipal("00000000-0000-4000-8000-000000000210")
+        : authorization === "Bearer different-test-token"
+          ? clientPrincipal("00000000-0000-4000-8000-000000000211")
+          : "invalid",
+      handleCoordination: async () => ({ status: 200, body: {} }),
       limits: {
         ...server.limits,
         maxRequestsPerWindow: 2,
@@ -716,13 +634,13 @@ describe("HTTPS service", () => {
     });
     try {
       const headers = { authorization: "Bearer accepted-test-token" };
-      expect((await request(limited.origin, certificate, "/api/protocol", headers)).status).toBe(200);
-      expect((await request(limited.origin, certificate, "/api/protocol", headers)).status).toBe(200);
-      const rejected = await request(limited.origin, certificate, "/api/protocol", headers);
+      expect((await request(limited.origin, certificate, "/api/cubes", headers)).status).toBe(200);
+      expect((await request(limited.origin, certificate, "/api/cubes", headers)).status).toBe(200);
+      const rejected = await request(limited.origin, certificate, "/api/cubes", headers);
       expect(rejected.status).toBe(429);
       expect(rejected.headers["retry-after"]).toBe("60");
       expect(rejected.headers.connection).toBe("close");
-      expect((await request(limited.origin, certificate, "/api/protocol", {
+      expect((await request(limited.origin, certificate, "/api/cubes", {
         authorization: "Bearer different-test-token",
       })).status).toBe(200);
     } finally {
@@ -734,8 +652,10 @@ describe("HTTPS service", () => {
     const limited = await startHttpsServer({
       bind: { port: 0 },
       tls: { key, cert: certificate },
-      protocolInfo,
-      authorizeProtocol: async (authorization) => authorization === "Bearer authenticated-client",
+      authorizeCoordination: async (authorization) => authorization === "Bearer authenticated-client"
+        ? clientPrincipal("00000000-0000-4000-8000-000000000212")
+        : "invalid",
+      handleCoordination: async () => ({ status: 200, body: {} }),
       limits: {
         ...server.limits,
         maxRequestsPerWindow: 1,
@@ -745,13 +665,13 @@ describe("HTTPS service", () => {
     });
     try {
       for (let index = 0; index < 5; index += 1) {
-        expect((await request(limited.origin, certificate, "/api/protocol", {
+        expect((await request(limited.origin, certificate, "/api/cubes", {
           authorization: `Bearer attacker-${index}`,
         })).status).toBe(401);
       }
       const headers = { authorization: "Bearer authenticated-client" };
-      expect((await request(limited.origin, certificate, "/api/protocol", headers)).status).toBe(200);
-      expect((await request(limited.origin, certificate, "/api/protocol", headers)).status).toBe(429);
+      expect((await request(limited.origin, certificate, "/api/cubes", headers)).status).toBe(200);
+      expect((await request(limited.origin, certificate, "/api/cubes", headers)).status).toBe(429);
     } finally {
       await limited.close();
     }
@@ -766,8 +686,6 @@ describe("HTTPS service", () => {
     const limited = await startHttpsServer({
       bind: { port: 0 },
       tls: { key, cert: certificate },
-      protocolInfo,
-      authorizeProtocol: async () => true,
       authorizeCoordination: async (authorization) => {
         if (authorization === "Bearer mutation-client" ||
             authorization === "Bearer rotated-mutation-client") return clientPrincipal(clientId);
@@ -863,8 +781,6 @@ describe("HTTPS service", () => {
     const streaming = await startHttpsServer({
       bind: { port: 0 },
       tls: { key, cert: certificate },
-      protocolInfo,
-      authorizeProtocol: async () => true,
       authorizeCoordination: async (authorization) => {
         if (authorization === "Bearer stream-client-a") {
           return clientPrincipal("00000000-0000-4000-8000-000000000204");
@@ -915,8 +831,6 @@ describe("HTTPS service", () => {
     const delayed = await startHttpsServer({
       bind: { port: 0 },
       tls: { key, cert: certificate },
-      protocolInfo,
-      authorizeProtocol: async () => true,
       authorizeCoordination: async () => clientPrincipal("00000000-0000-4000-8000-000000000205"),
       handleCoordination: async (coordinationRequest) => {
         calls += 1;
@@ -1065,8 +979,6 @@ async function expectCertificateRejected(
   await expect(startHttpsServer({
     bind: { port: 0 },
     tls: { key: material.private, cert: material.cert },
-    protocolInfo,
-    authorizeProtocol: async () => false,
   })).rejects.toThrow(message);
 }
 

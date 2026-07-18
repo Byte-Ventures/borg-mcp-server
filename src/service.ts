@@ -24,7 +24,6 @@ import {
   type HttpsServerOptions,
   type RunningServer,
 } from "./https-server.js";
-import { createPart2ProtocolInfo } from "./protocol-draft.js";
 import { resolveBindOptions } from "./network-policy.js";
 import {
   invitationCubeAmbiguousError,
@@ -220,12 +219,6 @@ export function createNodeServerService(dependencies: ServiceDependencies): Serv
           bind,
           tls: { key, cert, ...(ca === undefined ? {} : { ca }) },
           limits: DEFAULT_SERVICE_LIMITS,
-          protocolInfo: createPart2ProtocolInfo(DEFAULT_SERVICE_LIMITS),
-          authorizeProtocol: async (authorization) => {
-            if (authority === undefined) return false;
-            const result = authority.authenticateStatus(authorization);
-            return typeof result === "object" ? true : result;
-          },
           ...(authority === undefined
             ? {}
             : { exchangeEnrollment: createEnrollmentExchange(authority) }),

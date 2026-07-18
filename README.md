@@ -14,7 +14,9 @@ reviewed owner-enrollment, idempotent multi-cube creation, and stable prior-seat
 reattachment baseline, and adds managed role creation and updates, fail-closed
 setup reinitialization, opt-in redacted debug logging, live-safe invitation
 minting, and atomic cube-scoped invitations with enforced observer posture.
-It consumes the audited exact `borgmcp-shared@0.3.0` registry release.
+The published `0.1.4` package consumes the audited exact
+`borgmcp-shared@0.3.0` registry release. Current source consumes the audited
+exact `borgmcp-shared@0.4.0` release for the clean-slate protocol generation.
 
 Setup prepares local identity and storage and prints one-time recovery and
 owner-enrollment secrets; it creates no cube. Version `0.1.1` completed the

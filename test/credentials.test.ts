@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
 import { DatabaseSync } from "node:sqlite";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   CredentialAuthority,
@@ -13,6 +13,7 @@ import {
 } from "../src/credentials.js";
 import { type StoreRuntime, openStore } from "../src/store.js";
 import { createDebugLogger } from "../src/debug-log.js";
+import { droneSessionPrincipal } from "../src/principal.js";
 
 let directory: string;
 let runtime: StoreRuntime;
@@ -140,6 +141,40 @@ describe("credential authority", () => {
     expect(rotatedLive.signal.aborted).toBe(true);
     expect(authority.authenticate(`Bearer ${rotated}`)).toBeNull();
     expect(() => authority.rotateClient(enrolled.id)).toThrow("Provide an existing active client ID.");
+  });
+
+  it("aborts a registered live drone session when its credential expires", async () => {
+    vi.useFakeTimers();
+    try {
+      const clientId = randomUUID();
+      const cubeId = randomUUID();
+      const roleId = randomUUID();
+      const droneId = randomUUID();
+      const sessionId = randomUUID();
+      runtime.maintenance.createClient({ id: clientId, name: "Expiry client" });
+      runtime.maintenance.createCube({ id: cubeId, ownerId: clientId, name: "Expiry cube", directive: "" });
+      runtime.maintenance.createRole({ id: roleId, cubeId, name: "Worker" });
+      runtime.maintenance.createDrone({ id: droneId, cubeId, roleId, clientId, label: "worker-1" });
+      runtime.maintenance.createDroneSession({
+        id: sessionId,
+        clientId,
+        cubeId,
+        droneId,
+        expiresAt: new Date(now.getTime() + 1_000).toISOString(),
+      });
+      const live = authority.registerLiveSession(droneSessionPrincipal({
+        id: sessionId,
+        clientId,
+        cubeId,
+        droneId,
+      }));
+
+      expect(live.signal.aborted).toBe(false);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(live.signal.aborted).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("domain-separates keyed lookup and verifier digests", () => {

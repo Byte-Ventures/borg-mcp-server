@@ -27,7 +27,7 @@ export type DebugEvent =
   | { readonly event: "decision_write"; readonly cubeId: string; readonly decisionId: string; readonly principal: Principal }
   | { readonly event: "sse_subscribe"; readonly connectionId: string; readonly cubeId: string; readonly principal: Principal; readonly replayCount: number; readonly truncated: boolean }
   | { readonly event: "sse_unsubscribe"; readonly connectionId: string; readonly cubeId: string; readonly principal: Principal; readonly deliveryCount: number }
-  | { readonly event: "credential"; readonly action: "invitation_created" | "enrollment_accepted" | "enrollment_rejected" | "session_created" | "session_revoked" | "client_rotated" | "client_revoked"; readonly purpose?: "owner" | "client"; readonly clientId?: string; readonly cubeId?: string; readonly droneId?: string; readonly sessionId?: string; readonly generation?: number }
+  | { readonly event: "credential"; readonly action: "invitation_created" | "enrollment_accepted" | "enrollment_rejected" | "session_created" | "session_revoked" | "client_rotated" | "client_revoked"; readonly purpose?: "owner" | "client"; readonly clientId?: string; readonly cubeId?: string; readonly droneId?: string; readonly sessionId?: string }
   | { readonly event: "transport_rejection"; readonly reason: "tls_client_error" | "http_parser_error" };
 
 export interface DebugLogger {
@@ -113,7 +113,6 @@ function projectEvent(event: DebugEvent): Record<string, unknown> | null {
         ...optionalUuid("cube_id", value["cubeId"]),
         ...optionalUuid("drone_id", value["droneId"]),
         ...optionalUuid("session_id", value["sessionId"]),
-        ...(Number.isSafeInteger(value["generation"]) ? { generation: value["generation"] } : {}),
       };
     case "transport_rejection":
       return { event: "transport_rejection", reason: enumValue(value["reason"], ["tls_client_error", "http_parser_error"], "tls_client_error") };

@@ -350,6 +350,16 @@ export const STORE_MIGRATIONS: readonly Migration[] = Object.freeze([
       END;
     `,
   },
+  {
+    version: 9,
+    name: "digest_correlated_seat_attach",
+    sql: `
+      DROP TABLE seat_attach_bindings;
+      DROP INDEX drones_client_retry_key_idx;
+      ALTER TABLE drones DROP COLUMN retry_key;
+      ALTER TABLE drones DROP COLUMN attach_generation;
+    `,
+  },
 ]);
 
 interface AppliedMigrationRow {

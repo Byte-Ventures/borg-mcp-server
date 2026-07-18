@@ -1,26 +1,37 @@
+import {
+  ErrorCode,
+  PROTOCOL_VERSION,
+  ProtocolContractError,
+  createProtocolEnvelope,
+  decodeEnrollmentExchangeRequestEnvelope,
+  type EnrollmentExchangeRequest,
+  type ProtocolEnvelope,
+} from "borgmcp-shared/protocol";
 import type { CredentialAuthority } from "./credentials.js";
 import { StorageCapacityError } from "./store.js";
 
-interface EnrollmentEnvelope {
-  readonly protocol_version: "1";
-  readonly request_id: string;
-  readonly payload: {
-    readonly invitation: string;
-    readonly retry_key: string;
-    readonly client_credential: string;
-    readonly client_name?: string;
-  };
-}
+type EnrollmentEnvelope = ProtocolEnvelope<EnrollmentExchangeRequest>;
 
 export function createEnrollmentExchange(authority: CredentialAuthority) {
   return async (body: unknown): Promise<{
-    readonly status: 201 | 400 | 401 | 507;
+    readonly status: 201 | 400 | 401 | 426 | 507;
     readonly body?: unknown;
   }> => {
     let envelope: EnrollmentEnvelope;
     try {
       envelope = decodeEnrollmentEnvelope(body);
-    } catch {
+    } catch (error) {
+      if (error instanceof ProtocolContractError &&
+          error.code === ErrorCode.UNSUPPORTED_PROTOCOL_VERSION) {
+        return {
+          status: 426,
+          body: errorEnvelope(
+            ErrorCode.UNSUPPORTED_PROTOCOL_VERSION,
+            "Unsupported protocol version.",
+            safeRequestId(body),
+          ),
+        };
+      }
       return {
         status: 400,
         body: errorEnvelope(
@@ -59,26 +70,22 @@ export function createEnrollmentExchange(authority: CredentialAuthority) {
     }
     return {
       status: 201,
-      body: {
-        protocol_version: "1",
-        request_id: envelope.request_id,
-        payload: {
+      body: createProtocolEnvelope(envelope.request_id, {
           purpose: response.purpose,
           client_id: response.clientId,
           server_capabilities: response.serverCapabilities,
-        },
-      },
+      }),
     };
   };
 }
 
 function errorEnvelope(
-  code: "INVALID_INPUT" | "AUTH_INVALID" | "CAPACITY_EXCEEDED",
+  code: "INVALID_INPUT" | "AUTH_INVALID" | "CAPACITY_EXCEEDED" | "UNSUPPORTED_PROTOCOL_VERSION",
   message: string,
   requestId?: string,
 ) {
   return {
-    protocol_version: "1" as const,
+    protocol_version: PROTOCOL_VERSION,
     ...(requestId === undefined ? {} : { request_id: requestId }),
     error: { code, message },
   };
@@ -93,64 +100,11 @@ function safeRequestId(value: unknown): string | undefined {
 }
 
 export function decodeEnrollmentEnvelope(value: unknown): EnrollmentEnvelope {
-  const envelope = exactRecord(value, ["protocol_version", "request_id", "payload"]);
-  if (envelope["protocol_version"] !== "1") throw new Error("Invalid enrollment request.");
-  const requestId = envelope["request_id"];
-  if (typeof requestId !== "string" || !/^[A-Za-z0-9._-]{8,128}$/u.test(requestId)) {
+  try {
+    return decodeEnrollmentExchangeRequestEnvelope(value);
+  } catch (error) {
+    if (error instanceof ProtocolContractError &&
+        error.code === ErrorCode.UNSUPPORTED_PROTOCOL_VERSION) throw error;
     throw new Error("Invalid enrollment request.");
   }
-  const payload = exactRecord(
-    envelope["payload"],
-    ["invitation", "retry_key", "client_credential"],
-    ["client_name"],
-  );
-  const invitation = payload["invitation"];
-  if (typeof invitation !== "string" || !/^[A-Za-z0-9_-]{43,1024}$/u.test(invitation)) {
-    throw new Error("Invalid enrollment request.");
-  }
-  const retryKey = payload["retry_key"];
-  if (typeof retryKey !== "string" ||
-      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(retryKey)) {
-    throw new Error("Invalid enrollment request.");
-  }
-  const clientCredential = payload["client_credential"];
-  if (typeof clientCredential !== "string" ||
-      !/^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$/u.test(clientCredential)) {
-    throw new Error("Invalid enrollment request.");
-  }
-  const clientName = payload["client_name"];
-  if (clientName !== undefined &&
-      (typeof clientName !== "string" || Buffer.byteLength(clientName) > 120 ||
-       !/^[A-Za-z0-9][A-Za-z0-9 ._-]*$/u.test(clientName))) {
-    throw new Error("Invalid enrollment request.");
-  }
-  return {
-    protocol_version: "1",
-    request_id: requestId,
-    payload: clientName === undefined
-      ? { invitation, retry_key: retryKey.toLowerCase(), client_credential: clientCredential }
-      : {
-          invitation,
-          retry_key: retryKey.toLowerCase(),
-          client_credential: clientCredential,
-          client_name: clientName,
-        },
-  };
-}
-
-function exactRecord(
-  value: unknown,
-  required: readonly string[],
-  optional: readonly string[] = [],
-): Record<string, unknown> {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw new Error("Invalid enrollment request.");
-  }
-  const record = value as Record<string, unknown>;
-  const allowed = new Set([...required, ...optional]);
-  if (Object.keys(record).some((key) => !allowed.has(key)) ||
-      required.some((key) => !Object.hasOwn(record, key))) {
-    throw new Error("Invalid enrollment request.");
-  }
-  return record;
 }

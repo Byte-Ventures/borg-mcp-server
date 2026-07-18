@@ -113,24 +113,6 @@ describe("node server service", () => {
     const options = startServer.mock.calls[0]?.[0];
     expect(options?.bind).toEqual({});
     expect(options?.tls.ca).toEqual(Buffer.from("test-certificate"));
-    expect(options?.protocolInfo.capabilities).toEqual([
-      "coordination.core",
-      "auth.bearer",
-      "auth.revocation",
-      "auth.retry-safe-enrollment",
-      "scope.cube-isolation",
-      "transport.tls",
-      "authority.no-cloud-fallback",
-      "log.cursor",
-      "stream.sse",
-      "stream.replay",
-      "acks",
-      "claims",
-      "decisions",
-    ]);
-    await expect(
-      options?.authorizeProtocol("Bearer not-yet-supported", AbortSignal.abort()),
-    ).resolves.toBe(false);
     expect(onStarted).toHaveBeenCalledWith("https://127.0.0.1:7091");
     expect(waitForShutdown).toHaveBeenCalledOnce();
     expect(keyBuffer.every((byte) => byte === 0)).toBe(true);

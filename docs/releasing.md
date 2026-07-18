@@ -268,7 +268,8 @@ artifacts were produced, and `borgmcp-server` remained unclaimed in the npm regi
 move, delete, or reuse that tag. Recovery uses separately authorized version `0.1.1`, a fresh reviewed
 source and merge commit, pre-tag repository-variable evidence, and a never-before-used annotated tag.
 
-The published package consumes the audited exact `borgmcp-shared@0.3.0` registry release. Its
-shrinkwrap must retain the canonical registry tarball URL and matching SRI, and the source-lock,
-artifact, audit, signature, SBOM, and consumer gates must pass without Git dependencies before
-release review.
+The live `borgmcp-server@0.1.4` package consumes the audited exact
+`borgmcp-shared@0.3.0` registry release. Current source consumes the audited exact
+`borgmcp-shared@0.4.0` release; its shrinkwrap must resolve that registry tarball with the matching
+SRI. The source-lock, artifact, audit, signature, SBOM, and consumer gates must pass without Git
+dependencies before release review.

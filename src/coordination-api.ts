@@ -1,11 +1,20 @@
 import { randomUUID } from "node:crypto";
+import {
+  ATTACH_PATH,
+  ErrorCode,
+  PROTOCOL_VERSION,
+  ProtocolContractError,
+  createProtocolEnvelope,
+  decodeAttachRequestEnvelope,
+  decodeProtocolEnvelope,
+} from "borgmcp-shared/protocol";
 import type { Principal } from "./principal.js";
 import { assertServerDerivedPrincipal } from "./principal.js";
 import { disabledDebugLogger, type DebugLogger } from "./debug-log.js";
 import type { CredentialAuthority } from "./credentials.js";
 import {
   CursorExpiredError,
-  AttachConflictError,
+  AttachSessionRejectedError,
   AccessDeniedError,
   CreateCubeConflictError,
   DefaultRoleRequiredError,
@@ -78,38 +87,38 @@ export class CoordinationApi {
     assertServerDerivedPrincipal(request.principal);
     const authentication = request.principal;
 
-    if (request.path === "/api/client/attach" && request.method === "POST") {
+    if (request.path === ATTACH_PATH && request.method === "POST") {
       const requestId = safeRequestId(request.body);
       try {
-        const envelope = decodeEnvelope(request.body);
-        exactKeys(envelope.payload, ["cube_id", "role_id", "retry_key"], ["prior_drone_id"]);
-        const priorDroneId = envelope.payload["prior_drone_id"] === undefined
-          ? undefined
-          : requiredUuid(envelope.payload, "prior_drone_id");
+        const envelope = decodeAttachRequestEnvelope(request.body);
+        const priorDroneId = envelope.payload.prior_drone_id;
         const attachment = this.#authority.attachSeat(
           this.#runtime.forPrincipal(authentication),
           {
-            cubeId: requiredUuid(envelope.payload, "cube_id"),
-            roleId: requiredUuid(envelope.payload, "role_id"),
-            retryKey: requiredUuid(envelope.payload, "retry_key"),
+            cubeId: envelope.payload.cube_id,
+            roleId: envelope.payload.role_id,
+            sessionCredential: envelope.payload.session_credential,
             ...(priorDroneId === undefined ? {} : { priorDroneId }),
           },
         );
-        return success(201, envelope.requestId, {
+        return success(attachment.result === "created" ? 201 : 200, envelope.request_id, {
+          result: attachment.result,
           cube: attachment.cube,
           role: attachment.role,
           drone: attachment.drone,
           session: {
-            token: attachment.credential,
+            id: attachment.sessionId,
             expires_at: attachment.expiresAt,
-            generation: attachment.generation,
-            posture: attachment.posture,
           },
-          reattached: attachment.reattached,
         });
       } catch (error) {
-        if (error instanceof AttachConflictError) {
-          return failure(409, "INVALID_INPUT", "The attach request conflicts.", requestId);
+        if (error instanceof ProtocolContractError) {
+          return error.code === ErrorCode.UNSUPPORTED_PROTOCOL_VERSION
+            ? failure(426, error.code, "Unsupported protocol version.", requestId)
+            : failure(400, "INVALID_INPUT", "Invalid protocol request.", requestId);
+        }
+        if (error instanceof AttachSessionRejectedError) {
+          return failure(401, ErrorCode.SESSION_REJECTED, error.message, requestId);
         }
         if (error instanceof ScopedStoreError) {
           return failure(404, "NOT_FOUND", error.message, requestId);
@@ -163,6 +172,11 @@ export class CoordinationApi {
         }
         if (error instanceof StorageCapacityError) {
           return failure(507, "CAPACITY_EXCEEDED", error.message, requestId);
+        }
+        if (error instanceof ProtocolContractError) {
+          return error.code === ErrorCode.UNSUPPORTED_PROTOCOL_VERSION
+            ? failure(426, error.code, "Unsupported protocol version.", requestId)
+            : failure(400, "INVALID_INPUT", "Invalid protocol request.", requestId);
         }
         if (error instanceof InputError || error instanceof TypeError || error instanceof RangeError) {
           return failure(400, "INVALID_INPUT", "Invalid protocol request.", requestId);
@@ -397,6 +411,11 @@ export class CoordinationApi {
       if (error instanceof StorageCapacityError) {
         return failure(507, "CAPACITY_EXCEEDED", error.message, safeRequestId(request.body));
       }
+      if (error instanceof ProtocolContractError) {
+        return error.code === ErrorCode.UNSUPPORTED_PROTOCOL_VERSION
+          ? failure(426, error.code, "Unsupported protocol version.", safeRequestId(request.body))
+          : failure(400, "INVALID_INPUT", "Invalid protocol request.", safeRequestId(request.body));
+      }
       if (error instanceof InputError || error instanceof TypeError || error instanceof RangeError) {
         return failure(400, "INVALID_INPUT", "Invalid protocol request.", safeRequestId(request.body));
       }
@@ -548,14 +567,8 @@ class AsyncStringQueue implements AsyncIterable<string> {
 }
 
 function decodeEnvelope(value: unknown): RequestEnvelope {
-  const record = object(value);
-  exactKeys(record, ["protocol_version", "request_id", "payload"]);
-  if (record["protocol_version"] !== "1") throw new InputError();
-  const requestId = record["request_id"];
-  if (typeof requestId !== "string" || !/^[A-Za-z0-9._-]{8,128}$/u.test(requestId)) {
-    throw new InputError();
-  }
-  return { requestId, payload: object(record["payload"]) };
+  const envelope = decodeProtocolEnvelope(value, object);
+  return { requestId: envelope.request_id, payload: envelope.payload };
 }
 
 function object(value: unknown): Record<string, unknown> {
@@ -691,7 +704,7 @@ function safeRequestId(value: unknown): string | undefined {
 }
 
 function success(status: number, requestId: string, payload: unknown): CoordinationResponse {
-  return { status, body: { protocol_version: "1", request_id: requestId, payload } };
+  return { status, body: createProtocolEnvelope(requestId, payload) };
 }
 
 function failure(
@@ -703,7 +716,7 @@ function failure(
   return {
     status,
     body: {
-      protocol_version: "1",
+      protocol_version: PROTOCOL_VERSION,
       ...(requestId === undefined ? {} : { request_id: requestId }),
       error: { code, message },
     },

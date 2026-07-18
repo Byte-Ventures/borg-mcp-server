@@ -41,9 +41,7 @@ export interface CubeInvitationResult extends InvitationCubeScope {
   readonly invitation: string;
 }
 
-export interface SeatAttachResponse extends SeatAttachRecord {
-  readonly credential: string;
-}
+export type SeatAttachResponse = SeatAttachRecord;
 
 export class CredentialDigester {
   readonly #key: Buffer;
@@ -88,8 +86,9 @@ export class CredentialDigester {
 export class LiveCredentialRegistry {
   readonly #sessions = new Map<string, Set<AbortController>>();
   readonly #keys = new Map<AbortController, readonly string[]>();
+  readonly #timers = new Map<AbortController, NodeJS.Timeout>();
 
-  register(identities: string | readonly string[]): {
+  register(identities: string | readonly string[], expiresInMs?: number): {
     readonly signal: AbortSignal;
     readonly release: () => void;
   } {
@@ -100,6 +99,15 @@ export class LiveCredentialRegistry {
       const sessions = this.#sessions.get(key) ?? new Set<AbortController>();
       sessions.add(controller);
       this.#sessions.set(key, sessions);
+    }
+    if (expiresInMs !== undefined) {
+      if (expiresInMs <= 0) {
+        this.#expire(controller);
+      } else {
+        const timer = setTimeout(() => this.#expire(controller), expiresInMs);
+        timer.unref();
+        this.#timers.set(controller, timer);
+      }
     }
     return {
       signal: controller.signal,
@@ -121,6 +129,11 @@ export class LiveCredentialRegistry {
   }
 
   #release(controller: AbortController): void {
+    const timer = this.#timers.get(controller);
+    if (timer !== undefined) {
+      clearTimeout(timer);
+      this.#timers.delete(controller);
+    }
     const keys = this.#keys.get(controller);
     if (keys === undefined) return;
     this.#keys.delete(controller);
@@ -129,6 +142,11 @@ export class LiveCredentialRegistry {
       sessions?.delete(controller);
       if (sessions?.size === 0) this.#sessions.delete(key);
     }
+  }
+
+  #expire(controller: AbortController): void {
+    this.#release(controller);
+    controller.abort();
   }
 }
 
@@ -303,32 +321,30 @@ export class CredentialAuthority {
     request: {
       readonly cubeId: string;
       readonly roleId: string;
-      readonly retryKey: string;
+      readonly sessionCredential: string;
       readonly priorDroneId?: string;
     },
   ): SeatAttachResponse {
-    const credential = generateSecret();
     const record = store.attachSeat({
-      ...request,
+      cubeId: request.cubeId,
+      roleId: request.roleId,
+      ...(request.priorDroneId === undefined ? {} : { priorDroneId: request.priorDroneId }),
       droneId: randomUUID(),
       sessionId: randomUUID(),
       credentialId: randomUUID(),
-      credentialDigest: this.#digester.digest(credential, "drone-session"),
+      credentialDigest: this.#digester.digest(request.sessionCredential, "drone-session"),
       expiresAt: new Date(this.#clock().getTime() + 86_400_000).toISOString(),
     });
-    for (const sessionId of record.revokedSessionIds) {
-      this.#registry.invalidate(sessionId);
-      this.#debugLogger.emit({ event: "credential", action: "session_revoked", sessionId });
+    if (record.result === "created") {
+      this.#debugLogger.emit({
+        event: "credential",
+        action: "session_created",
+        sessionId: record.sessionId,
+        cubeId: record.cube.id,
+        droneId: record.drone.id,
+      });
     }
-    this.#debugLogger.emit({
-      event: "credential",
-      action: "session_created",
-      sessionId: record.sessionId,
-      cubeId: record.cube.id,
-      droneId: record.drone.id,
-      generation: record.generation,
-    });
-    return { ...record, credential };
+    return record;
   }
 
   rotateClient(clientId: string): string {
@@ -354,11 +370,12 @@ export class CredentialAuthority {
 
   registerLiveSession(principal: string | Principal) {
     if (typeof principal === "string") return this.#registry.register(principal);
-    return this.#registry.register(
-      principal.kind === "drone-session"
-        ? [principal.id, principal.clientId]
-        : principal.id,
-    );
+    if (principal.kind !== "drone-session") return this.#registry.register(principal.id);
+    const expiresAt = this.#store.findActiveDroneSessionExpiry(principal.id);
+    const expiresInMs = expiresAt === null
+      ? 0
+      : new Date(expiresAt).getTime() - this.#clock().getTime();
+    return this.#registry.register([principal.id, principal.clientId], expiresInMs);
   }
 }
 

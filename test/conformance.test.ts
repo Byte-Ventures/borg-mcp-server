@@ -13,10 +13,9 @@ import { generate } from "selfsigned";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { CoordinationApi } from "../src/coordination-api.js";
-import { CredentialAuthority, CredentialDigester } from "../src/credentials.js";
+import { CredentialAuthority, CredentialDigester, generateSecret } from "../src/credentials.js";
 import { createEnrollmentExchange } from "../src/enrollment.js";
-import { DEFAULT_SERVICE_LIMITS, startHttpsServer, type RunningServer } from "../src/https-server.js";
-import { createPart2ProtocolInfo } from "../src/protocol-draft.js";
+import { startHttpsServer, type RunningServer } from "../src/https-server.js";
 import { openStore, type StoreRuntime } from "../src/store.js";
 
 const directories: string[] = [];
@@ -29,13 +28,6 @@ afterEach(async () => {
 });
 
 describe("borgmcp-shared server adapter", () => {
-  it("advertises the breaking retry-safe enrollment contract as shared 0.3.0", () => {
-    expect(createPart2ProtocolInfo(DEFAULT_SERVICE_LIMITS).package).toEqual({
-      name: "borgmcp-shared",
-      version: "0.3.0",
-    });
-  });
-
   it("passes the full forward conformance suite", async () => {
     const fixture = await conformanceEnvironment();
     try {
@@ -93,16 +85,15 @@ async function conformanceEnvironment(): Promise<{
   const server = await startHttpsServer({
     bind: { port: 0 },
     tls: { key: material.private, cert: material.cert },
-    protocolInfo: createPart2ProtocolInfo(DEFAULT_SERVICE_LIMITS),
-    authorizeProtocol: async (authorization) => {
-      const result = authority.authenticateStatus(authorization);
-      return typeof result === "object" ? true : result;
-    },
     authorizeCoordination: async (authorization) => authority.authenticateStatus(authorization),
     exchangeEnrollment,
     handleCoordination: (request) => api.handle(request),
   });
-  const transport = new HttpsConformanceTransport(server.origin, material.cert);
+  const transport = new HttpsConformanceTransport(
+    server.origin,
+    material.cert,
+    server.limits.maxRequestBodyBytes,
+  );
 
   const environment: ConformanceEnvironment = {
     admin: {
@@ -141,13 +132,15 @@ async function conformanceEnvironment(): Promise<{
         runtime.maintenance.createCube({ id: cubeId, ownerId: clientId, name: "Session fixture", directive: "" });
         runtime.maintenance.createRole({ id: roleId, cubeId, name: "Worker" });
         runtime.maintenance.grantClientCube({ clientId, cubeId, access: "manage" });
-        return authority.attachSeat(runtime.forPrincipal(authority.authenticate(
+        const sessionCredential = generateSecret();
+        authority.attachSeat(runtime.forPrincipal(authority.authenticate(
           `Bearer ${principalCredentials.get(principal.id) ?? ""}`,
         )!), {
           cubeId,
           roleId,
-          retryKey: randomUUID(),
-        }).credential;
+          sessionCredential,
+        });
+        return sessionCredential;
       },
       issueSingleUseInvitation: async (principal, purpose) => {
         const invitation = purpose === "owner"
@@ -168,10 +161,19 @@ async function conformanceEnvironment(): Promise<{
           access: response.access,
         });
       },
-      inspectEnrollmentPrincipal: async (principal, responseClientId) => ({
-        response_client_matches: enrolledClients.get(principal.id) === responseClientId,
-        ...runtime.maintenance.inspectEnrollmentPrincipal(responseClientId),
-      }),
+      inspectEnrollmentPrincipal: async (principal, responseClientId) => {
+        const credential = principalCredentials.get(principal.id);
+        const authenticated = credential === undefined
+          ? null
+          : authority.authenticateStatus(`Bearer ${credential}`);
+        return {
+          response_client_matches: enrolledClients.get(principal.id) === responseClientId,
+          ...runtime.maintenance.inspectEnrollmentPrincipal(responseClientId),
+          bound_credential_matches_enrollment: authenticated !== null &&
+            typeof authenticated === "object" &&
+            authenticated.kind === "client" && authenticated.id === responseClientId,
+        };
+      },
       revokePrincipal: async (principal) => {
         const clientId = enrolledClients.get(principal.id);
         if (clientId !== undefined) authority.revokeClient(clientId);
@@ -183,7 +185,7 @@ async function conformanceEnvironment(): Promise<{
     },
     operations: {
       health: async () => transport.request("GET", "/healthz"),
-      protocol: async (credential) => transport.request("GET", "/api/protocol", undefined, credential),
+      protocol: async () => transport.request("GET", "/api/protocol"),
       enroll: async (request) => {
         const result = await transport.request(
           "POST",
@@ -256,10 +258,12 @@ function opaqueCursor(cursor: LogCursor): string {
 class HttpsConformanceTransport {
   readonly #origin: string;
   readonly #ca: string;
+  readonly #maxRequestBodyBytes: number;
 
-  constructor(origin: string, ca: string) {
+  constructor(origin: string, ca: string, maxRequestBodyBytes: number) {
     this.#origin = origin;
     this.#ca = ca;
+    this.#maxRequestBodyBytes = maxRequestBodyBytes;
   }
 
   request(
@@ -294,7 +298,9 @@ class HttpsConformanceTransport {
         }));
       });
       outgoing.on("error", reject);
-      outgoing.end(body);
+      outgoing.end(body !== undefined && Buffer.byteLength(body) <= this.#maxRequestBodyBytes
+        ? body
+        : undefined);
     });
   }
 

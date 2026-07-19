@@ -287,7 +287,7 @@ export class CredentialAuthority {
 
   authenticateStatus(
     authorization: string | undefined,
-  ): Principal | "missing" | "invalid" | "revoked" {
+  ): Principal | "missing" | "invalid" | "revoked" | "evicted" {
     if (authorization === undefined) return "missing";
     const secret = bearerSecret(authorization);
     const clientDigest = safeDigest(this.#digester, secret, "client");
@@ -306,6 +306,7 @@ export class CredentialAuthority {
       if (drone!.revokedAt != null || drone!.expiresAt <= this.#clock().toISOString()) {
         return "revoked";
       }
+      if (drone!.evictedAt !== null) return "evicted";
       return droneSessionPrincipal({
         id: drone!.sessionId,
         clientId: drone!.clientId,

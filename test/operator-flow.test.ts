@@ -4,6 +4,7 @@ import { request as httpsRequest } from "node:https";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Server } from "node:net";
+import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { bootstrapServer, loadDigestKey } from "../src/bootstrap.js";
@@ -27,6 +28,74 @@ afterEach(async () => {
 });
 
 describe("offline operator flow", () => {
+  it("returns DRONE_EVICTED before dispatching any coordination route", async () => {
+    const parent = await realpath(await mkdtemp(join(tmpdir(), "borg-operator-evicted-")));
+    directories.push(parent);
+    const bootstrap = await bootstrapServer(join(parent, "server"));
+    const runtime = await openStore({ path: bootstrap.paths.database });
+    const digestKey = await loadDigestKey(bootstrap.paths.digestKey);
+    const digester = new CredentialDigester(digestKey);
+    digestKey.fill(0);
+    const authority = new CredentialAuthority(runtime.credentials, digester);
+    const credential = generateSecret();
+    const enrolled = authority.exchangeInvitation({
+      invitation: bootstrap.initialInvitation,
+      retryKey: randomUUID(),
+      clientCredential: credential,
+      clientName: "eviction-client",
+    })!;
+    const cubeId = "00000000-0000-4000-8000-000000000041";
+    const roleId = "00000000-0000-4000-8000-000000000042";
+    const sessionCredential = generateSecret();
+    runtime.maintenance.createCube({ id: cubeId, name: "Eviction cube", directive: "" });
+    runtime.maintenance.grantClientCube({ clientId: enrolled.clientId, cubeId, access: "manage" });
+    runtime.maintenance.createRole({ id: roleId, cubeId, name: "Builder" });
+    const principal = authority.authenticate(`Bearer ${credential}`)!;
+    const attached = authority.attachSeat(runtime.forPrincipal(principal), {
+      cubeId, roleId, sessionCredential,
+    });
+    const coordination = new CoordinationApi(runtime, authority);
+    const server = await startHttpsServer({
+      bind: { port: 0 },
+      tls: {
+        key: await readFile(bootstrap.paths.serverKey),
+        cert: await readFile(bootstrap.paths.serverCertificate),
+      },
+      authorizeCoordination: async (authorization) => authority.authenticateStatus(authorization),
+      handleCoordination: (coordinationRequest) => coordination.handle(coordinationRequest),
+    });
+    const database = new DatabaseSync(bootstrap.paths.database);
+    database.prepare("UPDATE drones SET evicted_at = ? WHERE id = ?")
+      .run("2026-07-19T17:00:00.000Z", attached.drone.id);
+    database.close();
+    const ca = await readFile(bootstrap.paths.caCertificate);
+    try {
+      for (const [path, body, method] of [
+        ["/api/cubes", undefined, "GET"],
+        ["/api/client/attach", "{}", "POST"],
+        [`/api/cubes/${cubeId}`, undefined, "GET"],
+        [`/api/cubes/${cubeId}/roles`, undefined, "GET"],
+        [`/api/cubes/${cubeId}/drones`, undefined, "GET"],
+        [`/api/cubes/${cubeId}/logs`, "{}", "POST"],
+        [`/api/cubes/${cubeId}/acks`, "{}", "POST"],
+        [`/api/cubes/${cubeId}/decisions`, "{}", "POST"],
+        [`/api/cubes/${cubeId}/stream`, undefined, "GET"],
+      ] as const) {
+        const response = await request(
+          server.origin, ca, path, body, `Bearer ${sessionCredential}`, method,
+        );
+        expect(response.status).toBe(410);
+        expect(JSON.parse(response.body)).toMatchObject({
+          error: { code: "DRONE_EVICTED", message: "Authentication failed." },
+        });
+      }
+    } finally {
+      await server.close();
+      digester.destroy();
+      runtime.close();
+    }
+  });
+
   it("grants and removes only the named client cube authority while stopped", async () => {
     const parent = await realpath(await mkdtemp(join(tmpdir(), "borg-operator-grant-")));
     directories.push(parent);
@@ -160,9 +229,13 @@ describe("offline operator flow", () => {
         server.origin, ca, "/api/cubes", undefined, `Bearer ${rotated}`,
       )).status).toBe(200);
       expect(authority.authenticateStatus(`Bearer ${sessionCredential}`)).toBe("revoked");
-      expect((await request(
+      const revokedSession = await request(
         server.origin, ca, "/api/cubes", undefined, `Bearer ${sessionCredential}`,
-      )).status).toBe(401);
+      );
+      expect(revokedSession.status).toBe(401);
+      expect(JSON.parse(revokedSession.body)).toMatchObject({
+        error: { code: "SESSION_REVOKED", message: "Authentication failed." },
+      });
     } finally {
       await server.close();
       digester.destroy();

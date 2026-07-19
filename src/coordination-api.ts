@@ -466,6 +466,9 @@ export class CoordinationApi {
       if (error instanceof CursorExpiredError) {
         return failure(410, "CURSOR_EXPIRED", error.message);
       }
+      if (error instanceof AccessDeniedError) {
+        return failure(403, ErrorCode.ACCESS_DENIED, error.message);
+      }
       if (error instanceof ScopedStoreError) {
         return failure(404, "NOT_FOUND", error.message);
       }

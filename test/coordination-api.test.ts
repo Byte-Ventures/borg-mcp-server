@@ -12,7 +12,7 @@ import {
   generateSecret,
 } from "../src/credentials.js";
 import { openStore, type StoreRuntime } from "../src/store.js";
-import { clientPrincipal, droneSessionPrincipal } from "../src/principal.js";
+import { clientPrincipal, droneSessionPrincipal, type Principal } from "../src/principal.js";
 import { createDebugLogger, disabledDebugLogger } from "../src/debug-log.js";
 
 const directories: string[] = [];
@@ -216,7 +216,10 @@ describe("coordination stream setup", () => {
       },
       signal: new AbortController().signal,
     });
-    expect(observerManage.status).toBe(404);
+    expect(observerManage).toMatchObject({
+      status: 403,
+      body: { error: { code: "ACCESS_DENIED" } },
+    });
 
     const observerController = new AbortController();
     const participantController = new AbortController();
@@ -576,7 +579,10 @@ describe("coordination stream setup", () => {
       },
       signal: new AbortController().signal,
     });
-    expect(denied).toMatchObject({ status: 404, body: { error: { code: "NOT_FOUND" } } });
+    expect(denied).toMatchObject({
+      status: 403,
+      body: { error: { code: "ACCESS_DENIED", message: "Access denied." } },
+    });
 
     const routed = await api.handle({
       method: "POST",
@@ -803,10 +809,14 @@ describe("coordination stream setup", () => {
       } } },
     });
 
-    for (const principal of [
-      clientPrincipal(readerId),
-      droneSessionPrincipal({ id: sessionId, clientId: managerId, cubeId, droneId }),
-    ]) {
+    for (const [principal, status, code] of [
+      [clientPrincipal(readerId), 403, "ACCESS_DENIED"],
+      [
+        droneSessionPrincipal({ id: sessionId, clientId: managerId, cubeId, droneId }),
+        403,
+        "ACCESS_DENIED",
+      ],
+    ] as const) {
       const denied = await api.handle({
         method: "POST",
         path: `/api/cubes/${cubeId}/roles`,
@@ -814,7 +824,7 @@ describe("coordination stream setup", () => {
         body: { ...body, request_id: "role-denied-request", payload: { name: "Denied" } },
         signal: new AbortController().signal,
       });
-      expect(denied).toMatchObject({ status: 404, body: { error: { code: "NOT_FOUND" } } });
+      expect(denied).toMatchObject({ status, body: { error: { code } } });
       const updateDenied = await api.handle({
         method: "PATCH",
         path: `/api/cubes/${cubeId}/roles/${createdRoleId}`,
@@ -822,7 +832,7 @@ describe("coordination stream setup", () => {
         body: { ...body, request_id: "role-update-denied", payload: { name: "Denied" } },
         signal: new AbortController().signal,
       });
-      expect(updateDenied).toMatchObject({ status: 404, body: { error: { code: "NOT_FOUND" } } });
+      expect(updateDenied).toMatchObject({ status, body: { error: { code } } });
     }
 
     const duplicate = await api.handle({
@@ -875,6 +885,168 @@ describe("coordination stream setup", () => {
     });
     expect(runtime.forPrincipal(manager).listRoles(cubeId).map((role) => role.name))
       .toEqual(["Queen", "Release Quality", "Security Auditor"]);
+  });
+
+  it("distinguishes known non-managers from undisclosed cubes across administration routes", async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-api-manage-access-")));
+    directories.push(directory);
+    runtime = await openStore({
+      path: join(directory, "borg.db"),
+      clock: () => new Date("2026-07-19T18:00:00.000Z"),
+    });
+    digester = new CredentialDigester(Buffer.alloc(32, 25));
+    const authority = new CredentialAuthority(runtime.credentials, digester);
+    const api = new CoordinationApi(runtime, authority);
+    const managerId = "00000000-0000-4000-8000-0000000000f1";
+    const readerId = "00000000-0000-4000-8000-0000000000f2";
+    const writerId = "00000000-0000-4000-8000-0000000000f3";
+    const ungrantedId = "00000000-0000-4000-8000-0000000000f4";
+    const foreignManagerId = "00000000-0000-4000-8000-0000000000f5";
+    const cubeId = "00000000-0000-4000-8000-0000000000f6";
+    const foreignCubeId = "00000000-0000-4000-8000-0000000000f7";
+    const unknownCubeId = "00000000-0000-4000-8000-0000000000f8";
+    const roleId = "00000000-0000-4000-8000-0000000000f9";
+    const droneId = "00000000-0000-4000-8000-0000000000fa";
+    const sessionId = "00000000-0000-4000-8000-0000000000fb";
+    for (const [id, name] of [
+      [managerId, "Manager"],
+      [readerId, "Reader"],
+      [writerId, "Writer"],
+      [ungrantedId, "Ungranted"],
+      [foreignManagerId, "Foreign manager"],
+    ] as const) {
+      runtime.maintenance.createClient({ id, name });
+    }
+    runtime.maintenance.createCube({ id: cubeId, name: "Managed cube", directive: "original" });
+    runtime.maintenance.createCube({ id: foreignCubeId, name: "Foreign cube", directive: "foreign" });
+    runtime.maintenance.grantClientCube({ clientId: managerId, cubeId, access: "manage" });
+    runtime.maintenance.grantClientCube({ clientId: readerId, cubeId, access: "read" });
+    runtime.maintenance.grantClientCube({ clientId: writerId, cubeId, access: "write" });
+    runtime.maintenance.grantClientCube({
+      clientId: foreignManagerId, cubeId: foreignCubeId, access: "manage",
+    });
+    runtime.maintenance.createRole({ id: roleId, cubeId, name: "Builder" });
+    runtime.maintenance.createDrone({
+      id: droneId, cubeId, roleId, clientId: managerId, label: "builder-one",
+    });
+    runtime.maintenance.createDroneSession({
+      id: sessionId,
+      clientId: managerId,
+      cubeId,
+      droneId,
+      expiresAt: "2026-07-19T19:00:00.000Z",
+    });
+    const manager = clientPrincipal(managerId);
+    const snapshot = () => JSON.stringify({
+      cube: runtime!.forPrincipal(manager).getCube(cubeId),
+      roles: runtime!.forPrincipal(manager).listRoles(cubeId),
+      decisions: runtime!.forPrincipal(manager).listDecisions(cubeId),
+    });
+    const operations = [
+      {
+        name: "cube update",
+        method: "PATCH",
+        path: (targetCubeId: string) => `/api/cubes/${targetCubeId}`,
+        payload: { cube_directive: "updated" },
+        successStatus: 200,
+      },
+      {
+        name: "taxonomy patch",
+        method: "POST",
+        path: (targetCubeId: string) => `/api/cubes/${targetCubeId}/taxonomy-patch`,
+        payload: {
+          action: "add",
+          class_def: { class: "completion", prefixes: ["DONE"], routing: "broadcast" },
+        },
+        successStatus: 200,
+      },
+      {
+        name: "role create",
+        method: "POST",
+        path: (targetCubeId: string) => `/api/cubes/${targetCubeId}/roles`,
+        payload: { name: "Reviewer" },
+        successStatus: 201,
+      },
+      {
+        name: "role update",
+        method: "PATCH",
+        path: (targetCubeId: string) => `/api/cubes/${targetCubeId}/roles/${roleId}`,
+        payload: { short_description: "Updated builder" },
+        successStatus: 200,
+      },
+      {
+        name: "role section patch",
+        method: "POST",
+        path: (targetCubeId: string) => `/api/cubes/${targetCubeId}/roles/${roleId}/section-patch`,
+        payload: { action: "insert", heading: "Workflow", body: "Build and verify." },
+        successStatus: 200,
+      },
+      {
+        name: "decision record",
+        method: "POST",
+        path: (targetCubeId: string) => `/api/cubes/${targetCubeId}/decisions`,
+        payload: { topic: "release", decision: "Ship reviewed artifacts." },
+        successStatus: 201,
+      },
+    ] as const;
+    const request = (
+      operation: typeof operations[number],
+      principal: Principal,
+      targetCubeId = cubeId,
+    ) => api.handle({
+      method: operation.method,
+      path: operation.path(targetCubeId),
+      principal,
+      body: {
+        protocol_version: "2",
+        request_id: `manage-${operation.name.replaceAll(" ", "-")}`,
+        payload: operation.payload,
+      },
+      signal: new AbortController().signal,
+    });
+    const drone = droneSessionPrincipal({ id: sessionId, clientId: managerId, cubeId, droneId });
+
+    for (const operation of operations) {
+      const before = snapshot();
+      for (const principal of [clientPrincipal(readerId), clientPrincipal(writerId)]) {
+        const denied = await request(operation, principal);
+        expect(denied, operation.name).toMatchObject({
+          status: 403,
+          body: { error: { code: "ACCESS_DENIED", message: "Access denied." } },
+        });
+        expect(snapshot(), operation.name).toBe(before);
+      }
+      for (const principal of [clientPrincipal(ungrantedId), clientPrincipal(foreignManagerId)]) {
+        const hidden = await request(operation, principal);
+        expect(hidden, operation.name).toMatchObject({
+          status: 404,
+          body: { error: { code: "NOT_FOUND" } },
+        });
+        expect(snapshot(), operation.name).toBe(before);
+      }
+      const droneDenied = await request(operation, drone);
+      expect(droneDenied, operation.name).toMatchObject({
+        status: 403,
+        body: { error: { code: "ACCESS_DENIED", message: "Access denied." } },
+      });
+      expect(snapshot(), operation.name).toBe(before);
+      const foreignDrone = await request(operation, drone, foreignCubeId);
+      expect(foreignDrone, operation.name).toMatchObject({
+        status: 404,
+        body: { error: { code: "NOT_FOUND" } },
+      });
+      expect(snapshot(), operation.name).toBe(before);
+      const unknown = await request(operation, manager, unknownCubeId);
+      expect(unknown, operation.name).toMatchObject({
+        status: 404,
+        body: { error: { code: "NOT_FOUND" } },
+      });
+      expect(snapshot(), operation.name).toBe(before);
+
+      const succeeded = await request(operation, manager);
+      expect(succeeded.status, operation.name).toBe(operation.successStatus);
+      expect(snapshot(), operation.name).not.toBe(before);
+    }
   });
 
   it("logs coordination routing and stream semantics without content bodies", async () => {

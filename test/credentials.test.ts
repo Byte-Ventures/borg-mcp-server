@@ -232,7 +232,7 @@ describe("credential authority", () => {
     ]);
     expect(() => runtime.forPrincipal(principal).appendActivity(cubeId, "ready")).not.toThrow();
     expect(() => runtime.forPrincipal(principal).updateDirective(cubeId, "admin"))
-      .toThrow("The requested resource was not found.");
+      .toThrow("Access denied.");
   });
 
   it("fails a scoped claim without enrollment mutation when its cube was deleted after mint", () => {

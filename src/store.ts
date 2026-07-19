@@ -1576,7 +1576,15 @@ class SqliteScopedStore implements ScopedStore {
     const row = this.#database.prepare(`
       SELECT 1 AS present FROM cubes AS c WHERE c.id = ? AND ${scope.sql}
     `).get(cubeId, ...scope.parameters);
-    if (row === undefined) throw new ScopedStoreError();
+    if (row !== undefined) return;
+    if (access === "manage") {
+      const visibleScope = this.#scope("read");
+      const visible = this.#database.prepare(`
+        SELECT 1 AS present FROM cubes AS c WHERE c.id = ? AND ${visibleScope.sql}
+      `).get(cubeId, ...visibleScope.parameters);
+      if (visible !== undefined) throw new AccessDeniedError();
+    }
+    throw new ScopedStoreError();
   }
 
   #nextActivityTimestamp(cubeId: string): string {

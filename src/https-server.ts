@@ -6,6 +6,7 @@ import {
   ATTACH_PATH,
   CUBES_PATH,
   ENROLLMENT_EXCHANGE_PATH,
+  ErrorCode,
   HEALTH_PATH,
   PROTOCOL_INFO_PATH,
   PROTOCOL_VERSION,
@@ -62,7 +63,7 @@ export interface RequestHandlerContext {
   readonly authorizeCoordination?: (
     authorization: string | undefined,
     signal: AbortSignal,
-  ) => Promise<Principal | "missing" | "invalid" | "revoked">;
+  ) => Promise<Principal | "missing" | "invalid" | "revoked" | "evicted">;
   readonly handleCoordination?: (request: CoordinationRequest) => Promise<CoordinationResponse>;
   readonly debugLogger: DebugLogger;
 }
@@ -338,6 +339,10 @@ async function handleRequest(
     trace.authentication = typeof authentication === "string" ? authentication : "accepted";
     if (signal.aborted) return;
     if (typeof authentication === "string") {
+      if (authentication === "evicted") {
+        sendJson(response, 410, protocolError(ErrorCode.DRONE_EVICTED, "Authentication failed."));
+        return;
+      }
       const code = authentication === "revoked"
         ? "SESSION_REVOKED"
         : authentication === "missing" || authorization === undefined ? "AUTH_MISSING" : "AUTH_INVALID";
@@ -388,7 +393,7 @@ async function handleRequest(
 interface RequestTrace {
   readonly route: DebugRoute;
   readonly method: string;
-  authentication: "not_required" | "missing" | "invalid" | "revoked" | "accepted";
+  authentication: "not_required" | "missing" | "invalid" | "revoked" | "evicted" | "accepted";
   principal?: Principal;
 }
 

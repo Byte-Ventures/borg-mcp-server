@@ -236,6 +236,7 @@ export interface StoredDroneSessionDigest extends StoredSecretDigest {
   readonly cubeId: string;
   readonly droneId: string;
   readonly expiresAt: string;
+  readonly evictedAt: string | null;
 }
 
 export interface CredentialStore {
@@ -2414,9 +2415,8 @@ class SqliteCredentialStore implements CredentialStore {
       SELECT credential.id, credential.lookup_digest, credential.verifier_digest,
              credential.session_id, session.client_id, session.cube_id, session.drone_id,
              session.expires_at,
-             COALESCE(
-               credential.revoked_at, session.revoked_at, client.revoked_at, drone.evicted_at
-             ) AS revoked_at
+             COALESCE(credential.revoked_at, session.revoked_at, client.revoked_at) AS revoked_at,
+             drone.evicted_at
       FROM drone_session_credentials AS credential
       JOIN drone_sessions AS session ON session.id = credential.session_id
       JOIN clients AS client ON client.id = session.client_id
@@ -2893,6 +2893,7 @@ function storedDroneSessionDigest(row: Record<string, unknown>): StoredDroneSess
     cubeId: requiredText(row, "cube_id"),
     droneId: requiredText(row, "drone_id"),
     expiresAt: requiredText(row, "expires_at"),
+    evictedAt: nullableText(row, "evicted_at"),
   };
 }
 

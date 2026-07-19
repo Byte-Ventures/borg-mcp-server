@@ -30,7 +30,6 @@ import {
   type ActivityPage,
   type ActivityStreamRecord,
   type CubeRecord,
-  type EnrichedActivityRecord,
   type LogCursor,
   type StoreRuntime,
 } from "./store.js";

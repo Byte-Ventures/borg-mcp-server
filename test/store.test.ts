@@ -507,31 +507,116 @@ describe("Principal to ScopedStore isolation", () => {
     const path = join(directory, "borg.db");
     runtime.close();
     runtime = await openStore({ path, clock: () => new Date("2026-07-14T12:20:00.000Z") });
+    const peerDroneId = "00000000-0000-4000-8000-000000000031";
+    const peerSessionId = "00000000-0000-4000-8000-000000000032";
+    runtime.maintenance.createDrone({
+      id: peerDroneId,
+      cubeId: ids.cubeA,
+      roleId: ids.roleA,
+      clientId: ids.clientA,
+      label: "two-of-two-queen",
+    });
+    runtime.maintenance.createDroneSession({
+      id: peerSessionId,
+      clientId: ids.clientA,
+      cubeId: ids.cubeA,
+      droneId: peerDroneId,
+      expiresAt: "2026-07-14T12:30:00.000Z",
+    });
     const drone = runtime.forPrincipal(droneSessionPrincipal({
       id: ids.sessionA,
       clientId: ids.clientA,
       cubeId: ids.cubeA,
       droneId: ids.droneA,
     }));
+    const peer = runtime.forPrincipal(droneSessionPrincipal({
+      id: peerSessionId,
+      clientId: ids.clientA,
+      cubeId: ids.cubeA,
+      droneId: peerDroneId,
+    }));
     const events: ActivityStreamRecord[] = [];
+    const peerEvents: ActivityStreamRecord[] = [];
     const stop = drone.subscribeActivity(ids.cubeA, (entry) => events.push(entry));
+    const stopPeer = peer.subscribeActivity(ids.cubeA, (entry) => peerEvents.push(entry));
+    const before = drone.readLog(ids.cubeA, null, 10);
     expect(runtime.liveness.scan({ silentMs: 600_000, cooldownMs: 600_000 })).toEqual([
       expect.objectContaining({
+        kind: "heartbeat_ping",
         message: expect.stringContaining("[HEARTBEAT-PING]"),
         recipient_drone_ids: [ids.droneA],
       }),
     ]);
     expect(events).toHaveLength(1);
+    expect(peerEvents).toEqual([]);
+    expect(drone.readLog(ids.cubeA, null, 10)).toEqual(before);
     expect(runtime.liveness.scan({ silentMs: 600_000, cooldownMs: 600_000 })).toEqual([]);
+    stopPeer();
     drone.appendLog(ids.cubeA, { message: "responsive" });
     expect(drone.listDrones(ids.cubeA)).toContainEqual(expect.objectContaining({
       id: ids.droneA,
-      last_seen: "2026-07-14T12:20:00.001Z",
+      last_seen: "2026-07-14T12:20:00.000Z",
     }));
     stop();
     runtime.close();
     runtime = await openStore({ path, clock: () => new Date("2026-07-14T12:40:00.000Z") });
     expect(runtime.liveness.scan({ silentMs: 600_000, cooldownMs: 600_000 })).toHaveLength(1);
+  });
+
+  it("gives up after three watchdog attempts until genuine activity resets the seat", async () => {
+    const path = join(directory, "borg.db");
+    runtime.close();
+    let now = new Date("2026-07-14T12:20:00.000Z");
+    runtime = await openStore({ path, clock: () => now });
+    const drone = runtime.forPrincipal(droneSessionPrincipal({
+      id: ids.sessionA,
+      clientId: ids.clientA,
+      cubeId: ids.cubeA,
+      droneId: ids.droneA,
+    }));
+
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      expect(runtime.liveness.scan({ silentMs: 600_000, cooldownMs: 0 })).toHaveLength(1);
+      now = new Date(now.getTime() + 1);
+    }
+    expect(runtime.liveness.scan({ silentMs: 600_000, cooldownMs: 0 })).toEqual([]);
+    expect(drone.listDrones(ids.cubeA)).toContainEqual(expect.objectContaining({
+      id: ids.droneA,
+      last_seen: "2026-07-14T12:00:00.000Z",
+    }));
+
+    drone.appendLog(ids.cubeA, { message: "responsive after give-up" });
+    now = new Date(now.getTime() + 1);
+    expect(runtime.liveness.scan({ silentMs: 0, cooldownMs: 0 })).toHaveLength(1);
+  });
+
+  it("processes at most 25 silent candidates per scan", async () => {
+    for (let index = 0; index < 29; index += 1) {
+      const droneId = `00000000-0000-4000-8000-${String(100 + index).padStart(12, "0")}`;
+      const sessionId = `00000000-0000-4000-8000-${String(200 + index).padStart(12, "0")}`;
+      runtime.maintenance.createDrone({
+        id: droneId,
+        cubeId: ids.cubeA,
+        roleId: ids.roleA,
+        clientId: ids.clientA,
+        label: `builder-${index + 2}`,
+      });
+      runtime.maintenance.createDroneSession({
+        id: sessionId,
+        clientId: ids.clientA,
+        cubeId: ids.cubeA,
+        droneId,
+        expiresAt: "2026-07-14T13:00:00.000Z",
+      });
+    }
+    const path = join(directory, "borg.db");
+    runtime.close();
+    runtime = await openStore({ path, clock: () => new Date("2026-07-14T12:20:00.000Z") });
+
+    expect(runtime.liveness.scan({ silentMs: 600_000, cooldownMs: 600_000, limit: 100 }))
+      .toHaveLength(25);
+    expect(runtime.liveness.scan({ silentMs: 600_000, cooldownMs: 600_000, limit: 100 }))
+      .toHaveLength(5);
   });
 
   it("paginates monotonic tuple cursors and keeps claims outside the log cursor", () => {

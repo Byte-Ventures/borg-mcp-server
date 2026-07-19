@@ -897,14 +897,5 @@ function cubePayload(cube: CubeRecord) {
   };
 }
 
-function cursorKey(entry: EnrichedActivityRecord): string {
-  return `${entry.created_at}\0${entry.id}`;
-}
-
-function afterCursor(entry: EnrichedActivityRecord, cursor: LogCursor | null): boolean {
-  return cursor === null || entry.created_at > cursor.created_at ||
-    (entry.created_at === cursor.created_at && entry.id > cursor.id);
-}
-
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const timestampPattern = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u;

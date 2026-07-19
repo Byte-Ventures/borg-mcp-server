@@ -54,6 +54,19 @@ export interface EnrichedActivityRecord {
   readonly recipient_drone_ids: string[];
 }
 
+export interface ActivityNotificationRecord extends EnrichedActivityRecord {
+  readonly kind: "ack" | "claim";
+  readonly log_entry_id: string;
+  readonly ack_kind: "ack" | "claim";
+  readonly ack_at: string;
+  readonly entry_preview: string;
+  readonly author_drone_id?: string;
+  readonly claimant_drone_id?: string;
+  readonly claimant_role?: string | null;
+}
+
+export type ActivityStreamRecord = EnrichedActivityRecord | ActivityNotificationRecord;
+
 export interface ClaimRecord {
   readonly log_entry_id: string;
   readonly claimant_drone_id: string;
@@ -107,6 +120,8 @@ export interface DroneRecord {
   readonly hostname: string | null;
   readonly posture: "observer" | "participant";
   readonly created_at: string;
+  readonly last_log_post_at?: string | null;
+  readonly seen_since?: boolean;
 }
 
 export interface StoreDiagnostics {
@@ -156,8 +171,17 @@ export interface StoreRuntime {
   readonly forPrincipal: (principal: Principal) => ScopedStore;
   readonly maintenance: MaintenanceStore;
   readonly credentials: CredentialStore;
+  readonly liveness: LivenessStore;
   readonly diagnostics: () => StoreDiagnostics;
   readonly close: () => void;
+}
+
+export interface LivenessStore {
+  readonly scan: (options?: {
+    readonly silentMs?: number;
+    readonly cooldownMs?: number;
+    readonly limit?: number;
+  }) => EnrichedActivityRecord[];
 }
 
 export interface DigestPair {
@@ -257,6 +281,10 @@ export interface ScopedStore {
   readonly updateRole: (cubeId: string, roleId: string, input: UpdateRoleInput) => RoleRecord;
   readonly patchRoleSection: (cubeId: string, roleId: string, input: RoleSectionPatchOp) => RoleRecord;
   readonly listDrones: (cubeId: string) => DroneRecord[];
+  readonly listDronesSince: (cubeId: string, since: string) => {
+    readonly drones: DroneRecord[];
+    readonly since: string;
+  };
   readonly appendLog: (cubeId: string, input: {
     readonly message: string;
     readonly visibility?: "broadcast" | "direct";
@@ -272,7 +300,7 @@ export interface ScopedStore {
   readonly listDecisions: (cubeId: string) => DecisionRecord[];
   readonly subscribeActivity: (
     cubeId: string,
-    listener: (entry: EnrichedActivityRecord) => void,
+    listener: (entry: ActivityStreamRecord) => void,
   ) => (() => void);
   readonly attachSeat: (input: SeatAttachInput) => SeatAttachRecord;
 }
@@ -582,9 +610,10 @@ export async function openStore(options: OpenStoreOptions): Promise<StoreRuntime
     capacityProbe,
     requiredInteger(pageRow, "page_size"),
   );
-  const maintenance = new SqliteMaintenanceStore(database, clock);
-  const credentials = new SqliteCredentialStore(database, clock, capacityGuard, options.mutationHook);
   const activityHub = new ActivityHub();
+  const maintenance = new SqliteMaintenanceStore(database, clock);
+  const liveness = new SqliteLivenessStore(database, clock, activityHub, capacityGuard);
+  const credentials = new SqliteCredentialStore(database, clock, capacityGuard, options.mutationHook);
   return Object.freeze({
     forPrincipal: (principal: Principal) => {
       assertServerDerivedPrincipal(principal);
@@ -601,6 +630,7 @@ export async function openStore(options: OpenStoreOptions): Promise<StoreRuntime
     },
     maintenance,
     credentials,
+    liveness,
     diagnostics: () => diagnostics(database),
     close: () => database.close(),
   });
@@ -1047,6 +1077,50 @@ class SqliteScopedStore implements ScopedStore {
     return rows.map(droneRecord);
   }
 
+  listDronesSince(cubeId: string, since: string): { drones: DroneRecord[]; since: string } {
+    this.#requireCube(cubeId, "read");
+    let createdAt: string;
+    let anchorId: string | null = null;
+    if (/^[0-9a-f]{8}-[0-9a-f-]{27}$/iu.test(since)) {
+      const anchor = this.#database.prepare(
+        "SELECT id, created_at FROM activity_log WHERE id = ? AND cube_id = ?",
+      ).get(since, cubeId);
+      if (anchor === undefined) throw new ScopedStoreError();
+      anchorId = requiredText(anchor, "id");
+      createdAt = requiredText(anchor, "created_at");
+    } else {
+      validateTimestamp(since);
+      createdAt = since;
+    }
+    const rows = this.#database.prepare(`
+      SELECT drone.id, drone.cube_id, drone.role_id, drone.label,
+             COALESCE(drone.last_seen, drone.created_at) AS last_seen,
+             drone.hostname, drone.created_at,
+             CASE WHEN client.revoked_at IS NULL AND grant_row.access IN ('write', 'manage')
+               THEN 'participant' ELSE 'observer' END AS posture,
+             (SELECT MAX(post.created_at) FROM activity_log AS post
+              WHERE post.cube_id = drone.cube_id AND post.drone_id = drone.id) AS last_log_post_at,
+             EXISTS (SELECT 1 FROM activity_log AS response
+              WHERE response.cube_id = drone.cube_id AND response.drone_id = drone.id
+                AND (response.created_at > ? OR
+                   (? IS NOT NULL AND response.created_at = ? AND response.id > ?))) AS seen_since
+      FROM drones AS drone
+      LEFT JOIN clients AS client ON client.id = drone.client_id
+      LEFT JOIN client_cube_grants AS grant_row
+        ON grant_row.client_id = drone.client_id AND grant_row.cube_id = drone.cube_id
+      WHERE drone.cube_id = ? AND drone.evicted_at IS NULL
+      ORDER BY drone.label, drone.id
+    `).all(createdAt, anchorId, createdAt, anchorId, cubeId);
+    return {
+      since: createdAt,
+      drones: rows.map((row) => ({
+        ...droneRecord(row),
+        last_log_post_at: nullableText(row, "last_log_post_at"),
+        seen_since: requiredInteger(row, "seen_since") === 1,
+      })),
+    };
+  }
+
   appendLog(cubeId: string, input: {
     readonly message: string;
     readonly visibility?: "broadcast" | "direct";
@@ -1093,6 +1167,12 @@ class SqliteScopedStore implements ScopedStore {
         createdAt, visibility, cubeId, ...scope.parameters,
       );
       if (inserted.changes !== 1) throw new ScopedStoreError();
+      if (droneId !== null) {
+        this.#database.prepare(`
+          UPDATE drones SET last_seen = ? WHERE id = ? AND cube_id = ? AND evicted_at IS NULL
+        `).run(createdAt, droneId, cubeId);
+        this.#database.prepare("DELETE FROM silent_seat_ping_state WHERE drone_id = ?").run(droneId);
+      }
       if (recipients.length > 0) {
         const valid = this.#database.prepare(`
           SELECT COUNT(*) AS count
@@ -1166,19 +1246,56 @@ class SqliteScopedStore implements ScopedStore {
     this.#requireCube(cubeId, "write");
     assertCanonicalUuid(entryId, "Activity entry id");
     if (kind !== "ack" && kind !== "claim") throw new Error("Unknown acknowledgement kind.");
-    const exists = this.#database.prepare(
-      "SELECT 1 AS present FROM activity_log WHERE id = ? AND cube_id = ?",
-    ).get(entryId, cubeId);
-    if (exists === undefined) throw new ScopedStoreError();
+    const original = this.#database.prepare(`
+      SELECT drone_id, message, visibility FROM activity_log WHERE id = ? AND cube_id = ?
+    `).get(entryId, cubeId);
+    if (original === undefined) throw new ScopedStoreError();
     this.#capacityGuard.assertCanGrow(512);
     const claimant = this.#principal.kind === "drone-session"
       ? this.#principal.droneId
       : this.#principal.id;
-    this.#database.prepare(`
+    const ackAt = this.#now();
+    const inserted = this.#database.prepare(`
       INSERT OR IGNORE INTO activity_acks (
         entry_id, principal_kind, principal_id, kind, created_at, claimant_drone_id
       ) VALUES (?, ?, ?, ?, ?, ?)
-    `).run(entryId, this.#principal.kind, this.#principal.id, kind, this.#now(), claimant);
+    `).run(entryId, this.#principal.kind, this.#principal.id, kind, ackAt, claimant);
+    if (inserted.changes !== 1 || this.#principal.kind !== "drone-session") return;
+    const claimantDroneId = this.#principal.droneId;
+
+    const actor = this.#database.prepare(`
+      SELECT drone.label, role.name AS role_name
+      FROM drones AS drone JOIN roles AS role ON role.id = drone.role_id
+      WHERE drone.id = ? AND drone.cube_id = ? AND drone.evicted_at IS NULL
+    `).get(claimantDroneId, cubeId);
+    const preview = activityPreview(requiredText(original, "message"));
+    const originalAuthor = nullableText(original, "drone_id");
+    const recipients = kind === "ack"
+      ? originalAuthor === null ? [] : [originalAuthor]
+      : this.#claimAudience(cubeId, entryId, requiredText(original, "visibility"))
+        .filter((droneId) => droneId !== claimantDroneId);
+    if (recipients.length === 0) return;
+    const roleName = actor === undefined ? null : requiredText(actor, "role_name");
+    const notification: ActivityNotificationRecord = {
+      kind,
+      id: randomUUID(),
+      cube_id: cubeId,
+      drone_id: claimantDroneId,
+      drone_label: actor === undefined ? null : requiredText(actor, "label"),
+      role_name: roleName,
+      message: `[${kind.toUpperCase()}] ${preview}`,
+      created_at: ackAt,
+      visibility: "direct",
+      recipient_drone_ids: recipients,
+      log_entry_id: entryId,
+      ack_kind: kind,
+      ack_at: ackAt,
+      entry_preview: preview,
+      ...(kind === "ack"
+        ? { author_drone_id: recipients[0]! }
+        : { claimant_drone_id: claimantDroneId, claimant_role: roleName }),
+    };
+    this.#activityHub.publish(cubeId, notification);
   }
 
   recordDecision(cubeId: string, input: {
@@ -1286,6 +1403,7 @@ class SqliteScopedStore implements ScopedStore {
         }
         const droneId = requiredText(bound, "drone_id");
         this.#database.prepare("UPDATE drones SET last_seen = ? WHERE id = ?").run(now, droneId);
+        this.#database.prepare("DELETE FROM silent_seat_ping_state WHERE drone_id = ?").run(droneId);
         const attachedRoleRow = this.#database.prepare(`
           SELECT id AS role_id, name AS role_name, role_class, is_human_seat
           FROM roles WHERE id = ? AND cube_id = ?
@@ -1346,6 +1464,7 @@ class SqliteScopedStore implements ScopedStore {
           droneId, input.cubeId, input.roleId, this.#principal.id, droneLabel, now, now,
         );
       }
+      this.#database.prepare("DELETE FROM silent_seat_ping_state WHERE drone_id = ?").run(droneId);
 
       this.#database.prepare(`
         INSERT INTO drone_sessions (
@@ -1402,11 +1521,42 @@ class SqliteScopedStore implements ScopedStore {
     }
   }
 
-  subscribeActivity(cubeId: string, listener: (entry: EnrichedActivityRecord) => void): () => void {
+  subscribeActivity(cubeId: string, listener: (entry: ActivityStreamRecord) => void): () => void {
     this.#requireCube(cubeId, "read");
     return this.#activityHub.subscribe(cubeId, (entry) => {
+      if ("kind" in entry) {
+        if (this.#principal.kind === "drone-session" &&
+            entry.recipient_drone_ids.includes(this.#principal.droneId)) listener(entry);
+        return;
+      }
       if (entry.visibility === "broadcast" || this.#allowsDirectedWork(cubeId)) listener(entry);
     });
+  }
+
+  #claimAudience(cubeId: string, entryId: string, visibility: string): string[] {
+    if (visibility === "direct") {
+      return this.#database.prepare(`
+        SELECT recipient.drone_id
+        FROM activity_log_recipients AS recipient
+        JOIN drones AS drone ON drone.id = recipient.drone_id
+        JOIN clients AS client ON client.id = drone.client_id
+        JOIN client_cube_grants AS grant_row
+          ON grant_row.client_id = drone.client_id AND grant_row.cube_id = drone.cube_id
+        WHERE recipient.entry_id = ? AND drone.cube_id = ? AND drone.evicted_at IS NULL
+          AND client.revoked_at IS NULL AND grant_row.access IN ('write', 'manage')
+        ORDER BY recipient.drone_id
+      `).all(entryId, cubeId).map((row) => requiredText(row, "drone_id"));
+    }
+    return this.#database.prepare(`
+      SELECT drone.id AS drone_id
+      FROM drones AS drone
+      JOIN clients AS client ON client.id = drone.client_id
+      JOIN client_cube_grants AS grant_row
+        ON grant_row.client_id = drone.client_id AND grant_row.cube_id = drone.cube_id
+      WHERE drone.cube_id = ? AND drone.evicted_at IS NULL AND client.revoked_at IS NULL
+        AND grant_row.access IN ('write', 'manage')
+      ORDER BY drone.id
+    `).all(cubeId).map((row) => requiredText(row, "drone_id"));
   }
 
   #allowsDirectedWork(cubeId: string): boolean {
@@ -1848,9 +1998,9 @@ class SqliteMaintenanceStore implements MaintenanceStore {
 }
 
 class ActivityHub {
-  readonly #listeners = new Map<string, Set<(entry: EnrichedActivityRecord) => void>>();
+  readonly #listeners = new Map<string, Set<(entry: ActivityStreamRecord) => void>>();
 
-  subscribe(cubeId: string, listener: (entry: EnrichedActivityRecord) => void): () => void {
+  subscribe(cubeId: string, listener: (entry: ActivityStreamRecord) => void): () => void {
     const listeners = this.#listeners.get(cubeId) ?? new Set();
     listeners.add(listener);
     this.#listeners.set(cubeId, listeners);
@@ -1860,7 +2010,7 @@ class ActivityHub {
     };
   }
 
-  publish(cubeId: string, entry: EnrichedActivityRecord): void {
+  publish(cubeId: string, entry: ActivityStreamRecord): void {
     for (const listener of this.#listeners.get(cubeId) ?? []) {
       try {
         listener(entry);
@@ -1868,6 +2018,69 @@ class ActivityHub {
         // A live subscriber cannot roll back or alter a committed append.
       }
     }
+  }
+}
+
+class SqliteLivenessStore implements LivenessStore {
+  constructor(
+    readonly database: DatabaseSync,
+    readonly clock: () => Date,
+    readonly hub: ActivityHub,
+    readonly capacityGuard: StorageCapacityGuard,
+  ) {}
+
+  scan(options: { silentMs?: number; cooldownMs?: number; limit?: number } = {}): EnrichedActivityRecord[] {
+    const now = this.clock();
+    const silentBefore = new Date(now.getTime() - (options.silentMs ?? 600_000)).toISOString();
+    const cooldownBefore = new Date(now.getTime() - (options.cooldownMs ?? 600_000)).toISOString();
+    const limit = Math.max(1, Math.min(Math.trunc(options.limit ?? 25), 25));
+    const candidates = this.database.prepare(`
+      SELECT drone.id AS drone_id, drone.cube_id, COALESCE(state.attempts, 0) AS attempts
+      FROM drones AS drone
+      JOIN clients AS client ON client.id = drone.client_id AND client.revoked_at IS NULL
+      JOIN client_cube_grants AS grant_row ON grant_row.client_id = drone.client_id
+        AND grant_row.cube_id = drone.cube_id AND grant_row.access IN ('write', 'manage')
+      LEFT JOIN silent_seat_ping_state AS state ON state.drone_id = drone.id
+      WHERE drone.evicted_at IS NULL AND COALESCE(drone.last_seen, drone.created_at) < ?
+        AND COALESCE(state.attempts, 0) < 3
+        AND (state.last_ping_at IS NULL OR state.last_ping_at < ?)
+        AND EXISTS (SELECT 1 FROM drone_sessions AS session
+          WHERE session.drone_id = drone.id AND session.revoked_at IS NULL AND session.expires_at > ?)
+      ORDER BY COALESCE(drone.last_seen, drone.created_at), drone.id LIMIT ?
+    `).all(silentBefore, cooldownBefore, now.toISOString(), limit);
+    const published: EnrichedActivityRecord[] = [];
+    for (const candidate of candidates) {
+      const droneId = requiredText(candidate, "drone_id");
+      const cubeId = requiredText(candidate, "cube_id");
+      const message = "[HEARTBEAT-PING] No recent activity; confirm this seat is responsive.";
+      this.capacityGuard.assertCanGrow(Buffer.byteLength(message) + 128);
+      const id = randomUUID();
+      const createdAt = nextActivityTimestamp(this.database, cubeId, now.getTime());
+      this.database.exec("BEGIN IMMEDIATE");
+      try {
+        this.database.prepare(`INSERT INTO activity_log
+          (id, cube_id, drone_id, actor_kind, actor_id, message, created_at, visibility)
+          VALUES (?, ?, NULL, 'operator', ?, ?, ?, 'direct')
+        `).run(id, cubeId, "00000000-0000-4000-8000-000000000000", message, createdAt);
+        this.database.prepare("INSERT INTO activity_log_recipients (entry_id, drone_id) VALUES (?, ?)")
+          .run(id, droneId);
+        this.database.prepare(`INSERT INTO silent_seat_ping_state (drone_id, attempts, last_ping_at)
+          VALUES (?, 1, ?) ON CONFLICT(drone_id) DO UPDATE
+          SET attempts = attempts + 1, last_ping_at = excluded.last_ping_at
+        `).run(droneId, now.toISOString());
+        this.database.exec("COMMIT");
+      } catch (error) {
+        try { this.database.exec("ROLLBACK"); } catch { /* Preserve original failure. */ }
+        throw error;
+      }
+      const entry: EnrichedActivityRecord = {
+        id, cube_id: cubeId, drone_id: null, message, visibility: "direct", created_at: createdAt,
+        drone_label: null, role_name: null, recipient_drone_ids: [droneId],
+      };
+      this.hub.publish(cubeId, entry);
+      published.push(entry);
+    }
+    return published;
   }
 }
 
@@ -2757,6 +2970,19 @@ function validateDirective(value: string): void {
   if (Buffer.byteLength(value) > 100_000) {
     throw new Error("Cube directive exceeds 100000 bytes.");
   }
+}
+
+function activityPreview(message: string): string {
+  return message.replace(/\s+/gu, " ").trim().slice(0, 200);
+}
+
+function nextActivityTimestamp(database: DatabaseSync, cubeId: string, now: number): string {
+  const latest = database.prepare(`
+    SELECT created_at FROM activity_log WHERE cube_id = ? ORDER BY created_at DESC, id DESC LIMIT 1
+  `).get(cubeId);
+  return new Date(latest === undefined
+    ? now
+    : Math.max(now, Date.parse(requiredText(latest, "created_at")) + 1)).toISOString();
 }
 
 function validateRoleClass(value: unknown): void {

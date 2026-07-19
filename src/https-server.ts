@@ -350,8 +350,8 @@ async function handleRequest(
       : authentication.id}`;
     const credentialRetry = credentialRateLimiter.consume(clientIdentity);
     if (credentialRetry !== null) return sendRateLimited(response, credentialRetry);
-    const cursor = parseCursorParameter(request.url, path);
-    if (cursor === INVALID_COORDINATION_QUERY) {
+    const query = parseCoordinationQuery(request.url, path);
+    if (query === INVALID_COORDINATION_QUERY) {
       sendJson(response, 400, protocolError("INVALID_INPUT", "Invalid query parameters."), true);
       return;
     }
@@ -360,7 +360,7 @@ async function handleRequest(
       path,
       principal: authentication,
       ...(decoded === undefined ? {} : { body: decoded }),
-      ...(cursor === undefined ? {} : { cursor }),
+      ...query,
       signal,
     });
     if (signal.aborted) {
@@ -562,23 +562,21 @@ function protocolError(code: string, message: string): object {
 
 const INVALID_COORDINATION_QUERY = Symbol("invalid-coordination-query");
 
-function parseCursorParameter(
+function parseCoordinationQuery(
   value: string | undefined,
   path: string,
-): string | undefined | typeof INVALID_COORDINATION_QUERY {
-  if (value === undefined) return undefined;
+): { readonly cursor?: string; readonly since?: string } | typeof INVALID_COORDINATION_QUERY {
+  if (value === undefined) return {};
   try {
     const parsed = new URL(value, "https://local.invalid");
     const keys = [...parsed.searchParams.keys()];
-    if (!path.endsWith("/stream")) {
-      return keys.length === 0 ? undefined : INVALID_COORDINATION_QUERY;
-    }
-    if (keys.some((key) => key !== "cursor")) return INVALID_COORDINATION_QUERY;
-    const values = parsed.searchParams.getAll("cursor");
-    if (values.length === 0) return undefined;
-    return values.length === 1 && values[0]!.length > 0
-      ? values[0]
-      : INVALID_COORDINATION_QUERY;
+    const allowed = path.endsWith("/stream") ? "cursor" : path.endsWith("/drones") ? "since" : null;
+    if (allowed === null) return keys.length === 0 ? {} : INVALID_COORDINATION_QUERY;
+    if (keys.some((key) => key !== allowed)) return INVALID_COORDINATION_QUERY;
+    const values = parsed.searchParams.getAll(allowed);
+    if (values.length === 0) return {};
+    if (values.length !== 1 || values[0]!.length === 0) return INVALID_COORDINATION_QUERY;
+    return allowed === "cursor" ? { cursor: values[0]! } : { since: values[0]! };
   } catch {
     return INVALID_COORDINATION_QUERY;
   }

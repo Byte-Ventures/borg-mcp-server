@@ -27,6 +27,7 @@ describe("HTTPS service", () => {
   let key: string;
   let server: RunningServer;
   let coordinationCalls = 0;
+  let coordinationQuery: { readonly cursor?: string; readonly since?: string } = {};
 
   beforeAll(async () => {
     const material = await generate([{ name: "commonName", value: "localhost" }], {
@@ -72,8 +73,12 @@ describe("HTTPS service", () => {
           body: { protocol_version: "2", request_id: "request-1234", payload: { ok: true } },
         };
       },
-      handleCoordination: async () => {
+      handleCoordination: async (coordinationRequest) => {
         coordinationCalls += 1;
+        coordinationQuery = {
+          ...(coordinationRequest.cursor === undefined ? {} : { cursor: coordinationRequest.cursor }),
+          ...(coordinationRequest.since === undefined ? {} : { since: coordinationRequest.since }),
+        };
         return { status: 200, body: { protocol_version: "2", request_id: "unexpected" } };
       },
       limits: {
@@ -307,6 +312,28 @@ describe("HTTPS service", () => {
 
     expect(response.status).toBe(400);
     expect(JSON.parse(response.body).error.code).toBe("INVALID_INPUT");
+    expect(coordinationCalls).toBe(0);
+  });
+
+  it("forwards one roster liveness anchor and rejects ambiguous anchors", async () => {
+    const path = "/api/cubes/00000000-0000-4000-8000-000000000001/drones";
+    const accepted = await request(
+      server.origin,
+      certificate,
+      `${path}?since=2026-07-19T09%3A00%3A00.000Z`,
+      { authorization: "Bearer accepted-test-token" },
+    );
+    expect(accepted.status).toBe(200);
+    expect(coordinationQuery).toEqual({ since: "2026-07-19T09:00:00.000Z" });
+
+    coordinationCalls = 0;
+    const rejected = await request(
+      server.origin,
+      certificate,
+      `${path}?since=first&since=second`,
+      { authorization: "Bearer accepted-test-token" },
+    );
+    expect(rejected.status).toBe(400);
     expect(coordinationCalls).toBe(0);
   });
 

@@ -365,6 +365,19 @@ export const STORE_MIGRATIONS: readonly Migration[] = Object.freeze([
     name: "cube_message_taxonomy",
     sql: "ALTER TABLE cubes ADD COLUMN message_taxonomy TEXT;",
   },
+  {
+    version: 11,
+    name: "fleet_liveness",
+    sql: `
+      CREATE INDEX activity_log_drone_post_idx
+        ON activity_log (cube_id, drone_id, created_at, id) WHERE drone_id IS NOT NULL;
+      CREATE TABLE silent_seat_ping_state (
+        drone_id TEXT PRIMARY KEY REFERENCES drones(id) ON DELETE CASCADE,
+        attempts INTEGER NOT NULL CHECK (attempts BETWEEN 1 AND 3),
+        last_ping_at TEXT NOT NULL
+      ) STRICT;
+    `,
+  },
 ]);
 
 interface AppliedMigrationRow {

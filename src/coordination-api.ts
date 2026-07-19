@@ -367,7 +367,8 @@ export class CoordinationApi {
         if (request.since === undefined) {
           return success(200, "drones-read", { drones: store.listDrones(cubeId) });
         }
-        return success(200, "drones-read", store.listDronesSince(cubeId, request.since));
+        const since = decodeSince(request.since);
+        return success(200, "drones-read", store.listDronesSince(cubeId, since));
       }
       if (resource === "logs" && request.method === "POST") {
         const envelope = decodeEnvelope(request.body);
@@ -856,6 +857,12 @@ function decodeOpaqueCursor(value: string | undefined): LogCursor | null {
   } catch {
     throw new InputError();
   }
+}
+
+function decodeSince(value: string): string {
+  if (uuidPattern.test(value)) return value.toLowerCase();
+  if (timestampPattern.test(value) && new Date(value).toISOString() === value) return value;
+  throw new InputError();
 }
 
 function safeRequestId(value: unknown): string | undefined {

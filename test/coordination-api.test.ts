@@ -976,3 +976,131 @@ describe("coordination stream setup", () => {
     expect(events).toContainEqual(expect.objectContaining({ event: "sse_unsubscribe", delivery_count: 1 }));
   });
 });
+
+describe("drones since parameter validation", () => {
+  it("returns 400 INVALID_INPUT for a malformed since value", async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-api-since-malformed-")));
+    directories.push(directory);
+    runtime = await openStore({ path: join(directory, "borg.db") });
+    digester = new CredentialDigester(Buffer.alloc(32, 20));
+    const authority = new CredentialAuthority(runtime.credentials, digester);
+    const cubeId = "00000000-0000-4000-8000-0000000000a1";
+    const clientId = "00000000-0000-4000-8000-0000000000a2";
+    runtime.maintenance.createClient({ id: clientId, name: "Since client" });
+    runtime.maintenance.createCube({ id: cubeId, name: "Since cube", directive: "" });
+    runtime.maintenance.grantClientCube({ clientId, cubeId, access: "manage" });
+    const principal = clientPrincipal(clientId);
+    const api = new CoordinationApi(runtime, authority);
+    const response = await api.handle({
+      method: "GET",
+      path: `/api/cubes/${cubeId}/drones`,
+      principal,
+      since: "not-a-uuid-or-timestamp",
+      signal: new AbortController().signal,
+    });
+    expect(response.status).toBe(400);
+    expect((response.body as { error: { code: string } }).error.code).toBe("INVALID_INPUT");
+  });
+
+  it("returns 400 INVALID_INPUT for a partial UUID-like value", async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-api-since-partial-")));
+    directories.push(directory);
+    runtime = await openStore({ path: join(directory, "borg.db") });
+    digester = new CredentialDigester(Buffer.alloc(32, 21));
+    const authority = new CredentialAuthority(runtime.credentials, digester);
+    const cubeId = "00000000-0000-4000-8000-0000000000b1";
+    const clientId = "00000000-0000-4000-8000-0000000000b2";
+    runtime.maintenance.createClient({ id: clientId, name: "Partial client" });
+    runtime.maintenance.createCube({ id: cubeId, name: "Partial cube", directive: "" });
+    runtime.maintenance.grantClientCube({ clientId, cubeId, access: "manage" });
+    const principal = clientPrincipal(clientId);
+    const api = new CoordinationApi(runtime, authority);
+    const response = await api.handle({
+      method: "GET",
+      path: `/api/cubes/${cubeId}/drones`,
+      principal,
+      since: "deadbeef-dead-beef-dead-beefdeadbeef",
+      signal: new AbortController().signal,
+    });
+    expect(response.status).toBe(400);
+    expect((response.body as { error: { code: string } }).error.code).toBe("INVALID_INPUT");
+  });
+
+  it("returns 400 INVALID_INPUT for a malformed timestamp", async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-api-since-timestamp-")));
+    directories.push(directory);
+    runtime = await openStore({ path: join(directory, "borg.db") });
+    digester = new CredentialDigester(Buffer.alloc(32, 22));
+    const authority = new CredentialAuthority(runtime.credentials, digester);
+    const cubeId = "00000000-0000-4000-8000-0000000000c1";
+    const clientId = "00000000-0000-4000-8000-0000000000c2";
+    runtime.maintenance.createClient({ id: clientId, name: "Timestamp client" });
+    runtime.maintenance.createCube({ id: cubeId, name: "Timestamp cube", directive: "" });
+    runtime.maintenance.grantClientCube({ clientId, cubeId, access: "manage" });
+    const principal = clientPrincipal(clientId);
+    const api = new CoordinationApi(runtime, authority);
+    const response = await api.handle({
+      method: "GET",
+      path: `/api/cubes/${cubeId}/drones`,
+      principal,
+      since: "2026-01-01T00:00:00.000Z-extra-garbage",
+      signal: new AbortController().signal,
+    });
+    expect(response.status).toBe(400);
+    expect((response.body as { error: { code: string } }).error.code).toBe("INVALID_INPUT");
+  });
+
+  it("accepts a valid canonical timestamp as since", async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-api-since-valid-")));
+    directories.push(directory);
+    runtime = await openStore({ path: join(directory, "borg.db") });
+    digester = new CredentialDigester(Buffer.alloc(32, 23));
+    const authority = new CredentialAuthority(runtime.credentials, digester);
+    const cubeId = "00000000-0000-4000-8000-0000000000d1";
+    const clientId = "00000000-0000-4000-8000-0000000000d2";
+    const roleId = "00000000-0000-4000-8000-0000000000d3";
+    const droneId = "00000000-0000-4000-8000-0000000000d4";
+    runtime.maintenance.createClient({ id: clientId, name: "Valid client" });
+    runtime.maintenance.createCube({ id: cubeId, name: "Valid cube", directive: "" });
+    runtime.maintenance.createRole({ id: roleId, cubeId, name: "Worker" });
+    runtime.maintenance.grantClientCube({ clientId, cubeId, access: "manage" });
+    runtime.maintenance.createDrone({ id: droneId, cubeId, roleId, clientId, label: "worker-one" });
+    const principal = clientPrincipal(clientId);
+    const api = new CoordinationApi(runtime, authority);
+    const response = await api.handle({
+      method: "GET",
+      path: `/api/cubes/${cubeId}/drones`,
+      principal,
+      since: "2026-07-19T10:00:00.000Z",
+      signal: new AbortController().signal,
+    });
+    expect(response.status).toBe(200);
+    const payload = (response.body as { payload: { drones: Array<{ id: string; seen_since: boolean }> } }).payload;
+    expect(payload.drones).toEqual([expect.objectContaining({ id: droneId, seen_since: false })]);
+  });
+
+  it("accepts a valid UUID as since and returns 404 when not found", async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-api-since-uuid-")));
+    directories.push(directory);
+    runtime = await openStore({ path: join(directory, "borg.db") });
+    digester = new CredentialDigester(Buffer.alloc(32, 24));
+    const authority = new CredentialAuthority(runtime.credentials, digester);
+    const cubeId = "00000000-0000-4000-8000-0000000000e1";
+    const clientId = "00000000-0000-4000-8000-0000000000e2";
+    runtime.maintenance.createClient({ id: clientId, name: "UUID client" });
+    runtime.maintenance.createCube({ id: cubeId, name: "UUID cube", directive: "" });
+    runtime.maintenance.grantClientCube({ clientId, cubeId, access: "manage" });
+    const principal = clientPrincipal(clientId);
+    const api = new CoordinationApi(runtime, authority);
+    const nonexistent = "00000000-0000-4000-8000-0000000000ff";
+    const response = await api.handle({
+      method: "GET",
+      path: `/api/cubes/${cubeId}/drones`,
+      principal,
+      since: nonexistent,
+      signal: new AbortController().signal,
+    });
+    expect(response.status).toBe(404);
+    expect((response.body as { error: { code: string } }).error.code).toBe("NOT_FOUND");
+  });
+});

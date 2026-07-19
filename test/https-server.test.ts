@@ -825,6 +825,45 @@ describe("HTTPS service", () => {
     }
   });
 
+  it("keeps ten heartbeat-active SSE responses open beyond the inactivity timeout", async () => {
+    const streaming = await startHttpsServer({
+      bind: { port: 0 },
+      tls: { key, cert: certificate },
+      authorizeCoordination: async () => clientPrincipal(
+        "00000000-0000-4000-8000-000000000211",
+      ),
+      handleCoordination: async (coordinationRequest) => ({
+        status: 200,
+        stream: heartbeatStream(coordinationRequest.signal, 5),
+      }),
+      limits: {
+        ...server.limits,
+        handlerTimeoutMs: 10,
+        maxConnections: 12,
+        maxConnectionsPerAddress: 12,
+        maxStreamsPerCredential: 10,
+      },
+    });
+    const path = "/api/cubes/00000000-0000-4000-8000-000000000001/stream";
+    const opened = await Promise.all(Array.from({ length: 10 }, () => openStream(
+      streaming.origin,
+      certificate,
+      path,
+      "Bearer idle-client",
+    )));
+    const closed = Array.from({ length: 10 }, () => false);
+    opened.forEach((stream, index) => {
+      void stream.closed.then(() => { closed[index] = true; });
+    });
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      expect(closed).toEqual(Array.from({ length: 10 }, () => false));
+    } finally {
+      for (const stream of opened) stream.close();
+      await streaming.close();
+    }
+  });
+
   it("releases delayed SSE startup after a 503 handler timeout", async () => {
     let calls = 0;
     let cleanups = 0;
@@ -874,6 +913,14 @@ async function* heldStream(signal: AbortSignal): AsyncIterable<string> {
   await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
 }
 
+async function* heartbeatStream(signal: AbortSignal, intervalMs: number): AsyncIterable<string> {
+  yield "event: bookmark\ndata: {}\n\n";
+  while (!signal.aborted) {
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+    if (!signal.aborted) yield `event: heartbeat\ndata: {"ts":"test"}\n\n`;
+  }
+}
+
 function trackedStream(signal: AbortSignal, cleanup: () => void): AsyncIterable<string> {
   return {
     [Symbol.asyncIterator]() {
@@ -894,7 +941,11 @@ function openStream(
   ca: string,
   path: string,
   authorization: string,
-): Promise<{ readonly status: number; readonly close: () => void }> {
+): Promise<{
+  readonly status: number;
+  readonly close: () => void;
+  readonly closed: Promise<void>;
+}> {
   const url = new URL(path, origin);
   return new Promise((resolve, reject) => {
     const outgoing = httpsRequest({
@@ -907,8 +958,12 @@ function openStream(
       agent: false,
     });
     outgoing.on("response", (response) => {
+      const closed = new Promise<void>((resolveClosed) => {
+        response.once("close", () => resolveClosed());
+      });
       response.once("data", () => resolve({
         status: response.statusCode ?? 0,
+        closed,
         close: () => {
           response.destroy();
           outgoing.destroy();

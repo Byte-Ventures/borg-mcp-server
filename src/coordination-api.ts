@@ -22,6 +22,7 @@ import {
   RoleSectionConflictError,
   ScopedStoreError,
   StorageCapacityError,
+  type ActivityPage,
   type EnrichedActivityRecord,
   type LogCursor,
   type StoreRuntime,
@@ -57,16 +58,19 @@ export class CoordinationApi {
   readonly #runtime: StoreRuntime;
   readonly #authority: CredentialAuthority;
   readonly #debugLogger: DebugLogger;
+  readonly #streamHeartbeatMs: number;
   #replayBarrier: ReplayBarrier | undefined;
 
   constructor(
     runtime: StoreRuntime,
     authority: CredentialAuthority,
     debugLogger: DebugLogger = disabledDebugLogger,
+    streamHeartbeatMs = 5_000,
   ) {
     this.#runtime = runtime;
     this.#authority = authority;
     this.#debugLogger = debugLogger;
+    this.#streamHeartbeatMs = streamHeartbeatMs;
   }
 
   armReplayTransition(): { readonly reached: Promise<void>; readonly release: () => void } {
@@ -436,7 +440,9 @@ export class CoordinationApi {
     let unsubscribe = (): void => undefined;
     let subscribed = false;
     let deliveryCount = 0;
+    let heartbeat: NodeJS.Timeout | undefined;
     const queue = new AsyncStringQueue(() => {
+      if (heartbeat !== undefined) clearInterval(heartbeat);
       unsubscribe();
       session.release();
       if (subscribed) {
@@ -449,7 +455,7 @@ export class CoordinationApi {
         });
       }
     }, () => { deliveryCount += 1; });
-    const pending: EnrichedActivityRecord[] = [];
+    let replayDirty = false;
     let live = false;
     try {
       unsubscribe = store.subscribeActivity(cubeId, (entry) => {
@@ -458,21 +464,12 @@ export class CoordinationApi {
           return;
         }
         if (live) queue.push(encodeLogEvent(entry));
-        else if (pending.length >= 200) queue.close();
-        else pending.push(entry);
+        else replayDirty = true;
       });
+      subscribed = true;
       signal.addEventListener("abort", () => queue.close(), { once: true });
-      const replayPage = store.readLog(cubeId, cursor, 200);
-      const replay = replayPage.entries;
-      this.#debugLogger.emit({
-        event: "cursor_replay",
-        mode: "sse",
-        cubeId,
-        cursorId: cursor?.id ?? null,
-        returnedCount: replay.length,
-        behindBy: replayPage.behind_by,
-        truncated: replayPage.has_more,
-      });
+      const firstPage = store.readLog(cubeId, cursor, 200);
+      this.#logReplayPage(cubeId, cursor, firstPage);
       const barrier = this.#replayBarrier;
       this.#replayBarrier = undefined;
       if (barrier !== undefined) {
@@ -480,28 +477,56 @@ export class CoordinationApi {
         barrier.markReached();
         await barrier.release;
       }
-      const seen = new Set(replay.map(cursorKey));
-      for (const entry of replay) queue.push(encodeLogEvent(entry));
-      for (const entry of pending) {
-        if (!seen.has(cursorKey(entry)) && afterCursor(entry, cursor)) {
-          seen.add(cursorKey(entry));
-          queue.push(encodeLogEvent(entry));
+      void (async () => {
+        let page = firstPage;
+        let replayCursor = cursor;
+        let replayCount = 0;
+        try {
+          for (;;) {
+            for (const entry of page.entries) {
+              if (!await queue.write(encodeLogEvent(entry))) return;
+              replayCursor = { id: entry.id, created_at: entry.created_at };
+              replayCount += 1;
+            }
+            if (page.has_more || replayDirty) {
+              replayDirty = false;
+              page = store.readLog(cubeId, replayCursor, 200);
+              this.#logReplayPage(cubeId, replayCursor, page);
+              continue;
+            }
+
+            // Reserve room for the bookmark before making live callbacks visible.
+            // Any append while waiting marks replay dirty and is fetched first.
+            if (!await queue.waitForSpace()) return;
+            if (replayDirty) {
+              replayDirty = false;
+              page = store.readLog(cubeId, replayCursor, 200);
+              this.#logReplayPage(cubeId, replayCursor, page);
+              continue;
+            }
+            queue.push(`event: bookmark\ndata: ${JSON.stringify({
+              as_of: new Date().toISOString(),
+              replay_complete: true,
+            })}\n\n`);
+            live = true;
+            heartbeat = setInterval(() => {
+              queue.tryPush(encodeHeartbeat());
+            }, this.#streamHeartbeatMs);
+            heartbeat.unref();
+            this.#debugLogger.emit({
+              event: "sse_subscribe",
+              connectionId,
+              cubeId,
+              principal,
+              replayCount,
+              truncated: false,
+            });
+            return;
+          }
+        } catch {
+          queue.close();
         }
-      }
-      queue.push(`event: bookmark\ndata: ${JSON.stringify({
-        as_of: new Date().toISOString(),
-        replay_complete: true,
-      })}\n\n`);
-      live = true;
-      subscribed = true;
-      this.#debugLogger.emit({
-        event: "sse_subscribe",
-        connectionId,
-        cubeId,
-        principal,
-        replayCount: replay.length,
-        truncated: replayPage.has_more,
-      });
+      })();
       return { status: 200, stream: queue };
     } catch (error) {
       queue.close();
@@ -510,6 +535,22 @@ export class CoordinationApi {
       throw error;
     }
   }
+
+  #logReplayPage(
+    cubeId: string,
+    cursor: LogCursor | null,
+    page: ActivityPage,
+  ): void {
+    this.#debugLogger.emit({
+      event: "cursor_replay",
+      mode: "sse",
+      cubeId,
+      cursorId: cursor?.id ?? null,
+      returnedCount: page.entries.length,
+      behindBy: page.behind_by,
+      truncated: page.has_more,
+    });
+  }
 }
 
 class InputError extends Error {}
@@ -517,6 +558,7 @@ class InputError extends Error {}
 class AsyncStringQueue implements AsyncIterable<string> {
   readonly #values: string[] = [];
   readonly #waiters: Array<(result: IteratorResult<string>) => void> = [];
+  readonly #spaceWaiters: Array<(available: boolean) => void> = [];
   readonly #cleanup: () => void;
   readonly #onDelivered: () => void;
   #closed = false;
@@ -532,12 +574,28 @@ class AsyncStringQueue implements AsyncIterable<string> {
       this.close();
       return;
     }
-    const waiter = this.#waiters.shift();
-    if (waiter === undefined) this.#values.push(value);
-    else {
-      this.#onDelivered();
-      waiter({ value, done: false });
+    this.#enqueue(value);
+  }
+
+  tryPush(value: string): boolean {
+    if (this.#closed || this.#values.length >= 200) return false;
+    this.#enqueue(value);
+    return true;
+  }
+
+  async write(value: string): Promise<boolean> {
+    while (!this.#closed && this.#values.length >= 200) {
+      if (!await this.waitForSpace()) return false;
     }
+    if (this.#closed) return false;
+    this.#enqueue(value);
+    return true;
+  }
+
+  waitForSpace(): Promise<boolean> {
+    if (this.#closed) return Promise.resolve(false);
+    if (this.#values.length < 200) return Promise.resolve(true);
+    return new Promise((resolve) => this.#spaceWaiters.push(resolve));
   }
 
   close(): void {
@@ -545,6 +603,7 @@ class AsyncStringQueue implements AsyncIterable<string> {
     this.#closed = true;
     this.#cleanup();
     for (const waiter of this.#waiters.splice(0)) waiter({ value: undefined, done: true });
+    for (const waiter of this.#spaceWaiters.splice(0)) waiter(false);
   }
 
   [Symbol.asyncIterator](): AsyncIterator<string> {
@@ -552,6 +611,7 @@ class AsyncStringQueue implements AsyncIterable<string> {
       next: async () => {
         const value = this.#values.shift();
         if (value !== undefined) {
+          this.#spaceWaiters.shift()?.(true);
           this.#onDelivered();
           return { value, done: false };
         }
@@ -563,6 +623,15 @@ class AsyncStringQueue implements AsyncIterable<string> {
         return { value: undefined, done: true };
       },
     };
+  }
+
+  #enqueue(value: string): void {
+    const waiter = this.#waiters.shift();
+    if (waiter === undefined) this.#values.push(value);
+    else {
+      this.#onDelivered();
+      waiter({ value, done: false });
+    }
   }
 }
 
@@ -730,13 +799,8 @@ function encodeLogEvent(entry: EnrichedActivityRecord): string {
   })}\n\n`;
 }
 
-function cursorKey(entry: EnrichedActivityRecord): string {
-  return `${entry.created_at}\0${entry.id}`;
-}
-
-function afterCursor(entry: EnrichedActivityRecord, cursor: LogCursor | null): boolean {
-  return cursor === null || entry.created_at > cursor.created_at ||
-    (entry.created_at === cursor.created_at && entry.id > cursor.id);
+function encodeHeartbeat(): string {
+  return `event: heartbeat\ndata: ${JSON.stringify({ ts: new Date().toISOString() })}\n\n`;
 }
 
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;

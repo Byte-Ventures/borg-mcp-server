@@ -13,7 +13,7 @@ import {
 } from "../src/credentials.js";
 import { openStore, type StoreRuntime } from "../src/store.js";
 import { clientPrincipal, droneSessionPrincipal } from "../src/principal.js";
-import { createDebugLogger } from "../src/debug-log.js";
+import { createDebugLogger, disabledDebugLogger } from "../src/debug-log.js";
 
 const directories: string[] = [];
 let runtime: StoreRuntime | undefined;
@@ -31,6 +31,80 @@ afterEach(async () => {
 });
 
 describe("coordination stream setup", () => {
+  it("drains every replay page before switching to live delivery", async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-api-replay-")));
+    directories.push(directory);
+    runtime = await openStore({ path: join(directory, "borg.db") });
+    digester = new CredentialDigester(Buffer.alloc(32, 3));
+    const authority = new CredentialAuthority(runtime.credentials, digester);
+    const cubeId = "00000000-0000-4000-8000-000000000071";
+    const clientId = "00000000-0000-4000-8000-000000000072";
+    runtime.maintenance.createClient({ id: clientId, name: "Replay client" });
+    runtime.maintenance.createCube({ id: cubeId, name: "Replay", directive: "" });
+    runtime.maintenance.grantClientCube({ clientId, cubeId, access: "manage" });
+    const principal = clientPrincipal(clientId);
+    const store = runtime.forPrincipal(principal);
+    for (let index = 0; index < 425; index += 1) {
+      store.appendLog(cubeId, { message: `replay-${index}` });
+    }
+    const api = new CoordinationApi(runtime, authority);
+    const barrier = api.armReplayTransition();
+    const opening = api.handle({
+      method: "GET",
+      path: `/api/cubes/${cubeId}/stream`,
+      principal,
+      signal: new AbortController().signal,
+    });
+    await barrier.reached;
+    store.appendLog(cubeId, { message: "replay-boundary" });
+    barrier.release();
+
+    const response = await opening;
+    const iterator = response.stream![Symbol.asyncIterator]();
+    const messages: string[] = [];
+    for (;;) {
+      const next = await iterator.next();
+      expect(next.done).toBe(false);
+      if (next.value.includes("event: bookmark")) break;
+      const data = JSON.parse(next.value.match(/data: (.+)\n\n/u)![1]!);
+      messages.push(data.entry.message);
+    }
+
+    expect(messages).toEqual([
+      ...Array.from({ length: 425 }, (_, index) => `replay-${index}`),
+      "replay-boundary",
+    ]);
+    await iterator.return?.();
+  });
+
+  it("emits heartbeat events while a live stream is idle", async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-api-heartbeat-")));
+    directories.push(directory);
+    runtime = await openStore({ path: join(directory, "borg.db") });
+    digester = new CredentialDigester(Buffer.alloc(32, 2));
+    const authority = new CredentialAuthority(runtime.credentials, digester);
+    const cubeId = "00000000-0000-4000-8000-000000000073";
+    const clientId = "00000000-0000-4000-8000-000000000074";
+    runtime.maintenance.createClient({ id: clientId, name: "Heartbeat client" });
+    runtime.maintenance.createCube({ id: cubeId, name: "Heartbeat", directive: "" });
+    runtime.maintenance.grantClientCube({ clientId, cubeId, access: "manage" });
+    const api = new CoordinationApi(runtime, authority, disabledDebugLogger, 10);
+    const response = await api.handle({
+      method: "GET",
+      path: `/api/cubes/${cubeId}/stream`,
+      principal: clientPrincipal(clientId),
+      signal: new AbortController().signal,
+    });
+    const iterator = response.stream![Symbol.asyncIterator]();
+    expect((await iterator.next()).value).toContain("event: bookmark");
+    const heartbeat = (await iterator.next()).value!;
+    expect(heartbeat).toContain("event: heartbeat");
+    expect(JSON.parse(heartbeat.match(/data: (.+)\n\n/u)![1]!)).toEqual({
+      ts: expect.any(String),
+    });
+    await iterator.return?.();
+  });
+
   it("attaches read grants as observers and excludes them from directed work", async () => {
     const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-api-observer-")));
     directories.push(directory);

@@ -507,26 +507,55 @@ describe("Principal to ScopedStore isolation", () => {
     const path = join(directory, "borg.db");
     runtime.close();
     runtime = await openStore({ path, clock: () => new Date("2026-07-14T12:20:00.000Z") });
+    const peerDroneId = "00000000-0000-4000-8000-000000000031";
+    const peerSessionId = "00000000-0000-4000-8000-000000000032";
+    runtime.maintenance.createDrone({
+      id: peerDroneId,
+      cubeId: ids.cubeA,
+      roleId: ids.roleA,
+      clientId: ids.clientA,
+      label: "two-of-two-queen",
+    });
+    runtime.maintenance.createDroneSession({
+      id: peerSessionId,
+      clientId: ids.clientA,
+      cubeId: ids.cubeA,
+      droneId: peerDroneId,
+      expiresAt: "2026-07-14T12:30:00.000Z",
+    });
     const drone = runtime.forPrincipal(droneSessionPrincipal({
       id: ids.sessionA,
       clientId: ids.clientA,
       cubeId: ids.cubeA,
       droneId: ids.droneA,
     }));
+    const peer = runtime.forPrincipal(droneSessionPrincipal({
+      id: peerSessionId,
+      clientId: ids.clientA,
+      cubeId: ids.cubeA,
+      droneId: peerDroneId,
+    }));
     const events: ActivityStreamRecord[] = [];
+    const peerEvents: ActivityStreamRecord[] = [];
     const stop = drone.subscribeActivity(ids.cubeA, (entry) => events.push(entry));
+    const stopPeer = peer.subscribeActivity(ids.cubeA, (entry) => peerEvents.push(entry));
+    const before = drone.readLog(ids.cubeA, null, 10);
     expect(runtime.liveness.scan({ silentMs: 600_000, cooldownMs: 600_000 })).toEqual([
       expect.objectContaining({
+        kind: "heartbeat_ping",
         message: expect.stringContaining("[HEARTBEAT-PING]"),
         recipient_drone_ids: [ids.droneA],
       }),
     ]);
     expect(events).toHaveLength(1);
+    expect(peerEvents).toEqual([]);
+    expect(drone.readLog(ids.cubeA, null, 10)).toEqual(before);
     expect(runtime.liveness.scan({ silentMs: 600_000, cooldownMs: 600_000 })).toEqual([]);
+    stopPeer();
     drone.appendLog(ids.cubeA, { message: "responsive" });
     expect(drone.listDrones(ids.cubeA)).toContainEqual(expect.objectContaining({
       id: ids.droneA,
-      last_seen: "2026-07-14T12:20:00.001Z",
+      last_seen: "2026-07-14T12:20:00.000Z",
     }));
     stop();
     runtime.close();

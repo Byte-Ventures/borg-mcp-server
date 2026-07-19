@@ -54,16 +54,19 @@ export interface EnrichedActivityRecord {
   readonly recipient_drone_ids: string[];
 }
 
-export interface ActivityNotificationRecord extends EnrichedActivityRecord {
-  readonly kind: "ack" | "claim";
-  readonly log_entry_id: string;
-  readonly ack_kind: "ack" | "claim";
-  readonly ack_at: string;
-  readonly entry_preview: string;
-  readonly author_drone_id?: string;
-  readonly claimant_drone_id?: string;
-  readonly claimant_role?: string | null;
-}
+export type ActivityNotificationRecord = EnrichedActivityRecord & (
+  | {
+    readonly kind: "ack" | "claim";
+    readonly log_entry_id: string;
+    readonly ack_kind: "ack" | "claim";
+    readonly ack_at: string;
+    readonly entry_preview: string;
+    readonly author_drone_id?: string;
+    readonly claimant_drone_id?: string;
+    readonly claimant_role?: string | null;
+  }
+  | { readonly kind: "heartbeat_ping" }
+);
 
 export type ActivityStreamRecord = EnrichedActivityRecord | ActivityNotificationRecord;
 
@@ -181,7 +184,7 @@ export interface LivenessStore {
     readonly silentMs?: number;
     readonly cooldownMs?: number;
     readonly limit?: number;
-  }) => EnrichedActivityRecord[];
+  }) => ActivityNotificationRecord[];
 }
 
 export interface DigestPair {
@@ -2029,7 +2032,7 @@ class SqliteLivenessStore implements LivenessStore {
     readonly capacityGuard: StorageCapacityGuard,
   ) {}
 
-  scan(options: { silentMs?: number; cooldownMs?: number; limit?: number } = {}): EnrichedActivityRecord[] {
+  scan(options: { silentMs?: number; cooldownMs?: number; limit?: number } = {}): ActivityNotificationRecord[] {
     const now = this.clock();
     const silentBefore = new Date(now.getTime() - (options.silentMs ?? 600_000)).toISOString();
     const cooldownBefore = new Date(now.getTime() - (options.cooldownMs ?? 600_000)).toISOString();
@@ -2048,22 +2051,16 @@ class SqliteLivenessStore implements LivenessStore {
           WHERE session.drone_id = drone.id AND session.revoked_at IS NULL AND session.expires_at > ?)
       ORDER BY COALESCE(drone.last_seen, drone.created_at), drone.id LIMIT ?
     `).all(silentBefore, cooldownBefore, now.toISOString(), limit);
-    const published: EnrichedActivityRecord[] = [];
+    const published: ActivityNotificationRecord[] = [];
     for (const candidate of candidates) {
       const droneId = requiredText(candidate, "drone_id");
       const cubeId = requiredText(candidate, "cube_id");
       const message = "[HEARTBEAT-PING] No recent activity; confirm this seat is responsive.";
-      this.capacityGuard.assertCanGrow(Buffer.byteLength(message) + 128);
+      this.capacityGuard.assertCanGrow(256);
       const id = randomUUID();
-      const createdAt = nextActivityTimestamp(this.database, cubeId, now.getTime());
+      const createdAt = now.toISOString();
       this.database.exec("BEGIN IMMEDIATE");
       try {
-        this.database.prepare(`INSERT INTO activity_log
-          (id, cube_id, drone_id, actor_kind, actor_id, message, created_at, visibility)
-          VALUES (?, ?, NULL, 'operator', ?, ?, ?, 'direct')
-        `).run(id, cubeId, "00000000-0000-4000-8000-000000000000", message, createdAt);
-        this.database.prepare("INSERT INTO activity_log_recipients (entry_id, drone_id) VALUES (?, ?)")
-          .run(id, droneId);
         this.database.prepare(`INSERT INTO silent_seat_ping_state (drone_id, attempts, last_ping_at)
           VALUES (?, 1, ?) ON CONFLICT(drone_id) DO UPDATE
           SET attempts = attempts + 1, last_ping_at = excluded.last_ping_at
@@ -2073,7 +2070,8 @@ class SqliteLivenessStore implements LivenessStore {
         try { this.database.exec("ROLLBACK"); } catch { /* Preserve original failure. */ }
         throw error;
       }
-      const entry: EnrichedActivityRecord = {
+      const entry: ActivityNotificationRecord = {
+        kind: "heartbeat_ping",
         id, cube_id: cubeId, drone_id: null, message, visibility: "direct", created_at: createdAt,
         drone_label: null, role_name: null, recipient_drone_ids: [droneId],
       };
@@ -2974,15 +2972,6 @@ function validateDirective(value: string): void {
 
 function activityPreview(message: string): string {
   return message.replace(/\s+/gu, " ").trim().slice(0, 200);
-}
-
-function nextActivityTimestamp(database: DatabaseSync, cubeId: string, now: number): string {
-  const latest = database.prepare(`
-    SELECT created_at FROM activity_log WHERE cube_id = ? ORDER BY created_at DESC, id DESC LIMIT 1
-  `).get(cubeId);
-  return new Date(latest === undefined
-    ? now
-    : Math.max(now, Date.parse(requiredText(latest, "created_at")) + 1)).toISOString();
 }
 
 function validateRoleClass(value: unknown): void {

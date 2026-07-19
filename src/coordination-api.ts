@@ -11,6 +11,11 @@ import {
 import type { Principal } from "./principal.js";
 import { assertServerDerivedPrincipal } from "./principal.js";
 import { disabledDebugLogger, type DebugLogger } from "./debug-log.js";
+import {
+  patchMessageTaxonomy,
+  resolveMessageRouting,
+  validateMessageTaxonomy,
+} from "./message-taxonomy.js";
 import type { CredentialAuthority } from "./credentials.js";
 import {
   CursorExpiredError,
@@ -23,6 +28,7 @@ import {
   ScopedStoreError,
   StorageCapacityError,
   type ActivityPage,
+  type CubeRecord,
   type EnrichedActivityRecord,
   type LogCursor,
   type StoreRuntime,
@@ -143,6 +149,7 @@ export class CoordinationApi {
         owner_id: cube.ownerId,
         name: cube.name,
         cube_directive: cube.directive,
+        message_taxonomy: cube.messageTaxonomy,
         created_at: cube.createdAt,
         updated_at: cube.updatedAt,
       }));
@@ -191,7 +198,7 @@ export class CoordinationApi {
 
     const roleMatch = /^\/api\/cubes\/([0-9a-f-]{36})\/roles\/([0-9a-f-]{36})(\/section-patch)?$/u
       .exec(request.path);
-    const match = /^\/api\/cubes\/([0-9a-f-]{36})(?:\/(roles|drones|logs|acks|decisions|stream))?$/u
+    const match = /^\/api\/cubes\/([0-9a-f-]{36})(?:\/(roles|drones|logs|acks|decisions|stream|taxonomy-patch))?$/u
       .exec(request.path);
     if (match === null && roleMatch === null) {
       return failure(404, "NOT_FOUND", "The requested resource was not found.");
@@ -215,9 +222,45 @@ export class CoordinationApi {
             owner_id: cube.ownerId,
             name: cube.name,
             cube_directive: cube.directive,
+            message_taxonomy: cube.messageTaxonomy,
             created_at: cube.createdAt,
             updated_at: cube.updatedAt,
           },
+        });
+      }
+      if (resource === undefined && request.method === "PATCH") {
+        const envelope = decodeEnvelope(request.body);
+        exactKeys(envelope.payload, [], ["cube_directive", "message_taxonomy"]);
+        if (Object.keys(envelope.payload).length === 0) throw new InputError();
+        const directive = optionalText(envelope.payload, "cube_directive", 100_000);
+        const messageTaxonomy = optionalMessageTaxonomy(envelope.payload["message_taxonomy"]);
+        const cube = store.updateCube(cubeId, {
+          ...(directive === undefined ? {} : { directive }),
+          ...(messageTaxonomy === undefined ? {} : { messageTaxonomy }),
+        });
+        return success(200, envelope.requestId, { cube: cubePayload(cube) });
+      }
+      if (resource === "taxonomy-patch" && request.method === "POST") {
+        const envelope = decodeEnvelope(request.body);
+        const action = envelope.payload["action"];
+        const cube = store.getCube(cubeId);
+        if (cube === null) throw new ScopedStoreError();
+        if (action === "remove") {
+          exactKeys(envelope.payload, ["action", "class"]);
+          const messageTaxonomy = patchMessageTaxonomy(cube.messageTaxonomy, {
+            action,
+            className: requiredString(envelope.payload, "class", 64),
+          });
+          return success(200, envelope.requestId, {
+            cube: cubePayload(store.updateCube(cubeId, { messageTaxonomy })),
+          });
+        }
+        if (action !== "add" && action !== "replace") throw new InputError();
+        exactKeys(envelope.payload, ["action", "class_def"]);
+        const classDef = validateMessageTaxonomy([envelope.payload["class_def"]])![0]!;
+        const messageTaxonomy = patchMessageTaxonomy(cube.messageTaxonomy, { action, classDef });
+        return success(200, envelope.requestId, {
+          cube: cubePayload(store.updateCube(cubeId, { messageTaxonomy })),
         });
       }
       if (resource === "roles" && request.method === "GET") {
@@ -233,6 +276,7 @@ export class CoordinationApi {
           "is_human_seat",
           "can_broadcast",
           "receives_all_direct",
+          "role_class",
         ]);
         const role = store.createRole(cubeId, {
           name: requiredRoleName(envelope.payload, "name"),
@@ -243,6 +287,9 @@ export class CoordinationApi {
           isHumanSeat: optionalBoolean(envelope.payload["is_human_seat"]),
           canBroadcast: optionalBoolean(envelope.payload["can_broadcast"]),
           receivesAllDirect: optionalBoolean(envelope.payload["receives_all_direct"]),
+          ...(envelope.payload["role_class"] === undefined
+            ? {}
+            : { roleClass: optionalRoleClass(envelope.payload["role_class"])! }),
         });
         return success(201, envelope.requestId, { role });
       }
@@ -257,6 +304,7 @@ export class CoordinationApi {
           "is_human_seat",
           "can_broadcast",
           "receives_all_direct",
+          "role_class",
         ]);
         if (Object.keys(envelope.payload).length === 0) throw new InputError();
         const name = envelope.payload["name"] === undefined
@@ -269,6 +317,7 @@ export class CoordinationApi {
         const isHumanSeat = optionalBooleanValue(envelope.payload["is_human_seat"]);
         const canBroadcast = optionalBooleanValue(envelope.payload["can_broadcast"]);
         const receivesAllDirect = optionalBooleanValue(envelope.payload["receives_all_direct"]);
+        const roleClass = optionalRoleClass(envelope.payload["role_class"]);
         const role = store.updateRole(cubeId, roleId!, {
           ...(name === undefined ? {} : { name }),
           ...(shortDescription === undefined ? {} : { shortDescription }),
@@ -278,6 +327,7 @@ export class CoordinationApi {
           ...(isHumanSeat === undefined ? {} : { isHumanSeat }),
           ...(canBroadcast === undefined ? {} : { canBroadcast }),
           ...(receivesAllDirect === undefined ? {} : { receivesAllDirect }),
+          ...(roleClass === undefined ? {} : { roleClass }),
         });
         return success(200, envelope.requestId, { role });
       }
@@ -317,18 +367,29 @@ export class CoordinationApi {
       }
       if (resource === "logs" && request.method === "POST") {
         const envelope = decodeEnvelope(request.body);
-        exactKeys(envelope.payload, ["message"], ["visibility", "recipientDroneIds"]);
+        exactKeys(envelope.payload, ["message"], [
+          "visibility", "recipientDroneIds", "class", "to",
+        ]);
         const message = requiredString(envelope.payload, "message", 10_240);
         const visibility = optionalVisibility(envelope.payload["visibility"]);
         const recipientDroneIds = optionalUuidArray(envelope.payload["recipientDroneIds"]);
-        if (((visibility ?? "broadcast") === "broadcast" && recipientDroneIds !== undefined) ||
-            (visibility === "direct" && (recipientDroneIds?.length ?? 0) === 0)) {
-          throw new InputError();
-        }
-        const entry = store.appendLog(cubeId, {
+        const className = optionalString(envelope.payload, "class", 64);
+        const to = optionalStringArray(envelope.payload["to"]);
+        const cube = store.getCube(cubeId);
+        if (cube === null) throw new ScopedStoreError();
+        const resolved = resolveMessageRouting({
           message,
           ...(visibility === undefined ? {} : { visibility }),
           ...(recipientDroneIds === undefined ? {} : { recipientDroneIds }),
+          ...(className === undefined ? {} : { className }),
+          ...(to === undefined ? {} : { to }),
+        }, cube.messageTaxonomy, store.listRoles(cubeId), store.listDrones(cubeId));
+        const entry = store.appendLog(cubeId, {
+          message,
+          visibility: resolved.visibility,
+          ...(resolved.visibility === "direct"
+            ? { recipientDroneIds: resolved.recipientDroneIds }
+            : {}),
         });
         this.#debugLogger.emit({
           event: "activity_append",
@@ -704,6 +765,27 @@ function optionalBooleanValue(value: unknown): boolean | undefined {
   return value;
 }
 
+function optionalRoleClass(value: unknown): "queen" | "worker" | undefined {
+  if (value === undefined) return undefined;
+  if (value !== "queen" && value !== "worker") throw new InputError();
+  return value;
+}
+
+function optionalMessageTaxonomy(value: unknown) {
+  return value === undefined ? undefined : validateMessageTaxonomy(value);
+}
+
+function optionalStringArray(value: unknown): string[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length < 1 || value.length > 100 ||
+      value.some((entry) => typeof entry !== "string" || entry.length < 1 || entry.length > 120)) {
+    throw new InputError();
+  }
+  const entries = value as string[];
+  if (new Set(entries).size !== entries.length) throw new InputError();
+  return entries;
+}
+
 function requiredSectionHeading(record: Record<string, unknown>, key: string): string {
   const value = requiredString(record, key, 60);
   const heading = value.trim();
@@ -801,6 +883,27 @@ function encodeLogEvent(entry: EnrichedActivityRecord): string {
 
 function encodeHeartbeat(): string {
   return `event: heartbeat\ndata: ${JSON.stringify({ ts: new Date().toISOString() })}\n\n`;
+}
+
+function cubePayload(cube: CubeRecord) {
+  return {
+    id: cube.id,
+    owner_id: cube.ownerId,
+    name: cube.name,
+    cube_directive: cube.directive,
+    message_taxonomy: cube.messageTaxonomy,
+    created_at: cube.createdAt,
+    updated_at: cube.updatedAt,
+  };
+}
+
+function cursorKey(entry: EnrichedActivityRecord): string {
+  return `${entry.created_at}\0${entry.id}`;
+}
+
+function afterCursor(entry: EnrichedActivityRecord, cursor: LogCursor | null): boolean {
+  return cursor === null || entry.created_at > cursor.created_at ||
+    (entry.created_at === cursor.created_at && entry.id > cursor.id);
 }
 
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;

@@ -409,6 +409,7 @@ function debugRoute(rawUrl: string | undefined): DebugRoute {
   if (/^\/api\/cubes\/[0-9a-f-]{36}\/roles$/iu.test(path)) return "cube_roles";
   if (/^\/api\/cubes\/[0-9a-f-]{36}\/roles\/[0-9a-f-]{36}$/iu.test(path)) return "cube_role";
   if (/^\/api\/cubes\/[0-9a-f-]{36}\/roles\/[0-9a-f-]{36}\/section-patch$/iu.test(path)) return "cube_role_section_patch";
+  if (/^\/api\/cubes\/[0-9a-f-]{36}\/taxonomy-patch$/iu.test(path)) return "cube_taxonomy_patch";
   if (/^\/api\/cubes\/[0-9a-f-]{36}\/drones$/iu.test(path)) return "cube_drones";
   if (/^\/api\/cubes\/[0-9a-f-]{36}\/logs$/iu.test(path)) return "cube_logs";
   if (/^\/api\/cubes\/[0-9a-f-]{36}\/acks$/iu.test(path)) return "cube_acks";

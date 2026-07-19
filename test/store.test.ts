@@ -189,15 +189,34 @@ describe("Principal to ScopedStore isolation", () => {
     expect(client.listCubes()).toEqual([]);
   });
 
-  it("executes authorized writes and their scope predicate atomically", () => {
+  it("executes authorized writes atomically and persists migrated cube context", async () => {
+    const path = join(directory, "borg.db");
     const client = runtime.forPrincipal(clientPrincipal(ids.clientA));
 
     client.updateDirective(ids.cubeA, "updated by manager");
     expect(client.getCube(ids.cubeA)?.directive).toBe("updated by manager");
+    expect(client.updateCube(ids.cubeA, {
+      directive: "migrated directive",
+      messageTaxonomy: [{
+        class: "status",
+        prefixes: ["DONE"],
+        routing: "directed",
+        default_to: ["queen"],
+      }],
+    })).toMatchObject({
+      directive: "migrated directive",
+      messageTaxonomy: [{ class: "status", prefixes: ["DONE"], routing: "directed" }],
+    });
 
     const entry = client.appendActivity(ids.cubeA, "client append");
     expect(entry.actorKind).toBe("client");
     expect(entry.droneId).toBeNull();
+    runtime.close();
+    runtime = await openStore({ path, clock: () => new Date("2026-07-14T12:30:00.000Z") });
+    expect(runtime.forPrincipal(clientPrincipal(ids.clientA)).getCube(ids.cubeA)).toMatchObject({
+      directive: "migrated directive",
+      messageTaxonomy: [{ class: "status", prefixes: ["DONE"], routing: "directed" }],
+    });
   });
 
   it("creates complete worker roles and promotes one default atomically", async () => {
@@ -212,6 +231,7 @@ describe("Principal to ScopedStore isolation", () => {
       isHumanSeat: true,
       canBroadcast: true,
       receivesAllDirect: true,
+      roleClass: "queen",
     });
     expect(reviewer).toMatchObject({
       cube_id: ids.cubeA,
@@ -223,7 +243,7 @@ describe("Principal to ScopedStore isolation", () => {
       is_human_seat: true,
       can_broadcast: true,
       receives_all_direct: true,
-      role_class: "worker",
+      role_class: "queen",
     });
 
     const builder = client.createRole(ids.cubeA, { name: "Builder", isDefault: true });
@@ -289,6 +309,7 @@ describe("Principal to ScopedStore isolation", () => {
       isHumanSeat: true,
       canBroadcast: true,
       receivesAllDirect: true,
+      roleClass: "queen",
     });
 
     expect(updated).toMatchObject({
@@ -301,7 +322,7 @@ describe("Principal to ScopedStore isolation", () => {
       is_human_seat: true,
       can_broadcast: true,
       receives_all_direct: true,
-      role_class: "worker",
+      role_class: "queen",
       created_at: reviewer.created_at,
     });
     expect(client.listRoles(ids.cubeA).find((role) => role.id === builder.id)?.is_default).toBe(false);

@@ -3,6 +3,7 @@ import { statfsSync, statSync } from "node:fs";
 import { chmod, lstat, mkdir, open } from "node:fs/promises";
 import { dirname, join, parse, relative, resolve, sep } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import type { MessageTaxonomy } from "borgmcp-shared/domain";
 
 import { applyMigrations, assertMigrationsCurrent } from "./migrations.js";
 import { operatorErrors } from "./operator-error.js";
@@ -12,6 +13,7 @@ import {
   type Principal,
 } from "./principal.js";
 import { patchRoleSectionText, type RoleSectionPatchOp } from "./role-section.js";
+import { validateMessageTaxonomy } from "./message-taxonomy.js";
 
 export type CubeAccess = "read" | "write" | "manage";
 
@@ -20,6 +22,7 @@ export interface CubeRecord {
   readonly ownerId: string;
   readonly name: string;
   readonly directive: string;
+  readonly messageTaxonomy: MessageTaxonomy | null;
   readonly createdAt: string;
   readonly updatedAt: string;
 }
@@ -245,6 +248,7 @@ export interface ScopedStore {
   readonly createCube: (input: CreateCubeInput) => CreateCubeRecord;
   readonly listCubes: () => CubeRecord[];
   readonly getCube: (cubeId: string) => CubeRecord | null;
+  readonly updateCube: (cubeId: string, input: UpdateCubeInput) => CubeRecord;
   readonly updateDirective: (cubeId: string, directive: string) => void;
   readonly appendActivity: (cubeId: string, message: string) => ActivityRecord;
   readonly readActivity: (cubeId: string, limit: number) => ActivityRecord[];
@@ -282,6 +286,7 @@ export interface CreateRoleInput {
   readonly isHumanSeat?: boolean;
   readonly canBroadcast?: boolean;
   readonly receivesAllDirect?: boolean;
+  readonly roleClass?: "queen" | "worker";
 }
 
 export interface UpdateRoleInput {
@@ -293,6 +298,12 @@ export interface UpdateRoleInput {
   readonly isHumanSeat?: boolean;
   readonly canBroadcast?: boolean;
   readonly receivesAllDirect?: boolean;
+  readonly roleClass?: "queen" | "worker";
+}
+
+export interface UpdateCubeInput {
+  readonly directive?: string;
+  readonly messageTaxonomy?: MessageTaxonomy | null;
 }
 
 export interface CreateCubeInput {
@@ -479,6 +490,7 @@ interface CubeRow {
   readonly owner_id: string;
   readonly name: string;
   readonly directive: string;
+  readonly message_taxonomy: string | null;
   readonly created_at: string;
   readonly updated_at: string;
 }
@@ -709,7 +721,8 @@ class SqliteScopedStore implements ScopedStore {
   listCubes(): CubeRecord[] {
     const scope = this.#scope("read");
     const rows = this.#database.prepare(`
-      SELECT c.id, c.owner_id, c.name, c.directive, c.created_at, c.updated_at
+      SELECT c.id, c.owner_id, c.name, c.directive, c.message_taxonomy,
+             c.created_at, c.updated_at
       FROM cubes AS c
       WHERE ${scope.sql}
       ORDER BY c.id
@@ -721,7 +734,8 @@ class SqliteScopedStore implements ScopedStore {
     assertCanonicalUuid(cubeId, "Cube id");
     const scope = this.#scope("read");
     const row = this.#database.prepare(`
-      SELECT c.id, c.owner_id, c.name, c.directive, c.created_at, c.updated_at
+      SELECT c.id, c.owner_id, c.name, c.directive, c.message_taxonomy,
+             c.created_at, c.updated_at
       FROM cubes AS c
       WHERE c.id = ? AND ${scope.sql}
     `).get(cubeId, ...scope.parameters);
@@ -729,17 +743,42 @@ class SqliteScopedStore implements ScopedStore {
   }
 
   updateDirective(cubeId: string, directive: string): void {
+    this.updateCube(cubeId, { directive });
+  }
+
+  updateCube(cubeId: string, input: UpdateCubeInput): CubeRecord {
     assertCanonicalUuid(cubeId, "Cube id");
-    validateDirective(directive);
+    if (input.directive === undefined && input.messageTaxonomy === undefined) {
+      throw new TypeError("At least one cube field is required.");
+    }
+    if (input.directive !== undefined) validateDirective(input.directive);
+    const taxonomy = input.messageTaxonomy === undefined
+      ? undefined
+      : validateMessageTaxonomy(input.messageTaxonomy);
+    const serializedTaxonomy = taxonomy === undefined ? undefined : serializeTaxonomy(taxonomy);
     const scope = this.#scope("manage");
     this.#requireCube(cubeId, "manage");
-    this.#capacityGuard.assertCanGrow(Buffer.byteLength(directive));
+    this.#capacityGuard.assertCanGrow(
+      Buffer.byteLength(input.directive ?? "") + Buffer.byteLength(serializedTaxonomy ?? ""),
+    );
     const result = this.#database.prepare(`
       UPDATE cubes AS c
-      SET directive = ?, updated_at = ?
+      SET directive = COALESCE(?, directive),
+          message_taxonomy = CASE WHEN ? = 1 THEN ? ELSE message_taxonomy END,
+          updated_at = ?
       WHERE c.id = ? AND ${scope.sql}
-    `).run(directive, this.#now(), cubeId, ...scope.parameters);
+    `).run(
+      input.directive ?? null,
+      serializedTaxonomy === undefined ? 0 : 1,
+      serializedTaxonomy ?? null,
+      this.#now(),
+      cubeId,
+      ...scope.parameters,
+    );
     if (result.changes !== 1) throw new ScopedStoreError();
+    const cube = this.getCube(cubeId);
+    if (cube === null) throw new ScopedStoreError();
+    return cube;
   }
 
   appendActivity(cubeId: string, message: string): ActivityRecord {
@@ -800,6 +839,7 @@ class SqliteScopedStore implements ScopedStore {
     ]) {
       if (value !== undefined && typeof value !== "boolean") throw new TypeError("Role flags must be boolean.");
     }
+    validateRoleClass(input.roleClass);
     const isDefault = input.isDefault ?? false;
     const isMandatory = input.isMandatory ?? false;
     const isHumanSeat = input.isHumanSeat ?? false;
@@ -829,11 +869,12 @@ class SqliteScopedStore implements ScopedStore {
           id, cube_id, name, short_description, detailed_description,
           is_default, is_mandatory, is_human_seat, can_broadcast,
           receives_all_direct, role_class, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'worker', ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         id, cubeId, input.name, shortDescription, detailedDescription,
         booleanInteger(isDefault), booleanInteger(isMandatory), booleanInteger(isHumanSeat),
-        booleanInteger(canBroadcast), booleanInteger(receivesAllDirect), this.#now(),
+        booleanInteger(canBroadcast), booleanInteger(receivesAllDirect), input.roleClass ?? "worker",
+        this.#now(),
       );
       this.#mutationHook?.("role.insert");
       const row = this.#database.prepare(`
@@ -872,6 +913,7 @@ class SqliteScopedStore implements ScopedStore {
     ]) {
       if (value !== undefined && typeof value !== "boolean") throw new TypeError("Role flags must be boolean.");
     }
+    validateRoleClass(input.roleClass);
     this.#requireCube(cubeId, "manage");
     this.#capacityGuard.assertCanGrow(
       Buffer.byteLength(input.name ?? "") + Buffer.byteLength(input.shortDescription ?? "") +
@@ -908,7 +950,8 @@ class SqliteScopedStore implements ScopedStore {
       this.#database.prepare(`
         UPDATE roles SET
           name = ?, short_description = ?, detailed_description = ?, is_default = ?,
-          is_mandatory = ?, is_human_seat = ?, can_broadcast = ?, receives_all_direct = ?
+          is_mandatory = ?, is_human_seat = ?, can_broadcast = ?, receives_all_direct = ?,
+          role_class = ?
         WHERE id = ? AND cube_id = ?
       `).run(
         input.name ?? existing.name,
@@ -919,6 +962,7 @@ class SqliteScopedStore implements ScopedStore {
         booleanInteger(input.isHumanSeat ?? existing.is_human_seat),
         booleanInteger(input.canBroadcast ?? existing.can_broadcast),
         booleanInteger(input.receivesAllDirect ?? existing.receives_all_direct),
+        input.roleClass ?? existing.role_class,
         roleId,
         cubeId,
       );
@@ -2378,6 +2422,7 @@ function cubeRecord(row: CubeRow): CubeRecord {
     ownerId: row.owner_id,
     name: row.name,
     directive: row.directive,
+    messageTaxonomy: parseTaxonomy(row.message_taxonomy),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -2401,6 +2446,7 @@ function cubeRow(row: Record<string, unknown>): CubeRow {
     owner_id: requiredText(row, "owner_id"),
     name: requiredText(row, "name"),
     directive: requiredText(row, "directive"),
+    message_taxonomy: nullableText(row, "message_taxonomy"),
     created_at: requiredText(row, "created_at"),
     updated_at: requiredText(row, "updated_at"),
   };
@@ -2710,6 +2756,30 @@ function allowedGrantAccess(access: CubeAccess): readonly CubeAccess[] {
 function validateDirective(value: string): void {
   if (Buffer.byteLength(value) > 100_000) {
     throw new Error("Cube directive exceeds 100000 bytes.");
+  }
+}
+
+function validateRoleClass(value: unknown): void {
+  if (value !== undefined && value !== "queen" && value !== "worker") {
+    throw new TypeError("Role class must be queen or worker.");
+  }
+}
+
+function serializeTaxonomy(value: MessageTaxonomy | null): string | null {
+  if (value === null) return null;
+  const serialized = JSON.stringify(value);
+  if (Buffer.byteLength(serialized) > 100_000) {
+    throw new RangeError("Message taxonomy exceeds 100000 bytes.");
+  }
+  return serialized;
+}
+
+function parseTaxonomy(value: string | null): MessageTaxonomy | null {
+  if (value === null) return null;
+  try {
+    return validateMessageTaxonomy(JSON.parse(value));
+  } catch {
+    throw new Error("Database contains invalid message taxonomy.");
   }
 }
 

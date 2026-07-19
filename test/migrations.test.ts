@@ -34,7 +34,7 @@ describe("SQLite migrations", () => {
     expect(first.diagnostics()).toEqual({
       journalMode: "wal",
       foreignKeys: true,
-      schemaVersions: [1, 2, 3, 4, 5, 6, 7, 8, 9],
+      schemaVersions: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
     });
     expect((await stat(join(directory, "data"))).mode & 0o777).toBe(0o700);
     expect((await stat(databasePath)).mode & 0o777).toBe(0o600);
@@ -43,7 +43,7 @@ describe("SQLite migrations", () => {
     first.close();
 
     const second = await openStore({ path: databasePath });
-    expect(second.diagnostics().schemaVersions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    expect(second.diagnostics().schemaVersions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
     second.close();
     await expect(access(databasePath)).resolves.toBeUndefined();
   });
@@ -113,6 +113,8 @@ describe("SQLite migrations", () => {
       { is_mandatory: 0, can_broadcast: 0, receives_all_direct: 0 },
       { is_mandatory: 0, can_broadcast: 0, receives_all_direct: 0 },
     ]);
+    expect(database.prepare("SELECT message_taxonomy FROM cubes WHERE id = ?").get(cubeId))
+      .toEqual({ message_taxonomy: null });
     database.prepare("UPDATE roles SET is_default = 1 WHERE name = 'Coordinator'").run();
     expect(() => database.prepare("UPDATE roles SET is_default = 1 WHERE name = 'Observer'").run())
       .toThrow();

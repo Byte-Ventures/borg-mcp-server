@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 import { posix } from "node:path";
 import { createScanner, SyntaxKind } from "typescript/unstable/ast";
 import { describe, expect, it } from "vitest";
@@ -38,6 +38,25 @@ describe("clean-checkout verification", () => {
       const source = await readFile(new URL(file, import.meta.url), "utf8");
       expect(generatedDistImports(source)).toEqual([]);
       expect(source).toContain("await import(");
+    }
+  });
+
+  it("keeps hosted review actions and static OAuth credentials out of workflows", async () => {
+    const workflowDirectory = new URL("../.github/workflows/", import.meta.url);
+    const workflowNames = (await readdir(workflowDirectory))
+      .filter((name) => name.endsWith(".yml") || name.endsWith(".yaml"));
+    const forbidden = [
+      /anthropics\/claude-code-action/iu,
+      /\$\{\{\s*secrets\.[A-Z0-9_]*OAUTH_TOKEN\s*\}\}/iu,
+      /plugin_marketplaces\s*:/iu,
+    ];
+
+    for (const name of workflowNames) {
+      const workflow = await readFile(new URL(name, workflowDirectory), "utf8");
+      for (const pattern of forbidden) {
+        expect(workflow, `${name} contains forbidden hosted review integration ${pattern}`)
+          .not.toMatch(pattern);
+      }
     }
   });
 });

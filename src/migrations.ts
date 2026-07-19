@@ -360,6 +360,11 @@ export const STORE_MIGRATIONS: readonly Migration[] = Object.freeze([
       ALTER TABLE drones DROP COLUMN attach_generation;
     `,
   },
+  {
+    version: 10,
+    name: "cube_message_taxonomy",
+    sql: "ALTER TABLE cubes ADD COLUMN message_taxonomy TEXT;",
+  },
 ]);
 
 interface AppliedMigrationRow {

@@ -502,6 +502,152 @@ describe("coordination stream setup", () => {
     expect(runtime.forPrincipal(principal).listRoles(cubeId)).toEqual([]);
   });
 
+  it("updates migrated cube context and routes activity through its taxonomy", async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-api-context-")));
+    directories.push(directory);
+    runtime = await openStore({ path: join(directory, "borg.db") });
+    digester = new CredentialDigester(Buffer.alloc(32, 7));
+    const authority = new CredentialAuthority(runtime.credentials, digester);
+    const api = new CoordinationApi(runtime, authority);
+    const managerId = "00000000-0000-4000-8000-000000000081";
+    const readerId = "00000000-0000-4000-8000-000000000082";
+    const cubeId = "00000000-0000-4000-8000-000000000083";
+    const coordinatorRoleId = "00000000-0000-4000-8000-000000000084";
+    const reviewerRoleId = "00000000-0000-4000-8000-000000000085";
+    const coordinatorDroneId = "00000000-0000-4000-8000-000000000086";
+    const reviewerDroneId = "00000000-0000-4000-8000-000000000087";
+    runtime.maintenance.createClient({ id: managerId, name: "Manager" });
+    runtime.maintenance.createClient({ id: readerId, name: "Reader" });
+    runtime.maintenance.createCube({ id: cubeId, name: "Migrated", directive: "old" });
+    runtime.maintenance.grantClientCube({ clientId: managerId, cubeId, access: "manage" });
+    runtime.maintenance.grantClientCube({ clientId: readerId, cubeId, access: "read" });
+    runtime.maintenance.createRole({
+      id: coordinatorRoleId, cubeId, name: "Coordinator", isHumanSeat: true, roleClass: "queen",
+    });
+    runtime.maintenance.createRole({ id: reviewerRoleId, cubeId, name: "Code Reviewer" });
+    runtime.maintenance.createDrone({
+      id: coordinatorDroneId,
+      cubeId,
+      roleId: coordinatorRoleId,
+      clientId: managerId,
+      label: "one-coordinator",
+    });
+    runtime.maintenance.createDrone({
+      id: reviewerDroneId,
+      cubeId,
+      roleId: reviewerRoleId,
+      clientId: managerId,
+      label: "one-reviewer",
+    });
+    const manager = clientPrincipal(managerId);
+    const taxonomy = [{
+      class: "completion",
+      prefixes: ["DONE"],
+      routing: "directed",
+      default_to: ["coordinator"],
+      lifecycle: "completion",
+    }];
+    const updated = await api.handle({
+      method: "PATCH",
+      path: `/api/cubes/${cubeId}`,
+      principal: manager,
+      body: {
+        protocol_version: "2",
+        request_id: "cube-context-update",
+        payload: { cube_directive: "migrated directive", message_taxonomy: taxonomy },
+      },
+      signal: new AbortController().signal,
+    });
+    expect(updated).toMatchObject({
+      status: 200,
+      body: { request_id: "cube-context-update", payload: { cube: {
+        cube_directive: "migrated directive",
+        message_taxonomy: taxonomy,
+      } } },
+    });
+    const denied = await api.handle({
+      method: "PATCH",
+      path: `/api/cubes/${cubeId}`,
+      principal: clientPrincipal(readerId),
+      body: {
+        protocol_version: "2",
+        request_id: "cube-context-denied",
+        payload: { cube_directive: "denied" },
+      },
+      signal: new AbortController().signal,
+    });
+    expect(denied).toMatchObject({ status: 404, body: { error: { code: "NOT_FOUND" } } });
+
+    const routed = await api.handle({
+      method: "POST",
+      path: `/api/cubes/${cubeId}/logs`,
+      principal: manager,
+      body: {
+        protocol_version: "2",
+        request_id: "taxonomy-route",
+        payload: { message: "DONE: migrated" },
+      },
+      signal: new AbortController().signal,
+    });
+    expect(routed).toMatchObject({
+      status: 201,
+      body: { payload: {
+        entry: { visibility: "direct", recipient_drone_ids: [coordinatorDroneId] },
+      } },
+    });
+    const explicitlyRouted = await api.handle({
+      method: "POST",
+      path: `/api/cubes/${cubeId}/logs`,
+      principal: manager,
+      body: {
+        protocol_version: "2",
+        request_id: "taxonomy-explicit-route",
+        payload: { message: "manual completion", class: "completion", to: ["code-reviewer"] },
+      },
+      signal: new AbortController().signal,
+    });
+    expect(explicitlyRouted).toMatchObject({
+      status: 201,
+      body: { payload: {
+        entry: { visibility: "direct", recipient_drone_ids: [reviewerDroneId] },
+      } },
+    });
+
+    const patched = await api.handle({
+      method: "POST",
+      path: `/api/cubes/${cubeId}/taxonomy-patch`,
+      principal: manager,
+      body: {
+        protocol_version: "2",
+        request_id: "taxonomy-replace",
+        payload: {
+          action: "replace",
+          class_def: { class: "completion", prefixes: ["DONE"], routing: "broadcast" },
+        },
+      },
+      signal: new AbortController().signal,
+    });
+    expect(patched).toMatchObject({
+      status: 200,
+      body: { payload: { cube: { message_taxonomy: [{ routing: "broadcast" }] } } },
+    });
+    const broadcast = await api.handle({
+      method: "POST",
+      path: `/api/cubes/${cubeId}/logs`,
+      principal: manager,
+      body: {
+        protocol_version: "2",
+        request_id: "taxonomy-broadcast",
+        payload: { message: "DONE: all seats" },
+      },
+      signal: new AbortController().signal,
+    });
+    expect(broadcast).toMatchObject({
+      status: 201,
+      body: { payload: { entry: { visibility: "broadcast", recipient_drone_ids: [] } } },
+    });
+  });
+
   it("creates full roles only for cube managers and rejects malformed or duplicate requests", async () => {
     const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-api-roles-")));
     directories.push(directory);
@@ -690,7 +836,7 @@ describe("coordination stream setup", () => {
       status: 409,
       body: { request_id: "role-create-request", error: { code: "ROLE_ALREADY_EXISTS" } },
     });
-    const malformed = await api.handle({
+    const classified = await api.handle({
       method: "POST",
       path: `/api/cubes/${cubeId}/roles`,
       principal: manager,
@@ -701,9 +847,20 @@ describe("coordination stream setup", () => {
       },
       signal: new AbortController().signal,
     });
-    expect(malformed).toMatchObject({
+    expect(classified).toMatchObject({
+      status: 201,
+      body: { request_id: "role-invalid-request", payload: { role: { role_class: "queen" } } },
+    });
+    const invalidClass = await api.handle({
+      method: "PATCH",
+      path: `/api/cubes/${cubeId}/roles/${createdRoleId}`,
+      principal: manager,
+      body: { ...body, request_id: "role-class-invalid", payload: { role_class: "admin" } },
+      signal: new AbortController().signal,
+    });
+    expect(invalidClass).toMatchObject({
       status: 400,
-      body: { request_id: "role-invalid-request", error: { code: "INVALID_INPUT" } },
+      body: { request_id: "role-class-invalid", error: { code: "INVALID_INPUT" } },
     });
     const emptyUpdate = await api.handle({
       method: "PATCH",
@@ -717,7 +874,7 @@ describe("coordination stream setup", () => {
       body: { request_id: "role-update-empty", error: { code: "INVALID_INPUT" } },
     });
     expect(runtime.forPrincipal(manager).listRoles(cubeId).map((role) => role.name))
-      .toEqual(["Queen", "Release Quality"]);
+      .toEqual(["Queen", "Release Quality", "Security Auditor"]);
   });
 
   it("logs coordination routing and stream semantics without content bodies", async () => {

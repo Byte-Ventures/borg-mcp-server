@@ -191,7 +191,7 @@ describe("node server service", () => {
       BORG_SERVER_TLS_CA_FILE: "/private/ca.crt",
       BORG_SERVER_MAX_DATABASE_BYTES: "2000000000",
       BORG_TOKEN: "must-not-cross-boundary",
-      GOOGLE_REFRESH_TOKEN: "must-not-cross-boundary",
+      UNRELATED_REFRESH_TOKEN: "must-not-cross-boundary",
     })).toEqual({
       BORG_SERVER_TLS_KEY_FILE: "/private/server.key",
       BORG_SERVER_TLS_CERT_FILE: "/private/server.crt",

@@ -84,6 +84,10 @@ describe("client seat attach", () => {
       clientA.credential, ids.cubeA, ids.roleA, revokedCredential, "attach-revoked",
     );
     runtime.maintenance.revokeDroneSession(revoked.payload.session.id);
+    const database = new DatabaseSync(databasePath);
+    database.prepare("UPDATE drones SET evicted_at = ? WHERE id = ?")
+      .run("2026-07-14T13:01:00.000Z", revoked.payload.drone.id);
+    database.close();
 
     const expiredCredential = generateSecret();
     await attach(clientA.credential, ids.cubeA, ids.roleA, expiredCredential, "attach-expired");

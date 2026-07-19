@@ -37,6 +37,7 @@ import {
   preparePrivateDataDirectory,
   InvitationCubeAmbiguousError,
   InvitationCubeNotFoundError,
+  type LivenessStore,
   type StorageLimits,
 } from "./store.js";
 import type { CubeAccess } from "./store.js";
@@ -81,6 +82,9 @@ interface ServiceDependencies {
   readonly debugOutput?: (line: string) => void;
   readonly installShutdownHandlers?: () => { readonly signal: AbortSignal; readonly dispose: () => void };
   readonly openStore?: typeof openStore;
+  readonly startLivenessScheduler?: (
+    liveness: LivenessStore,
+  ) => { readonly stop: () => void };
   readonly onStartupPhase?: (
     phase: "pre-lock" | "post-lock" | "pre-listen",
   ) => Promise<void>;
@@ -91,6 +95,7 @@ interface RuntimeResources {
   readonly authRuntime: Awaited<ReturnType<typeof openStore>> | undefined;
   readonly digester: CredentialDigester | undefined;
   readonly runtimeLock: RuntimeLock | undefined;
+  readonly livenessScheduler: { readonly stop: () => void } | undefined;
 }
 
 const guardedRuntimeFailures = new Set<RuntimeResources>();
@@ -169,6 +174,7 @@ export function createNodeServerService(dependencies: ServiceDependencies): Serv
         throw error;
       }
       let running: RunningServer | undefined;
+      let livenessScheduler: { readonly stop: () => void } | undefined;
       let key: Buffer | undefined;
       try {
         throwIfShutdown(shutdown?.signal);
@@ -235,9 +241,14 @@ export function createNodeServerService(dependencies: ServiceDependencies): Serv
           debugLogger,
         });
         throwIfShutdown(shutdown?.signal);
+        if (authRuntime !== undefined) {
+          livenessScheduler = (dependencies.startLivenessScheduler ?? startLivenessScheduler)(
+            authRuntime.liveness,
+          );
+        }
       } catch (error) {
         try {
-          await teardownRuntime({ running, authRuntime, digester, runtimeLock });
+          await teardownRuntime({ running, authRuntime, digester, runtimeLock, livenessScheduler });
         } catch (cleanupError) {
           shutdown?.dispose();
           throw fatalTeardownError(error, cleanupError);
@@ -260,7 +271,7 @@ export function createNodeServerService(dependencies: ServiceDependencies): Serv
         failure = error;
       }
       try {
-        await teardownRuntime({ running, authRuntime, digester, runtimeLock });
+        await teardownRuntime({ running, authRuntime, digester, runtimeLock, livenessScheduler });
         debugLogger.emit({ event: "lifecycle", action: "stopped" });
       } catch (cleanupError) {
         shutdown?.dispose();
@@ -552,6 +563,7 @@ interface RuntimeLock {
 }
 
 async function teardownRuntime(resources: RuntimeResources): Promise<void> {
+  resources.livenessScheduler?.stop();
   try {
     await resources.running?.close();
   } catch (error) {
@@ -566,6 +578,21 @@ async function teardownRuntime(resources: RuntimeResources): Promise<void> {
     throw error;
   }
   await resources.runtimeLock?.release();
+}
+
+function startLivenessScheduler(liveness: { readonly scan: () => unknown }): { readonly stop: () => void } {
+  let stopped = false;
+  let timer: NodeJS.Timeout;
+  const schedule = (): void => {
+    timer = setTimeout(() => {
+      if (stopped) return;
+      try { liveness.scan(); } catch { /* Retry on the next bounded tick. */ }
+      schedule();
+    }, 60_000);
+    timer.unref();
+  };
+  schedule();
+  return { stop: () => { stopped = true; clearTimeout(timer); } };
 }
 
 const fatalTeardownErrors = new WeakSet<object>();

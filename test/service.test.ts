@@ -10,7 +10,7 @@ import { CredentialAuthority, CredentialDigester, generateSecret } from "../src/
 import { applyMigrations, STORE_MIGRATIONS } from "../src/migrations.js";
 import { operatorPublicMessage } from "../src/operator-error.js";
 import type { HttpsServerOptions, RunningServer } from "../src/https-server.js";
-import { openStore } from "../src/store.js";
+import { openStore, type LivenessStore } from "../src/store.js";
 import {
   assertLanCaKeyOffline,
   acquireRuntimeLock,
@@ -24,6 +24,36 @@ import {
 } from "../src/service.js";
 
 describe("node server service", () => {
+  it("starts and stops the liveness scheduler with the authenticated runtime", async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-liveness-service-")));
+    try {
+      await bootstrapServer(directory);
+      const stop = vi.fn();
+      const startLivenessScheduler = vi.fn((_liveness: LivenessStore) => ({ stop }));
+      const service = createNodeServerService({
+        environment: { BORG_SERVER_DATA_DIR: directory },
+        readFile: vi.fn().mockResolvedValue(Buffer.from("certificate")),
+        readPrivateKey: vi.fn().mockResolvedValue(Buffer.from("private-key")),
+        startServer: vi.fn().mockResolvedValue({
+          origin: "https://127.0.0.1:7091",
+          limits: {} as never,
+          close: vi.fn().mockResolvedValue(undefined),
+        }),
+        onStarted: vi.fn(),
+        waitForShutdown: vi.fn().mockResolvedValue(undefined),
+        startLivenessScheduler,
+      });
+
+      await service.start([]);
+
+      expect(startLivenessScheduler).toHaveBeenCalledOnce();
+      expect(startLivenessScheduler.mock.calls[0]![0]).toMatchObject({ scan: expect.any(Function) });
+      expect(stop).toHaveBeenCalledOnce();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("emits a redacted startup record only when debug is explicitly enabled", async () => {
     const lines: string[] = [];
     const service = createNodeServerService({

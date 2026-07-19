@@ -16,6 +16,7 @@ import {
   RoleConflictError,
   ScopedStoreError,
   StorageCapacityError,
+  type ActivityStreamRecord,
   type StoreRuntime,
   openStore,
 } from "../src/store.js";
@@ -394,6 +395,7 @@ describe("Principal to ScopedStore isolation", () => {
       "credentials",
       "diagnostics",
       "forPrincipal",
+      "liveness",
       "maintenance",
     ]);
     expect("database" in runtime).toBe(false);
@@ -415,6 +417,121 @@ describe("Principal to ScopedStore isolation", () => {
     const reopened = runtime.forPrincipal(clientPrincipal(ids.clientA));
 
     expect(reopened.readActivity(ids.cubeA, 10)).toContainEqual(entry);
+  });
+
+  it("publishes idempotent ack and claim notifications to their intended audience", () => {
+    const peerDroneId = "00000000-0000-4000-8000-000000000021";
+    const peerSessionId = "00000000-0000-4000-8000-000000000022";
+    runtime.maintenance.createDrone({
+      id: peerDroneId,
+      cubeId: ids.cubeA,
+      roleId: ids.roleA,
+      clientId: ids.clientA,
+      label: "two-of-two-queen",
+    });
+    runtime.maintenance.createDroneSession({
+      id: peerSessionId,
+      clientId: ids.clientA,
+      cubeId: ids.cubeA,
+      droneId: peerDroneId,
+      expiresAt: "2026-07-14T13:00:00.000Z",
+    });
+    const author = runtime.forPrincipal(droneSessionPrincipal({
+      id: ids.sessionA,
+      clientId: ids.clientA,
+      cubeId: ids.cubeA,
+      droneId: ids.droneA,
+    }));
+    const peer = runtime.forPrincipal(droneSessionPrincipal({
+      id: peerSessionId,
+      clientId: ids.clientA,
+      cubeId: ids.cubeA,
+      droneId: peerDroneId,
+    }));
+    const authorEvents: ActivityStreamRecord[] = [];
+    const peerEvents: ActivityStreamRecord[] = [];
+    const stopAuthor = author.subscribeActivity(ids.cubeA, (entry) => authorEvents.push(entry));
+    const stopPeer = peer.subscribeActivity(ids.cubeA, (entry) => peerEvents.push(entry));
+    const entry = author.appendLog(ids.cubeA, { message: "dispatch work" });
+    authorEvents.length = 0;
+    peerEvents.length = 0;
+
+    peer.acknowledge(ids.cubeA, entry.id, "ack");
+    peer.acknowledge(ids.cubeA, entry.id, "ack");
+    expect(authorEvents).toEqual([expect.objectContaining({
+      kind: "ack",
+      author_drone_id: ids.droneA,
+      recipient_drone_ids: [ids.droneA],
+      entry_preview: "dispatch work",
+    })]);
+    expect(peerEvents).toEqual([]);
+
+    authorEvents.length = 0;
+    peer.acknowledge(ids.cubeA, entry.id, "claim");
+    expect(authorEvents).toEqual([expect.objectContaining({
+      kind: "claim",
+      claimant_drone_id: peerDroneId,
+      claimant_role: "Queen",
+      recipient_drone_ids: [ids.droneA],
+    })]);
+    expect(peerEvents).toEqual([]);
+    stopAuthor();
+    stopPeer();
+  });
+
+  it("tracks sender posts separately from roster anchor liveness", () => {
+    const drone = runtime.forPrincipal(droneSessionPrincipal({
+      id: ids.sessionA,
+      clientId: ids.clientA,
+      cubeId: ids.cubeA,
+      droneId: ids.droneA,
+    }));
+    const anchor = drone.appendLog(ids.cubeA, { message: "dispatch received" });
+    expect(drone.listDronesSince(ids.cubeA, anchor.id).drones).toContainEqual(
+      expect.objectContaining({ id: ids.droneA, seen_since: false }),
+    );
+    const response = drone.appendLog(ids.cubeA, { message: "response posted" });
+    expect(drone.listDronesSince(ids.cubeA, anchor.id)).toMatchObject({
+      since: anchor.created_at,
+      drones: [expect.objectContaining({
+        id: ids.droneA,
+        last_seen: response.created_at,
+        last_log_post_at: response.created_at,
+        seen_since: true,
+      })],
+    });
+    expect(() => drone.listDronesSince(ids.cubeA, randomUUID())).toThrow(ScopedStoreError);
+  });
+
+  it("durably pings silent seats with cooldown and resets after a response", async () => {
+    const path = join(directory, "borg.db");
+    runtime.close();
+    runtime = await openStore({ path, clock: () => new Date("2026-07-14T12:20:00.000Z") });
+    const drone = runtime.forPrincipal(droneSessionPrincipal({
+      id: ids.sessionA,
+      clientId: ids.clientA,
+      cubeId: ids.cubeA,
+      droneId: ids.droneA,
+    }));
+    const events: ActivityStreamRecord[] = [];
+    const stop = drone.subscribeActivity(ids.cubeA, (entry) => events.push(entry));
+    expect(runtime.liveness.scan({ silentMs: 600_000, cooldownMs: 600_000 })).toEqual([
+      expect.objectContaining({
+        message: expect.stringContaining("[HEARTBEAT-PING]"),
+        recipient_drone_ids: [ids.droneA],
+      }),
+    ]);
+    expect(events).toHaveLength(1);
+    expect(runtime.liveness.scan({ silentMs: 600_000, cooldownMs: 600_000 })).toEqual([]);
+    drone.appendLog(ids.cubeA, { message: "responsive" });
+    expect(drone.listDrones(ids.cubeA)).toContainEqual(expect.objectContaining({
+      id: ids.droneA,
+      last_seen: "2026-07-14T12:20:00.001Z",
+    }));
+    stop();
+    runtime.close();
+    runtime = await openStore({ path, clock: () => new Date("2026-07-14T12:40:00.000Z") });
+    expect(runtime.liveness.scan({ silentMs: 600_000, cooldownMs: 600_000 })).toHaveLength(1);
   });
 
   it("paginates monotonic tuple cursors and keeps claims outside the log cursor", () => {

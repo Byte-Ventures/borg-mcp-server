@@ -28,6 +28,7 @@ import {
   ScopedStoreError,
   StorageCapacityError,
   type ActivityPage,
+  type ActivityStreamRecord,
   type CubeRecord,
   type EnrichedActivityRecord,
   type LogCursor,
@@ -40,6 +41,7 @@ export interface CoordinationRequest {
   readonly principal: Principal;
   readonly body?: unknown;
   readonly cursor?: string;
+  readonly since?: string;
   readonly signal: AbortSignal;
 }
 
@@ -363,7 +365,10 @@ export class CoordinationApi {
         });
       }
       if (resource === "drones" && request.method === "GET") {
-        return success(200, "drones-read", { drones: store.listDrones(cubeId) });
+        if (request.since === undefined) {
+          return success(200, "drones-read", { drones: store.listDrones(cubeId) });
+        }
+        return success(200, "drones-read", store.listDronesSince(cubeId, request.since));
       }
       if (resource === "logs" && request.method === "POST") {
         const envelope = decodeEnvelope(request.body);
@@ -517,6 +522,8 @@ export class CoordinationApi {
       }
     }, () => { deliveryCount += 1; });
     let replayDirty = false;
+    const pendingNotifications: ActivityStreamRecord[] = [];
+    let notificationIndex = 0;
     let live = false;
     try {
       unsubscribe = store.subscribeActivity(cubeId, (entry) => {
@@ -525,6 +532,7 @@ export class CoordinationApi {
           return;
         }
         if (live) queue.push(encodeLogEvent(entry));
+        else if ("kind" in entry) pendingNotifications.push(entry);
         else replayDirty = true;
       });
       subscribed = true;
@@ -556,10 +564,15 @@ export class CoordinationApi {
               continue;
             }
 
+            while (notificationIndex < pendingNotifications.length) {
+              if (!await queue.write(encodeLogEvent(pendingNotifications[notificationIndex]!))) return;
+              notificationIndex += 1;
+            }
+
             // Reserve room for the bookmark before making live callbacks visible.
             // Any append while waiting marks replay dirty and is fetched first.
             if (!await queue.waitForSpace()) return;
-            if (replayDirty) {
+            if (replayDirty || notificationIndex < pendingNotifications.length) {
               replayDirty = false;
               page = store.readLog(cubeId, replayCursor, 200);
               this.#logReplayPage(cubeId, replayCursor, page);
@@ -874,7 +887,10 @@ function failure(
   };
 }
 
-function encodeLogEvent(entry: EnrichedActivityRecord): string {
+function encodeLogEvent(entry: ActivityStreamRecord): string {
+  if ("kind" in entry) {
+    return `event: log\nid: ${entry.id}\ndata: ${JSON.stringify({ entry })}\n\n`;
+  }
   return `event: log\nid: ${entry.id}\ndata: ${JSON.stringify({
     cursor: { id: entry.id, created_at: entry.created_at },
     entry,

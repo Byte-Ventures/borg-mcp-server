@@ -78,15 +78,21 @@ describe("client seat attach", () => {
     }
   });
 
-  it("keeps revoked and expired session credentials in the generic rejection class", async () => {
+  it("prioritizes eviction while keeping live-seat revocation and expiry generic", async () => {
     const revokedCredential = generateSecret();
     const revoked = await attach(
       clientA.credential, ids.cubeA, ids.roleA, revokedCredential, "attach-revoked",
     );
     runtime.maintenance.revokeDroneSession(revoked.payload.session.id);
+
+    const evictedCredential = generateSecret();
+    const evicted = await attach(
+      clientA.credential, ids.cubeA, ids.roleA, evictedCredential, "attach-evicted",
+    );
+    runtime.maintenance.revokeDroneSession(evicted.payload.session.id);
     const database = new DatabaseSync(databasePath);
     database.prepare("UPDATE drones SET evicted_at = ? WHERE id = ?")
-      .run("2026-07-14T13:01:00.000Z", revoked.payload.drone.id);
+      .run("2026-07-14T13:01:00.000Z", evicted.payload.drone.id);
     database.close();
 
     const expiredCredential = generateSecret();
@@ -94,6 +100,7 @@ describe("client seat attach", () => {
     now = new Date("2026-07-15T13:00:01.000Z");
 
     expect(authority.authenticateStatus(`Bearer ${revokedCredential}`)).toBe("revoked");
+    expect(authority.authenticateStatus(`Bearer ${evictedCredential}`)).toBe("evicted");
     expect(authority.authenticateStatus(`Bearer ${expiredCredential}`)).toBe("revoked");
   });
 

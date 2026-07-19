@@ -303,10 +303,10 @@ export class CredentialAuthority {
       return clientPrincipal(client!.clientId!);
     }
     if (droneValid) {
+      if (drone!.evictedAt !== null) return "evicted";
       if (drone!.revokedAt != null || drone!.expiresAt <= this.#clock().toISOString()) {
         return "revoked";
       }
-      if (drone!.evictedAt !== null) return "evicted";
       return droneSessionPrincipal({
         id: drone!.sessionId,
         clientId: drone!.clientId,

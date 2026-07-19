@@ -216,7 +216,10 @@ describe("coordination stream setup", () => {
       },
       signal: new AbortController().signal,
     });
-    expect(observerManage.status).toBe(404);
+    expect(observerManage).toMatchObject({
+      status: 403,
+      body: { error: { code: "ACCESS_DENIED" } },
+    });
 
     const observerController = new AbortController();
     const participantController = new AbortController();
@@ -810,8 +813,8 @@ describe("coordination stream setup", () => {
       [clientPrincipal(readerId), 403, "ACCESS_DENIED"],
       [
         droneSessionPrincipal({ id: sessionId, clientId: managerId, cubeId, droneId }),
-        404,
-        "NOT_FOUND",
+        403,
+        "ACCESS_DENIED",
       ],
     ] as const) {
       const denied = await api.handle({
@@ -1013,7 +1016,7 @@ describe("coordination stream setup", () => {
         });
         expect(snapshot(), operation.name).toBe(before);
       }
-      for (const principal of [clientPrincipal(ungrantedId), clientPrincipal(foreignManagerId), drone]) {
+      for (const principal of [clientPrincipal(ungrantedId), clientPrincipal(foreignManagerId)]) {
         const hidden = await request(operation, principal);
         expect(hidden, operation.name).toMatchObject({
           status: 404,
@@ -1021,6 +1024,18 @@ describe("coordination stream setup", () => {
         });
         expect(snapshot(), operation.name).toBe(before);
       }
+      const droneDenied = await request(operation, drone);
+      expect(droneDenied, operation.name).toMatchObject({
+        status: 403,
+        body: { error: { code: "ACCESS_DENIED", message: "Access denied." } },
+      });
+      expect(snapshot(), operation.name).toBe(before);
+      const foreignDrone = await request(operation, drone, foreignCubeId);
+      expect(foreignDrone, operation.name).toMatchObject({
+        status: 404,
+        body: { error: { code: "NOT_FOUND" } },
+      });
+      expect(snapshot(), operation.name).toBe(before);
       const unknown = await request(operation, manager, unknownCubeId);
       expect(unknown, operation.name).toMatchObject({
         status: 404,

@@ -127,7 +127,7 @@ describe("Principal to ScopedStore isolation", () => {
 
     expect(drone.listCubes().map((cube) => cube.id)).toEqual([ids.cubeA]);
     expect(drone.getCube(ids.cubeB)).toBeNull();
-    expect(() => drone.updateDirective(ids.cubeA, "role escalation")).toThrow(ScopedStoreError);
+    expect(() => drone.updateDirective(ids.cubeA, "role escalation")).toThrow(AccessDeniedError);
 
     const entry = drone.appendActivity(ids.cubeA, "session-scoped append");
     expect(entry.droneId).toBe(ids.droneA);
@@ -273,7 +273,7 @@ describe("Principal to ScopedStore isolation", () => {
 
     expect(() => manager.createRole(ids.cubeB, { name: "Read only" })).toThrow(AccessDeniedError);
     expect(() => foreignManager.createRole(ids.cubeA, { name: "Foreign" })).toThrow(ScopedStoreError);
-    expect(() => drone.createRole(ids.cubeA, { name: "Queen escalation" })).toThrow(ScopedStoreError);
+    expect(() => drone.createRole(ids.cubeA, { name: "Queen escalation" })).toThrow(AccessDeniedError);
     expect(() => manager.createRole(randomUUID(), { name: "Missing" })).toThrow(ScopedStoreError);
     expect(manager.listRoles(ids.cubeA)).toEqual(before);
   });
@@ -353,7 +353,7 @@ describe("Principal to ScopedStore isolation", () => {
     expect(() => foreignManager.updateRole(ids.cubeA, second.id, { name: "Foreign" }))
       .toThrow(ScopedStoreError);
     expect(() => drone.updateRole(ids.cubeA, second.id, { name: "Escalated" }))
-      .toThrow(ScopedStoreError);
+      .toThrow(AccessDeniedError);
     expect(() => manager.updateRole(ids.cubeB, second.id, { name: "Wrong cube" }))
       .toThrow(AccessDeniedError);
     expect(manager.listRoles(ids.cubeA).find((role) => role.id === first.id)?.is_default).toBe(true);
@@ -881,6 +881,6 @@ describe("Principal to ScopedStore isolation", () => {
     expect(() => drone.recordDecision(ids.cubeA, {
       topic: "runtime",
       decision: "role label cannot escalate",
-    })).toThrow(ScopedStoreError);
+    })).toThrow(AccessDeniedError);
   });
 });

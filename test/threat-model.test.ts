@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
 
 describe("server threat model", () => {
-  it("documents every #1016 acceptance boundary and preserves release authorization", async () => {
+  it("documents every release acceptance boundary and preserves release authorization", async () => {
     const threatModel = await readFile("docs/threat-model.md", "utf8");
     const releaseWorkflow = await readFile(".github/workflows/release.yml", "utf8");
     const manifest = JSON.parse(await readFile("package.json", "utf8")) as {

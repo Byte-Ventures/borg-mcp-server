@@ -6,23 +6,39 @@ HTTPS.
 
 ## Release status
 
-The current public preview is `borgmcp-server@0.1.4`, published on npm.
+The current public preview is `borgmcp-server@0.1.5`, published on npm.
 Versions `0.1.2` and `0.1.3` were not published; their immutable tags are
-internal failed-release evidence and are not installation or dogfood targets.
-Version `0.1.4` retains the
-reviewed owner-enrollment, idempotent multi-cube creation, and stable prior-seat
-reattachment baseline, and adds managed role creation and updates, fail-closed
-setup reinitialization, opt-in redacted debug logging, live-safe invitation
-minting, and atomic cube-scoped invitations with enforced observer posture.
-The published `0.1.4` package consumes the audited exact
-`borgmcp-shared@0.3.0` registry release. Current source consumes the audited
-exact `borgmcp-shared@0.4.0` release for the clean-slate protocol generation.
+preserved failed-release evidence and are not installation or dogfood targets.
+Version `0.1.5` includes the reviewed owner-enrollment, idempotent multi-cube
+creation, managed role administration, fail-closed setup reinitialization,
+redacted debug logging, and cube-scoped invitation baseline. Relative to
+`0.1.4`, it adds idempotent prior-seat reattachment, migrated cube-context and
+taxonomy routing, durable SSE replay and heartbeat delivery, fleet liveness
+signals, typed terminal drone eviction, and explicit manage-access denials for
+visible non-managing principals. The published
+`0.1.5` package and current source consume the audited exact
+`borgmcp-shared@0.4.0` registry release.
 
 Setup prepares local identity and storage and prints one-time recovery and
 owner-enrollment secrets; it creates no cube. Version `0.1.1` completed the
 documented exact-source, tagged-artifact, and protected-publication gates.
-Version `0.1.4` completed a fresh exact-source, tagged-artifact, tokenless OIDC
+Version `0.1.5` completed a fresh exact-source, tagged-artifact, tokenless OIDC
 publication, provenance, signature, and attestation gate chain.
+
+## Repository topology
+
+Borg MCP's local/self-hosted product is split across three public repositories:
+
+- [`borg-mcp-client`](https://github.com/Byte-Ventures/borg-mcp-client) provides
+  the local MCP and command-line client.
+- [`borg-mcp-server`](https://github.com/Byte-Ventures/borg-mcp-server) is this
+  self-hosted coordination authority.
+- [`borg-mcp-shared`](https://github.com/Byte-Ventures/borg-mcp-shared) defines
+  the portable protocol contract and conformance suite used by both sides.
+
+The repositories release independently. Protocol changes land and pass portable
+conformance in `borg-mcp-shared` first; client and server then update to an exact,
+reviewed registry release. Neither consumer uses Git or SSH dependencies.
 
 ## Requirements
 

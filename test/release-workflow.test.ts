@@ -336,8 +336,8 @@ describe("server release lane", () => {
     const runbook = await readFile("docs/releasing.md", "utf8");
 
     for (const gate of [
-      "#1016",
-      "#1026",
+      "server preview threat model",
+      "exact-byte audit trail",
       "SERVER_FSL_COUNSEL_LICENSE_SHA256",
       "public-boundary CR, SR, Release Quality",
       "ARTIFACT_SR_SHA512",
@@ -349,10 +349,16 @@ describe("server release lane", () => {
       "29575906933",
       'GITHUB_TOKEN="$(gh auth token)" node scripts/verify-main-ruleset.mjs',
       "tag authorization record must name the reviewed verifier commit",
+      "borgmcp-server@0.1.5",
+      "The `latest` tag resolves to `0.1.5`",
+      "github.com/Byte-Ventures/borg-mcp-client",
+      "github.com/Byte-Ventures/borg-mcp-shared",
     ]) {
       expect(runbook).toContain(gate);
     }
-    expect(runbook).toContain("The repository is public; visibility is complete");
+    expect(runbook).toContain("The server repository is public; visibility is complete");
     expect(runbook).not.toContain("The repository remains private");
+    expect(runbook).not.toContain("#1016");
+    expect(runbook).not.toContain("#1026");
   });
 });

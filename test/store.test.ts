@@ -563,6 +563,62 @@ describe("Principal to ScopedStore isolation", () => {
     expect(runtime.liveness.scan({ silentMs: 600_000, cooldownMs: 600_000 })).toHaveLength(1);
   });
 
+  it("gives up after three watchdog attempts until genuine activity resets the seat", async () => {
+    const path = join(directory, "borg.db");
+    runtime.close();
+    let now = new Date("2026-07-14T12:20:00.000Z");
+    runtime = await openStore({ path, clock: () => now });
+    const drone = runtime.forPrincipal(droneSessionPrincipal({
+      id: ids.sessionA,
+      clientId: ids.clientA,
+      cubeId: ids.cubeA,
+      droneId: ids.droneA,
+    }));
+
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      expect(runtime.liveness.scan({ silentMs: 600_000, cooldownMs: 0 })).toHaveLength(1);
+      now = new Date(now.getTime() + 1);
+    }
+    expect(runtime.liveness.scan({ silentMs: 600_000, cooldownMs: 0 })).toEqual([]);
+    expect(drone.listDrones(ids.cubeA)).toContainEqual(expect.objectContaining({
+      id: ids.droneA,
+      last_seen: "2026-07-14T12:00:00.000Z",
+    }));
+
+    drone.appendLog(ids.cubeA, { message: "responsive after give-up" });
+    now = new Date(now.getTime() + 1);
+    expect(runtime.liveness.scan({ silentMs: 0, cooldownMs: 0 })).toHaveLength(1);
+  });
+
+  it("processes at most 25 silent candidates per scan", async () => {
+    for (let index = 0; index < 29; index += 1) {
+      const droneId = `00000000-0000-4000-8000-${String(100 + index).padStart(12, "0")}`;
+      const sessionId = `00000000-0000-4000-8000-${String(200 + index).padStart(12, "0")}`;
+      runtime.maintenance.createDrone({
+        id: droneId,
+        cubeId: ids.cubeA,
+        roleId: ids.roleA,
+        clientId: ids.clientA,
+        label: `builder-${index + 2}`,
+      });
+      runtime.maintenance.createDroneSession({
+        id: sessionId,
+        clientId: ids.clientA,
+        cubeId: ids.cubeA,
+        droneId,
+        expiresAt: "2026-07-14T13:00:00.000Z",
+      });
+    }
+    const path = join(directory, "borg.db");
+    runtime.close();
+    runtime = await openStore({ path, clock: () => new Date("2026-07-14T12:20:00.000Z") });
+
+    expect(runtime.liveness.scan({ silentMs: 600_000, cooldownMs: 600_000, limit: 100 }))
+      .toHaveLength(25);
+    expect(runtime.liveness.scan({ silentMs: 600_000, cooldownMs: 600_000, limit: 100 }))
+      .toHaveLength(5);
+  });
+
   it("paginates monotonic tuple cursors and keeps claims outside the log cursor", () => {
     const client = runtime.forPrincipal(clientPrincipal(ids.clientA));
     const alpha = client.appendLog(ids.cubeA, { message: "alpha" });

@@ -1,4 +1,4 @@
-import { request as httpsRequest } from "node:https";
+import { Agent, request as httpsRequest } from "node:https";
 import type { IncomingHttpHeaders } from "node:http";
 import { connect as connectTcp, type Socket } from "node:net";
 import { generate } from "selfsigned";
@@ -7,6 +7,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   createRequestHandlerContext,
   ConcurrentQuota,
+  DEFAULT_SERVICE_LIMITS,
   PreAuthAdmissionLimiter,
   RequestRateLimiter,
   startHttpsServer,
@@ -675,6 +676,193 @@ describe("HTTPS service", () => {
     }
   });
 
+  it("isolates routine-read rate limits between drone sessions owned by one client", async () => {
+    const clientId = "00000000-0000-4000-8000-000000000220";
+    const limited = await startHttpsServer({
+      bind: { port: 0 },
+      tls: { key, cert: certificate },
+      authorizeCoordination: async (authorization) => {
+        if (authorization === "Bearer drone-a") {
+          return droneSessionPrincipal({
+            id: "00000000-0000-4000-8000-000000000221",
+            clientId,
+            cubeId: "00000000-0000-4000-8000-000000000223",
+            droneId: "00000000-0000-4000-8000-000000000224",
+          });
+        }
+        if (authorization === "Bearer drone-b") {
+          return droneSessionPrincipal({
+            id: "00000000-0000-4000-8000-000000000222",
+            clientId,
+            cubeId: "00000000-0000-4000-8000-000000000223",
+            droneId: "00000000-0000-4000-8000-000000000225",
+          });
+        }
+        return "invalid";
+      },
+      handleCoordination: async () => ({ status: 200, body: {} }),
+      limits: {
+        ...server.limits,
+        maxRequestsPerWindow: 3,
+      },
+    });
+    try {
+      const routineReads = [
+        { path: "/api/cubes", method: "GET", body: "" },
+        {
+          path: "/api/cubes/00000000-0000-4000-8000-000000000223/logs",
+          method: "PUT",
+          body: JSON.stringify({ payload: { cursor: null, limit: 20 } }),
+        },
+        {
+          path: "/api/cubes/00000000-0000-4000-8000-000000000223/decisions",
+          method: "PUT",
+          body: JSON.stringify({ payload: {} }),
+        },
+      ];
+      for (const token of ["drone-a", "drone-b"]) {
+        const headers = { authorization: `Bearer ${token}` };
+        for (const read of routineReads) {
+          expect((await request(
+            limited.origin,
+            certificate,
+            read.path,
+            headers,
+            read.body,
+            read.method,
+          )).status).toBe(200);
+        }
+        expect((await request(limited.origin, certificate, "/api/cubes", headers)).status).toBe(429);
+      }
+    } finally {
+      await limited.close();
+    }
+  });
+
+  it("aggregates mutation and stream rate limits across sibling drone sessions", async () => {
+    const clientId = "00000000-0000-4000-8000-000000000230";
+    const authorize = async (authorization: string | undefined) => {
+      const suffix = authorization === "Bearer drone-a" ? "1" : authorization === "Bearer drone-b" ? "2" : null;
+      if (suffix === null) return "invalid" as const;
+      return droneSessionPrincipal({
+        id: `00000000-0000-4000-8000-00000000023${suffix}`,
+        clientId,
+        cubeId: "00000000-0000-4000-8000-000000000233",
+        droneId: `00000000-0000-4000-8000-00000000024${suffix}`,
+      });
+    };
+    const mutationLimited = await startHttpsServer({
+      bind: { port: 0 },
+      tls: { key, cert: certificate },
+      authorizeCoordination: authorize,
+      handleCoordination: async () => ({ status: 201 }),
+      limits: { ...server.limits, maxRequestsPerWindow: 1 },
+    });
+    const logPath = "/api/cubes/00000000-0000-4000-8000-000000000233/logs";
+    try {
+      expect((await request(
+        mutationLimited.origin,
+        certificate,
+        logPath,
+        { authorization: "Bearer drone-a" },
+        JSON.stringify({ payload: { message: "first" } }),
+        "POST",
+      )).status).toBe(201);
+      expect((await request(
+        mutationLimited.origin,
+        certificate,
+        logPath,
+        { authorization: "Bearer drone-b" },
+        JSON.stringify({ payload: { message: "second" } }),
+        "POST",
+      )).status).toBe(429);
+    } finally {
+      await mutationLimited.close();
+    }
+
+    const streamLimited = await startHttpsServer({
+      bind: { port: 0 },
+      tls: { key, cert: certificate },
+      authorizeCoordination: authorize,
+      handleCoordination: async (coordinationRequest) => ({
+        status: 200,
+        stream: heldStream(coordinationRequest.signal),
+      }),
+      limits: { ...server.limits, maxRequestsPerWindow: 1 },
+    });
+    const streamPath = "/api/cubes/00000000-0000-4000-8000-000000000233/stream";
+    const first = await openStream(streamLimited.origin, certificate, streamPath, "Bearer drone-a");
+    try {
+      expect(first.status).toBe(200);
+      expect((await request(streamLimited.origin, certificate, streamPath, {
+        authorization: "Bearer drone-b",
+      })).status).toBe(429);
+    } finally {
+      first.close();
+      await streamLimited.close();
+    }
+  });
+
+  it("keeps a cursor-complete log read burst on a reusable connection", async () => {
+    let expectedCursor: number | null = null;
+    const readCount = 150;
+    const burst = await startHttpsServer({
+      bind: { port: 0 },
+      tls: { key, cert: certificate },
+      authorizeCoordination: async () => clientPrincipal(
+        "00000000-0000-4000-8000-000000000226",
+      ),
+      handleCoordination: async (coordinationRequest) => {
+        const cursor = (coordinationRequest.body as { payload: { cursor: number | null } }).payload.cursor;
+        expect(cursor).toBe(expectedCursor);
+        expectedCursor = expectedCursor === null ? 0 : expectedCursor + 1;
+        return {
+          status: 200,
+          body: {
+            protocol_version: "2",
+            request_id: `read-${expectedCursor}`,
+            payload: {
+              entries: [{ sequence: expectedCursor }],
+              cursor: expectedCursor,
+              behind_by: readCount - expectedCursor - 1,
+              has_more: expectedCursor + 1 < readCount,
+            },
+          },
+        };
+      },
+      limits: {
+        ...DEFAULT_SERVICE_LIMITS,
+        maxRequestsPerWindow: 200,
+        maxRequestsPerAddressWindow: 250,
+        maxRequestsGlobalWindow: 300,
+      },
+    });
+    const agent = new Agent({ keepAlive: true, maxSockets: 1 });
+    try {
+      let cursor: number | null = null;
+      for (let index = 0; index < readCount; index += 1) {
+        const response = await request(
+          burst.origin,
+          certificate,
+          "/api/cubes/00000000-0000-4000-8000-000000000227/logs",
+          { authorization: "Bearer burst-client" },
+          JSON.stringify({ payload: { cursor, limit: 1 } }),
+          "PUT",
+          undefined,
+          agent,
+        );
+        expect(response.status).toBe(200);
+        expect(response.headers.connection).not.toBe("close");
+        const payload = JSON.parse(response.body) as { payload: { cursor: number } };
+        cursor = payload.payload.cursor;
+      }
+      expect(cursor).toBe(readCount - 1);
+    } finally {
+      agent.destroy();
+      await burst.close();
+    }
+  });
+
   it("does not allocate credential quota state for unauthenticated identities", async () => {
     const limited = await startHttpsServer({
       bind: { port: 0 },
@@ -1072,6 +1260,7 @@ function request(
   body = "",
   method = "GET",
   localAddress?: string,
+  agent: Agent | false = false,
 ): Promise<TestResponse> {
   const url = new URL(path, origin);
 
@@ -1085,7 +1274,7 @@ function request(
         headers: { ...headers, ...(body === "" ? {} : { "content-length": byteLength(body) }) },
         ca,
         rejectUnauthorized: true,
-        agent: false,
+        agent,
         ...(localAddress === undefined ? {} : { localAddress }),
       },
       (response) => {

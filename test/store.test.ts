@@ -504,7 +504,7 @@ describe("Principal to ScopedStore isolation", () => {
     expect(() => drone.listDronesSince(ids.cubeA, randomUUID())).toThrow(ScopedStoreError);
   });
 
-  it("durably pings silent seats with cooldown and resets after a response", async () => {
+  it("never wakes an idle seat solely because time has elapsed", async () => {
     const path = join(directory, "borg.db");
     runtime.close();
     runtime = await openStore({ path, clock: () => new Date("2026-07-14T12:20:00.000Z") });
@@ -541,57 +541,31 @@ describe("Principal to ScopedStore isolation", () => {
     const stop = drone.subscribeActivity(ids.cubeA, (entry) => events.push(entry));
     const stopPeer = peer.subscribeActivity(ids.cubeA, (entry) => peerEvents.push(entry));
     const before = drone.readLog(ids.cubeA, null, 10);
-    expect(runtime.liveness.scan({ silentMs: 600_000, cooldownMs: 600_000 })).toEqual([
-      expect.objectContaining({
-        kind: "heartbeat_ping",
-        message: expect.stringContaining("[HEARTBEAT-PING]"),
-        recipient_drone_ids: [ids.droneA],
-      }),
-    ]);
-    expect(events).toHaveLength(1);
+    expect(runtime.liveness.scan()).toEqual([]);
+    expect(events).toEqual([]);
     expect(peerEvents).toEqual([]);
     expect(drone.readLog(ids.cubeA, null, 10)).toEqual(before);
-    expect(runtime.liveness.scan({ silentMs: 600_000, cooldownMs: 600_000 })).toEqual([]);
-    stopPeer();
-    drone.appendLog(ids.cubeA, { message: "responsive" });
-    expect(drone.listDrones(ids.cubeA)).toContainEqual(expect.objectContaining({
-      id: ids.droneA,
-      last_seen: "2026-07-14T12:20:00.000Z",
-    }));
+    expect(runtime.liveness.scan()).toEqual([]);
     stop();
+    stopPeer();
     runtime.close();
     runtime = await openStore({ path, clock: () => new Date("2026-07-14T12:40:00.000Z") });
-    expect(runtime.liveness.scan({ silentMs: 600_000, cooldownMs: 600_000 })).toHaveLength(1);
+    expect(runtime.liveness.scan()).toEqual([]);
   });
 
-  it("gives up after three watchdog attempts until genuine activity resets the seat", async () => {
-    const path = join(directory, "borg.db");
-    runtime.close();
-    let now = new Date("2026-07-14T12:20:00.000Z");
-    runtime = await openStore({ path, clock: () => now });
-    const drone = runtime.forPrincipal(droneSessionPrincipal({
-      id: ids.sessionA,
-      clientId: ids.clientA,
-      cubeId: ids.cubeA,
-      droneId: ids.droneA,
-    }));
+  it("never wakes expired, revoked, or evicted sessions", () => {
+    const manager = runtime.forPrincipal(clientPrincipal(ids.clientA));
 
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      expect(runtime.liveness.scan({ silentMs: 600_000, cooldownMs: 0 })).toHaveLength(1);
-      now = new Date(now.getTime() + 1);
-    }
-    expect(runtime.liveness.scan({ silentMs: 600_000, cooldownMs: 0 })).toEqual([]);
-    expect(drone.listDrones(ids.cubeA)).toContainEqual(expect.objectContaining({
-      id: ids.droneA,
-      last_seen: "2026-07-14T12:00:00.000Z",
-    }));
-
-    drone.appendLog(ids.cubeA, { message: "responsive after give-up" });
-    now = new Date(now.getTime() + 1);
-    expect(runtime.liveness.scan({ silentMs: 0, cooldownMs: 0 })).toHaveLength(1);
+    expect(runtime.liveness.scan()).toEqual([]);
+    runtime.maintenance.revokeDroneSession(ids.sessionA);
+    expect(runtime.liveness.scan()).toEqual([]);
+    runtime.maintenance.expireDroneSession(ids.expiredSession);
+    expect(runtime.liveness.scan()).toEqual([]);
+    manager.evictDrone(ids.cubeA, ids.droneA);
+    expect(runtime.liveness.scan()).toEqual([]);
   });
 
-  it("processes at most 25 silent candidates per scan", async () => {
+  it("does not create synthetic work for a large idle fleet", async () => {
     for (let index = 0; index < 29; index += 1) {
       const droneId = `00000000-0000-4000-8000-${String(100 + index).padStart(12, "0")}`;
       const sessionId = `00000000-0000-4000-8000-${String(200 + index).padStart(12, "0")}`;
@@ -614,10 +588,8 @@ describe("Principal to ScopedStore isolation", () => {
     runtime.close();
     runtime = await openStore({ path, clock: () => new Date("2026-07-14T12:20:00.000Z") });
 
-    expect(runtime.liveness.scan({ silentMs: 600_000, cooldownMs: 600_000, limit: 100 }))
-      .toHaveLength(25);
-    expect(runtime.liveness.scan({ silentMs: 600_000, cooldownMs: 600_000, limit: 100 }))
-      .toHaveLength(5);
+    expect(runtime.liveness.scan()).toEqual([]);
+    expect(runtime.liveness.scan()).toEqual([]);
   });
 
   it("paginates monotonic tuple cursors and keeps claims outside the log cursor", () => {

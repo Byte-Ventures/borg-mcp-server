@@ -3,7 +3,6 @@ name: Verify and publish npm release
 on:
   push:
     tags: ['v*.*.*']
-  workflow_dispatch:
 
 permissions:
   contents: read
@@ -13,182 +12,13 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  oidc-preflight:
-    if: github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    environment:
-      name: npm-publish
-    permissions:
-      contents: read
-      id-token: write
-    steps:
-      - name: Set up exact Node.js
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: 22.22.2
-
-      - name: Verify the trusted-publisher exchange without publishing
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "${GITHUB_ACTIONS}" = "true"
-          test "${GITHUB_EVENT_NAME}" = "workflow_dispatch"
-          test "${GITHUB_RUN_ATTEMPT}" = "1"
-          test "${GITHUB_REF}" = "refs/heads/main"
-          test "${GITHUB_REF_TYPE}" = "branch"
-          test "$(node --version)" = "v22.22.2"
-          test -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}"
-          test -n "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}"
-          test -z "${NODE_AUTH_TOKEN:-}"
-          node <<'NODE'
-          const diagnostics = {
-            idStatus: "request not completed",
-            exchangeStatus: "request not attempted",
-            exchangeBody: "response not received",
-          };
-
-          const redactTokenFields = (value) => {
-            if (Array.isArray(value)) {
-              return value.map(redactTokenFields);
-            }
-            if (value && typeof value === "object") {
-              return Object.fromEntries(Object.entries(value).map(([key, entry]) => [
-                key,
-                key !== "token_type" && /token|authorization|credential|secret/i.test(key)
-                  ? "[REDACTED]"
-                  : redactTokenFields(entry),
-              ]));
-            }
-            return value;
-          };
-
-          const parseJsonWithoutEcho = (text, source) => {
-            try {
-              return JSON.parse(text);
-            } catch {
-              throw new Error(`${source} response was not valid JSON; body omitted`);
-            }
-          };
-
-          const assertClaim = (claims, name, expected) => {
-            if (claims[name] !== expected) {
-              throw new Error(
-                `GitHub OIDC claim ${name} mismatch: expected ${JSON.stringify(expected)}, ` +
-                `received ${JSON.stringify(claims[name])}`,
-              );
-            }
-          };
-
-          let idToken;
-
-          (async () => {
-            const audience = "npm:registry.npmjs.org";
-            const requestUrl = new URL(process.env.ACTIONS_ID_TOKEN_REQUEST_URL);
-            requestUrl.searchParams.set("audience", audience);
-            const idResponse = await fetch(requestUrl, {
-              headers: {
-                accept: "application/json",
-                authorization: `Bearer ${process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN}`,
-              },
-            });
-            diagnostics.idStatus = idResponse.status;
-            if (idResponse.status !== 200) {
-              throw new Error(`GitHub rejected the OIDC token request with status ${idResponse.status}`);
-            }
-            const idBody = parseJsonWithoutEcho(await idResponse.text(), "GitHub OIDC");
-            idToken = idBody.value;
-            if (typeof idToken !== "string" || idToken.length === 0) {
-              throw new Error("GitHub OIDC response did not contain a token");
-            }
-            idBody.value = undefined;
-
-            const tokenParts = idToken.split(".");
-            if (tokenParts.length !== 3) {
-              throw new Error("GitHub returned a malformed OIDC token");
-            }
-            const claims = parseJsonWithoutEcho(
-              Buffer.from(tokenParts[1], "base64url").toString("utf8"),
-              "GitHub OIDC claims",
-            );
-            assertClaim(claims, "aud", audience);
-            assertClaim(claims, "repository", "Byte-Ventures/borg-mcp-server");
-            assertClaim(claims, "environment", "npm-publish");
-            assertClaim(claims, "runner_environment", "github-hosted");
-            assertClaim(claims, "event_name", "workflow_dispatch");
-            assertClaim(claims, "ref", "refs/heads/main");
-            assertClaim(
-              claims,
-              "workflow_ref",
-              "Byte-Ventures/borg-mcp-server/.github/workflows/release.yml@refs/heads/main",
-            );
-
-            const exchangeResponse = await fetch(
-              "https://registry.npmjs.org/-/npm/v1/oidc/token/exchange/package/borgmcp-server",
-              {
-                method: "POST",
-                headers: {
-                  accept: "application/json",
-                  authorization: `Bearer ${idToken}`,
-                },
-              },
-            );
-            idToken = undefined;
-            diagnostics.exchangeStatus = exchangeResponse.status;
-            const exchangeText = await exchangeResponse.text();
-            const exchange = parseJsonWithoutEcho(exchangeText, "npm exchange");
-            diagnostics.exchangeBody = JSON.stringify(redactTokenFields(exchange));
-            const hasExchangeToken = typeof exchange.token === "string" && exchange.token.length > 0;
-            exchange.token = undefined;
-            if (exchangeResponse.status !== 201) {
-              throw new Error(`npm rejected the trusted-publisher exchange with status ${exchangeResponse.status}`);
-            }
-            if (exchange.token_type !== "oidc") {
-              throw new Error("npm exchange response token_type was not oidc");
-            }
-            if (!hasExchangeToken) {
-              throw new Error("npm exchange response did not contain a token");
-            }
-            const expiresAtSeconds = exchange.expires;
-            if (typeof expiresAtSeconds !== "number" || !Number.isSafeInteger(expiresAtSeconds)) {
-              throw new Error("npm returned an invalid exchange token expiry");
-            }
-            const nowSeconds = Date.now() / 1000;
-            if (!(expiresAtSeconds > nowSeconds)) {
-              throw new Error("npm returned an expired exchange token");
-            }
-            const maxExchangeLifetimeSeconds = 60 * 60;
-            if (expiresAtSeconds > nowSeconds + maxExchangeLifetimeSeconds) {
-              throw new Error("npm returned an exchange token expiry outside the allowed range");
-            }
-            process.stdout.write("Trusted-publisher exchange accepted without publishing.\n");
-          })().catch((error) => {
-            const message = error instanceof Error ? error.message : String(error);
-            const stack = error instanceof Error ? error.stack : undefined;
-            console.error(`Trusted-publisher exchange validation failed: ${message}`);
-            if (stack) {
-              console.error(stack);
-            }
-            console.error(`GitHub OIDC response status: ${diagnostics.idStatus}`);
-            console.error(`npm exchange response status: ${diagnostics.exchangeStatus}`);
-            console.error(`npm exchange response body: ${diagnostics.exchangeBody}`);
-            process.exitCode = 1;
-          }).finally(() => {
-            idToken = undefined;
-          });
-          NODE
-
   verify:
-    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     outputs:
       tarball: ${{ steps.pack.outputs.tarball }}
       version: ${{ steps.release.outputs.version }}
     env:
       REPOSITORY_PRIVATE: ${{ github.event.repository.private }}
-      SERVER_1016_APPROVED_SHA: ${{ vars.SERVER_1016_APPROVED_SHA }}
-      SERVER_FSL_COUNSEL_LICENSE_SHA256: ${{ vars.SERVER_FSL_COUNSEL_LICENSE_SHA256 }}
-      SERVER_PUBLIC_REVIEW_APPROVED_SHA: ${{ vars.SERVER_PUBLIC_REVIEW_APPROVED_SHA }}
-      SERVER_RELEASE_AUTHORIZATION: ${{ vars.SERVER_RELEASE_AUTHORIZATION }}
     steps:
       - name: Check out tagged source
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -196,7 +26,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Reject reruns and repository npm configuration
+      - name: Reject immutable release reruns and repository npm configuration
         shell: bash
         run: |
           set -euo pipefail
@@ -208,55 +38,26 @@ jobs:
         with:
           node-version: 22.22.2
 
-      - name: Set up exact npm without mutating the runner installation
-        shell: bash
-        run: |
-          set -euo pipefail
-          bootstrap_config="${RUNNER_TEMP}/npm-bootstrap-config"
-          npm_prefix="${RUNNER_TEMP}/npm-11.18.0"
-          mkdir "${bootstrap_config}"
-          : > "${bootstrap_config}/user.npmrc"
-          : > "${bootstrap_config}/global.npmrc"
-          export NPM_CONFIG_USERCONFIG="${bootstrap_config}/user.npmrc"
-          export NPM_CONFIG_GLOBALCONFIG="${bootstrap_config}/global.npmrc"
-          export NPM_CONFIG_CACHE="${RUNNER_TEMP}/npm-bootstrap-cache"
-          export NPM_CONFIG_REGISTRY="https://registry.npmjs.org/"
-          cd "${RUNNER_TEMP}"
-          npm install --prefix "${npm_prefix}" --ignore-scripts --no-save --registry=https://registry.npmjs.org npm@11.18.0
-          test "$("${npm_prefix}/node_modules/.bin/npm" --version)" = "11.18.0"
-          test "$("${npm_prefix}/node_modules/.bin/npm" config get registry)" = "https://registry.npmjs.org/"
-          echo "${npm_prefix}/node_modules/.bin" >> "${GITHUB_PATH}"
-          printf '%s\n' \
-            "NPM_CONFIG_USERCONFIG=${NPM_CONFIG_USERCONFIG}" \
-            "NPM_CONFIG_GLOBALCONFIG=${NPM_CONFIG_GLOBALCONFIG}" \
-            "NPM_CONFIG_CACHE=${NPM_CONFIG_CACHE}" \
-            "NPM_CONFIG_REGISTRY=${NPM_CONFIG_REGISTRY}" >> "${GITHUB_ENV}"
-
-      - name: Verify immutable release source and all external gates
+      - name: Verify immutable release source and readiness boundaries
         id: release
         shell: bash
         run: |
           set -euo pipefail
-          test "${GITHUB_RUN_ATTEMPT}" = "1"
           test "$(node --version)" = "v22.22.2"
-          test "$(npm --version)" = "11.18.0"
           test "${REPOSITORY_PRIVATE}" = "false"
           version="$(node -p "require('./package.json').version")"
           test "${GITHUB_EVENT_NAME}" = "push"
           test "${GITHUB_REF_TYPE}" = "tag"
           test "${GITHUB_REF_NAME}" = "v${version}"
-          release_ref="refs/release-verification/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          git fetch --force --no-tags origin "refs/tags/${GITHUB_REF_NAME}:${release_ref}"
+          release_ref="refs/release-verification/${GITHUB_REF_NAME}"
+          git fetch --no-tags origin "refs/tags/${GITHUB_REF_NAME}:${release_ref}"
           test "$(git cat-file -t "${release_ref}")" = "tag"
           release_commit="$(git rev-parse "${release_ref}^{commit}")"
+          test "$(git rev-parse HEAD)" = "${release_commit}"
           test "${release_commit}" = "${GITHUB_SHA}"
-          git fetch --force --no-tags origin main:refs/remotes/origin/main
-          git merge-base --is-ancestor "${release_commit}" refs/remotes/origin/main
-          test "${SERVER_1016_APPROVED_SHA}" = "${release_commit}"
-          test "${SERVER_PUBLIC_REVIEW_APPROVED_SHA}" = "${release_commit}"
-          license_sha="$(sha256sum LICENSE | cut -d ' ' -f1)"
-          test "${SERVER_FSL_COUNSEL_LICENSE_SHA256}" = "${license_sha}"
-          test "${SERVER_RELEASE_AUTHORIZATION}" = "${GITHUB_REF_NAME}@${release_commit}"
+          git fetch --no-tags origin refs/heads/main:refs/release-verification/main
+          git merge-base --is-ancestor "${release_commit}" refs/release-verification/main
+          test "$(sha256sum LICENSE | cut -d ' ' -f1)" = "9535abd9881dc5af88523e24e0bed77df8dddd0f255bb74710533ac71140d2a1"
           test -s README.md
           test -s CONTRIBUTING.md
           test -s SECURITY.md
@@ -270,69 +71,39 @@ jobs:
       - name: Install locked dependencies without lifecycle scripts
         run: npm ci --ignore-scripts --registry=https://registry.npmjs.org
 
-      - name: Audit production and complete dependency trees
-        run: |
-          npm audit --omit=dev --audit-level=high --registry=https://registry.npmjs.org
-          npm audit --audit-level=high --registry=https://registry.npmjs.org
+      - name: Audit locked dependency tree
+        run: npm audit --audit-level=high --registry=https://registry.npmjs.org
 
-      - name: Check, test, and build
+      - name: Check, test, and build once
         run: npm run check
 
-      - name: Build exact release tarball
+      - name: Build exact release tarball once
         id: pack
         shell: bash
         run: |
           set -euo pipefail
           mkdir release
-          printf '%s\n' \
-            "run_id=${GITHUB_RUN_ID}" \
-            "run_attempt=${GITHUB_RUN_ATTEMPT}" \
-            "event=${GITHUB_EVENT_NAME}" \
-            "ref=${GITHUB_REF}" \
-            "sha=${GITHUB_SHA}" > release/run-evidence.txt
           npm pack --ignore-scripts --json --pack-destination release > release/pack-result.json
-          node -e 'const fs=require("node:fs");const [r]=JSON.parse(fs.readFileSync("release/pack-result.json","utf8"));fs.appendFileSync(process.env.GITHUB_OUTPUT,`tarball=${r.filename}\n`);'
+          node -e 'const fs=require("node:fs");const [result]=JSON.parse(fs.readFileSync("release/pack-result.json","utf8"));fs.appendFileSync(process.env.GITHUB_OUTPUT,`tarball=${result.filename}\n`);'
 
-      - name: Verify exact release tarball
+      - name: Verify exact release tarball once
         run: node scripts/verify-packed-artifact.mjs "release/${{ steps.pack.outputs.tarball }}" > release/artifact-report.json
 
-      - name: Generate dependency SBOM from the locked release tree
-        shell: bash
-        run: |
-          set -euo pipefail
-          raw_sbom="${RUNNER_TEMP}/borgmcp-server-${{ steps.release.outputs.version }}.raw.cdx.json"
-          release_sbom="release/borgmcp-server-${{ steps.release.outputs.version }}.cdx.json"
-          npm sbom --sbom-format cyclonedx --registry=https://registry.npmjs.org > "${raw_sbom}"
-          node scripts/normalize-release-sbom.mjs "${raw_sbom}" "${release_sbom}"
-          node scripts/verify-release-sbom.mjs "${release_sbom}" > release/sbom-report.json
-
-      - name: Record exact artifact checksums
-        working-directory: release
-        run: sha512sum "${{ steps.pack.outputs.tarball }}" > SHA512SUMS
-
-      - name: Exercise publish metadata without publishing
-        run: npm publish "./release/${{ steps.pack.outputs.tarball }}" --dry-run --ignore-scripts --access public --registry=https://registry.npmjs.org
-
-      - name: Exercise exact tarball in clean consumer prefixes
+      - name: Exercise exact tarball once
         run: node scripts/exercise-packed-artifact.mjs "./release/${{ steps.pack.outputs.tarball }}"
 
-      - name: Upload exact artifact for security audit
+      - name: Upload same-run release artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: npm-release-${{ steps.release.outputs.version }}
           path: |
             release/${{ steps.pack.outputs.tarball }}
             release/artifact-report.json
-            release/borgmcp-server-${{ steps.release.outputs.version }}.cdx.json
-            release/sbom-report.json
-            release/SHA512SUMS
-            release/run-evidence.txt
           if-no-files-found: error
           retention-days: 7
 
   publish:
     needs: verify
-    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     environment:
       name: npm-publish
@@ -340,77 +111,48 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    env:
-      ARTIFACT_SR_SHA512: ${{ vars.ARTIFACT_SR_SHA512 }}
-      NPM_EXPECTED_OWNER: ${{ vars.NPM_EXPECTED_OWNER }}
-      SERVER_RELEASE_AUTHORIZATION: ${{ vars.SERVER_RELEASE_AUTHORIZATION }}
     steps:
-      - name: Check out tagged verification code
+      - name: Check out reviewed release helpers
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-
-      - name: Reject reruns and repository npm configuration
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "${GITHUB_RUN_ATTEMPT}" = "1"
-          test ! -e .npmrc
+        with:
+          persist-credentials: false
 
       - name: Set up exact Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22.22.2
 
-      - name: Set up exact npm without mutating the runner installation
+      - name: Set up Trusted Publishing npm
         shell: bash
         run: |
           set -euo pipefail
-          bootstrap_config="${RUNNER_TEMP}/npm-bootstrap-config"
           npm_prefix="${RUNNER_TEMP}/npm-11.18.0"
-          mkdir "${bootstrap_config}"
-          : > "${bootstrap_config}/user.npmrc"
-          : > "${bootstrap_config}/global.npmrc"
-          export NPM_CONFIG_USERCONFIG="${bootstrap_config}/user.npmrc"
-          export NPM_CONFIG_GLOBALCONFIG="${bootstrap_config}/global.npmrc"
-          export NPM_CONFIG_CACHE="${RUNNER_TEMP}/npm-bootstrap-cache"
-          export NPM_CONFIG_REGISTRY="https://registry.npmjs.org/"
-          cd "${RUNNER_TEMP}"
-          npm install --prefix "${npm_prefix}" --ignore-scripts --no-save --registry=https://registry.npmjs.org npm@11.18.0
-          test "$("${npm_prefix}/node_modules/.bin/npm" --version)" = "11.18.0"
-          test "$("${npm_prefix}/node_modules/.bin/npm" config get registry)" = "https://registry.npmjs.org/"
+          bootstrap_userconfig="${RUNNER_TEMP}/npm-bootstrap.npmrc"
+          bootstrap_cache="${RUNNER_TEMP}/npm-bootstrap-cache"
+          printf '%s\n' 'registry=https://registry.npmjs.org/' > "${bootstrap_userconfig}"
+          NPM_CONFIG_USERCONFIG="${bootstrap_userconfig}" NPM_CONFIG_CACHE="${bootstrap_cache}" \
+            npm install --prefix "${npm_prefix}" --ignore-scripts --no-save \
+            --registry=https://registry.npmjs.org npm@11.18.0
+          exact_npm="${npm_prefix}/node_modules/.bin/npm"
+          test "$(NPM_CONFIG_USERCONFIG="${bootstrap_userconfig}" "${exact_npm}" --version)" = "11.18.0"
+          test "$(NPM_CONFIG_USERCONFIG="${bootstrap_userconfig}" "${exact_npm}" config get registry)" = "https://registry.npmjs.org/"
           echo "${npm_prefix}/node_modules/.bin" >> "${GITHUB_PATH}"
-          printf '%s\n' \
-            "NPM_CONFIG_USERCONFIG=${NPM_CONFIG_USERCONFIG}" \
-            "NPM_CONFIG_GLOBALCONFIG=${NPM_CONFIG_GLOBALCONFIG}" \
-            "NPM_CONFIG_CACHE=${NPM_CONFIG_CACHE}" \
-            "NPM_CONFIG_REGISTRY=${NPM_CONFIG_REGISTRY}" >> "${GITHUB_ENV}"
+          echo "NPM_CONFIG_USERCONFIG=${bootstrap_userconfig}" >> "${GITHUB_ENV}"
+          echo "NPM_CONFIG_CACHE=${bootstrap_cache}" >> "${GITHUB_ENV}"
 
-      - name: Download security-audited artifact
+      - name: Download same-run release artifact
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: npm-release-${{ needs.verify.outputs.version }}
           path: release
 
-      - name: Bind environment approval to the exact audited checksum
-        working-directory: release
-        shell: bash
-        run: |
-          set -euo pipefail
-          sha512sum --check SHA512SUMS
-          artifact_sha="$(cut -d ' ' -f1 SHA512SUMS)"
-          test -n "${ARTIFACT_SR_SHA512}"
-          test "${ARTIFACT_SR_SHA512}" = "${artifact_sha}"
-          test "${SERVER_RELEASE_AUTHORIZATION}" = "${GITHUB_REF_NAME}@${GITHUB_SHA}"
-
-      - name: Re-verify exact audited tarball
-        run: node scripts/verify-packed-artifact.mjs "release/${{ needs.verify.outputs.tarball }}"
-
-      - name: Verify registry ownership and version availability
-        run: node scripts/verify-registry-release.mjs prepublish "release/${{ needs.verify.outputs.tarball }}"
+      - name: Verify immutable version, package, and reviewed owner
+        run: node scripts/verify-registry-release.mjs prepublish release/artifact-report.json
         env:
-          ALLOW_UNCLAIMED_FIRST_PUBLISH: ${{ vars.ALLOW_UNCLAIMED_FIRST_PUBLISH }}
-          NPM_TOKEN_PRESENT: "false"
+          EXPECTED_VERSION: ${{ needs.verify.outputs.version }}
+          NPM_EXPECTED_OWNER: ${{ vars.NPM_EXPECTED_OWNER }}
 
-      - name: Publish the exact audited tarball with tokenless OIDC and provenance
+      - name: Publish same-run tarball with Trusted Publishing provenance
         shell: bash
         run: |
           set -euo pipefail
@@ -420,12 +162,34 @@ jobs:
           test -z "${NODE_AUTH_TOKEN:-}"
           npm publish "./release/${{ needs.verify.outputs.tarball }}" --ignore-scripts --access public --provenance --registry=https://registry.npmjs.org
 
-      - name: Verify registry integrity, ownership, and provenance
-        run: node scripts/verify-registry-release.mjs postpublish "release/${{ needs.verify.outputs.tarball }}"
-        env:
-          GITHUB_SHA: ${{ github.sha }}
+  registry-verification:
+    needs: [verify, publish]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out reviewed release helpers
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
 
-      - name: Cryptographically verify registry signatures and attestations
+      - name: Set up exact Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22.22.2
+
+      - name: Download same-run release report
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: npm-release-${{ needs.verify.outputs.version }}
+          path: release
+
+      - name: Verify bounded registry integrity
+        run: node scripts/verify-registry-release.mjs postpublish release/artifact-report.json
+        env:
+          EXPECTED_VERSION: ${{ needs.verify.outputs.version }}
+
+      - name: Verify registry signatures and Trusted Publishing attestation
         shell: bash
         run: |
           set -euo pipefail

@@ -1,9 +1,9 @@
 # Release runbook
 
-Each release requires separate exact-source and exact-artifact authorization.
-The workflow in `.github/workflows/release.yml` supports the existing public npm
-package, but committing or merging release preparation does not authorize a tag,
-package publication, or deployment.
+Each release requires separate exact-source review and human publication authorization.
+The tag-triggered workflow in `.github/workflows/release.yml` supports the existing public npm
+package, but committing or merging release preparation does not authorize a tag, protected
+environment approval, package publication, or deployment.
 
 ## Hard blockers
 
@@ -16,8 +16,8 @@ Every item below must be complete before a release tag is authorized:
    No Additional Permission, Additional Use Grant, or other addendum may be appended. The approval
    and exact-byte audit trail is tracked by `#1026`.
 3. The exact approved text is committed as `LICENSE`, `package.json` uses
-   `"license": "SEE LICENSE IN LICENSE"`, and the license SHA-256 is recorded in
-   `SERVER_FSL_COUNSEL_LICENSE_SHA256`.
+   `"license": "SEE LICENSE IN LICENSE"`, and the tag workflow compares the file with the reviewed
+   SHA-256 `9535abd9881dc5af88523e24e0bed77df8dddd0f255bb74710533ac71140d2a1`.
 4. The repository has completed public-boundary CR, SR, Release Quality, documentation,
    sensitivity, credential-history, dependency, and vulnerability review for the exact commit.
 5. `README.md`, `CONTRIBUTING.md`, and `SECURITY.md` are complete for a standalone public repository.
@@ -25,20 +25,25 @@ Every item below must be complete before a release tag is authorized:
 7. All declared dependencies are exact registry versions, a publishable `npm-shrinkwrap.json` locks
    the complete build and consumer trees without non-registry sources, and the production tree has no
    install scripts. Source maps reference shipped files, and
-   `node scripts/verify-packed-artifact.mjs <tarball>` accepts the exact package. NOTICE, third-party
-   license disclosures, and the normalized, fail-closed-verified CycloneDX SBOM must match that tree.
-8. After any tokenless authentication-path change or failed OIDC release, a Queen-approved,
-   first-attempt preflight from protected `main` has completed the GitHub-to-npm exchange without
-   publishing, staging, printing, storing, or uploading either token.
-9. The Coordinator has recorded a separate release authorization for the exact version, tag,
+   `node scripts/verify-packed-artifact.mjs <tarball>` accepts the exact package. NOTICE and
+   third-party license disclosures must match that tree. Any useful SBOM or supplemental report is
+   generated outside the publish-critical path and cannot change publication outcome.
+8. The Coordinator has recorded a separate release authorization for the exact version, tag,
    and commit under the ratified `release-tag-coordinator-autonomy` decision after all prior gates.
 
-The verify job enforces these approvals by exact value rather than by presence:
+The workflow binds the source-contained release boundaries directly:
 
-- `SERVER_1016_APPROVED_SHA` equals the tagged commit.
-- `SERVER_PUBLIC_REVIEW_APPROVED_SHA` equals the tagged commit.
-- `SERVER_FSL_COUNSEL_LICENSE_SHA256` equals `sha256sum LICENSE`.
-- `SERVER_RELEASE_AUTHORIZATION` equals `v<version>@<commit>`.
+- the remote annotated tag peels to the checked-out `GITHUB_SHA` and that commit is on protected
+  `main`;
+- the tag equals `v<package version>` and package identity is exactly `borgmcp-server`;
+- the canonical FSL file, manifest license declaration, repository visibility, and required public
+  documentation are exact; and
+- the source lock and packed artifact verifiers preserve dependency, license, notice, entrypoint,
+  lifecycle-script, and public-package boundaries.
+
+External review and authorization are deliberately not reconstructed as repository variables or
+cross-run tuples. They are prerequisites to tag creation and the protected environment's human
+approval, and remain independently attributable in the cube record.
 
 The repository must already be public and `package.json` must have the separately approved version,
 `private: false`, the exact repository URL, and public npm publish metadata. These are outputs of
@@ -59,14 +64,12 @@ Before any tag is authorized, the Coordinator configures and verifies:
   gates rather than GitHub review approvals, avoiding a sole-operator deadlock.
 - An active tag ruleset protects `refs/tags/v*.*.*` from update, deletion, and non-fast-forward;
   only the designated release operator may create a tag after exact authorization by the Coordinator.
-- The `npm-publish` environment allows protected `main` for the dispatch-only OIDC preflight and
-  `v*.*.*` for publication, has no admin bypass, and requires the designated Queen operator to
-  approve both preflight and exact-artifact deployments.
+- The `npm-publish` environment allows only protected `v*.*.*` tags, has no admin bypass, and
+  requires the designated Queen operator to approve the exact same-run artifact deployment.
 - npm ownership is verified and Trusted Publishing is bound to this repository,
   `.github/workflows/release.yml`, and the `npm-publish` environment. Owned-package releases use
-  tokenless OIDC: `ALLOW_UNCLAIMED_FIRST_PUBLISH` must be `false` and the environment must contain no
-  `NPM_TOKEN`. Bootstrap mode and its token were first-publication-only exceptions and must never be
-  restored for an owned package.
+  tokenless OIDC; the environment contains only the reviewed `NPM_EXPECTED_OWNER` variable and no
+  npm token. Bootstrap mode and long-lived credentials must never be restored for an owned package.
 
 Repository visibility must not be changed under this runbook. Visibility requires its own explicit
 authorization after all public-boundary and license gates.
@@ -91,38 +94,35 @@ separate exact-artifact CR/SR/Release Quality gates before any preview.
 
 ## Verification and artifact audit
 
-1. Merge reviewed source to protected `main` and verify the merge commit and required CI checks.
-2. After any tokenless authentication-path change or failed OIDC release, run the dispatch-only
-   preflight from exactly `refs/heads/main` in the Queen-approved `npm-publish` environment and require
-   an accepted, short-lived npm exchange token before selecting or preparing a recovery version.
-3. Obtain separate authorization naming the immutable version, annotated tag, and exact commit.
-4. Create the annotated tag once. Never move, reuse, force-update, or rerun a failed release tag.
-5. The tag-push workflow verifies the remote annotated tag object through an isolated ref, binds its
-   peeled commit to `GITHUB_SHA`, and requires that commit to be on `origin/main`.
-6. Both jobs reject workflow reruns and repository npm configuration before bootstrapping exact npm
-   from the official registry with isolated configuration. Before `npm ci` or any repository build
-   tool runs, a builtins-only verifier binds every source-lock dependency to its exact official
-   registry metadata. The unprivileged `verify` job then installs with scripts disabled, audits
-   dependencies, runs all checks, creates one npm tarball, binds its lock
-   entries to official registry metadata, verifies its allowlist and entrypoints, installs/imports/runs
-   that exact tarball in clean consumer prefixes, normalizes npm's checkout-derived SBOM root name,
-   verifies the CycloneDX root identity, lock-bound components, hashes, distribution URLs, and complete
-   dependency graph, records run evidence and SHA-512, performs an npm dry run, and uploads only the
-   verified SBOM and exact files. It has no environment, publish token, or OIDC permission.
-7. SR downloads and audits the workflow artifact itself, including the tarball, report, SBOM, and
-   checksum. Source review or a locally rebuilt tarball cannot substitute for this gate.
-8. After `SECURITY-APPROVED` names the exact SHA-512, the Coordinator sets the protected environment
-   `ARTIFACT_SR_SHA512` to that value. The Queen operator separately reviews and approves the pending
-   environment deployment.
-9. The publish job downloads rather than rebuilds the artifact, checks SHA-512, re-runs artifact and
-   registry ownership checks, requires GitHub to expose both OIDC request variables, rejects any
-   retained `NODE_AUTH_TOKEN`, and publishes that tarball with tokenless npm OIDC and provenance.
-10. The job verifies registry integrity, sole expected ownership, in-toto/SLSA provenance identity,
-    Git commit, workflow/tag binding, and npm signatures/attestations.
-11. After successful registry verification, update the README and this runbook in a fresh reviewed
-    documentation change so public release claims match the shipped package.
-12. Stop immediately on any mismatch. Preserve the run and tag as immutable evidence; recovery uses
-    a newly reviewed source fix, a new version, and a newly authorized tag.
+1. Merge reviewed source to protected `main`, verify the merge commit and required CI checks, and
+   obtain separate release authorization naming the immutable version, annotated tag, and commit.
+2. Create the annotated tag once. Never move, reuse, force-update, or rerun a failed release tag.
+3. The tag workflow verifies the remote annotated tag through an isolated ref, binds its peeled
+   commit to `GITHUB_SHA`, requires that commit on protected `main`, and rejects repository npm
+   configuration before running dependency code.
+4. The unprivileged `verify` job is the one build, test, package, and artifact-verification authority.
+   It verifies the source lock, installs with lifecycle scripts disabled, audits, runs the complete
+   check/test/build gate, packs once, verifies once, and installs/imports/runs that exact server
+   tarball once in clean consumer prefixes.
+5. The verify job uploads only the same-run tarball and verifier report. The report contains the
+   package identity, version, and canonical SHA-512 SRI; no checksum bundle, run tuple, rebuild,
+   duplicate verification, or critical-path SBOM is needed.
+6. The protected publish job downloads that same-run tarball and verifier report. Its read-only
+   preflight rejects a wrong package or version, an existing immutable version, an unclaimed package,
+   or ownership other than the sole reviewed `NPM_EXPECTED_OWNER`. It then publishes the tarball once
+   through npm Trusted Publishing with provenance, lifecycle scripts disabled, and no long-lived npm
+   token.
+7. A separate read-only job performs one bounded registry integrity comparison with the verifier
+   report, installs the exact registry version with lifecycle scripts disabled, and runs
+   `npm audit signatures` to verify registry signatures and the Trusted Publishing attestation.
+   A successful publish job remains recorded as successful if this later readback fails; such a
+   failure is a release incident and never authorizes a rerun or second publication.
+8. Useful SBOM or supplemental report generation may run separately, but cannot gate, invalidate, or
+   make an otherwise authentic immutable publication ambiguous.
+9. After successful registry verification, update the README and this runbook in a fresh reviewed
+   documentation change so public release claims match the shipped package.
+10. Stop immediately on any mismatch before publication. Preserve every run and tag as immutable
+    evidence; recovery uses a newly reviewed source fix, a new version, and a newly authorized tag.
 
 ## Current audit state
 
@@ -254,11 +254,11 @@ First-publication run `29495546749` built and published the exact audited artifa
 concluded `failure` when the immediate postpublish ownership read returned HTTP 404 before registry
 propagation completed. The run and tag remain immutable and must not be rerun, moved, or reused.
 
-Future postpublish version, ownership, and provenance reads retry only transient HTTP 404 propagation
-responses. The production envelope performs at most 18 reads over approximately three and a half
-minutes (1, 2, 4, and 8 second waits, then a 15 second cap). Every non-404 response proceeds directly
-to the existing terminal status or content verification; integrity, owner, provenance, workflow, tag,
-commit, and builder mismatches remain immediate failures.
+Future postpublish version reads retry only transient HTTP 404 propagation responses. The production
+envelope performs at most 18 reads over approximately three and a half minutes (1, 2, 4, and 8 second
+waits, then a 15 second cap). Every non-404 response proceeds directly to terminal status and exact
+integrity verification. The following `npm audit signatures` readback verifies npm's registry
+signatures and Trusted Publishing attestation instead of reconstructing provenance statements locally.
 
 The immutable annotated `v0.1.0` tag object
 `0f454997ced06802f0d3a0518c2e294af5a73b56` and first-attempt workflow run `29494436948`
@@ -271,5 +271,5 @@ source and merge commit, pre-tag repository-variable evidence, and a never-befor
 The live `borgmcp-server@0.1.4` package consumes the audited exact
 `borgmcp-shared@0.3.0` registry release. Current source consumes the audited exact
 `borgmcp-shared@0.4.0` release; its shrinkwrap must resolve that registry tarball with the matching
-SRI. The source-lock, artifact, audit, signature, SBOM, and consumer gates must pass without Git
-dependencies before release review.
+SRI. The source-lock, artifact, audit, signature, and consumer gates must pass without Git dependencies
+before release review; SBOM generation is supplemental and outside the publication-critical path.

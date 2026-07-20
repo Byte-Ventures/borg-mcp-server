@@ -6,7 +6,9 @@ import {
   ProtocolContractError,
   createProtocolEnvelope,
   decodeAttachRequestEnvelope,
+  decodeEvictDroneRequestEnvelope,
   decodeProtocolEnvelope,
+  decodeReassignDroneRequestEnvelope,
 } from "borgmcp-shared/protocol";
 import type { Principal } from "./principal.js";
 import { assertServerDerivedPrincipal } from "./principal.js";
@@ -24,9 +26,11 @@ import {
   CreateCubeConflictError,
   DefaultRoleRequiredError,
   RoleConflictError,
+  RoleInUseError,
   RoleSectionConflictError,
   ScopedStoreError,
   StorageCapacityError,
+  type DroneRecord,
   type ActivityPage,
   type ActivityStreamRecord,
   type CubeRecord,
@@ -199,17 +203,21 @@ export class CoordinationApi {
 
     const roleMatch = /^\/api\/cubes\/([0-9a-f-]{36})\/roles\/([0-9a-f-]{36})(\/section-patch)?$/u
       .exec(request.path);
+    const droneMatch = /^\/api\/cubes\/([0-9a-f-]{36})\/drones\/([0-9a-f-]{36})$/u
+      .exec(request.path);
     const match = /^\/api\/cubes\/([0-9a-f-]{36})(?:\/(roles|drones|logs|acks|decisions|stream|taxonomy-patch))?$/u
       .exec(request.path);
-    if (match === null && roleMatch === null) {
+    if (match === null && roleMatch === null && droneMatch === null) {
       return failure(404, "NOT_FOUND", "The requested resource was not found.");
     }
-    const cubeId = (roleMatch?.[1] ?? match?.[1])!;
+    const cubeId = (roleMatch?.[1] ?? droneMatch?.[1] ?? match?.[1])!;
     const roleId = roleMatch?.[2];
-    if (!uuidPattern.test(cubeId) || (roleId !== undefined && !uuidPattern.test(roleId))) {
+    const droneId = droneMatch?.[2];
+    if (!uuidPattern.test(cubeId) || (roleId !== undefined && !uuidPattern.test(roleId)) ||
+        (droneId !== undefined && !uuidPattern.test(droneId))) {
       return failure(404, "NOT_FOUND", "The requested resource was not found.");
     }
-    const resource = roleMatch === null ? match?.[2] : "role";
+    const resource = roleMatch !== null ? "role" : droneMatch !== null ? "drone" : match?.[2];
     const sectionPatch = roleMatch?.[3] !== undefined;
     const store = this.#runtime.forPrincipal(authentication);
 
@@ -370,6 +378,16 @@ export class CoordinationApi {
         const since = decodeSince(request.since);
         return success(200, "drones-read", store.listDronesSince(cubeId, since));
       }
+      if (resource === "drone" && request.method === "PATCH") {
+        const envelope = decodeReassignDroneRequestEnvelope(request.body);
+        const drone = store.reassignDrone(cubeId, droneId!, envelope.payload.role_id);
+        return success(200, envelope.request_id, { drone: managedDronePayload(drone) });
+      }
+      if (resource === "drone" && request.method === "DELETE") {
+        const envelope = decodeEvictDroneRequestEnvelope(request.body);
+        store.evictDrone(cubeId, droneId!);
+        return success(200, envelope.request_id, { drone_id: droneId!, evicted: true });
+      }
       if (resource === "logs" && request.method === "POST") {
         const envelope = decodeEnvelope(request.body);
         exactKeys(envelope.payload, ["message"], [
@@ -479,6 +497,9 @@ export class CoordinationApi {
         return failure(409, error.code, error.message, safeRequestId(request.body));
       }
       if (error instanceof RoleSectionConflictError) {
+        return failure(409, error.code, error.message, safeRequestId(request.body));
+      }
+      if (error instanceof RoleInUseError) {
         return failure(409, error.code, error.message, safeRequestId(request.body));
       }
       if (error instanceof StorageCapacityError) {
@@ -919,6 +940,15 @@ function cubePayload(cube: CubeRecord) {
     message_taxonomy: cube.messageTaxonomy,
     created_at: cube.createdAt,
     updated_at: cube.updatedAt,
+  };
+}
+
+function managedDronePayload(drone: DroneRecord) {
+  return {
+    id: drone.id,
+    cube_id: drone.cube_id,
+    role_id: drone.role_id,
+    label: drone.label,
   };
 }
 

@@ -38,7 +38,7 @@ describe("borgmcp-shared server adapter", () => {
 
       expect(report.results.filter((result) => !result.ok)).toEqual([]);
       expect(report.ok).toBe(true);
-      expect(report.results).toHaveLength(13);
+      expect(report.results).toHaveLength(19);
     } finally {
       await fixture.server.close();
       fixture.digester.destroy();
@@ -60,7 +60,7 @@ async function conformanceEnvironment(): Promise<{
   const authority = new CredentialAuthority(runtime.credentials, digester);
   const api = new CoordinationApi(runtime, authority);
   const exchangeEnrollment = createEnrollmentExchange(authority);
-  const principalCubes = new Map<string, string>();
+  const principalCubes = new Map<string, Map<string, "read" | "write" | "manage">>();
   const invitations = new Map<string, string>();
   const enrolledClients = new Map<string, string>();
   const principalCredentials = new Map<string, string>();
@@ -71,6 +71,7 @@ async function conformanceEnvironment(): Promise<{
     access: "manage";
   }>();
   const pendingCreateCapability = new Set<string>();
+  const managedSessions = new Map<string, { sessionId: string; credential: string }>();
   const recovery = authority.createRecoveryCredential();
   const material = await generate([{ name: "commonName", value: "localhost" }], {
     algorithm: "sha256",
@@ -105,6 +106,7 @@ async function conformanceEnvironment(): Promise<{
         principalCredentials.clear();
         createdByPrincipal.clear();
         pendingCreateCapability.clear();
+        managedSessions.clear();
       },
       createPrincipal: async () => ({ id: randomUUID() }),
       createCube: async (name) => {
@@ -112,13 +114,61 @@ async function conformanceEnvironment(): Promise<{
         runtime.maintenance.createCube({ id, name, directive: "" });
         return { id };
       },
-      grantCube: async (principal, cube) => {
-        principalCubes.set(principal.id, cube.id);
+      grantCube: async (principal, cube, access = "manage") => {
+        const grants = principalCubes.get(principal.id) ?? new Map();
+        grants.set(cube.id, access);
+        principalCubes.set(principal.id, grants);
         const clientId = enrolledClients.get(principal.id);
         if (clientId !== undefined) {
-          runtime.maintenance.grantClientCube({ clientId, cubeId: cube.id, access: "manage" });
+          runtime.maintenance.grantClientCube({ clientId, cubeId: cube.id, access });
         }
       },
+      createRole: async (cube, input) => {
+        const id = randomUUID();
+        runtime.maintenance.createRole({
+          id,
+          cubeId: cube.id,
+          name: `Conformance ${id.slice(-8)}`,
+          roleClass: input.roleClass,
+          isHumanSeat: input.isHumanSeat,
+        });
+        return { id };
+      },
+      createDrone: async (principal, cube, role) => {
+        const credential = principalCredentials.get(principal.id);
+        if (credential === undefined) throw new Error("Principal is not enrolled.");
+        const authenticated = authority.authenticate(`Bearer ${credential}`);
+        if (authenticated === null) throw new Error("Principal credential is invalid.");
+        const sessionCredential = generateSecret();
+        const attachment = authority.attachSeat(runtime.forPrincipal(authenticated), {
+          cubeId: cube.id,
+          roleId: role.id,
+          sessionCredential,
+        });
+        managedSessions.set(attachment.drone.id, {
+          sessionId: attachment.sessionId,
+          credential: sessionCredential,
+        });
+        return { id: attachment.drone.id };
+      },
+      issueManagedDroneSession: async (drone) => {
+        const session = managedSessions.get(drone.id);
+        if (session === undefined) throw new Error("Managed drone session is unavailable.");
+        return session.credential;
+      },
+      revokeManagedDroneSession: async (drone) => {
+        const session = managedSessions.get(drone.id);
+        if (session === undefined) throw new Error("Managed drone session is unavailable.");
+        runtime.maintenance.revokeDroneSession(session.sessionId);
+      },
+      expireManagedDroneSession: async (drone) => {
+        const session = managedSessions.get(drone.id);
+        if (session === undefined) throw new Error("Managed drone session is unavailable.");
+        runtime.maintenance.expireDroneSession(session.sessionId);
+      },
+      inspectManagedDrone: async (drone) => runtime.maintenance.inspectManagedDrone(drone.id),
+      inspectCubeManagementState: async (cube) =>
+        runtime.maintenance.inspectCubeManagementState(cube.id),
       grantCreateCubeCapability: async (principal) => {
         const clientId = enrolledClients.get(principal.id);
         if (clientId === undefined) pendingCreateCapability.add(principal.id);
@@ -200,12 +250,12 @@ async function conformanceEnvironment(): Promise<{
             payload: { client_id: string };
           };
           const principalId = invitations.get(record.payload.invitation);
-          const cubeId = principalId === undefined ? undefined : principalCubes.get(principalId);
+          const grants = principalId === undefined ? undefined : principalCubes.get(principalId);
           if (principalId !== undefined) {
             enrolledClients.set(principalId, body.payload.client_id);
             principalCredentials.set(principalId, record.payload.client_credential);
-            if (cubeId !== undefined) runtime.maintenance.grantClientCube({
-              clientId: body.payload.client_id, cubeId, access: "manage",
+            for (const [cubeId, access] of grants ?? []) runtime.maintenance.grantClientCube({
+              clientId: body.payload.client_id, cubeId, access,
             });
             if (pendingCreateCapability.has(principalId)) {
               runtime.maintenance.grantCreateCubeCapability(body.payload.client_id);
@@ -238,10 +288,52 @@ async function conformanceEnvironment(): Promise<{
         transport.request("PUT", `/api/cubes/${cube.id}/logs`, JSON.stringify(request), credential),
       ack: async (credential, cube, request) =>
         transport.request("POST", `/api/cubes/${cube.id}/acks`, JSON.stringify(request), credential),
+      updateCube: async (credential, cube, request) =>
+        transport.request("PATCH", `/api/cubes/${cube.id}`, JSON.stringify(request), credential),
+      createRole: async (credential, cube, request) =>
+        transport.request("POST", `/api/cubes/${cube.id}/roles`, JSON.stringify(request), credential),
+      patchTaxonomy: async (credential, cube, request) => {
+        const envelope = request as {
+          protocol_version: string;
+          request_id: string;
+          payload: { marker: string };
+        };
+        return transport.request(
+          "POST",
+          `/api/cubes/${cube.id}/taxonomy-patch`,
+          JSON.stringify({
+            protocol_version: envelope.protocol_version,
+            request_id: envelope.request_id,
+            payload: {
+              action: "add",
+              class_def: {
+                class: envelope.payload.marker,
+                prefixes: [`${envelope.payload.marker}:`],
+                routing: "broadcast",
+              },
+            },
+          }),
+          credential,
+        );
+      },
       recordDecision: async (credential, cube, request) =>
         transport.request("POST", `/api/cubes/${cube.id}/decisions`, JSON.stringify(request), credential),
       listDecisions: async (credential, cube, request) =>
         transport.request("PUT", `/api/cubes/${cube.id}/decisions`, JSON.stringify(request), credential),
+      listDrones: async (credential, cube) =>
+        transport.request("GET", `/api/cubes/${cube.id}/drones`, undefined, credential),
+      reassignDrone: async (credential, cube, drone, request) => transport.request(
+        "PATCH",
+        `/api/cubes/${cube.id}/drones/${drone.id}`,
+        JSON.stringify(request),
+        credential,
+      ),
+      evictDrone: async (credential, cube, drone, request) => transport.request(
+        "DELETE",
+        `/api/cubes/${cube.id}/drones/${drone.id}`,
+        JSON.stringify(request),
+        credential,
+      ),
       openStream: async (credential, cube, cursor) => transport.stream(
         `/api/cubes/${cube.id}/stream${cursor === null ? "" : `?cursor=${opaqueCursor(cursor)}`}`,
         credential,

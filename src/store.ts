@@ -289,6 +289,8 @@ export interface ScopedStore {
     readonly drones: DroneRecord[];
     readonly since: string;
   };
+  readonly reassignDrone: (cubeId: string, droneId: string, roleId: string) => DroneRecord;
+  readonly evictDrone: (cubeId: string, droneId: string) => void;
   readonly appendLog: (cubeId: string, input: {
     readonly message: string;
     readonly visibility?: "broadcast" | "direct";
@@ -441,6 +443,24 @@ export interface MaintenanceStore {
   }) => void;
   readonly revokeClient: (clientId: string) => void;
   readonly revokeDroneSession: (sessionId: string) => void;
+  readonly expireDroneSession: (sessionId: string) => void;
+  readonly inspectManagedDrone: (droneId: string) => {
+    readonly role_id: string;
+    readonly evicted: boolean;
+    readonly session_revoked: boolean;
+  };
+  readonly inspectCubeManagementState: (cubeId: string) => {
+    readonly directive: string;
+    readonly taxonomy_marker: string | null;
+    readonly role_ids: readonly string[];
+    readonly active_decision_ids: readonly string[];
+    readonly drones: ReadonlyArray<{
+      readonly id: string;
+      readonly role_id: string;
+      readonly evicted: boolean;
+      readonly session_revoked: boolean;
+    }>;
+  };
   readonly expireActivityCursor: (cubeId: string, cursor: LogCursor) => void;
 }
 
@@ -477,6 +497,15 @@ export class RoleSectionConflictError extends Error {
   constructor() {
     super("The role section patch conflicts with the current role text.");
     this.name = "RoleSectionConflictError";
+  }
+}
+
+export class RoleInUseError extends Error {
+  readonly code = "ROLE_IN_USE";
+
+  constructor() {
+    super("The human-seat role is already occupied.");
+    this.name = "RoleInUseError";
   }
 }
 
@@ -1123,6 +1152,85 @@ class SqliteScopedStore implements ScopedStore {
         seen_since: requiredInteger(row, "seen_since") === 1,
       })),
     };
+  }
+
+  reassignDrone(cubeId: string, droneId: string, roleId: string): DroneRecord {
+    assertCanonicalUuid(cubeId, "Cube id");
+    assertCanonicalUuid(droneId, "Drone id");
+    assertCanonicalUuid(roleId, "Role id");
+    this.#requireCube(cubeId, "manage");
+    this.#database.exec("BEGIN IMMEDIATE");
+    try {
+      this.#requireCube(cubeId, "manage");
+      const droneRow = this.#database.prepare(`
+        SELECT id, cube_id, role_id, label FROM drones
+        WHERE id = ? AND cube_id = ? AND evicted_at IS NULL
+      `).get(droneId, cubeId);
+      const targetRoleRow = this.#database.prepare(`
+        SELECT id, is_human_seat, role_class FROM roles WHERE id = ? AND cube_id = ?
+      `).get(roleId, cubeId);
+      if (droneRow === undefined || targetRoleRow === undefined) throw new ScopedStoreError();
+      const sourceRoleRow = this.#database.prepare(`
+        SELECT is_human_seat FROM roles WHERE id = ? AND cube_id = ?
+      `).get(requiredText(droneRow, "role_id"), cubeId);
+      if (sourceRoleRow === undefined) throw new ScopedStoreError();
+      if (requiredText(targetRoleRow, "role_class") === "queen" &&
+          requiredInteger(sourceRoleRow, "is_human_seat") !== 1) {
+        throw new AccessDeniedError();
+      }
+      if (requiredInteger(targetRoleRow, "is_human_seat") === 1) {
+        const occupied = this.#database.prepare(`
+          SELECT 1 AS present FROM drones
+          WHERE cube_id = ? AND role_id = ? AND id <> ? AND evicted_at IS NULL
+        `).get(cubeId, roleId, droneId);
+        if (occupied !== undefined) throw new RoleInUseError();
+      }
+      this.#database.prepare("UPDATE drones SET role_id = ? WHERE id = ? AND cube_id = ?")
+        .run(roleId, droneId, cubeId);
+      const row = this.#database.prepare(`
+        SELECT drone.id, drone.cube_id, drone.role_id, drone.label,
+               COALESCE(drone.last_seen, drone.created_at) AS last_seen,
+               drone.hostname, drone.created_at,
+               CASE WHEN client.revoked_at IS NULL AND grant_row.access IN ('write', 'manage')
+                 THEN 'participant' ELSE 'observer' END AS posture
+        FROM drones AS drone
+        LEFT JOIN clients AS client ON client.id = drone.client_id
+        LEFT JOIN client_cube_grants AS grant_row
+          ON grant_row.client_id = drone.client_id AND grant_row.cube_id = drone.cube_id
+        WHERE drone.id = ? AND drone.cube_id = ? AND drone.evicted_at IS NULL
+      `).get(droneId, cubeId);
+      if (row === undefined) throw new ScopedStoreError();
+      this.#database.exec("COMMIT");
+      return droneRecord(row);
+    } catch (error) {
+      try { this.#database.exec("ROLLBACK"); } catch { /* Preserve the original failure. */ }
+      throw error;
+    }
+  }
+
+  evictDrone(cubeId: string, droneId: string): void {
+    assertCanonicalUuid(cubeId, "Cube id");
+    assertCanonicalUuid(droneId, "Drone id");
+    this.#requireCube(cubeId, "manage");
+    this.#database.exec("BEGIN IMMEDIATE");
+    try {
+      this.#requireCube(cubeId, "manage");
+      const active = this.#database.prepare(`
+        SELECT 1 AS present FROM drones WHERE id = ? AND cube_id = ? AND evicted_at IS NULL
+      `).get(droneId, cubeId);
+      if (active === undefined) throw new ScopedStoreError();
+      const now = this.#now();
+      this.#database.prepare("UPDATE drones SET evicted_at = ? WHERE id = ? AND cube_id = ?")
+        .run(now, droneId, cubeId);
+      this.#database.prepare(`
+        UPDATE drone_sessions SET revoked_at = ?
+        WHERE drone_id = ? AND cube_id = ? AND revoked_at IS NULL
+      `).run(now, droneId, cubeId);
+      this.#database.exec("COMMIT");
+    } catch (error) {
+      try { this.#database.exec("ROLLBACK"); } catch { /* Preserve the original failure. */ }
+      throw error;
+    }
   }
 
   appendLog(cubeId: string, input: {
@@ -1988,6 +2096,59 @@ class SqliteMaintenanceStore implements MaintenanceStore {
     this.#database.prepare(
       "UPDATE drone_sessions SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL",
     ).run(this.#now(), sessionId);
+  }
+
+  expireDroneSession(sessionId: string): void {
+    assertCanonicalUuid(sessionId, "Drone session id");
+    this.#database.prepare("UPDATE drone_sessions SET expires_at = ? WHERE id = ?")
+      .run(new Date(0).toISOString(), sessionId);
+  }
+
+  inspectManagedDrone(droneId: string) {
+    assertCanonicalUuid(droneId, "Drone id");
+    const row = this.#database.prepare(`
+      SELECT drone.role_id, drone.evicted_at,
+             EXISTS(SELECT 1 FROM drone_sessions AS session
+                    WHERE session.drone_id = drone.id AND session.revoked_at IS NOT NULL) AS session_revoked
+      FROM drones AS drone WHERE drone.id = ?
+    `).get(droneId);
+    if (row === undefined) throw new ScopedStoreError();
+    return {
+      role_id: requiredText(row, "role_id"),
+      evicted: nullableText(row, "evicted_at") !== null,
+      session_revoked: requiredInteger(row, "session_revoked") === 1,
+    };
+  }
+
+  inspectCubeManagementState(cubeId: string) {
+    assertCanonicalUuid(cubeId, "Cube id");
+    const cube = this.#database.prepare(
+      "SELECT directive, message_taxonomy FROM cubes WHERE id = ?",
+    ).get(cubeId);
+    if (cube === undefined) throw new ScopedStoreError();
+    const taxonomy = nullableText(cube, "message_taxonomy");
+    const parsed = taxonomy === null ? null : JSON.parse(taxonomy) as Array<{ class?: unknown }>;
+    return {
+      directive: requiredText(cube, "directive"),
+      taxonomy_marker: typeof parsed?.[0]?.class === "string" ? parsed[0].class : null,
+      role_ids: this.#database.prepare(
+        "SELECT id FROM roles WHERE cube_id = ? ORDER BY id",
+      ).all(cubeId).map((row) => requiredText(row, "id")),
+      active_decision_ids: this.#database.prepare(`
+        SELECT id FROM decisions WHERE cube_id = ? AND status = 'active' ORDER BY id
+      `).all(cubeId).map((row) => requiredText(row, "id")),
+      drones: this.#database.prepare(`
+        SELECT drone.id, drone.role_id, drone.evicted_at,
+               EXISTS(SELECT 1 FROM drone_sessions AS session
+                      WHERE session.drone_id = drone.id AND session.revoked_at IS NOT NULL) AS session_revoked
+        FROM drones AS drone WHERE drone.cube_id = ? ORDER BY drone.id
+      `).all(cubeId).map((row) => ({
+        id: requiredText(row, "id"),
+        role_id: requiredText(row, "role_id"),
+        evicted: nullableText(row, "evicted_at") !== null,
+        session_revoked: requiredInteger(row, "session_revoked") === 1,
+      })),
+    };
   }
 
   expireActivityCursor(cubeId: string, cursor: LogCursor): void {

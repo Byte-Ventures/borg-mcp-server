@@ -285,8 +285,10 @@ move, delete, or reuse that tag. Recovery uses separately authorized version `0.
 source and merge commit, pre-tag repository-variable evidence, and a never-before-used annotated tag.
 
 The live `borgmcp-server@0.1.5` package consumes the audited exact
-`borgmcp-shared@0.4.0` registry release. Current source consumes the verified exact
-`borgmcp-shared@0.4.2` registry release for the next server publication; the shrinkwrap must resolve
-that registry tarball with the matching SRI. The source-lock, artifact, audit, signature, and consumer
-gates must pass without Git dependencies before release review; SBOM generation is supplemental and
-outside the publication-critical path.
+`borgmcp-shared@0.4.0` registry release. Current source is the unpublished
+`borgmcp-server@0.1.6` release candidate and consumes the verified exact
+`borgmcp-shared@0.4.2` registry release; the shrinkwrap must resolve that registry tarball with the
+matching SRI. Version `0.1.5` remains the install target until the candidate passes exact-SHA review,
+an authorized immutable tag publication, and bounded registry integrity and signature verification.
+The source-lock, artifact, audit, signature, and consumer gates must pass without Git dependencies;
+SBOM generation is supplemental and outside the publication-critical path.

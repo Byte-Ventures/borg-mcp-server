@@ -169,7 +169,7 @@ v1 scope.
 
 ## Acceptance matrix
 
-| #1016 criterion | Enforcement and evidence |
+| Release criterion | Enforcement and evidence |
 | --- | --- |
 | Separate least-privilege credentials | Purpose-separated digest domains, scoped principals, narrow drone sessions, and offline-only client rotation/revocation commands. |
 | Loopback default, explicit LAN consent, no discovery | `network-policy.ts`, `start-options.ts`, bind negatives, and static discovery boundary test. |

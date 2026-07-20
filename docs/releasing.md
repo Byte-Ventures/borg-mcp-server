@@ -9,12 +9,11 @@ environment approval, package publication, or deployment.
 
 Every item below must be complete before a release tag is authorized:
 
-1. The server preview threat model in `docs/threat-model.md` passes the `#1016` gate for the exact
-   release commit.
+1. The server preview threat model in `docs/threat-model.md` passes for the exact release commit.
 2. The final license is the unmodified canonical Functional Source License, Version 1.1,
    ALv2 Future License (`FSL-1.1-ALv2`) with the notice `Copyright 2026 Byte Ventures`.
    No Additional Permission, Additional Use Grant, or other addendum may be appended. The approval
-   and exact-byte audit trail is tracked by `#1026`.
+   and exact-byte audit trail are included in the release evidence.
 3. The exact approved text is committed as `LICENSE`, `package.json` uses
    `"license": "SEE LICENSE IN LICENSE"`, and the tag workflow compares the file with the reviewed
    SHA-256 `9535abd9881dc5af88523e24e0bed77df8dddd0f255bb74710533ac71140d2a1`.
@@ -87,10 +86,10 @@ Any authentication, API, ruleset-ID, scope, enforcement, pull-request, status-ch
 history-protection, or bypass mismatch blocks authorization; never skip or substitute a manual check.
 
 This workflow covers the npm service artifact only. It does not authorize or manufacture an OCI
-image, native installer, service unit, signing key, or update channel. The hardened OCI and native
-service artifacts required by the server architecture remain part of `#1016`: they must derive from
-the same audited npm tarball, pin base images by digest, carry their own SBOM and signatures, and pass
-separate exact-artifact CR/SR/Release Quality gates before any preview.
+image, native installer, service unit, signing key, or update channel. Any hardened OCI or native
+service artifacts must derive from the same audited npm tarball, pin base images by digest, carry
+their own SBOM and signatures, and pass separate exact-artifact CR/SR/Release Quality gates before
+any preview.
 
 ## Verification and artifact audit
 
@@ -126,12 +125,20 @@ separate exact-artifact CR/SR/Release Quality gates before any preview.
 
 ## Current audit state
 
-The repository is public; visibility is complete, and `borgmcp-server@0.1.1` and
-`borgmcp-server@0.1.4` are live on npm under the sole expected maintainer. The `latest` tag resolves to
-`0.1.4`. Versions `0.1.2` and `0.1.3` are unpublished immutable failure evidence and must never be
-customer, install, or dogfood targets. Version `0.1.4` completed the full exact-source,
-tagged-artifact, tokenless OIDC publication, registry verification, provenance, signature, and
-attestation gate chain recorded below.
+The active local/self-hosted product spans the public
+[`borg-mcp-client`](https://github.com/Byte-Ventures/borg-mcp-client),
+[`borg-mcp-server`](https://github.com/Byte-Ventures/borg-mcp-server), and
+[`borg-mcp-shared`](https://github.com/Byte-Ventures/borg-mcp-shared) repositories. This runbook
+authorizes only the `borgmcp-server` npm artifact. Portable wire-contract changes are reviewed and
+released from `borg-mcp-shared` first; server releases consume an exact audited registry version,
+never a Git or SSH dependency. Client releases follow their own repository gates.
+
+The server repository is public; visibility is complete, and `borgmcp-server@0.1.1`,
+`borgmcp-server@0.1.4`, and `borgmcp-server@0.1.5` are live on npm under the sole expected maintainer.
+The `latest` tag resolves to `0.1.5`. Versions `0.1.2` and `0.1.3` are unpublished immutable failure
+evidence and must never be customer, install, or dogfood targets. Version `0.1.5` completed the full
+exact-source, tagged-artifact, tokenless OIDC publication, registry verification, provenance,
+signature, and attestation gate chain recorded below.
 
 The immutable annotated `v0.1.1` tag object
 `e3f6ee268d5cd4f1e88adabdc6171c1e732cd096` peels to protected-main commit
@@ -235,6 +242,15 @@ token. A missing permission, retained long-lived token, claim mismatch, non-201 
 response, invalid expiry, or failed readback blocks the release; recovery always uses a new version
 and never moves, deletes, reuses, or reruns a failed tag or tag-triggered workflow.
 
+The immutable annotated `v0.1.5` tag object
+`d5a7d0d3114397ff514ee4de1a886ba2379362f9` peels to protected-main merge
+`4e0602a19de994205e7c97bd48f38302af895cd4`, whose tree is byte-identical to reviewed source
+`28e010b079f6d73e25cefb8c45cdfcfcc21f65fd`. Workflow run `29699335144`, attempt 1, built and
+published the exact audited 79-file artifact. npm reports integrity
+`sha512-NVqwZRZ355wQdR4YAKA3Yj/BYI2LYbjXAf+EMZUkK1xWmZBXzdOWCADdsMPiEufvXwV+18rBR2BkraO2q1X5dQ==`
+and `latest` resolves to `0.1.5`. The tokenless OIDC publication and postpublication checks verified
+registry ownership, SLSA provenance, signatures, and attestations for this tag and commit.
+
 The immutable annotated `v0.1.4` tag object
 `1604077e6249c7c0f7ce17b3f2848caad2bc773e` peels to protected-main merge
 `1f7e60a695f27d92b2d46233b0e3cad5aa43bd0d`, whose tree is byte-identical to reviewed source
@@ -268,8 +284,9 @@ artifacts were produced, and `borgmcp-server` remained unclaimed in the npm regi
 move, delete, or reuse that tag. Recovery uses separately authorized version `0.1.1`, a fresh reviewed
 source and merge commit, pre-tag repository-variable evidence, and a never-before-used annotated tag.
 
-The live `borgmcp-server@0.1.4` package consumes the audited exact
-`borgmcp-shared@0.3.0` registry release. Current source consumes the audited exact
-`borgmcp-shared@0.4.0` release; its shrinkwrap must resolve that registry tarball with the matching
-SRI. The source-lock, artifact, audit, signature, and consumer gates must pass without Git dependencies
-before release review; SBOM generation is supplemental and outside the publication-critical path.
+The live `borgmcp-server@0.1.5` package consumes the audited exact
+`borgmcp-shared@0.4.0` registry release. Current source consumes the verified exact
+`borgmcp-shared@0.4.2` registry release for the next server publication; the shrinkwrap must resolve
+that registry tarball with the matching SRI. The source-lock, artifact, audit, signature, and consumer
+gates must pass without Git dependencies before release review; SBOM generation is supplemental and
+outside the publication-critical path.

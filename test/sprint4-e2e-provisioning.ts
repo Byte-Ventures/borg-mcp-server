@@ -442,6 +442,17 @@ async function postJson(
   });
 }
 
+/** Test-only access to the provisioner's bounded POST transport. */
+export async function postSprint4Json(
+  origin: string,
+  ca: Buffer,
+  path: string,
+  payload: unknown,
+  credential?: string,
+): Promise<{ readonly status: number; readonly body: string }> {
+  return postJson(origin, ca, path, payload, credential);
+}
+
 /** Test-only hostile-transport probe used to prove the request deadline. */
 export async function getSprint4Status(
   origin: string,

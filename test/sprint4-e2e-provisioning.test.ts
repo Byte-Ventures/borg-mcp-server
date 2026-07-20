@@ -1,5 +1,4 @@
 import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
-import { request as httpsRequest } from "node:https";
 import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9,6 +8,7 @@ import {
   assertTrustIdentityContract,
   closeSprint4Server,
   getSprint4Status,
+  postSprint4Json,
   provisionSprint4E2e,
   SPRINT4_TRANSPORT_TIMEOUT_MS,
 } from "./sprint4-e2e-provisioning.js";
@@ -132,6 +132,25 @@ describe("Sprint 4 joined E2E provisioning", () => {
     }
   });
 
+  it("bounds a stalled HTTPS POST and destroys its owned request", async () => {
+    const stalled = createServer((socket) => socket.on("data", () => undefined));
+    await listen(stalled);
+    const address = stalled.address();
+    if (address === null || typeof address === "string") throw new Error("Expected a TCP port.");
+    const startedAt = Date.now();
+    try {
+      await expect(postSprint4Json(
+        `https://127.0.0.1:${address.port}`,
+        Buffer.alloc(0),
+        "/stalled",
+        { protocol_version: "2", request_id: "stalled-post", payload: {} },
+      )).rejects.toThrow("HTTPS POST timed out");
+      expect(Date.now() - startedAt).toBeLessThan(SPRINT4_TRANSPORT_TIMEOUT_MS + 500);
+    } finally {
+      await closeServer(stalled);
+    }
+  });
+
   it("rejects a missing or mismatched emitted trust identity before handoff", () => {
     const bareIdentity = "a".repeat(64);
     const identity = `spki-sha256:${bareIdentity}`;
@@ -196,7 +215,11 @@ async function directedAppendStatus(
   const writer = JSON.parse(await readFile(run.credentialReferences.writerA, "utf8")) as {
     session_credential: string;
   };
-  const body = JSON.stringify({
+  const response = await postSprint4Json(
+    run.endpoint,
+    await readFile(run.trustMaterialReference),
+    `/api/cubes/${run.cubeId}/logs`,
+    {
     protocol_version: "2",
     request_id: "directed-append-regression",
     payload: {
@@ -204,27 +227,8 @@ async function directedAppendStatus(
       visibility: "direct",
       recipientDroneIds: [recipientDroneId],
     },
-  });
-  const url = new URL(`/api/cubes/${run.cubeId}/logs`, run.endpoint);
-  const ca = await readFile(run.trustMaterialReference);
-  return new Promise((resolve, reject) => {
-    const request = httpsRequest({
-      hostname: url.hostname,
-      port: url.port,
-      path: url.pathname,
-      method: "POST",
-      ca,
-      agent: false,
-      headers: {
-        authorization: `Bearer ${writer.session_credential}`,
-        "content-type": "application/json",
-        "content-length": Buffer.byteLength(body),
-      },
-    }, (response) => {
-      response.resume();
-      response.on("end", () => resolve(response.statusCode ?? 0));
-    });
-    request.once("error", reject);
-    request.end(body);
-  });
+    },
+    writer.session_credential,
+  );
+  return response.status;
 }

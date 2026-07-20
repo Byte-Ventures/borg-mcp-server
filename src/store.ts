@@ -65,7 +65,6 @@ export type ActivityNotificationRecord = EnrichedActivityRecord & (
     readonly claimant_drone_id?: string;
     readonly claimant_role?: string | null;
   }
-  | { readonly kind: "heartbeat_ping" }
 );
 
 export type ActivityStreamRecord = EnrichedActivityRecord | ActivityNotificationRecord;
@@ -180,11 +179,7 @@ export interface StoreRuntime {
 }
 
 export interface LivenessStore {
-  readonly scan: (options?: {
-    readonly silentMs?: number;
-    readonly cooldownMs?: number;
-    readonly limit?: number;
-  }) => ActivityNotificationRecord[];
+  readonly scan: () => ActivityNotificationRecord[];
 }
 
 export interface DigestPair {
@@ -645,7 +640,7 @@ export async function openStore(options: OpenStoreOptions): Promise<StoreRuntime
   );
   const activityHub = new ActivityHub();
   const maintenance = new SqliteMaintenanceStore(database, clock);
-  const liveness = new SqliteLivenessStore(database, clock, activityHub, capacityGuard);
+  const liveness = new IdleLivenessStore();
   const credentials = new SqliteCredentialStore(database, clock, capacityGuard, options.mutationHook);
   return Object.freeze({
     forPrincipal: (principal: Principal) => {
@@ -1283,7 +1278,6 @@ class SqliteScopedStore implements ScopedStore {
         this.#database.prepare(`
           UPDATE drones SET last_seen = ? WHERE id = ? AND cube_id = ? AND evicted_at IS NULL
         `).run(createdAt, droneId, cubeId);
-        this.#database.prepare("DELETE FROM silent_seat_ping_state WHERE drone_id = ?").run(droneId);
       }
       if (recipients.length > 0) {
         const valid = this.#database.prepare(`
@@ -1515,7 +1509,6 @@ class SqliteScopedStore implements ScopedStore {
         }
         const droneId = requiredText(bound, "drone_id");
         this.#database.prepare("UPDATE drones SET last_seen = ? WHERE id = ?").run(now, droneId);
-        this.#database.prepare("DELETE FROM silent_seat_ping_state WHERE drone_id = ?").run(droneId);
         const attachedRoleRow = this.#database.prepare(`
           SELECT id AS role_id, name AS role_name, role_class, is_human_seat
           FROM roles WHERE id = ? AND cube_id = ?
@@ -1576,8 +1569,6 @@ class SqliteScopedStore implements ScopedStore {
           droneId, input.cubeId, input.roleId, this.#principal.id, droneLabel, now, now,
         );
       }
-      this.#database.prepare("DELETE FROM silent_seat_ping_state WHERE drone_id = ?").run(droneId);
-
       this.#database.prepare(`
         INSERT INTO drone_sessions (
           id, client_id, cube_id, drone_id, created_at, expires_at
@@ -2194,61 +2185,11 @@ class ActivityHub {
   }
 }
 
-class SqliteLivenessStore implements LivenessStore {
-  constructor(
-    readonly database: DatabaseSync,
-    readonly clock: () => Date,
-    readonly hub: ActivityHub,
-    readonly capacityGuard: StorageCapacityGuard,
-  ) {}
-
-  scan(options: { silentMs?: number; cooldownMs?: number; limit?: number } = {}): ActivityNotificationRecord[] {
-    const now = this.clock();
-    const silentBefore = new Date(now.getTime() - (options.silentMs ?? 600_000)).toISOString();
-    const cooldownBefore = new Date(now.getTime() - (options.cooldownMs ?? 600_000)).toISOString();
-    const limit = Math.max(1, Math.min(Math.trunc(options.limit ?? 25), 25));
-    const candidates = this.database.prepare(`
-      SELECT drone.id AS drone_id, drone.cube_id, COALESCE(state.attempts, 0) AS attempts
-      FROM drones AS drone
-      JOIN clients AS client ON client.id = drone.client_id AND client.revoked_at IS NULL
-      JOIN client_cube_grants AS grant_row ON grant_row.client_id = drone.client_id
-        AND grant_row.cube_id = drone.cube_id AND grant_row.access IN ('write', 'manage')
-      LEFT JOIN silent_seat_ping_state AS state ON state.drone_id = drone.id
-      WHERE drone.evicted_at IS NULL AND COALESCE(drone.last_seen, drone.created_at) < ?
-        AND COALESCE(state.attempts, 0) < 3
-        AND (state.last_ping_at IS NULL OR state.last_ping_at < ?)
-        AND EXISTS (SELECT 1 FROM drone_sessions AS session
-          WHERE session.drone_id = drone.id AND session.revoked_at IS NULL AND session.expires_at > ?)
-      ORDER BY COALESCE(drone.last_seen, drone.created_at), drone.id LIMIT ?
-    `).all(silentBefore, cooldownBefore, now.toISOString(), limit);
-    const published: ActivityNotificationRecord[] = [];
-    for (const candidate of candidates) {
-      const droneId = requiredText(candidate, "drone_id");
-      const cubeId = requiredText(candidate, "cube_id");
-      const message = "[HEARTBEAT-PING] No recent activity; confirm this seat is responsive.";
-      this.capacityGuard.assertCanGrow(256);
-      const id = randomUUID();
-      const createdAt = now.toISOString();
-      this.database.exec("BEGIN IMMEDIATE");
-      try {
-        this.database.prepare(`INSERT INTO silent_seat_ping_state (drone_id, attempts, last_ping_at)
-          VALUES (?, 1, ?) ON CONFLICT(drone_id) DO UPDATE
-          SET attempts = attempts + 1, last_ping_at = excluded.last_ping_at
-        `).run(droneId, now.toISOString());
-        this.database.exec("COMMIT");
-      } catch (error) {
-        try { this.database.exec("ROLLBACK"); } catch { /* Preserve original failure. */ }
-        throw error;
-      }
-      const entry: ActivityNotificationRecord = {
-        kind: "heartbeat_ping",
-        id, cube_id: cubeId, drone_id: null, message, visibility: "direct", created_at: createdAt,
-        drone_label: null, role_name: null, recipient_drone_ids: [droneId],
-      };
-      this.hub.publish(cubeId, entry);
-      published.push(entry);
-    }
-    return published;
+class IdleLivenessStore implements LivenessStore {
+  scan(): ActivityNotificationRecord[] {
+    // Silence is not a delivery failure. Keep the scheduler's lifecycle seam without
+    // creating a directed event that crosses the client/model wake boundary.
+    return [];
   }
 }
 

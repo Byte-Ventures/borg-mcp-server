@@ -15,9 +15,10 @@ redacted debug logging, and cube-scoped invitation baseline. Relative to
 `0.1.4`, it adds idempotent prior-seat reattachment, migrated cube-context and
 taxonomy routing, durable SSE replay and heartbeat delivery, fleet liveness
 signals, typed terminal drone eviction, and explicit manage-access denials for
-visible non-managing principals. The published
-`0.1.5` package and current source consume the audited exact
-`borgmcp-shared@0.4.0` registry release.
+visible non-managing principals. The published `0.1.5` package consumes the
+audited exact `borgmcp-shared@0.4.0` registry release. Current source has moved
+to the verified exact `borgmcp-shared@0.4.2` registry release for the next
+server publication.
 
 Setup prepares local identity and storage and prints one-time recovery and
 owner-enrollment secrets; it creates no cube. Version `0.1.1` completed the

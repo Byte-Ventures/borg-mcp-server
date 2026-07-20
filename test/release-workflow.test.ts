@@ -351,6 +351,8 @@ describe("server release lane", () => {
       "tag authorization record must name the reviewed verifier commit",
       "borgmcp-server@0.1.5",
       "The `latest` tag resolves to `0.1.5`",
+      "borgmcp-shared@0.4.0",
+      "borgmcp-shared@0.4.2",
       "github.com/Byte-Ventures/borg-mcp-client",
       "github.com/Byte-Ventures/borg-mcp-shared",
     ]) {

@@ -32,6 +32,8 @@ export interface Sprint4ProvisioningInput {
   /** A numeric loopback address only; host names and LAN addresses are refused. */
   readonly host: "127.0.0.1" | "::1";
   readonly port: number;
+  /** Test-only negative-path fixture; never enabled by the RQ joined run. */
+  readonly includeReadOnlyRecipientForRegression?: boolean;
 }
 
 export interface Sprint4ProvisionedRun {
@@ -54,6 +56,7 @@ export interface Sprint4ProvisionedRun {
     writerA: SeatIdentity;
     writerB: SeatIdentity;
   }>;
+  readonly readOnlyRecipient?: SeatIdentity;
   /** Stops the owned listener and removes all created credentials and state. */
   readonly cleanup: () => Promise<void>;
 }
@@ -163,12 +166,23 @@ export async function provisionSprint4E2e(
       default_worker_role_id: string;
     }>(cube.body, "create cube");
 
-    const enrolledReader = await enrollInvitation(service, recovery, cubePayload.cube_id, "read", server.origin, ca, "s4-reader");
+    // The active reader receives directed coordination and therefore needs the
+    // public write grant. It still performs the harness's log-drain duties.
+    const enrolledReader = await enrollInvitation(service, recovery, cubePayload.cube_id, "write", server.origin, ca, "s4-reader");
     const enrolledWriterA = await enrollInvitation(service, recovery, cubePayload.cube_id, "write", server.origin, ca, "s4-writer-a");
     const enrolledWriterB = await enrollInvitation(service, recovery, cubePayload.cube_id, "write", server.origin, ca, "s4-writer-b");
     const reader = await attachIdentity(server.origin, ca, cubePayload.cube_id, cubePayload.default_worker_role_id, enrolledReader);
     const writerA = await attachIdentity(server.origin, ca, cubePayload.cube_id, cubePayload.default_worker_role_id, enrolledWriterA);
     const writerB = await attachIdentity(server.origin, ca, cubePayload.cube_id, cubePayload.default_worker_role_id, enrolledWriterB);
+    const readOnlyRecipient = input.includeReadOnlyRecipientForRegression === true
+      ? await attachIdentity(
+          server.origin,
+          ca,
+          cubePayload.cube_id,
+          cubePayload.default_worker_role_id,
+          await enrollInvitation(service, recovery, cubePayload.cube_id, "read", server.origin, ca, "s4-read-only-recipient"),
+        )
+      : undefined;
     if (new Set([reader.clientId, writerA.clientId, writerB.clientId]).size !== 3) {
       throw new Error("Sprint 4 provisioning requires three distinct enrolled identities.");
     }
@@ -211,6 +225,7 @@ export async function provisionSprint4E2e(
       credentialReferences,
       clientIds: { reader: reader.clientId, writerA: writerA.clientId, writerB: writerB.clientId },
       seats: { reader: reader.seat, writerA: writerA.seat, writerB: writerB.seat },
+      ...(readOnlyRecipient === undefined ? {} : { readOnlyRecipient: readOnlyRecipient.seat }),
       cleanup,
     };
   } catch (error) {

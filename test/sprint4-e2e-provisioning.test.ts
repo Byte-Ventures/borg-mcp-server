@@ -1,4 +1,5 @@
 import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { request as httpsRequest } from "node:https";
 import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -144,6 +145,37 @@ describe("Sprint 4 joined E2E provisioning", () => {
       .toThrow("trust identity mismatch");
     expect(() => assertTrustIdentityContract(identity, identity)).not.toThrow();
   });
+
+  it("allows directed work to the active write-granted reader", async () => {
+    const parent = await mkdtemp(join(tmpdir(), "borg-s4-provision-directed-write-"));
+    parents.push(parent);
+    const run = await provisionSprint4E2e({
+      testMode: true, dataDirectory: join(parent, "server"), host: "127.0.0.1", port: 0,
+    });
+    try {
+      expect(await directedAppendStatus(run, run.seats.reader.droneId)).toBe(201);
+    } finally {
+      await run.cleanup();
+    }
+  });
+
+  it("conceals a read-only attached recipient from directed work", async () => {
+    const parent = await mkdtemp(join(tmpdir(), "borg-s4-provision-directed-read-"));
+    parents.push(parent);
+    const run = await provisionSprint4E2e({
+      testMode: true,
+      dataDirectory: join(parent, "server"),
+      host: "127.0.0.1",
+      port: 0,
+      includeReadOnlyRecipientForRegression: true,
+    });
+    try {
+      expect(run.readOnlyRecipient).toBeDefined();
+      expect(await directedAppendStatus(run, run.readOnlyRecipient!.droneId)).toBe(404);
+    } finally {
+      await run.cleanup();
+    }
+  });
 });
 
 function listen(server: Server): Promise<void> {
@@ -155,4 +187,44 @@ function listen(server: Server): Promise<void> {
 
 function closeServer(server: Server): Promise<void> {
   return new Promise((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error)));
+}
+
+async function directedAppendStatus(
+  run: Awaited<ReturnType<typeof provisionSprint4E2e>>,
+  recipientDroneId: string,
+): Promise<number> {
+  const writer = JSON.parse(await readFile(run.credentialReferences.writerA, "utf8")) as {
+    session_credential: string;
+  };
+  const body = JSON.stringify({
+    protocol_version: "2",
+    request_id: "directed-append-regression",
+    payload: {
+      message: "directed append regression",
+      visibility: "direct",
+      recipientDroneIds: [recipientDroneId],
+    },
+  });
+  const url = new URL(`/api/cubes/${run.cubeId}/logs`, run.endpoint);
+  const ca = await readFile(run.trustMaterialReference);
+  return new Promise((resolve, reject) => {
+    const request = httpsRequest({
+      hostname: url.hostname,
+      port: url.port,
+      path: url.pathname,
+      method: "POST",
+      ca,
+      agent: false,
+      headers: {
+        authorization: `Bearer ${writer.session_credential}`,
+        "content-type": "application/json",
+        "content-length": Buffer.byteLength(body),
+      },
+    }, (response) => {
+      response.resume();
+      response.on("end", () => resolve(response.statusCode ?? 0));
+    });
+    request.once("error", reject);
+    request.end(body);
+  });
 }

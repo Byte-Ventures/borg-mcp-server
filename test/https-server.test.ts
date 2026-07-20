@@ -703,18 +703,103 @@ describe("HTTPS service", () => {
       handleCoordination: async () => ({ status: 200, body: {} }),
       limits: {
         ...server.limits,
-        maxRequestsPerWindow: 2,
+        maxRequestsPerWindow: 3,
       },
     });
     try {
+      const routineReads = [
+        { path: "/api/cubes", method: "GET", body: "" },
+        {
+          path: "/api/cubes/00000000-0000-4000-8000-000000000223/logs",
+          method: "PUT",
+          body: JSON.stringify({ payload: { cursor: null, limit: 20 } }),
+        },
+        {
+          path: "/api/cubes/00000000-0000-4000-8000-000000000223/decisions",
+          method: "PUT",
+          body: JSON.stringify({ payload: {} }),
+        },
+      ];
       for (const token of ["drone-a", "drone-b"]) {
         const headers = { authorization: `Bearer ${token}` };
-        expect((await request(limited.origin, certificate, "/api/cubes", headers)).status).toBe(200);
-        expect((await request(limited.origin, certificate, "/api/cubes", headers)).status).toBe(200);
+        for (const read of routineReads) {
+          expect((await request(
+            limited.origin,
+            certificate,
+            read.path,
+            headers,
+            read.body,
+            read.method,
+          )).status).toBe(200);
+        }
         expect((await request(limited.origin, certificate, "/api/cubes", headers)).status).toBe(429);
       }
     } finally {
       await limited.close();
+    }
+  });
+
+  it("aggregates mutation and stream rate limits across sibling drone sessions", async () => {
+    const clientId = "00000000-0000-4000-8000-000000000230";
+    const authorize = async (authorization: string | undefined) => {
+      const suffix = authorization === "Bearer drone-a" ? "1" : authorization === "Bearer drone-b" ? "2" : null;
+      if (suffix === null) return "invalid" as const;
+      return droneSessionPrincipal({
+        id: `00000000-0000-4000-8000-00000000023${suffix}`,
+        clientId,
+        cubeId: "00000000-0000-4000-8000-000000000233",
+        droneId: `00000000-0000-4000-8000-00000000024${suffix}`,
+      });
+    };
+    const mutationLimited = await startHttpsServer({
+      bind: { port: 0 },
+      tls: { key, cert: certificate },
+      authorizeCoordination: authorize,
+      handleCoordination: async () => ({ status: 201 }),
+      limits: { ...server.limits, maxRequestsPerWindow: 1 },
+    });
+    const logPath = "/api/cubes/00000000-0000-4000-8000-000000000233/logs";
+    try {
+      expect((await request(
+        mutationLimited.origin,
+        certificate,
+        logPath,
+        { authorization: "Bearer drone-a" },
+        JSON.stringify({ payload: { message: "first" } }),
+        "POST",
+      )).status).toBe(201);
+      expect((await request(
+        mutationLimited.origin,
+        certificate,
+        logPath,
+        { authorization: "Bearer drone-b" },
+        JSON.stringify({ payload: { message: "second" } }),
+        "POST",
+      )).status).toBe(429);
+    } finally {
+      await mutationLimited.close();
+    }
+
+    const streamLimited = await startHttpsServer({
+      bind: { port: 0 },
+      tls: { key, cert: certificate },
+      authorizeCoordination: authorize,
+      handleCoordination: async (coordinationRequest) => ({
+        status: 200,
+        stream: heldStream(coordinationRequest.signal),
+      }),
+      limits: { ...server.limits, maxRequestsPerWindow: 1 },
+    });
+    const streamPath = "/api/cubes/00000000-0000-4000-8000-000000000233/stream";
+    const first = await openStream(streamLimited.origin, certificate, streamPath, "Bearer drone-a");
+    try {
+      expect(first.status).toBe(200);
+      expect((await request(streamLimited.origin, certificate, streamPath, {
+        authorization: "Bearer drone-b",
+      })).status).toBe(429);
+    } finally {
+      first.close();
+      await streamLimited.close();
     }
   });
 

@@ -20,6 +20,14 @@ afterEach(async () => {
 });
 
 describe("packed release artifact", () => {
+  it("delegates npm compatibility solely to the packed engine boundary", async () => {
+    const probe = await readFile("scripts/exercise-packed-artifact.mjs", "utf8");
+    expect(probe.match(/--engine-strict/gu)).toHaveLength(2);
+    expect(probe).not.toContain("expectedNpmVersion");
+    expect(probe).not.toContain("11.18.0");
+    expect(probe).not.toMatch(/npm@[0-9]/u);
+  });
+
   it("accepts a bounded public server package", async () => {
     const fixture = await packageFixture();
     const tarball = await pack(fixture);
@@ -56,8 +64,16 @@ describe("packed release artifact", () => {
 
   it("installs, imports, and executes the exact packed artifact", async () => {
     const fixture = await packageFixture();
-    const npmVersion = (await execute("npm", ["--version"])).stdout.trim();
-    await expect(exercisePackedArtifact(await pack(fixture), { expectedNpmVersion: npmVersion })).resolves.toBeUndefined();
+    await expect(exercisePackedArtifact(await pack(fixture))).resolves.toBeUndefined();
+  });
+
+  it("rejects an npm runtime excluded by the packed artifact engine", async () => {
+    const fixture = await packageFixture({
+      engines: { node: ">=22.12.0", npm: ">=999.0.0" },
+    });
+    await expect(exercisePackedArtifact(await pack(fixture))).rejects.toMatchObject({
+      stderr: expect.stringContaining("EBADENGINE"),
+    });
   });
 
   it("rejects consumer lifecycle hooks", async () => {
@@ -265,8 +281,7 @@ describe("packed release artifact", () => {
     const fixture = await packageFixture({
       exports: { ".": { types: "./dist/index.d.ts", import: "./dist/missing.js" } },
     });
-    const npmVersion = (await execute("npm", ["--version"])).stdout.trim();
-    await expect(exercisePackedArtifact(await pack(fixture), { expectedNpmVersion: npmVersion })).rejects.toMatchObject({
+    await expect(exercisePackedArtifact(await pack(fixture))).rejects.toMatchObject({
       stderr: expect.stringContaining("ERR_MODULE_NOT_FOUND"),
     });
   });
@@ -305,6 +320,7 @@ async function packageFixture(overrides: Record<string, unknown> = {}): Promise<
       url: "git+https://github.com/Byte-Ventures/borg-mcp-server.git",
     },
     publishConfig: { access: "public" },
+    engines: { node: ">=22.12.0", npm: ">=10.0.0" },
     files: [
       "dist",
       "src",

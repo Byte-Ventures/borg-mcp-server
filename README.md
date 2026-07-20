@@ -16,9 +16,10 @@ redacted debug logging, and cube-scoped invitation baseline. Relative to
 taxonomy routing, durable SSE replay and heartbeat delivery, fleet liveness
 signals, typed terminal drone eviction, and explicit manage-access denials for
 visible non-managing principals. The published `0.1.5` package consumes the
-audited exact `borgmcp-shared@0.4.0` registry release. Current source is the
-unpublished `borgmcp-server@0.1.6` release candidate and consumes the verified
-exact `borgmcp-shared@0.4.2` registry release. Version `0.1.5` remains the only
+audited exact `borgmcp-shared@0.4.0` registry release. Immutable `v0.1.6` failed
+safely before artifact upload or npm publication and is not an install target.
+Current source is the unpublished `borgmcp-server@0.1.7` recovery candidate and
+consumes the verified exact `borgmcp-shared@0.4.2` registry release. Version `0.1.5` remains the only
 current install target until the candidate passes exact-SHA review, immutable
 tag publication, and bounded registry verification.
 

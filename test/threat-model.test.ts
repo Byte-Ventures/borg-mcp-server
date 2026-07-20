@@ -25,7 +25,11 @@ describe("server threat model", () => {
     ]) {
       expect(threatModel).toContain(boundary);
     }
-    expect(releaseWorkflow).toContain('test "${SERVER_1016_APPROVED_SHA}" = "${release_commit}"');
+    expect(releaseWorkflow).toContain('test "${release_commit}" = "${GITHUB_SHA}"');
+    expect(releaseWorkflow).toContain("git merge-base --is-ancestor");
+    expect(releaseWorkflow).toContain(
+      'test "$(sha256sum LICENSE | cut -d \' \' -f1)" = "9535abd9881dc5af88523e24e0bed77df8dddd0f255bb74710533ac71140d2a1"',
+    );
     expect(manifest).toMatchObject({
       private: false,
       version: "0.1.5",

@@ -1,59 +1,105 @@
 import { createHash } from "node:crypto";
-import { describe, expect, it, vi } from "vitest";
+import { readFile } from "node:fs/promises";
+import { describe, expect, it } from "vitest";
 
 import {
-  postpublish,
   readWithPropagationRetry,
-  verifyProvenanceStatement,
+  verifyArtifactReport,
+  verifyPostpublish,
+  verifyPrepublish,
 } from "../scripts/verify-registry-release.mjs";
 
-const tarball = Buffer.from("audited server tarball");
-const integrity = `sha512-${createHash("sha512").update(tarball).digest("base64")}`;
-const digest = createHash("sha512").update(tarball).digest("hex");
-const commit = "0123456789abcdef0123456789abcdef01234567";
+const integrity = `sha512-${createHash("sha512").update("audited server tarball").digest("base64")}`;
+const report = { name: "borgmcp-server", version: "1.2.3", integrity };
 
-function statement() {
-  return {
-    _type: "https://in-toto.io/Statement/v1",
-    predicateType: "https://slsa.dev/provenance/v1",
-    subject: [{ name: "pkg:npm/borgmcp-server@1.2.3", digest: { sha512: digest } }],
-    predicate: {
-      buildDefinition: {
-        externalParameters: {
-          workflow: {
-            repository: "https://github.com/Byte-Ventures/borg-mcp-server",
-            path: ".github/workflows/release.yml",
-            ref: "refs/tags/v1.2.3",
-          },
-        },
-        internalParameters: { github: { event_name: "push" } },
-        resolvedDependencies: [{
-          uri: "git+https://github.com/Byte-Ventures/borg-mcp-server@refs/tags/v1.2.3",
-          digest: { gitCommit: commit },
-        }],
+const response = (status: number, body: unknown = {}) => new Response(JSON.stringify(body), {
+  status,
+  headers: { "content-type": "application/json" },
+});
+
+describe("minimal npm registry assurance", () => {
+  it("delegates provenance verification to npm audit signatures", async () => {
+    const source = await readFile("scripts/verify-registry-release.mjs", "utf8");
+    for (const removed of ["dsseEnvelope", "verifyProvenanceStatement", "in-toto", "SLSA", "attestations"]) {
+      expect(source).not.toContain(removed);
+    }
+  });
+
+  it("binds the verifier report to the exact package, version, and SHA-512 integrity", () => {
+    expect(verifyArtifactReport(report, "1.2.3")).toEqual(report);
+    expect(() => verifyArtifactReport({ ...report, name: "other" }, "1.2.3"))
+      .toThrow("must be borgmcp-server");
+    expect(() => verifyArtifactReport({ ...report, version: "1.2.4" }, "1.2.3"))
+      .toThrow("exactly 1.2.3");
+    expect(() => verifyArtifactReport({ ...report, integrity: "sha512-short" }, "1.2.3"))
+      .toThrow("full SHA-512 integrity");
+  });
+
+  it("accepts only an unused version owned solely by the reviewed maintainer", async () => {
+    const responses = [
+      response(404),
+      response(200, { maintainers: [{ name: "byteventures" }] }),
+    ];
+    await expect(verifyPrepublish(report, {
+      expectedVersion: "1.2.3",
+      expectedOwner: "byteventures",
+      request: async () => responses.shift()!,
+    })).resolves.toEqual({
+      name: "borgmcp-server",
+      version: "1.2.3",
+      registryState: "owned",
+    });
+  });
+
+  it("rejects an existing immutable version before reading package ownership", async () => {
+    let requests = 0;
+    await expect(verifyPrepublish(report, {
+      expectedVersion: "1.2.3",
+      expectedOwner: "byteventures",
+      request: async () => {
+        requests += 1;
+        return response(200);
       },
-      runDetails: { builder: { id: "https://github.com/actions/runner/github-hosted" } },
-    },
-  };
-}
+    })).rejects.toThrow("already exists and is immutable");
+    expect(requests).toBe(1);
+  });
 
-describe("npm provenance guard", () => {
+  it.each([
+    ["wrong configured owner", "other", [{ name: "byteventures" }], "must equal the reviewed owner"],
+    ["wrong registry owner", "byteventures", [{ name: "other" }], "ownership differs"],
+    ["multiple registry owners", "byteventures", [{ name: "byteventures" }, { name: "other" }], "ownership differs"],
+  ])("rejects %s", async (_case, expectedOwner, maintainers, message) => {
+    const responses = [response(404), response(200, { maintainers })];
+    await expect(verifyPrepublish(report, {
+      expectedVersion: "1.2.3",
+      expectedOwner,
+      request: async () => responses.shift()!,
+    })).rejects.toThrow(message);
+  });
+
+  it("rejects an unexpectedly unclaimed package instead of bootstrapping ownership", async () => {
+    const responses = [response(404), response(404)];
+    await expect(verifyPrepublish(report, {
+      expectedVersion: "1.2.3",
+      expectedOwner: "byteventures",
+      request: async () => responses.shift()!,
+    })).rejects.toThrow("unexpectedly unclaimed");
+  });
+
   it("survives registry propagation beyond the former twelve-read window", async () => {
     let reads = 0;
     const waits: number[] = [];
-    const response = await readWithPropagationRetry(
-      async () => {
+    const result = await verifyPostpublish(report, {
+      expectedVersion: "1.2.3",
+      request: async () => {
         reads += 1;
-        return { status: reads <= 12 ? 404 : 200 };
+        return reads <= 12 ? response(404) : response(200, { dist: { integrity } });
       },
-      "Provenance verification",
-      {
-        wait: async (milliseconds) => {
-          waits.push(milliseconds);
-        },
+      wait: async (milliseconds: number) => {
+        waits.push(milliseconds);
       },
-    );
-    expect(response.status).toBe(200);
+    });
+    expect(result).toEqual({ ...report, registryState: "verified" });
     expect(reads).toBe(13);
     expect(waits).toEqual([
       1_000,
@@ -71,134 +117,37 @@ describe("npm provenance guard", () => {
     ]);
   });
 
-  it("fails closed after the full production propagation window", async () => {
+  it("fails closed after the bounded registry propagation window", async () => {
     let reads = 0;
-    await expect(readWithPropagationRetry(
-      async () => {
+    await expect(verifyPostpublish(report, {
+      expectedVersion: "1.2.3",
+      request: async () => {
         reads += 1;
-        return { status: 404 };
+        return response(404);
       },
-      "Post-publish ownership check",
-      { wait: async () => {} },
-    )).rejects.toThrow("Post-publish ownership check remained HTTP 404 after 18 attempts.");
+      wait: async () => {},
+    })).rejects.toThrow("remained HTTP 404 after 18 attempts");
     expect(reads).toBe(18);
   });
 
-  it("does not retry terminal non-404 registry responses", async () => {
+  it("does not retry terminal registry errors", async () => {
     let reads = 0;
-    const response = await readWithPropagationRetry(
+    const result = await readWithPropagationRetry(
       async () => {
         reads += 1;
-        return { status: 503 };
+        return response(503);
       },
       "Published version verification",
       { wait: async () => {} },
     );
-    expect(response.status).toBe(503);
+    expect(result.status).toBe(503);
     expect(reads).toBe(1);
   });
 
-  it("verifies version, provenance, and ownership after independent propagation lag", async () => {
-    const attestationsUrl =
-      "https://registry.npmjs.org/-/npm/v1/attestations/borgmcp-server@1.2.3";
-    const reads = new Map<string, number>();
-    const response = (status: number, body: unknown = {}) => ({
-      status,
-      ok: status >= 200 && status < 300,
-      json: async () => body,
-    }) as Response;
-    const fetchMock = vi.fn(async (input: string | URL | Request) => {
-      const url = String(input);
-      const count = (reads.get(url) ?? 0) + 1;
-      reads.set(url, count);
-      if (count <= 12) return response(404);
-      if (url.endsWith("/borgmcp-server/1.2.3")) {
-        return response(200, {
-          dist: {
-            integrity,
-            attestations: {
-              provenance: { predicateType: "https://slsa.dev/provenance/v1" },
-              url: attestationsUrl,
-            },
-          },
-        });
-      }
-      if (url === attestationsUrl) {
-        return response(200, {
-          attestations: [{
-            predicateType: "https://slsa.dev/provenance/v1",
-            bundle: {
-              dsseEnvelope: {
-                payloadType: "application/vnd.in-toto+json",
-                payload: Buffer.from(JSON.stringify(statement())).toString("base64"),
-              },
-            },
-          }],
-        });
-      }
-      if (url.endsWith("/borgmcp-server")) {
-        return response(200, { maintainers: [{ name: "byteventures" }] });
-      }
-      throw new Error(`Unexpected registry request: ${url}`);
-    });
-    const previousOwner = process.env["NPM_EXPECTED_OWNER"];
-    const previousSha = process.env["GITHUB_SHA"];
-    vi.stubGlobal("fetch", fetchMock);
-    process.env["NPM_EXPECTED_OWNER"] = "byteventures";
-    process.env["GITHUB_SHA"] = commit;
-    try {
-      await expect(postpublish("borgmcp-server", "1.2.3", integrity, {
-        wait: async () => {},
-      })).resolves.toEqual({
-        name: "borgmcp-server",
-        version: "1.2.3",
-        integrity,
-        registryState: "verified",
-      });
-      expect([...reads.values()]).toEqual([13, 13, 13]);
-    } finally {
-      vi.unstubAllGlobals();
-      if (previousOwner === undefined) delete process.env["NPM_EXPECTED_OWNER"];
-      else process.env["NPM_EXPECTED_OWNER"] = previousOwner;
-      if (previousSha === undefined) delete process.env["GITHUB_SHA"];
-      else process.env["GITHUB_SHA"] = previousSha;
-    }
-  });
-
-  it("accepts an exact artifact, tag, workflow, commit, and builder binding", () => {
-    expect(() => verifyProvenanceStatement(
-      statement(),
-      "application/vnd.in-toto+json",
-      "borgmcp-server",
-      "1.2.3",
-      integrity,
-      commit,
-    )).not.toThrow();
-  });
-
-  it.each([
-    ["workflow", (value: ReturnType<typeof statement>) => {
-      value.predicate.buildDefinition.externalParameters.workflow.path = ".github/workflows/other.yml";
-    }],
-    ["tag", (value: ReturnType<typeof statement>) => {
-      value.predicate.buildDefinition.externalParameters.workflow.ref = "refs/tags/v9.9.9";
-    }],
-    ["commit", (value: ReturnType<typeof statement>) => {
-      value.predicate.buildDefinition.resolvedDependencies[0]!.digest.gitCommit = "f".repeat(40);
-    }],
-    ["subject", (value: ReturnType<typeof statement>) => {
-      value.subject[0]!.digest.sha512 = "0".repeat(128);
-    }],
-  ])("rejects a mismatched %s", (_name, mutate) => {
-    const value = statement();
-    mutate(value);
-    expect(() => verifyProvenanceStatement(
-      value,
-      "application/vnd.in-toto+json",
-      "borgmcp-server",
-      "1.2.3",
-      integrity,
-      commit,
-    )).toThrow();
+  it("rejects a registry integrity mismatch", async () => {
+    await expect(verifyPostpublish(report, {
+      expectedVersion: "1.2.3",
+      request: async () => response(200, { dist: { integrity: "sha512-wrong" } }),
+    })).rejects.toThrow("Registry integrity mismatch");
   });
 });

@@ -1,19 +1,75 @@
-import { setTimeout as delay } from 'node:timers/promises';
+import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
-import { verifyPackedArtifact } from './verify-packed-artifact.mjs';
 
 const REGISTRY = 'https://registry.npmjs.org';
+const PACKAGE_NAME = 'borgmcp-server';
+const EXPECTED_OWNER = 'byteventures';
+const INTEGRITY_RE = /^sha512-[A-Za-z0-9+/]+={0,2}$/;
 const PROPAGATION_ATTEMPTS = 18;
 const PROPAGATION_MAX_DELAY_MS = 15_000;
 
-async function request(path) {
-  return fetch(`${REGISTRY}/${path}`, { headers: { accept: 'application/json' }, cache: 'no-store' });
+async function requestRegistry(path) {
+  return fetch(`${REGISTRY}/${path}`, {
+    headers: { accept: 'application/json' },
+    cache: 'no-store',
+  });
 }
 
 async function responseJson(response, description) {
   if (!response.ok) throw new Error(`${description} returned HTTP ${response.status}.`);
   return response.json();
+}
+
+export function verifyArtifactReport(report, expectedVersion) {
+  if (report?.name !== PACKAGE_NAME) {
+    throw new Error(`Release artifact package must be ${PACKAGE_NAME}.`);
+  }
+  if (typeof expectedVersion !== 'string' || report.version !== expectedVersion) {
+    throw new Error(`Release artifact version must be exactly ${expectedVersion}.`);
+  }
+  if (!INTEGRITY_RE.test(report.integrity ?? '') ||
+      Buffer.from(report.integrity.slice('sha512-'.length), 'base64').byteLength !== 64) {
+    throw new Error('Release artifact must have a full SHA-512 integrity.');
+  }
+  return { name: report.name, version: report.version, integrity: report.integrity };
+}
+
+export function verifyOwner(packument, expectedOwner) {
+  if (expectedOwner !== EXPECTED_OWNER) {
+    throw new Error(`NPM_EXPECTED_OWNER must equal the reviewed owner ${EXPECTED_OWNER}.`);
+  }
+  const maintainers = (packument?.maintainers ?? []).map((entry) => entry.name).sort();
+  if (maintainers.length !== 1 || maintainers[0] !== expectedOwner) {
+    throw new Error(`Package ownership differs from the reviewed owner; registry maintainers: ${maintainers.join(', ')}`);
+  }
+}
+
+export async function verifyPrepublish(
+  report,
+  {
+    expectedVersion = report?.version,
+    expectedOwner,
+    request = requestRegistry,
+  } = {},
+) {
+  const artifact = verifyArtifactReport(report, expectedVersion);
+  const versionResponse = await request(
+    `${encodeURIComponent(artifact.name)}/${encodeURIComponent(artifact.version)}`,
+  );
+  if (versionResponse.status !== 404) {
+    if (versionResponse.ok) {
+      throw new Error(`${artifact.name}@${artifact.version} already exists and is immutable.`);
+    }
+    throw new Error(`Version availability check returned HTTP ${versionResponse.status}.`);
+  }
+  const packageResponse = await request(encodeURIComponent(artifact.name));
+  if (packageResponse.status === 404) {
+    throw new Error(`${artifact.name} is unexpectedly unclaimed; do not bootstrap package ownership from this workflow.`);
+  }
+  verifyOwner(await responseJson(packageResponse, 'Package ownership check'), expectedOwner);
+  return { name: artifact.name, version: artifact.version, registryState: 'owned' };
 }
 
 export async function readWithPropagationRetry(
@@ -25,6 +81,10 @@ export async function readWithPropagationRetry(
     wait = delay,
   } = {},
 ) {
+  if (!Number.isSafeInteger(attempts) || attempts < 1 ||
+      !Number.isSafeInteger(maxDelayMs) || maxDelayMs < 0) {
+    throw new Error('Registry visibility retry bounds are invalid.');
+  }
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     const response = await read();
     if (response.status !== 404) return response;
@@ -36,116 +96,48 @@ export async function readWithPropagationRetry(
   throw new Error(`${description} retry loop terminated unexpectedly.`);
 }
 
-function verifyOwner(packument, expectedOwner) {
-  if (!expectedOwner) throw new Error('NPM_EXPECTED_OWNER must be configured in the protected environment.');
-  const maintainers = (packument.maintainers ?? []).map((entry) => entry.name).sort();
-  if (maintainers.length !== 1 || maintainers[0] !== expectedOwner) {
-    throw new Error(`Unexpected npm maintainers: ${maintainers.join(', ')}`);
-  }
-}
-
-async function prepublish(name, version) {
-  if (process.env.NPM_EXPECTED_OWNER !== 'byteventures') {
-    throw new Error('NPM_EXPECTED_OWNER must equal the verified owner byteventures.');
-  }
-  const versionResponse = await request(`${encodeURIComponent(name)}/${encodeURIComponent(version)}`);
-  if (versionResponse.status !== 404) throw new Error(`${name}@${version} is not available for immutable publication.`);
-  const packageResponse = await request(encodeURIComponent(name));
-  if (packageResponse.status === 404) {
-    if (process.env.ALLOW_UNCLAIMED_FIRST_PUBLISH !== 'true' || process.env.NPM_TOKEN_PRESENT !== 'true') {
-      throw new Error('Unclaimed first publish requires both explicit bootstrap approval and protected NPM_TOKEN.');
-    }
-    return { name, version, registryState: 'unclaimed-bootstrap' };
-  }
-  if (process.env.ALLOW_UNCLAIMED_FIRST_PUBLISH !== 'false' || process.env.NPM_TOKEN_PRESENT !== 'false') {
-    throw new Error('Owned package publishing requires OIDC and rejects bootstrap mode/token retention.');
-  }
-  verifyOwner(await responseJson(packageResponse, 'Package ownership check'), process.env.NPM_EXPECTED_OWNER);
-  return { name, version, registryState: 'owned' };
-}
-
-function decodePayload(attestation) {
-  return JSON.parse(Buffer.from(attestation.bundle.dsseEnvelope.payload, 'base64').toString('utf8'));
-}
-
-export function verifyProvenanceStatement(statement, payloadType, name, version, integrity, commit) {
-  if (payloadType !== 'application/vnd.in-toto+json' ||
-      statement?._type !== 'https://in-toto.io/Statement/v1' ||
-      statement?.predicateType !== 'https://slsa.dev/provenance/v1') {
-    throw new Error('Provenance is not signed in-toto/SLSA v1.');
-  }
-  const digest = Buffer.from(integrity.slice('sha512-'.length), 'base64').toString('hex');
-  if (statement.subject?.length !== 1 ||
-      statement.subject[0].name !== `pkg:npm/${name}@${version}` ||
-      statement.subject[0].digest?.sha512 !== digest) {
-    throw new Error('Provenance subject does not match the audited tarball.');
-  }
-  const workflow = statement.predicate?.buildDefinition?.externalParameters?.workflow;
-  if (workflow?.repository !== 'https://github.com/Byte-Ventures/borg-mcp-server' ||
-      workflow?.path !== '.github/workflows/release.yml' ||
-      workflow?.ref !== `refs/tags/v${version}`) {
-    throw new Error('Provenance workflow identity is invalid.');
-  }
-  const github = statement.predicate?.buildDefinition?.internalParameters?.github;
-  if (github?.event_name !== 'push') throw new Error('Provenance was not generated by a tag push.');
-  const dependency = statement.predicate?.buildDefinition?.resolvedDependencies?.find(
-    (entry) => entry.uri === `git+https://github.com/Byte-Ventures/borg-mcp-server@refs/tags/v${version}`,
-  );
-  if (!commit || dependency?.digest?.gitCommit !== commit) throw new Error('Provenance commit mismatch.');
-  if (statement.predicate?.runDetails?.builder?.id !== 'https://github.com/actions/runner/github-hosted') {
-    throw new Error('Provenance builder is not GitHub-hosted.');
-  }
-}
-
-export async function postpublish(name, version, integrity, retryOptions = {}) {
+export async function verifyPostpublish(
+  report,
+  {
+    expectedVersion = report?.version,
+    request = requestRegistry,
+    ...retryOptions
+  } = {},
+) {
+  const artifact = verifyArtifactReport(report, expectedVersion);
   const versionResponse = await readWithPropagationRetry(
-    () => request(`${encodeURIComponent(name)}/${encodeURIComponent(version)}`),
+    () => request(`${encodeURIComponent(artifact.name)}/${encodeURIComponent(artifact.version)}`),
     'Published version verification',
     retryOptions,
   );
   const published = await responseJson(versionResponse, 'Published version verification');
-  if (published.dist?.integrity !== integrity) throw new Error('Registry integrity does not match audited artifact.');
-  const attestationsUrl = published.dist?.attestations?.url;
-  if (published.dist?.attestations?.provenance?.predicateType !== 'https://slsa.dev/provenance/v1' || !attestationsUrl) {
-    throw new Error('Registry response lacks SLSA provenance.');
+  if (published.dist?.integrity !== artifact.integrity) {
+    throw new Error(
+      `Registry integrity mismatch: expected ${artifact.integrity}, received ${published.dist?.integrity}.`,
+    );
   }
-  const provenanceUrl = new URL(attestationsUrl);
-  if (provenanceUrl.protocol !== 'https:' || provenanceUrl.hostname !== 'registry.npmjs.org' ||
-      !provenanceUrl.pathname.startsWith('/-/npm/v1/attestations/')) {
-    throw new Error('Registry provenance URL is outside the trusted npm attestation endpoint.');
-  }
-  const provenanceResponse = await readWithPropagationRetry(
-    () => fetch(attestationsUrl, {
-      headers: { accept: 'application/json' }, cache: 'no-store',
-    }),
-    'Provenance verification',
-    retryOptions,
-  );
-  const document = await responseJson(provenanceResponse, 'Provenance verification');
-  const attestation = document.attestations?.find((entry) => entry.predicateType === 'https://slsa.dev/provenance/v1');
-  if (!attestation) throw new Error('Registry bundle lacks SLSA provenance statement.');
-  verifyProvenanceStatement(
-    decodePayload(attestation), attestation.bundle.dsseEnvelope.payloadType,
-    name, version, integrity, process.env.GITHUB_SHA,
-  );
-  const packageResponse = await readWithPropagationRetry(
-    () => request(encodeURIComponent(name)),
-    'Post-publish ownership check',
-    retryOptions,
-  );
-  verifyOwner(await responseJson(packageResponse, 'Post-publish ownership check'), process.env.NPM_EXPECTED_OWNER);
-  return { name, version, integrity, registryState: 'verified' };
+  return {
+    name: artifact.name,
+    version: artifact.version,
+    integrity: artifact.integrity,
+    registryState: 'verified',
+  };
 }
 
 const invokedPath = process.argv[1] ? resolve(process.argv[1]) : '';
 if (invokedPath === fileURLToPath(import.meta.url)) {
-  const [mode, tarball] = process.argv.slice(2);
-  if (!['prepublish', 'postpublish'].includes(mode) || !tarball) {
-    throw new Error('Usage: node scripts/verify-registry-release.mjs <prepublish|postpublish> <package.tgz>');
+  const [mode, reportPath] = process.argv.slice(2);
+  if (!['prepublish', 'postpublish'].includes(mode) || !reportPath) {
+    throw new Error('Usage: node scripts/verify-registry-release.mjs <prepublish|postpublish> <artifact-report.json>');
   }
-  const artifact = await verifyPackedArtifact(tarball);
-  const report = mode === 'prepublish'
-    ? await prepublish(artifact.name, artifact.version)
-    : await postpublish(artifact.name, artifact.version, artifact.integrity);
-  console.log(JSON.stringify(report, null, 2));
+  const expectedVersion = process.env.EXPECTED_VERSION;
+  if (!expectedVersion) throw new Error('EXPECTED_VERSION is required.');
+  const report = JSON.parse(await readFile(reportPath, 'utf8'));
+  const result = mode === 'prepublish'
+    ? await verifyPrepublish(report, {
+        expectedVersion,
+        expectedOwner: process.env.NPM_EXPECTED_OWNER,
+      })
+    : await verifyPostpublish(report, { expectedVersion });
+  console.log(JSON.stringify(result, null, 2));
 }

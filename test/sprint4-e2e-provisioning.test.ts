@@ -1,10 +1,15 @@
 import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
-import { createServer } from "node:net";
+import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { provisionSprint4E2e } from "./sprint4-e2e-provisioning.js";
+import {
+  closeSprint4Server,
+  getSprint4Status,
+  provisionSprint4E2e,
+  SPRINT4_TRANSPORT_TIMEOUT_MS,
+} from "./sprint4-e2e-provisioning.js";
 
 const parents: string[] = [];
 
@@ -84,4 +89,39 @@ describe("Sprint 4 joined E2E provisioning", () => {
     }
     await expect(stat(dataDirectory)).rejects.toMatchObject({ code: "ENOENT" });
   });
+
+  it("bounds a stalled TLS transport and a stalled server close", async () => {
+    const stalled = createServer((socket) => socket.on("data", () => undefined));
+    await listen(stalled);
+    const address = stalled.address();
+    if (address === null || typeof address === "string") throw new Error("Expected a TCP port.");
+    const startedAt = Date.now();
+    try {
+      await expect(getSprint4Status(
+        `https://127.0.0.1:${address.port}`,
+        Buffer.alloc(0),
+        "/stalled",
+        "credential-is-not-sent-to-any-log",
+      )).rejects.toThrow("HTTPS GET timed out");
+      expect(Date.now() - startedAt).toBeLessThan(SPRINT4_TRANSPORT_TIMEOUT_MS + 500);
+      await expect(closeSprint4Server({
+        origin: "https://127.0.0.1:1",
+        limits: {} as never,
+        close: async () => await new Promise<void>(() => undefined),
+      })).rejects.toThrow("HTTPS server close timed out");
+    } finally {
+      await closeServer(stalled);
+    }
+  });
 });
+
+function listen(server: Server): Promise<void> {
+  return new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => resolve());
+  });
+}
+
+function closeServer(server: Server): Promise<void> {
+  return new Promise((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error)));
+}

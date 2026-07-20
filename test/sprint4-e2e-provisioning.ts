@@ -7,6 +7,7 @@
  */
 import { randomUUID } from "node:crypto";
 import { mkdir, lstat, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
+import type { ClientRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { basename, dirname, join, resolve } from "node:path";
 
@@ -56,6 +57,9 @@ interface Enrollment {
   readonly credential: string;
 }
 
+/** Every owned network operation must leave time for bounded teardown. */
+export const SPRINT4_TRANSPORT_TIMEOUT_MS = 2_000;
+
 /**
  * Provision a disposable, real server scenario for one joined client/server
  * execution. The caller must retain the returned object and always call
@@ -81,11 +85,17 @@ export async function provisionSprint4E2e(
   const cleanup = async (): Promise<void> => {
     if (cleaned) return;
     cleaned = true;
-    await server?.close();
-    runtime?.close();
-    digester?.destroy();
-    await runtimeLock?.release();
-    await rm(dataDirectory, { recursive: true, force: true });
+    let failure: unknown;
+    try {
+      await closeSprint4Server(server);
+    } catch (error) {
+      failure = error;
+    }
+    try { runtime?.close(); } catch (error) { failure ??= error; }
+    try { digester?.destroy(); } catch (error) { failure ??= error; }
+    try { await runtimeLock?.release(); } catch (error) { failure ??= error; }
+    try { await rm(dataDirectory, { recursive: true, force: true }); } catch (error) { failure ??= error; }
+    if (failure !== undefined) throw failure;
   };
 
   try {
@@ -145,7 +155,7 @@ export async function provisionSprint4E2e(
     }, owner.credential);
     expectStatus(otherCube, 201, "create scoped-access sentinel");
     const otherCubeId = decodePayload<{ cube_id: string }>(otherCube.body, "create scoped-access sentinel").cube_id;
-    const crossCubeRead = await getStatus(
+    const crossCubeRead = await getSprint4Status(
       server.origin,
       ca,
       `/api/cubes/${otherCubeId}`,
@@ -292,7 +302,7 @@ async function postJson(
 ): Promise<{ readonly status: number; readonly body: string }> {
   const body = JSON.stringify(payload);
   const url = new URL(path, origin);
-  return new Promise((resolve, reject) => {
+  return requestWithDeadline("HTTPS POST", (resolve, reject) => {
     const outgoing = httpsRequest({
       hostname: url.hostname,
       port: url.port,
@@ -311,14 +321,21 @@ async function postJson(
       response.on("data", (chunk: string) => { responseBody += chunk; });
       response.on("end", () => resolve({ status: response.statusCode ?? 0, body: responseBody }));
     });
-    outgoing.on("error", reject);
+    outgoing.once("error", reject);
     outgoing.end(body);
+    return outgoing;
   });
 }
 
-async function getStatus(origin: string, ca: Buffer, path: string, credential: string): Promise<number> {
+/** Test-only hostile-transport probe used to prove the request deadline. */
+export async function getSprint4Status(
+  origin: string,
+  ca: Buffer,
+  path: string,
+  credential: string,
+): Promise<number> {
   const url = new URL(path, origin);
-  return new Promise((resolve, reject) => {
+  return requestWithDeadline("HTTPS GET", (resolve, reject) => {
     const outgoing = httpsRequest({
       hostname: url.hostname,
       port: url.port,
@@ -330,8 +347,56 @@ async function getStatus(origin: string, ca: Buffer, path: string, credential: s
       response.resume();
       response.on("end", () => resolve(response.statusCode ?? 0));
     });
-    outgoing.on("error", reject);
+    outgoing.once("error", reject);
     outgoing.end();
+    return outgoing;
+  });
+}
+
+/** Test-only bounded wrapper around the server-owned close operation. */
+export async function closeSprint4Server(server: RunningServer | undefined): Promise<void> {
+  if (server === undefined) return;
+  await withDeadline("HTTPS server close", () => server.close());
+}
+
+function requestWithDeadline<T>(
+  operation: string,
+  start: (
+    resolve: (value: T) => void,
+    reject: (reason: unknown) => void,
+  ) => ClientRequest,
+): Promise<T> {
+  let outgoing: ClientRequest | undefined;
+  return withDeadline(operation, () => new Promise<T>((resolve, reject) => {
+    outgoing = start(resolve, reject);
+  }), () => outgoing?.destroy());
+}
+
+function withDeadline<T>(
+  operation: string,
+  work: () => Promise<T>,
+  onTimeout?: () => void,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const settle = (callback: (value: T) => void, value: T): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      callback(value);
+    };
+    const fail = (error: unknown): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      reject(error);
+    };
+    const timer = setTimeout(() => {
+      try { onTimeout?.(); } catch { /* Preserve the bounded timeout error. */ }
+      fail(new Error(`Sprint 4 ${operation} timed out.`));
+    }, SPRINT4_TRANSPORT_TIMEOUT_MS);
+    timer.unref();
+    work().then((value) => settle(resolve, value), fail);
   });
 }
 

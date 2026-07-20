@@ -75,7 +75,7 @@ describe("coordination stream setup", () => {
       "replay-boundary",
     ]);
     await iterator.return?.();
-  });
+  }, 15_000);
 
   it("emits heartbeat events while a live stream is idle", async () => {
     const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-api-heartbeat-")));

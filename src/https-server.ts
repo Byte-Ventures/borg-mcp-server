@@ -48,7 +48,7 @@ export const DEFAULT_SERVICE_LIMITS: ServiceLimits = {
   maxStreamsPerCredential: 8,
   maxHeaderBytes: 16_384,
   maxRequestBodyBytes: 65_536,
-  maxRequestsPerSocket: 100,
+  maxRequestsPerSocket: 0,
   requestTimeoutMs: 15_000,
   tlsHandshakeTimeoutMs: 10_000,
   headersTimeoutMs: 10_000,
@@ -350,9 +350,7 @@ async function handleRequest(
       return;
     }
     trace.principal = authentication;
-    const clientIdentity = `client:${authentication.kind === "drone-session"
-      ? authentication.clientId
-      : authentication.id}`;
+    const clientIdentity = credentialRateLimitIdentity(authentication, request.method, path);
     const credentialRetry = credentialRateLimiter.consume(clientIdentity);
     if (credentialRetry !== null) return sendRateLimited(response, credentialRetry);
     const query = parseCoordinationQuery(request.url, path);
@@ -592,6 +590,19 @@ function isCoordinationPath(path: string | null): path is string {
     path?.startsWith("/api/cubes/") === true;
 }
 
+function credentialRateLimitIdentity(
+  principal: Principal,
+  method: string | undefined,
+  path: string,
+): string {
+  const routineRead = (method === "GET" && !path.endsWith("/stream")) ||
+    (method === "PUT" && (path.endsWith("/logs") || path.endsWith("/decisions")));
+  if (principal.kind === "drone-session" && routineRead) {
+    return `drone-session:${principal.id}`;
+  }
+  return `client:${principal.kind === "drone-session" ? principal.clientId : principal.id}`;
+}
+
 function applyServerLimits(server: HttpsServer, limits: ServiceLimits): Set<Socket> {
   server.maxConnections = limits.maxConnections;
   server.maxRequestsPerSocket = limits.maxRequestsPerSocket;
@@ -621,8 +632,9 @@ function applyServerLimits(server: HttpsServer, limits: ServiceLimits): Set<Sock
 
 function validateLimits(limits: ServiceLimits): void {
   for (const [name, value] of Object.entries(limits)) {
-    if (!Number.isSafeInteger(value) || value <= 0) {
-      throw new Error(`${name} must be a positive safe integer.`);
+    if (!Number.isSafeInteger(value) || value < 0 || (value === 0 && name !== "maxRequestsPerSocket")) {
+      const range = name === "maxRequestsPerSocket" ? "non-negative" : "positive";
+      throw new Error(`${name} must be a ${range} safe integer.`);
     }
   }
   if (limits.headersTimeoutMs > limits.requestTimeoutMs) {

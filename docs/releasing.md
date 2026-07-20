@@ -251,6 +251,15 @@ published the exact audited 79-file artifact. npm reports integrity
 and `latest` resolves to `0.1.5`. The tokenless OIDC publication and postpublication checks verified
 registry ownership, SLSA provenance, signatures, and attestations for this tag and commit.
 
+The immutable annotated `v0.1.6` tag object
+`850b2b61cb4ce84ba9d1d6bc4e14defefecc1d23` peels to protected-main merge
+`29954b9517d160d23b1d31ce8e49e1e24fb6beba`. Workflow run `29743430282`, attempt 1, failed safely in
+`Exercise exact tarball once` before artifact upload, protected-environment approval, or npm publication.
+The setup-node runner supplied npm `10.9.7`, which satisfies the declared `npm >=10.0.0` engine, but
+the consumer probe redundantly required exact npm `11.18.0`. npm continued to return E404 for
+`borgmcp-server@0.1.6`. Never rerun the workflow or move, delete, or reuse the tag; recovery uses the
+unused `0.1.7` identity and validates consumer npm solely through the packed package engine boundary.
+
 The immutable annotated `v0.1.4` tag object
 `1604077e6249c7c0f7ce17b3f2848caad2bc773e` peels to protected-main merge
 `1f7e60a695f27d92b2d46233b0e3cad5aa43bd0d`, whose tree is byte-identical to reviewed source
@@ -285,8 +294,9 @@ move, delete, or reuse that tag. Recovery uses separately authorized version `0.
 source and merge commit, pre-tag repository-variable evidence, and a never-before-used annotated tag.
 
 The live `borgmcp-server@0.1.5` package consumes the audited exact
-`borgmcp-shared@0.4.0` registry release. Current source is the unpublished
-`borgmcp-server@0.1.6` release candidate and consumes the verified exact
+`borgmcp-shared@0.4.0` registry release. Immutable `v0.1.6` is failed prepublication evidence and is
+not an install target. Current source is the unpublished `borgmcp-server@0.1.7` recovery candidate
+and consumes the verified exact
 `borgmcp-shared@0.4.2` registry release; the shrinkwrap must resolve that registry tarball with the
 matching SRI. Version `0.1.5` remains the install target until the candidate passes exact-SHA review,
 an authorized immutable tag publication, and bounded registry integrity and signature verification.

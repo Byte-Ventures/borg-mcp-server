@@ -62,11 +62,11 @@ describe("Sprint 4 joined E2E provisioning", () => {
       expect(new Set(Object.values(run.clientIds)).size).toBe(3);
       expect(new Set(Object.values(run.seats).map((seat) => seat.droneId)).size).toBe(3);
       expect(run.trustMaterialReference).toMatch(/\/server\/ca\.crt$/u);
-      expect(run.trustIdentity).toMatch(/^[0-9a-f]{64}$/u);
+      expect(run.trustIdentity).toMatch(/^spki-sha256:[0-9a-f]{64}$/u);
       const setupConfig = JSON.parse(await readFile(join(dataDirectory, "server.json"), "utf8")) as {
         ca_spki_sha256: string;
       };
-      expect(run.trustIdentity).toBe(setupConfig.ca_spki_sha256);
+      expect(run.trustIdentity).toBe(`spki-sha256:${setupConfig.ca_spki_sha256}`);
       for (const [identity, reference] of Object.entries(run.credentialReferences)) {
         expect((await stat(reference)).mode & 0o777).toBe(0o600);
         const saved = JSON.parse(await readFile(reference, "utf8")) as Record<string, unknown>;
@@ -132,10 +132,15 @@ describe("Sprint 4 joined E2E provisioning", () => {
   });
 
   it("rejects a missing or mismatched emitted trust identity before handoff", () => {
-    const identity = "a".repeat(64);
+    const bareIdentity = "a".repeat(64);
+    const identity = `spki-sha256:${bareIdentity}`;
     expect(() => assertTrustIdentityContract(identity, undefined))
       .toThrow("trust identity mismatch");
-    expect(() => assertTrustIdentityContract(identity, "b".repeat(64)))
+    expect(() => assertTrustIdentityContract(identity, bareIdentity))
+      .toThrow("trust identity mismatch");
+    expect(() => assertTrustIdentityContract(identity, `sha256:${bareIdentity}`))
+      .toThrow("trust identity mismatch");
+    expect(() => assertTrustIdentityContract(identity, `spki-sha256:${"b".repeat(64)}`))
       .toThrow("trust identity mismatch");
     expect(() => assertTrustIdentityContract(identity, identity)).not.toThrow();
   });

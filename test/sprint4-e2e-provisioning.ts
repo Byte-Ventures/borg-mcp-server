@@ -368,7 +368,7 @@ async function writeCredentialReference(
 
 /** Test-only trust binding guard shared by emitted reader and writer references. */
 export function assertTrustIdentityContract(expected: string, actual: unknown): void {
-  if (!/^[0-9a-f]{64}$/iu.test(expected) || actual !== expected) {
+  if (!/^spki-sha256:[0-9a-f]{64}$/u.test(expected) || actual !== expected) {
     throw new Error("Sprint 4 credential reference trust identity mismatch.");
   }
 }
@@ -378,13 +378,15 @@ async function assertCredentialReferenceTrust(path: string, expected: string): P
   assertTrustIdentityContract(expected, value.trust_identity);
 }
 
-// This is the same CA public-key (SPKI) SHA-256 used by bootstrapServer for
-// server.json's ca_spki_sha256; it is a portable trust identity, not a path.
+// bootstrapServer writes the bare CA public-key (SPKI) SHA-256 to server.json.
+// The client authority contract prefixes that same lowercase digest to make its
+// algorithm explicit; the emitted identity is portable and never a path.
 function canonicalTrustIdentity(certificate: Buffer): string {
   const ca = new X509Certificate(certificate);
-  return createHash("sha256")
+  const fingerprint = createHash("sha256")
     .update(ca.publicKey.export({ type: "spki", format: "der" }))
     .digest("hex");
+  return `spki-sha256:${fingerprint}`;
 }
 
 function isUuid(value: string): boolean {

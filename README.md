@@ -64,9 +64,9 @@ npm install --global borgmcp-server
 The default data directory is `~/.borg/server`. Setup creates the local
 database, credential-digest key, local certificate authority, server
 certificate, and one same-machine owner binding. The matching client credential
-is written atomically to the portable owner-only store at
-`~/.borg/credentials/credentials.json`; the directory is mode `0700` and the
-file is mode `0600`. Setup prints no credential, invitation, or credential path,
+is written atomically to the portable owner-only file at
+`~/.borg/credentials` (mode `0600`). Its `~/.borg` parent must be owner-controlled
+and not group/world-writable. Setup prints no credential, invitation, or credential path,
 and creates no cube.
 
 ```sh

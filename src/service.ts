@@ -440,7 +440,7 @@ function storageOperatorErrorCode(name: string): OperatorErrorCode {
 const serverEnvironment = selectServerEnvironment(process.env);
 const dataDirectory = serverEnvironment.BORG_SERVER_DATA_DIR ?? join(homedir(), ".borg", "server");
 const runtimeDirectory = serverEnvironment.BORG_SERVER_RUNTIME_DIR ?? join(homedir(), ".borg", "server-runtime");
-const credentialDirectory = join(homedir(), ".borg", "credentials");
+const credentialFile = join(homedir(), ".borg", "credentials");
 const nodeRuntimeOperator = createNodeRuntimeOperator(runtimeDirectory, dataDirectory);
 const startOnlyService = createNodeServerService({
   environment: { ...serverEnvironment, BORG_SERVER_DATA_DIR: dataDirectory },
@@ -495,7 +495,7 @@ export const nodeServerService: ServerService = {
       dataDirectory,
       bindHost,
       options,
-      credentialDirectory,
+      credentialFile,
     );
     if (!("existing" in result)) {
       const { recoveryCredential: _recovery, initialInvitation: _invitation, ...publicResult } = result;
@@ -519,7 +519,7 @@ export const nodeServerService: ServerService = {
   },
   status: () => inspectNodeRuntime(dataDirectory, runtimeDirectory),
   update: () => nodeRuntimeOperator.updateLatest(30_000),
-  ...createOfflineCredentialService(dataDirectory, credentialDirectory),
+  ...createOfflineCredentialService(dataDirectory, credentialFile),
 };
 
 function createNodeRuntimeOperator(managedRuntimeDirectory: string, runtimeDataDirectory: string) {

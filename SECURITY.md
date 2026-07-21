@@ -31,8 +31,8 @@ has been coordinated.
   private LAN.
 - Restrict the data directory and all generated credentials to the service
   account.
-- Keep `~/.borg/credentials` owner-only (`0700`) and its credential files
-  owner-only (`0600`); setup never prints the local owner credential.
+- Keep `~/.borg` owner-controlled and not group/world-writable, and keep the
+  `~/.borg/credentials` file owner-only (`0600`); setup never prints the local owner credential.
 - Create single-use invitations only in a private interactive terminal.
 - Stop the server before offline credential rotation or revocation.
 - Back up sensitive state using encrypted storage and test restoration in a

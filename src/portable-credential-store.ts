@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
-import { lstat, mkdir, open, realpath, rename, unlink } from "node:fs/promises";
+import { lstat, open, realpath, rename, unlink } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { isIP } from "node:net";
 
@@ -27,12 +27,12 @@ export function portableCredentialAccount(origin: string, trustIdentity: string)
 }
 
 export async function writePortableServerCredential(
-  root: string,
+  path: string,
   record: PortableServerCredential,
 ): Promise<void> {
   validateRecord(record);
-  const canonicalRoot = await prepareRoot(root, true);
-  const target = join(canonicalRoot, "credentials.json");
+  const target = await credentialPath(path);
+  const canonicalRoot = dirname(target);
   const lock = `${target}.lock`;
   const lockHandle = await open(lock, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, 0o600);
   try {
@@ -73,12 +73,11 @@ export async function writePortableServerCredential(
 }
 
 export async function readPortableServerCredential(
-  root: string,
+  path: string,
   origin: string,
   trustIdentity: string,
 ): Promise<PortableServerCredential> {
-  const canonicalRoot = await prepareRoot(root, false);
-  const target = join(canonicalRoot, "credentials.json");
+  const target = await credentialPath(path);
   await assertPrivateFile(target);
   const document = parseDocument(await readPrivateBytes(target));
   const value = document.accounts[portableCredentialAccount(origin, trustIdentity)];
@@ -91,29 +90,17 @@ export async function readPortableServerCredential(
   return Object.freeze(parsed);
 }
 
-async function prepareRoot(path: string, create: boolean): Promise<string> {
-  const expected = resolve(path);
-  const parent = dirname(expected);
+async function credentialPath(path: string): Promise<string> {
+  const target = resolve(path);
+  const parent = dirname(target);
   const parentMetadata = await lstat(parent);
   if (!parentMetadata.isDirectory() || parentMetadata.isSymbolicLink() ||
-      (parentMetadata.mode & 0o077) !== 0 ||
+      (parentMetadata.mode & 0o022) !== 0 ||
       (typeof process.getuid === "function" && parentMetadata.uid !== process.getuid()) ||
       await realpath(parent) !== parent) {
     throw new Error("Portable credential parent directory is unsafe.");
   }
-  if (create) {
-    await mkdir(expected, { mode: 0o700 }).catch((error: unknown) => {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-    });
-  }
-  const metadata = await lstat(expected);
-  if (!metadata.isDirectory() || metadata.isSymbolicLink() || (metadata.mode & 0o777) !== 0o700 ||
-      (typeof process.getuid === "function" && metadata.uid !== process.getuid())) {
-    throw new Error("Portable credential directory is unsafe.");
-  }
-  const canonical = await realpath(expected);
-  if (canonical !== expected) throw new Error("Portable credential directory is unsafe.");
-  return canonical;
+  return target;
 }
 
 async function assertPrivateFile(path: string): Promise<void> {

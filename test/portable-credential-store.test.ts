@@ -25,11 +25,12 @@ afterEach(async () => Promise.all(roots.splice(0).map((root) => rm(root, { recur
 describe("portable parent credential store", () => {
   it("writes the exact client schema privately and preserves unrelated accounts", async () => {
     const parent = await temporaryDirectory();
-    const root = join(parent, "credentials");
-    await writePortableServerCredential(root, record);
-    const target = join(root, "credentials.json");
-    expect((await lstat(root)).mode & 0o777).toBe(0o700);
+    await chmod(parent, 0o755);
+    const target = join(parent, "credentials");
+    await writePortableServerCredential(target, record);
+    expect((await lstat(parent)).mode & 0o777).toBe(0o755);
     expect((await lstat(target)).mode & 0o777).toBe(0o600);
+    await expect(access(`${target}.lock`)).rejects.toMatchObject({ code: "ENOENT" });
     const document = JSON.parse(await readFile(target, "utf8")) as {
       version: number;
       accounts: Record<string, string>;
@@ -40,10 +41,10 @@ describe("portable parent credential store", () => {
     const second = { ...record, credential: "d".repeat(43) } as const;
     document.accounts["unrelated-account"] = "opaque unrelated value";
     await writeFile(target, `${JSON.stringify(document)}\n`, { mode: 0o600 });
-    await writePortableServerCredential(root, second);
+    await writePortableServerCredential(target, second);
     const updated = JSON.parse(await readFile(target, "utf8")) as typeof document;
     expect(updated.accounts["unrelated-account"]).toBe("opaque unrelated value");
-    await expect(readPortableServerCredential(root, record.origin, record.trustIdentity))
+    await expect(readPortableServerCredential(target, record.origin, record.trustIdentity))
       .resolves.toEqual(second);
   });
 
@@ -55,7 +56,7 @@ describe("portable parent credential store", () => {
     await symlink(actual, link);
     await expect(readPortableServerCredential(link, record.origin, record.trustIdentity))
       .rejects.toThrow("unsafe");
-    await chmod(join(actual, "credentials.json"), 0o644);
+    await chmod(actual, 0o644);
     await expect(readPortableServerCredential(actual, record.origin, record.trustIdentity))
       .rejects.toThrow("unsafe");
   });
@@ -66,6 +67,15 @@ describe("portable parent credential store", () => {
     await expect(readPortableServerCredential(missing, record.origin, record.trustIdentity))
       .rejects.toMatchObject({ code: "ENOENT" });
     await expect(access(missing)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("rejects a group-writable parent without rewriting its mode", async () => {
+    const parent = await temporaryDirectory();
+    await chmod(parent, 0o775);
+    const target = join(parent, "credentials");
+    await expect(writePortableServerCredential(target, record)).rejects.toThrow("unsafe");
+    expect((await lstat(parent)).mode & 0o777).toBe(0o775);
+    await expect(access(target)).rejects.toMatchObject({ code: "ENOENT" });
   });
 });
 

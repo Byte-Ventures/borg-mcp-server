@@ -77,7 +77,7 @@ describe("node server service", () => {
         credentials,
       );
       expect("existing" in first).toBe(false);
-      const before = await readFile(join(credentials, "credentials.json"));
+      const before = await readFile(credentials);
       const second = await setupNodeServerInstallation(
         directory,
         "127.0.0.1",
@@ -85,7 +85,7 @@ describe("node server service", () => {
         credentials,
       );
       expect(second).toEqual({ existing: true });
-      expect(await readFile(join(credentials, "credentials.json"))).toEqual(before);
+      expect(await readFile(credentials)).toEqual(before);
     } finally {
       await rm(parent, { recursive: true, force: true });
     }

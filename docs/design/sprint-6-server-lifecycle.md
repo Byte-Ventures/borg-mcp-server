@@ -18,7 +18,7 @@ The server owns artifact verification, activation, data and identity preservatio
 
 ### Setup
 
-First setup must say that local identity and data storage were prepared, identify the verified artifact, state that no server process started, and give the foreground start command as the next action. It must not print a recovery credential or bootstrap invitation. Initial local owner enrollment is handled by the existing `borg assimilate` flow.
+First setup must say that local identity and data storage were prepared, identify the verified artifact, state that local owner access is prepared, state that no server process started, and give the foreground start command as the next action. It must not print a recovery credential or bootstrap invitation. Bare local `borg assimilate` reads the prepared owner credential without an invitation prompt.
 
 Repeated setup must be idempotent. It must say that data and identity are unchanged and that no process started. It must not print credentials, recovery material, or ambiguous "already running" language.
 
@@ -50,7 +50,11 @@ Non-TTY output is one bounded machine-readable record with no ANSI, progress ani
 
 ### Invitation
 
-`borg-mcp-server invite` and `borg server invite` create a single-use invitation only when explicitly run in an interactive terminal. They reuse existing authenticated invitation generation behavior; setup never creates or prints an invitation.
+`borg-mcp-server invite` and `borg server invite` create a single-use invitation only when explicitly run in an interactive terminal. They reuse existing authenticated invitation generation behavior; setup never creates or prints an invitation. Both help surfaces include exactly:
+
+```text
+invite   Create a single-use invitation in an interactive terminal.
+```
 
 Interactive output is exactly:
 
@@ -76,9 +80,16 @@ Invitation creation requires an interactive terminal.
 
 ```text
 Local server setup completed.
+Artifact: borgmcp-server@<version> (<artifact digest>)
+Local owner access: prepared.
 No server process started.
-Initial owner enrollment is handled by borg assimilate.
 Next: start the server, then run borg assimilate.
+```
+
+  Non-TTY successful setup output is exactly:
+
+```json
+{"status":"prepared","artifact":"borgmcp-server@<version>","build_identity":"<identity>","owner_access":"prepared","process":"stopped"}
 ```
 
   Setup, status, update, repeated setup, logs, diagnostics, and error output must never print an invitation token.

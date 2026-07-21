@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sprint 6 Client Facade Copy</title>
+  <style>
+    :root { color-scheme: dark; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    body { margin: 0; background: #101316; color: #e8e2d8; }
+    main { max-width: 860px; margin: 0 auto; padding: 36px 20px 56px; }
+    h1 { font-family: ui-sans-serif, system-ui, sans-serif; font-size: 28px; margin: 0 0 8px; }
+    p { color: #a9b1ba; line-height: 1.55; }
+    section { border: 1px solid #303841; background: #171c21; margin-top: 16px; padding: 16px; }
+    h2 { font-family: ui-sans-serif, system-ui, sans-serif; font-size: 15px; letter-spacing: .04em; margin: 0 0 12px; text-transform: uppercase; }
+    pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.48; }
+    .bad { color: #f48f8f; } .ok { color: #83d3a2; } .dim { color: #a9b1ba; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Client Facade: borg server</h1>
+    <p>Client-owned copy only. Server lifecycle output is passed through unchanged.</p>
+    <section>
+      <h2>Help</h2>
+      <pre>Usage: borg server &lt;command&gt; [arguments]
+
+Commands:
+  setup    Prepare local server identity and data; does not start the server.
+  start    Start the verified server in the foreground.
+  status   Report verified runtime evidence.
+  update   Verify and activate a local server artifact.
+
+Run <span class="ok">borg server &lt;command&gt; --help</span> for server command options.</pre>
+    </section>
+    <section>
+      <h2>Unsupported Command</h2>
+      <pre><span class="bad">Unknown server command: &lt;command&gt;.</span>
+Available commands: setup, start, status, update.
+Next: run <span class="ok">borg server --help</span>.</pre>
+    </section>
+    <section>
+      <h2>Missing Executable</h2>
+      <pre><span class="bad">Local server command is unavailable: borg-mcp-server was not found.</span>
+Next: install a verified borgmcp-server release, then rerun
+<span class="ok">borg server &lt;command&gt;</span>.
+<span class="dim">No checkout fallback is attempted.</span></pre>
+    </section>
+    <section>
+      <h2>Non-TTY</h2>
+      <pre>Use the same plain text. Do not emit ANSI, JSON, a stack trace, a searched path, or a checkout hint for facade errors.</pre>
+    </section>
+  </main>
+</body>
+</html>

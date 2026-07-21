@@ -2,7 +2,7 @@
 
 ## Status
 
-Design gate for borg-mcp-server #104/#109 and borg-mcp-client #91. The companion mockup is `docs/design/mockups/sprint-6-server-lifecycle.html`.
+Design gate for borg-mcp-server #104/#109 and borg-mcp-client #91. The companion mockups are `docs/design/mockups/sprint-6-server-lifecycle.html` and `docs/design/mockups/sprint-6-client-facade.html`.
 
 The mockup is the user-facing acceptance surface. Implementation may choose its internal service APIs and adapter file formats, but may not change lifecycle copy, ownership, or recovery semantics without Product Design review.
 
@@ -56,6 +56,48 @@ Non-TTY output is one bounded machine-readable record with no ANSI, progress ani
 - Use bounded, actionable failures: what stopped, whether activation occurred, what remains available, and the next command.
 - Do not expose artifact URLs, credentials, recovery material, local secret paths, CA material, or raw process errors.
 - Do not add retry loops, service installation, or LAN enablement implicitly.
+
+## Client Facade Copy
+
+The following strings are client-owned. The facade renders them before server execution. Server-owned lifecycle output passes through unchanged.
+
+### Help
+
+```text
+Usage: borg server <command> [arguments]
+
+Commands:
+  setup    Prepare local server identity and data; does not start the server.
+  start    Start the verified server in the foreground.
+  status   Report verified runtime evidence.
+  update   Verify and activate a local server artifact.
+
+Run borg server <command> --help for server command options.
+```
+
+### Unsupported Command
+
+```text
+Unknown server command: <command>.
+Available commands: setup, start, status, update.
+Next: run borg server --help.
+```
+
+`<command>` is the parsed command token rendered as inert text. Do not include remaining user-supplied arguments.
+
+### Missing Server Executable
+
+```text
+Local server command is unavailable: borg-mcp-server was not found.
+Next: install a verified borgmcp-server release, then rerun borg server <command>.
+No checkout fallback is attempted.
+```
+
+`<command>` is the requested lifecycle command. The client must not search a checkout, infer a local binary path, or start another process after this error.
+
+### Facade Non-TTY
+
+For the three client-owned messages above, non-TTY behavior is the same bounded plain text with no ANSI, JSON, stack trace, searched path, or checkout hint. Server-provided non-TTY lifecycle output remains server-owned and follows the lifecycle mockup.
 
 ## Accessibility And Portability
 

@@ -43,6 +43,9 @@ export interface CubeInvitationResult extends InvitationCubeScope {
 
 export type SeatAttachResponse = SeatAttachRecord;
 
+export const DRONE_SESSION_TTL_MS = 86_400_000;
+export const DRONE_SESSION_RENEWAL_WINDOW_MS = DRONE_SESSION_TTL_MS / 2;
+
 export class CredentialDigester {
   readonly #key: Buffer;
 
@@ -121,6 +124,22 @@ export class LiveCredentialRegistry {
     for (const controller of [...sessions]) {
       this.#release(controller);
       controller.abort();
+    }
+  }
+
+  renew(identity: string, expiresInMs: number): void {
+    const sessions = this.#sessions.get(identity);
+    if (sessions === undefined) return;
+    for (const controller of [...sessions]) {
+      const timer = this.#timers.get(controller);
+      if (timer !== undefined) clearTimeout(timer);
+      if (expiresInMs <= 0) {
+        this.#expire(controller);
+        continue;
+      }
+      const renewedTimer = setTimeout(() => this.#expire(controller), expiresInMs);
+      renewedTimer.unref();
+      this.#timers.set(controller, renewedTimer);
     }
   }
 
@@ -287,7 +306,7 @@ export class CredentialAuthority {
 
   authenticateStatus(
     authorization: string | undefined,
-  ): Principal | "missing" | "invalid" | "revoked" | "evicted" {
+  ): Principal | "missing" | "invalid" | "expired" | "revoked" | "evicted" | "rejected" {
     if (authorization === undefined) return "missing";
     const secret = bearerSecret(authorization);
     const clientDigest = safeDigest(this.#digester, secret, "client");
@@ -304,9 +323,9 @@ export class CredentialAuthority {
     }
     if (droneValid) {
       if (drone!.evictedAt !== null) return "evicted";
-      if (drone!.revokedAt != null || drone!.expiresAt <= this.#clock().toISOString()) {
-        return "revoked";
-      }
+      if (drone!.revokedAt != null) return "revoked";
+      if (drone!.takenOver) return "rejected";
+      if (drone!.expiresAt <= this.#clock().toISOString()) return "expired";
       return droneSessionPrincipal({
         id: drone!.sessionId,
         clientId: drone!.clientId,
@@ -326,6 +345,7 @@ export class CredentialAuthority {
       readonly priorDroneId?: string;
     },
   ): SeatAttachResponse {
+    const now = this.#clock();
     const record = store.attachSeat({
       cubeId: request.cubeId,
       roleId: request.roleId,
@@ -334,8 +354,12 @@ export class CredentialAuthority {
       sessionId: randomUUID(),
       credentialId: randomUUID(),
       credentialDigest: this.#digester.digest(request.sessionCredential, "drone-session"),
-      expiresAt: new Date(this.#clock().getTime() + 86_400_000).toISOString(),
+      expiresAt: new Date(now.getTime() + DRONE_SESSION_TTL_MS).toISOString(),
+      renewIfExpiresAtOrBefore: new Date(
+        now.getTime() + DRONE_SESSION_RENEWAL_WINDOW_MS,
+      ).toISOString(),
     });
+    this.#registry.renew(record.sessionId, new Date(record.expiresAt).getTime() - now.getTime());
     if (record.result === "created") {
       this.#debugLogger.emit({
         event: "credential",

@@ -6,7 +6,12 @@ import { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { CoordinationApi } from "../src/coordination-api.js";
-import { CredentialAuthority, CredentialDigester, generateSecret } from "../src/credentials.js";
+import {
+  CredentialAuthority,
+  CredentialDigester,
+  DRONE_SESSION_TTL_MS,
+  generateSecret,
+} from "../src/credentials.js";
 import { openStore, type StoreRuntime } from "../src/store.js";
 
 const ids = {
@@ -78,7 +83,7 @@ describe("client seat attach", () => {
     }
   });
 
-  it("prioritizes eviction while keeping live-seat revocation and expiry generic", async () => {
+  it("keeps eviction, revocation, and expiry distinct", async () => {
     const revokedCredential = generateSecret();
     const revoked = await attach(
       clientA.credential, ids.cubeA, ids.roleA, revokedCredential, "attach-revoked",
@@ -101,12 +106,13 @@ describe("client seat attach", () => {
 
     expect(authority.authenticateStatus(`Bearer ${revokedCredential}`)).toBe("revoked");
     expect(authority.authenticateStatus(`Bearer ${evictedCredential}`)).toBe("evicted");
-    expect(authority.authenticateStatus(`Bearer ${expiredCredential}`)).toBe("revoked");
+    expect(authority.authenticateStatus(`Bearer ${expiredCredential}`)).toBe("expired");
   });
 
-  it("reuses the matching active digest without mutating session identity", async () => {
+  it("renews the matching active digest without mutating session identity", async () => {
     const sessionCredential = generateSecret();
     const created = await attach(clientA.credential, ids.cubeA, ids.roleA, sessionCredential, "attach-reuse-1");
+    now = new Date(now.getTime() + DRONE_SESSION_TTL_MS / 2);
     const reused = await attach(clientA.credential, ids.cubeA, ids.roleA, sessionCredential, "attach-reuse-2");
 
     expect(reused).toMatchObject({
@@ -114,12 +120,29 @@ describe("client seat attach", () => {
       payload: {
         result: "reused",
         drone: created.payload.drone,
-        session: created.payload.session,
+        session: {
+          id: created.payload.session.id,
+          expires_at: "2026-07-16T01:00:00.000Z",
+        },
       },
     });
     expect(count("drones")).toBe(1);
     expect(count("drone_sessions")).toBe(1);
     expect(count("drone_session_credentials")).toBe(1);
+
+    now = new Date(now.getTime() + 1);
+    const lostResponseRetry = await attach(
+      clientA.credential,
+      ids.cubeA,
+      ids.roleA,
+      sessionCredential,
+      "attach-reuse-3",
+      created.payload.drone.id,
+    );
+    expect(lostResponseRetry).toMatchObject({
+      status: 200,
+      payload: { result: "reused", drone: created.payload.drone, session: reused.payload.session },
+    });
   });
 
   it("recovers a lost first response after restart using only the persisted bearer", async () => {
@@ -206,7 +229,7 @@ describe("client seat attach", () => {
 
     now = new Date("2026-07-15T13:00:00.000Z");
     const expired = await attach(clientA.credential, ids.cubeA, ids.roleA, ownCredential, "attach-scope-4");
-    expect(expired).toMatchObject({ status: 401, error: { code: "SESSION_REJECTED" } });
+    expect(expired).toMatchObject({ status: 401, error: { code: "AUTH_EXPIRED" } });
     expect(count("drones")).toBe(1);
   });
 
@@ -232,9 +255,29 @@ describe("client seat attach", () => {
     expect(count("drones")).toBe(1);
     expect(count("drone_sessions")).toBe(2);
     expect(authority.authenticateStatus(`Bearer ${nextCredential}`)).toMatchObject({ kind: "drone-session" });
+
+    now = new Date(now.getTime() + 1);
+    const lostResponseRetry = await attach(
+      clientA.credential,
+      ids.cubeA,
+      ids.roleA,
+      nextCredential,
+      "attach-renew-3",
+      first.payload.drone.id,
+    );
+    expect(lostResponseRetry).toMatchObject({
+      status: 200,
+      payload: {
+        result: "reused",
+        drone: first.payload.drone,
+        session: renewed.payload.session,
+      },
+    });
+    expect(count("drones")).toBe(1);
+    expect(count("drone_sessions")).toBe(2);
   });
 
-  it("revokes the active session and permits a fresh attach after explicit client rotation", async () => {
+  it("keeps an explicitly revoked seat terminal after client rotation", async () => {
     const firstCredential = generateSecret();
     const first = await attach(
       clientA.credential,
@@ -257,12 +300,117 @@ describe("client seat attach", () => {
 
     expect(authority.authenticateStatus(`Bearer ${firstCredential}`)).toBe("revoked");
     expect(replacement).toMatchObject({
-      status: 201,
-      payload: { result: "created", drone: first.payload.drone },
+      status: 401,
+      error: { code: "SESSION_REVOKED" },
     });
-    expect(replacement.payload.session.id).not.toBe(first.payload.session.id);
+    expect(count("drones")).toBe(1);
+    expect(count("drone_sessions")).toBe(1);
+  });
+
+  it("never creates a replacement for a missing or evicted prior seat", async () => {
+    const missing = await attach(
+      clientA.credential,
+      ids.cubeA,
+      ids.roleA,
+      generateSecret(),
+      "attach-missing-prior",
+      randomUUID(),
+    );
+    expect(missing).toMatchObject({ status: 401, error: { code: "SESSION_REJECTED" } });
+    expect(count("drones")).toBe(0);
+
+    const created = await attach(
+      clientA.credential, ids.cubeA, ids.roleA, generateSecret(), "attach-before-eviction",
+    );
+    runtime.forPrincipal(authenticatedPrincipal(clientA.credential))
+      .evictDrone(ids.cubeA, created.payload.drone.id);
+    const evicted = await attach(
+      clientA.credential,
+      ids.cubeA,
+      ids.roleA,
+      generateSecret(),
+      "attach-evicted-prior",
+      created.payload.drone.id,
+    );
+    expect(evicted).toMatchObject({ status: 410, error: { code: "DRONE_EVICTED" } });
+    expect(count("drones")).toBe(1);
+    expect(count("drone_sessions")).toBe(1);
+  });
+
+  it("serializes concurrent expired-seat restoration exactly once", async () => {
+    const firstCredential = generateSecret();
+    const first = await attach(
+      clientA.credential, ids.cubeA, ids.roleA, firstCredential, "attach-restore-race-1",
+    );
+    now = new Date(first.payload.session.expires_at);
+    const credentials = [generateSecret(), generateSecret()] as const;
+    const restored = await Promise.all(credentials.map((credential, index) => attach(
+      clientA.credential,
+      ids.cubeA,
+      ids.roleA,
+      credential,
+      `attach-restore-race-${index + 2}`,
+      first.payload.drone.id,
+    )));
+
+    expect(restored.map((response) => response.status).sort()).toEqual([201, 401]);
+    expect(restored.find((response) => response.status === 401)).toMatchObject({
+      error: { code: "SESSION_REJECTED" },
+    });
     expect(count("drones")).toBe(1);
     expect(count("drone_sessions")).toBe(2);
+    expect(credentials.filter((credential) =>
+      typeof authority.authenticateStatus(`Bearer ${credential}`) === "object"
+    )).toHaveLength(1);
+    expect(authority.authenticateStatus(`Bearer ${firstCredential}`)).toBe("rejected");
+  });
+
+  it("preserves the same directed recipient and unread entry beyond two session TTLs", async () => {
+    const sessionCredential = generateSecret();
+    const created = await attach(
+      clientA.credential, ids.cubeA, ids.roleA, sessionCredential, "attach-long-lived-1",
+    );
+
+    for (let renewal = 0; renewal < 3; renewal += 1) {
+      now = new Date(now.getTime() + DRONE_SESSION_TTL_MS * 3 / 4);
+      const response = await attach(
+        clientA.credential,
+        ids.cubeA,
+        ids.roleA,
+        sessionCredential,
+        `attach-long-lived-${renewal + 2}`,
+        created.payload.drone.id,
+      );
+      expect(response).toMatchObject({
+        status: 200,
+        payload: { result: "reused", drone: created.payload.drone },
+      });
+    }
+
+    const renewedPrincipal = authenticatedPrincipal(sessionCredential);
+    const stream = await api.handle({
+      method: "GET",
+      path: `/api/cubes/${ids.cubeA}/stream`,
+      principal: renewedPrincipal,
+      signal: new AbortController().signal,
+    });
+    const iterator = stream.stream![Symbol.asyncIterator]();
+    await iterator.next();
+    const wake = iterator.next();
+    const clientStore = runtime.forPrincipal(authenticatedPrincipal(clientA.credential));
+    clientStore.appendLog(ids.cubeA, {
+      message: "directed beyond two TTLs",
+      visibility: "direct",
+      recipientDroneIds: [created.payload.drone.id],
+    });
+    await expect(wake).resolves.toMatchObject({ done: false });
+    await iterator.return?.();
+    const sessionStore = runtime.forPrincipal(renewedPrincipal);
+    const unread = sessionStore.readLog(ids.cubeA, null, 100);
+    expect(unread.entries.filter((entry) => entry.message === "directed beyond two TTLs"))
+      .toHaveLength(1);
+    expect(count("drones")).toBe(1);
+    expect(count("drone_sessions")).toBe(1);
   });
 
   it("rejects an expired prior seat when the requested role does not match", async () => {

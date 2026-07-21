@@ -9,11 +9,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   CredentialAuthority,
   CredentialDigester,
+  DRONE_SESSION_TTL_MS,
   generateSecret,
 } from "../src/credentials.js";
 import { type StoreRuntime, openStore } from "../src/store.js";
 import { createDebugLogger } from "../src/debug-log.js";
-import { droneSessionPrincipal } from "../src/principal.js";
+import { clientPrincipal, droneSessionPrincipal } from "../src/principal.js";
 
 let directory: string;
 let runtime: StoreRuntime;
@@ -171,6 +172,48 @@ describe("credential authority", () => {
 
       expect(live.signal.aborted).toBe(false);
       await vi.advanceTimersByTimeAsync(1_000);
+      expect(live.signal.aborted).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("moves an existing live-session deadline when its credential is renewed", async () => {
+    vi.useFakeTimers();
+    try {
+      const clientId = randomUUID();
+      const cubeId = randomUUID();
+      const roleId = randomUUID();
+      runtime.maintenance.createClient({ id: clientId, name: "Renewal client" });
+      runtime.maintenance.createCube({ id: cubeId, ownerId: clientId, name: "Renewal cube", directive: "" });
+      runtime.maintenance.createRole({ id: roleId, cubeId, name: "Worker" });
+      runtime.maintenance.grantClientCube({ clientId, cubeId, access: "manage" });
+      const parent = clientPrincipal(clientId);
+      const sessionCredential = generateSecret();
+      const attached = authority.attachSeat(runtime.forPrincipal(parent), {
+        cubeId, roleId, sessionCredential,
+      });
+      const live = authority.registerLiveSession(droneSessionPrincipal({
+        id: attached.sessionId,
+        clientId,
+        cubeId,
+        droneId: attached.drone.id,
+      }));
+
+      const elapsed = DRONE_SESSION_TTL_MS / 2;
+      now = new Date(now.getTime() + elapsed);
+      await vi.advanceTimersByTimeAsync(elapsed);
+      const renewed = authority.attachSeat(runtime.forPrincipal(parent), {
+        cubeId,
+        roleId,
+        sessionCredential,
+        priorDroneId: attached.drone.id,
+      });
+      expect(renewed).toMatchObject({ result: "reused", sessionId: attached.sessionId });
+
+      await vi.advanceTimersByTimeAsync(elapsed);
+      expect(live.signal.aborted).toBe(false);
+      await vi.advanceTimersByTimeAsync(elapsed);
       expect(live.signal.aborted).toBe(true);
     } finally {
       vi.useRealTimers();

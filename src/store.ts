@@ -232,6 +232,7 @@ export interface StoredDroneSessionDigest extends StoredSecretDigest {
   readonly droneId: string;
   readonly expiresAt: string;
   readonly evictedAt: string | null;
+  readonly takenOver: boolean;
 }
 
 export interface CredentialStore {
@@ -357,6 +358,7 @@ export interface SeatAttachInput {
   readonly credentialId: string;
   readonly credentialDigest: DigestPair;
   readonly expiresAt: string;
+  readonly renewIfExpiresAtOrBefore: string;
 }
 
 export interface SeatAttachRecord {
@@ -519,6 +521,33 @@ export class AttachSessionRejectedError extends Error {
   constructor() {
     super("The saved session is not accepted for this seat.");
     this.name = "AttachSessionRejectedError";
+  }
+}
+
+export class AttachSessionExpiredError extends Error {
+  readonly code = "AUTH_EXPIRED";
+
+  constructor() {
+    super("Authentication failed.");
+    this.name = "AttachSessionExpiredError";
+  }
+}
+
+export class AttachSessionRevokedError extends Error {
+  readonly code = "SESSION_REVOKED";
+
+  constructor() {
+    super("Authentication failed.");
+    this.name = "AttachSessionRevokedError";
+  }
+}
+
+export class AttachDroneEvictedError extends Error {
+  readonly code = "DRONE_EVICTED";
+
+  constructor() {
+    super("Authentication failed.");
+    this.name = "AttachDroneEvictedError";
   }
 }
 
@@ -1464,6 +1493,7 @@ class SqliteScopedStore implements ScopedStore {
     assertCanonicalUuid(input.credentialId, "Drone session credential id");
     validateDigest(input.credentialDigest);
     validateTimestamp(input.expiresAt);
+    validateTimestamp(input.renewIfExpiresAtOrBefore);
     const scope = this.#scope("read");
     const authorizedRole = this.#database.prepare(`
       SELECT 1 FROM cubes AS c JOIN roles AS role ON role.cube_id = c.id
@@ -1486,20 +1516,28 @@ class SqliteScopedStore implements ScopedStore {
         SELECT credential.verifier_digest, credential.revoked_at AS credential_revoked_at,
                session.id AS session_id, session.client_id, session.cube_id, session.drone_id,
                session.expires_at, session.revoked_at AS session_revoked_at,
-               drone.role_id, drone.label, drone.evicted_at
+               drone.role_id, drone.label, drone.evicted_at,
+               EXISTS (
+                 SELECT 1 FROM drone_sessions AS replacement
+                 JOIN drone_session_credentials AS replacement_credential
+                   ON replacement_credential.session_id = replacement.id
+                 WHERE replacement.drone_id = session.drone_id
+                   AND replacement.client_id = session.client_id
+                   AND replacement.cube_id = session.cube_id
+                   AND replacement.id <> session.id
+                   AND replacement.revoked_at IS NULL
+                   AND replacement_credential.revoked_at IS NULL
+                   AND replacement.expires_at > ?
+               ) AS taken_over
         FROM drone_session_credentials AS credential
         JOIN drone_sessions AS session ON session.id = credential.session_id
         JOIN drones AS drone ON drone.id = session.drone_id
           AND drone.client_id = session.client_id AND drone.cube_id = session.cube_id
         WHERE credential.lookup_digest = ?
-      `).get(input.credentialDigest.lookup);
+      `).get(now, input.credentialDigest.lookup);
       if (bound !== undefined) {
         const verifier = requiredBuffer(bound, "verifier_digest");
         if (!timingSafeEqual(verifier, input.credentialDigest.verifier) ||
-            optionalText(bound, "credential_revoked_at") !== null ||
-            optionalText(bound, "session_revoked_at") !== null ||
-            optionalText(bound, "evicted_at") !== null ||
-            requiredText(bound, "expires_at") <= now ||
             requiredText(bound, "client_id") !== this.#principal.id ||
             requiredText(bound, "cube_id") !== input.cubeId ||
             requiredText(bound, "role_id") !== input.roleId ||
@@ -1507,7 +1545,26 @@ class SqliteScopedStore implements ScopedStore {
               requiredText(bound, "drone_id") !== input.priorDroneId)) {
           throw new AttachSessionRejectedError();
         }
+        if (optionalText(bound, "evicted_at") !== null) throw new AttachDroneEvictedError();
+        if (optionalText(bound, "credential_revoked_at") !== null ||
+            optionalText(bound, "session_revoked_at") !== null) {
+          throw new AttachSessionRevokedError();
+        }
+        if (requiredInteger(bound, "taken_over") === 1) {
+          throw new AttachSessionRejectedError();
+        }
+        if (requiredText(bound, "expires_at") <= now) throw new AttachSessionExpiredError();
         const droneId = requiredText(bound, "drone_id");
+        const sessionId = requiredText(bound, "session_id");
+        const previousExpiry = requiredText(bound, "expires_at");
+        const committedExpiry = input.expiresAt > previousExpiry &&
+            previousExpiry <= input.renewIfExpiresAtOrBefore
+          ? input.expiresAt
+          : previousExpiry;
+        if (committedExpiry !== previousExpiry) {
+          this.#database.prepare("UPDATE drone_sessions SET expires_at = ? WHERE id = ?")
+            .run(committedExpiry, sessionId);
+        }
         this.#database.prepare("UPDATE drones SET last_seen = ? WHERE id = ?").run(now, droneId);
         const attachedRoleRow = this.#database.prepare(`
           SELECT id AS role_id, name AS role_name, role_class, is_human_seat
@@ -1531,31 +1588,44 @@ class SqliteScopedStore implements ScopedStore {
             is_human_seat: requiredInteger(attachedRoleRow, "is_human_seat") === 1,
           },
           drone: { id: droneId, label: requiredText(bound, "label") },
-          sessionId: requiredText(bound, "session_id"),
-          expiresAt: requiredText(bound, "expires_at"),
+          sessionId,
+          expiresAt: committedExpiry,
           result: "reused",
         };
       }
 
       const priorSeat = input.priorDroneId === undefined ? undefined : this.#database.prepare(`
-        SELECT id, role_id, label FROM drones
-        WHERE id = ? AND client_id = ? AND cube_id = ? AND evicted_at IS NULL
+        SELECT id, role_id, label, evicted_at FROM drones
+        WHERE id = ? AND client_id = ? AND cube_id = ?
       `).get(input.priorDroneId, this.#principal.id, input.cubeId);
       let droneId: string;
       let droneLabel: string;
-      if (priorSeat !== undefined) {
+      if (input.priorDroneId !== undefined) {
+        if (priorSeat === undefined) throw new AttachSessionRejectedError();
+        if (optionalText(priorSeat, "evicted_at") !== null) throw new AttachDroneEvictedError();
         const priorSeatId = requiredText(priorSeat, "id");
         if (requiredText(priorSeat, "role_id") !== input.roleId) {
           throw new AttachSessionRejectedError();
         }
-        const occupied = this.#database.prepare(`
-          SELECT 1 FROM drone_sessions AS session
+        const latestSession = this.#database.prepare(`
+          SELECT session.expires_at, session.revoked_at AS session_revoked_at,
+                 MAX(CASE WHEN credential.revoked_at IS NOT NULL THEN 1 ELSE 0 END)
+                   AS credential_revoked
+          FROM drone_sessions AS session
           JOIN drone_session_credentials AS credential ON credential.session_id = session.id
           WHERE session.drone_id = ? AND session.client_id = ? AND session.cube_id = ?
-            AND session.revoked_at IS NULL AND credential.revoked_at IS NULL
-            AND session.expires_at > ?
-        `).get(priorSeatId, this.#principal.id, input.cubeId, now);
-        if (occupied !== undefined) throw new AttachSessionRejectedError();
+          GROUP BY session.id
+          ORDER BY session.created_at DESC, session.id DESC
+          LIMIT 1
+        `).get(priorSeatId, this.#principal.id, input.cubeId);
+        if (latestSession === undefined) throw new AttachSessionRejectedError();
+        if (optionalText(latestSession, "session_revoked_at") !== null ||
+            requiredInteger(latestSession, "credential_revoked") === 1) {
+          throw new AttachSessionRevokedError();
+        }
+        if (requiredText(latestSession, "expires_at") > now) {
+          throw new AttachSessionRejectedError();
+        }
         droneId = priorSeatId;
         droneLabel = requiredText(priorSeat, "label");
         this.#database.prepare("UPDATE drones SET last_seen = ? WHERE id = ?").run(now, droneId);
@@ -2518,7 +2588,19 @@ class SqliteCredentialStore implements CredentialStore {
              credential.session_id, session.client_id, session.cube_id, session.drone_id,
              session.expires_at,
              COALESCE(credential.revoked_at, session.revoked_at, client.revoked_at) AS revoked_at,
-             drone.evicted_at
+             drone.evicted_at,
+             EXISTS (
+               SELECT 1 FROM drone_sessions AS replacement
+               JOIN drone_session_credentials AS replacement_credential
+                 ON replacement_credential.session_id = replacement.id
+               WHERE replacement.drone_id = session.drone_id
+                 AND replacement.client_id = session.client_id
+                 AND replacement.cube_id = session.cube_id
+                 AND replacement.id <> session.id
+                 AND replacement.revoked_at IS NULL
+                 AND replacement_credential.revoked_at IS NULL
+                 AND replacement.expires_at > ?
+             ) AS taken_over
       FROM drone_session_credentials AS credential
       JOIN drone_sessions AS session ON session.id = credential.session_id
       JOIN clients AS client ON client.id = session.client_id
@@ -2526,7 +2608,7 @@ class SqliteCredentialStore implements CredentialStore {
         AND drone.client_id = session.client_id
         AND drone.cube_id = session.cube_id
       WHERE credential.lookup_digest = ?
-    `).get(lookup);
+    `).get(this.#now(), lookup);
     return row === undefined ? null : storedDroneSessionDigest(row);
   }
 
@@ -2996,6 +3078,7 @@ function storedDroneSessionDigest(row: Record<string, unknown>): StoredDroneSess
     droneId: requiredText(row, "drone_id"),
     expiresAt: requiredText(row, "expires_at"),
     evictedAt: nullableText(row, "evicted_at"),
+    takenOver: requiredInteger(row, "taken_over") === 1,
   };
 }
 

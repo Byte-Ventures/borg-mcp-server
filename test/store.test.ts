@@ -735,6 +735,7 @@ describe("Principal to ScopedStore isolation", () => {
         credentialId: "00000000-0000-4000-8000-000000000034",
         credentialDigest: { lookup: Buffer.alloc(16), verifier: Buffer.alloc(32) },
         expiresAt: "2026-07-15T12:00:00.000Z",
+        renewIfExpiresAtOrBefore: "2026-07-15T00:00:00.000Z",
       }),
       () => authority.exchangeInvitation({
         invitation,

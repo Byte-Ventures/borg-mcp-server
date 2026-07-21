@@ -1,4 +1,4 @@
-import { chmod, mkdir, mkdtemp, readFile, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, mkdtemp, readFile, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -16,6 +16,7 @@ import {
   assertSameProvisionedFile,
   assertSameProvisionedFiles,
   assertProvisionedRun,
+  assertSuccessfulSpawnResult,
   assertStructuredResultContract,
   buildClientFixtureEnvironment,
   cleanupJoinedRun,
@@ -23,7 +24,6 @@ import {
   isJoinedRunEnabled,
   materializeClientCaHandoff,
   parseStructuredResult,
-  redactOutput,
   runBounded,
   snapshotClientCaHandoff,
   snapshotOwnedProvisionedFiles,
@@ -32,6 +32,17 @@ import {
 
 const writerAId = "55555555-5555-4555-8555-555555555555";
 const writerBId = "77777777-7777-4777-8777-777777777777";
+
+function proofBinding(endpoint = "https://127.0.0.1:1234") {
+  return {
+    endpoint,
+    cubeId: "11111111-1111-4111-8111-111111111111",
+    writers: [
+      { droneId: writerAId, roleId: "22222222-2222-4222-8222-222222222222", sessionId: "66666666-6666-4666-8666-666666666666" },
+      { droneId: writerBId, roleId: "22222222-2222-4222-8222-222222222222", sessionId: "88888888-8888-4888-8888-888888888888" },
+    ],
+  } as const;
+}
 
 function validSuccess(origin = "https://127.0.0.1:1234"): Record<string, unknown> {
   return {
@@ -79,31 +90,30 @@ describe("Sprint 4 joined runner safeguards", () => {
     expect(() => assertClientPinValues(SPRINT4_CLIENT_SHA, "bad")).toThrow("hash");
   });
 
-  it("parses only the structured result and redacts credential-shaped output", () => {
+  it("parses only the structured result", () => {
     expect(parseStructuredResult("noise\nS4_COUPLED_E2E {\"pass\":true,\"cleanup_verified\":true}\n")).toEqual({ pass: true, cleanup_verified: true });
     expect(() => parseStructuredResult("S4_COUPLED_E2E []")).toThrow("invalid");
     expect(() => parseStructuredResult("S4_COUPLED_E2E {\"pass\":true,\"cleanup_verified\":true}\nS4_COUPLED_E2E {\"pass\":true,\"cleanup_verified\":true}")).toThrow("exactly one");
     expect(() => parseStructuredResult("S4_COUPLED_E2E {\"pass\":true,\"cleanup_verified\":false}")).toThrow("invalid");
     expect(() => parseStructuredResult("S4_COUPLED_E2E " + "x".repeat(20_000))).toThrow("exceeded");
-    expect(redactOutput("Bearer secret client_credential\":\"also-secret\"")).not.toContain("secret");
   });
 
   it("requires a successful, pinned, credential-safe result", () => {
-    const run = { endpoint: "https://127.0.0.1:1234" } as never;
-    expect(() => assertStructuredResultContract(validSuccess(), run)).not.toThrow();
-    expect(() => assertStructuredResultContract({ ...validSuccess(), client_sha: "other" }, run)).toThrow("pinned");
-    expect(() => assertStructuredResultContract({ ...validSuccess(), session_token: "secret" }, run)).toThrow("unexpected");
-    expect(() => assertStructuredResultContract({ ...validSuccess(), burst_drained: 149 }, run)).toThrow("burst");
-    expect(() => assertStructuredResultContract({ ...validSuccess(), idle_cursor_stable: false }, run)).toThrow("idle-cursor");
-    expect(() => assertStructuredResultContract({ ...validSuccess(), phase: { ...(validSuccess()["phase"] as object), quiescence_elapsed_ms: 5_999 } }, run)).toThrow("quiescence");
+    const binding = proofBinding();
+    expect(() => assertStructuredResultContract(validSuccess(), binding)).not.toThrow();
+    expect(() => assertStructuredResultContract({ ...validSuccess(), client_sha: "other" }, binding)).toThrow("pinned");
+    expect(() => assertStructuredResultContract({ ...validSuccess(), session_token: "secret" }, binding)).toThrow("unexpected");
+    expect(() => assertStructuredResultContract({ ...validSuccess(), burst_drained: 149 }, binding)).toThrow("burst");
+    expect(() => assertStructuredResultContract({ ...validSuccess(), idle_cursor_stable: false }, binding)).toThrow("idle-cursor");
+    expect(() => assertStructuredResultContract({ ...validSuccess(), phase: { ...(validSuccess()["phase"] as object), quiescence_elapsed_ms: 5_999 } }, binding)).toThrow("quiescence");
   });
 
   it("rejects every missing, contradictory, or over-cap proof class", () => {
-    const run = { endpoint: "https://127.0.0.1:1234" } as never;
+    const binding = proofBinding();
     const invalid = (mutate: (result: Record<string, unknown>) => void): void => {
       const result = structuredClone(validSuccess());
       mutate(result);
-      expect(() => assertStructuredResultContract(result, run)).toThrow();
+      expect(() => assertStructuredResultContract(result, binding)).toThrow();
     };
     invalid((result) => { delete result["schema_version"]; });
     invalid((result) => { result["unexpected"] = true; });
@@ -112,6 +122,14 @@ describe("Sprint 4 joined runner safeguards", () => {
     invalid((result) => { result["idle_log_before"] = [{ id: writerAId, created_at: "2026-07-21T10:00:00.000Z" }]; result["idle_log_before_count"] = 1; });
     invalid((result) => { result["directed_unread_occurrences"] = 2; });
     invalid((result) => { result["authenticated_writer_ids"] = [writerAId, writerBId, "99999999-9999-4999-8999-999999999999"]; });
+    invalid((result) => {
+      const spoofed = "99999999-9999-4999-8999-999999999999";
+      result["authenticated_writer_ids"] = [spoofed, writerBId];
+      (result["validated_writer_refs"] as Array<Record<string, unknown>>)[0]!["drone_id"] = spoofed;
+    });
+    invalid((result) => { (result["validated_writer_refs"] as Array<Record<string, unknown>>)[0]!["cube_id"] = "99999999-9999-4999-8999-999999999999"; });
+    invalid((result) => { (result["validated_writer_refs"] as Array<Record<string, unknown>>)[0]!["role_id"] = "99999999-9999-4999-8999-999999999999"; });
+    invalid((result) => { (result["validated_writer_refs"] as Array<Record<string, unknown>>)[0]!["session_id"] = "99999999-9999-4999-8999-999999999999"; });
     invalid((result) => { result["order_mismatch_count"] = 1; });
     invalid((result) => { result["status_counts"] = { "429": 1 }; result["http_429_count"] = 1; });
     invalid((result) => { result["transport_errors"] = [{ code: "ECONNRESET", message: "transport failure" }]; });
@@ -191,14 +209,18 @@ describe("Sprint 4 joined runner safeguards", () => {
         BORG_E2E_READER_TOKEN: "r".repeat(43),
       });
       expect(mapped["BORG_RQ_SPRINT4_SERVER_RUN"]).toBeUndefined();
-      expect(JSON.parse(mapped["BORG_E2E_WRITER_REFS"]!)).toMatchObject([{ drone_id: "55555555-5555-4555-8555-555555555555" }, { drone_id: "77777777-7777-4777-8777-777777777777" }]);
+      const mappedWriters = JSON.parse(mapped["BORG_E2E_WRITER_REFS"]!) as Array<Record<string, unknown>>;
+      expect(mappedWriters).toMatchObject([{ drone_id: "55555555-5555-4555-8555-555555555555" }, { drone_id: "77777777-7777-4777-8777-777777777777" }]);
+      expect(Object.keys(mappedWriters[0]!).sort()).toEqual(["cube_id", "drone_id", "endpoint", "role_id", "session_credential", "session_id", "trust_identity"]);
+      expect(mappedWriters.some((writer) => "client_id" in writer || "client_credential" in writer || "trust_material_reference" in writer)).toBe(false);
       let selected = false;
       let cleaned = false;
       let provisionedCaPath = "";
+      let pinChecks = 0;
       const outcome = await executeJoinedRunner(
         { [SPRINT4_JOINED_GATE]: "1", [SPRINT4_CLIENT_DIRECTORY]: "/tmp/disposable-client" },
         {
-          verifyClientPins: async () => {},
+          verifyClientPins: async () => { pinChecks += 1; },
           provision: async (input) => {
             const references = join(input.dataDirectory, "s4-e2e-credentials");
             await mkdir(references, { recursive: true, mode: 0o700 });
@@ -234,6 +256,7 @@ describe("Sprint 4 joined runner safeguards", () => {
       expect(outcome).toMatchObject({ pass: true, cleanup_verified: true });
       expect(selected).toBe(true);
       expect(cleaned).toBe(true);
+      expect(pinChecks).toBe(2);
       await writeFile(writerB, JSON.stringify({
         endpoint, trust_material_reference: join(root, "server", "ca.crt"), trust_identity: trust, cube_id: "11111111-1111-4111-8111-111111111111",
         client_id: "writer-b-client", client_credential: "unused", role_id: "22222222-2222-4222-8222-222222222222",
@@ -285,6 +308,44 @@ describe("Sprint 4 joined runner safeguards", () => {
     await expect(runBounded(process.execPath, ["-e", "setTimeout(() => {}, 1000)"], { cwd: process.cwd(), env: process.env }, 10)).rejects.toThrow("timed out");
   });
 
+  it("never includes echoed child secrets in surfaced failures", () => {
+    const secret = "raw-unkeyed-writer-secret";
+    const base = { code: 1, stdout: secret, stderr: "", stdoutOverflow: false, stderrOverflow: false, stdoutBytes: secret.length, stderrBytes: 0 };
+    expect(() => assertSuccessfulSpawnResult(base)).toThrow("fixture failed.");
+    try {
+      assertSuccessfulSpawnResult(base);
+    } catch (error) {
+      expect((error as Error).message).not.toContain(secret);
+    }
+    expect(() => assertSuccessfulSpawnResult({ ...base, code: 0, stderr: secret, stderrBytes: secret.length })).toThrow("wrote to stderr.");
+    expect(() => assertSuccessfulSpawnResult({ ...base, stdoutOverflow: true })).toThrow("exceeded its bound.");
+  });
+
+  it("terminates credential-holding descendant trees on timeout and overflow", async () => {
+    const root = await mkdtemp(join(tmpdir(), "borg-s4-runner-tree-"));
+    const grandchildSource = "setTimeout(() => require('node:fs').writeFileSync(process.env.MARKER, process.env.CHILD_SECRET), 300); setInterval(() => {}, 1000);";
+    const parentSource = (overflow: boolean): string =>
+      `require('node:child_process').spawn(process.execPath, ['-e', ${JSON.stringify(grandchildSource)}], { env: process.env, stdio: 'ignore' }); ${overflow ? `process.stdout.write('x'.repeat(${SPRINT4_RUNNER_OUTPUT_LIMIT + 1}));` : ""} setInterval(() => {}, 1000);`;
+    try {
+      const timeoutMarker = join(root, "timeout-secret");
+      await expect(runBounded(process.execPath, ["-e", parentSource(false)], {
+        cwd: process.cwd(), env: { ...process.env, MARKER: timeoutMarker, CHILD_SECRET: "timeout-secret" },
+      }, 20)).rejects.toThrow("timed out");
+      await new Promise((resolve) => setTimeout(resolve, 350));
+      await expect(access(timeoutMarker)).rejects.toThrow();
+
+      const overflowMarker = join(root, "overflow-secret");
+      const overflow = await runBounded(process.execPath, ["-e", parentSource(true)], {
+        cwd: process.cwd(), env: { ...process.env, MARKER: overflowMarker, CHILD_SECRET: "overflow-secret" },
+      });
+      expect(overflow.stdoutOverflow).toBe(true);
+      await new Promise((resolve) => setTimeout(resolve, 350));
+      await expect(access(overflowMarker)).rejects.toThrow();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("fails closed when spawned stdout overflows before or after a plausible result", async () => {
     const record = `S4_COUPLED_E2E ${JSON.stringify({ pass: true, cleanup_verified: true })}`;
     const before = await runBounded(process.execPath, ["-e", `process.stdout.write('x'.repeat(${SPRINT4_RUNNER_OUTPUT_LIMIT + 1}) + ${JSON.stringify(record)})`], { cwd: process.cwd(), env: process.env });
@@ -303,7 +364,14 @@ describe("Sprint 4 joined runner safeguards", () => {
   it("cleans owned state even if provisioner cleanup fails", async () => {
     const root = await mkdtemp(join(tmpdir(), "borg-s4-runner-unit-"));
     await writeFile(join(root, "owned"), "state");
-    await expect(cleanupJoinedRun({ cleanup: async () => { throw new Error("cleanup failure"); } }, root)).rejects.toThrow("cleanup failure");
+    await expect(cleanupJoinedRun({ cleanup: async () => { throw new Error("credential /secret/path"); } }, root)).rejects.toThrow("cleanup failed.");
     await expect(rm(root, { recursive: true, force: false })).rejects.toThrow();
+  });
+
+  it("bounds stalled provisioner cleanup and still removes the owned root", async () => {
+    const root = await mkdtemp(join(tmpdir(), "borg-s4-runner-stalled-cleanup-"));
+    await writeFile(join(root, "owned"), "state");
+    await expect(cleanupJoinedRun({ cleanup: () => new Promise<void>(() => {}) }, root, rm, 10)).rejects.toThrow("cleanup timed out");
+    await expect(access(root)).rejects.toThrow();
   });
 });

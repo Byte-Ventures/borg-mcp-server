@@ -19,6 +19,7 @@ export const SPRINT4_JOINED_GATE = "BORG_RUN_S4_JOINED_E2E";
 export const SPRINT4_CLIENT_DIRECTORY = "BORG_RQ_CLIENT_DIRECTORY";
 export const SPRINT4_RUNNER_TIMEOUT_MS = 20_000;
 export const SPRINT4_RUNNER_OUTPUT_LIMIT = 16_384;
+export const SPRINT4_CLEANUP_TIMEOUT_MS = 5_000;
 
 export interface JoinedRunnerEnvironment {
   readonly clientDirectory: string;
@@ -86,7 +87,8 @@ export async function executeJoinedRunner(
   dependencies: JoinedRunnerDependencies = {},
 ): Promise<Record<string, unknown>> {
   const configuration = validateJoinedRunnerEnvironment(env);
-  await (dependencies.verifyClientPins ?? verifyClientPins)(configuration.clientDirectory);
+  const verifyPins = dependencies.verifyClientPins ?? verifyClientPins;
+  await verifyPins(configuration.clientDirectory);
   const root = await realpath(await mkdtemp(join(tmpdir(), "borg-s4-joined-")));
   let run: Sprint4ProvisionedRun | undefined;
   try {
@@ -113,6 +115,8 @@ export async function executeJoinedRunner(
       spawnFiles,
       spawnCaHandoff.canonicalPath,
     );
+    const proofBinding = buildProofBinding(run, spawnFiles);
+    await verifyPins(configuration.clientDirectory);
     const result = await (dependencies.spawn ?? runBounded)(
       "npx",
       ["vitest", "run", "__tests__/s4-coupled-e2e.test.ts"],
@@ -121,17 +125,21 @@ export async function executeJoinedRunner(
         env: clientEnvironment,
       },
     );
-    if (result.stdoutOverflow || result.stderrOverflow) {
-      throw new Error(`Sprint 4 client fixture output exceeded its bound: ${redactOutput(result.stderr || result.stdout)}`);
-    }
-    if (result.code !== 0) throw new Error(`Sprint 4 client fixture failed: ${redactOutput(result.stderr || result.stdout)}`);
-    if (result.stderr.trim() !== "") throw new Error(`Sprint 4 client fixture wrote to stderr: ${redactOutput(result.stderr)}`);
+    assertSuccessfulSpawnResult(result);
     const structured = parseStructuredResult(result.stdout);
-    assertStructuredResultContract(structured, run);
+    assertStructuredResultContract(structured, proofBinding);
     return structured;
   } finally {
     await cleanupJoinedRun(run, root);
   }
+}
+
+export function assertSuccessfulSpawnResult(result: SpawnResult): void {
+  if (result.stdoutOverflow || result.stderrOverflow) {
+    throw new Error("Sprint 4 client fixture output exceeded its bound.");
+  }
+  if (result.code !== 0) throw new Error("Sprint 4 client fixture failed.");
+  if (result.stderr.trim() !== "") throw new Error("Sprint 4 client fixture wrote to stderr.");
 }
 
 interface CredentialReference {
@@ -145,6 +153,22 @@ interface CredentialReference {
   readonly drone_id: string;
   readonly session_id: string;
   readonly session_credential: string;
+}
+
+interface ClientWriterReference {
+  readonly endpoint: string;
+  readonly trust_identity: string;
+  readonly cube_id: string;
+  readonly role_id: string;
+  readonly drone_id: string;
+  readonly session_id: string;
+  readonly session_credential: string;
+}
+
+export interface JoinedProofBinding {
+  readonly endpoint: string;
+  readonly cubeId: string;
+  readonly writers: readonly [{ readonly droneId: string; readonly roleId: string; readonly sessionId: string }, { readonly droneId: string; readonly roleId: string; readonly sessionId: string }];
 }
 
 /** Maps the reviewed client fixture contract from existing provisioner refs. */
@@ -201,6 +225,10 @@ function buildClientFixtureEnvironmentFromReferences(
       writerA.drone_id === writerB.drone_id) {
     throw new Error("Sprint 4 provisioner returned cross-wired session credentials.");
   }
+  const clientWriters: readonly [ClientWriterReference, ClientWriterReference] = [
+    selectClientWriterReference(writerA),
+    selectClientWriterReference(writerB),
+  ];
   return {
     ...minimalEnvironment(env),
     [SPRINT4_JOINED_GATE]: "1",
@@ -213,7 +241,34 @@ function buildClientFixtureEnvironmentFromReferences(
     BORG_E2E_CUBE_ID: run.cubeId,
     BORG_E2E_READER_DRONE_ID: reader.drone_id,
     BORG_E2E_READER_TOKEN: reader.session_credential,
-    BORG_E2E_WRITER_REFS: JSON.stringify([writerA, writerB]),
+    BORG_E2E_WRITER_REFS: JSON.stringify(clientWriters),
+  };
+}
+
+function selectClientWriterReference(reference: CredentialReference): ClientWriterReference {
+  return {
+    endpoint: reference.endpoint,
+    trust_identity: reference.trust_identity,
+    cube_id: reference.cube_id,
+    role_id: reference.role_id,
+    drone_id: reference.drone_id,
+    session_id: reference.session_id,
+    session_credential: reference.session_credential,
+  };
+}
+
+function buildProofBinding(run: Sprint4ProvisionedRun, files: ProvisionedFileSnapshots): JoinedProofBinding {
+  const writerA = readCredentialReference(files.writerA.bytes);
+  const writerB = readCredentialReference(files.writerB.bytes);
+  assertReferenceContract(run, writerA, run.clientIds.writerA, run.seats.writerA);
+  assertReferenceContract(run, writerB, run.clientIds.writerB, run.seats.writerB);
+  return {
+    endpoint: run.endpoint,
+    cubeId: run.cubeId,
+    writers: [
+      { droneId: writerA.drone_id, roleId: writerA.role_id, sessionId: writerA.session_id },
+      { droneId: writerB.drone_id, roleId: writerB.role_id, sessionId: writerB.session_id },
+    ],
   };
 }
 
@@ -284,7 +339,7 @@ export function parseStructuredResult(output: string): Record<string, unknown> {
   }
 }
 
-export function assertStructuredResultContract(result: Record<string, unknown>, run: Pick<Sprint4ProvisionedRun, "endpoint">): void {
+export function assertStructuredResultContract(result: Record<string, unknown>, binding: JoinedProofBinding): void {
   const topKeys = [
     "schema_version", "pass", "client_sha", "origin", "simulated_idle_ms", "idle_accepted_model_turns",
     "idle_log_before_count", "idle_log_after_count", "idle_log_before", "idle_log_after", "idle_log_stable",
@@ -298,7 +353,7 @@ export function assertStructuredResultContract(result: Record<string, unknown>, 
   ] as const;
   assertExactKeys(result, topKeys, "result");
   if (result["schema_version"] !== "s4-coupled-e2e/v1" || result["pass"] !== true ||
-      result["client_sha"] !== SPRINT4_EXPECTED_CLIENT_MAIN_SHA || result["origin"] !== run.endpoint ||
+      result["client_sha"] !== SPRINT4_EXPECTED_CLIENT_MAIN_SHA || result["origin"] !== binding.endpoint ||
       !isCanonicalLoopbackOrigin(result["origin"]) || result["cleanup_verified"] !== true) {
     throw new Error("Sprint 4 client fixture result does not match the pinned joined contract.");
   }
@@ -322,9 +377,17 @@ export function assertStructuredResultContract(result: Record<string, unknown>, 
   }
   const writers = assertUuidArray(result["authenticated_writer_ids"], 2, 16, "authenticated writers");
   const writerRefs = assertWriterReferences(result["validated_writer_refs"]);
+  const expectedWriters = binding.writers.map((writer) => writer.droneId);
   if (writerRefs.length !== writers.length || result["authenticated_writer_count"] !== writers.length ||
       result["writer_ids_match_configured"] !== true ||
-      !sameStringSet(writers, writerRefs.map((reference) => reference.drone_id))) {
+      !sameStringSet(writers, writerRefs.map((reference) => reference.drone_id)) ||
+      !sameStringSet(writers, expectedWriters) ||
+      writerRefs.some((reference) => {
+        const expected = binding.writers.find((writer) => writer.droneId === reference.drone_id);
+        return expected === undefined || reference.cube_id !== binding.cubeId ||
+          (reference.role_id !== undefined && reference.role_id !== expected.roleId) ||
+          (reference.session_id !== undefined && reference.session_id !== expected.sessionId);
+      })) {
     throw new Error("Sprint 4 client fixture result has invalid writer evidence.");
   }
 
@@ -515,30 +578,46 @@ function isSocketEvidence(value: unknown): boolean {
   } catch { return false; }
 }
 
-export function redactOutput(value: string): string {
-  return value
-    .replace(/Bearer\s+[^\s"']+/gu, "Bearer [REDACTED]")
-    .replace(/((?:["']?(?:client|session)_credential["']?\s*[:=]\s*["']))[^"']+(["'])/gu, "$1[REDACTED]$2")
-    .slice(0, SPRINT4_RUNNER_OUTPUT_LIMIT);
-}
-
 export async function cleanupJoinedRun(
   run: Pick<Sprint4ProvisionedRun, "cleanup"> | undefined,
   root: string,
   remove: (path: string, options: { readonly recursive: true; readonly force: true }) => Promise<void> = rm,
+  timeoutMs = SPRINT4_CLEANUP_TIMEOUT_MS,
 ): Promise<void> {
   let failure: unknown;
   try {
-    await run?.cleanup();
+    if (run !== undefined) await withDeadline(run.cleanup(), timeoutMs, "Sprint 4 provisioner cleanup timed out.");
   } catch (error) {
-    failure = error;
+    failure = error instanceof Error && error.message === "Sprint 4 provisioner cleanup timed out."
+      ? error
+      : new Error("Sprint 4 provisioner cleanup failed.");
   }
   try {
-    await remove(root, { recursive: true, force: true });
+    await withDeadline(
+      remove(root, { recursive: true, force: true }),
+      Math.max(timeoutMs, 1_000),
+      "Sprint 4 runner root cleanup timed out.",
+    );
   } catch (error) {
-    failure ??= error;
+    failure ??= error instanceof Error && error.message === "Sprint 4 runner root cleanup timed out."
+      ? error
+      : new Error("Sprint 4 runner root cleanup failed.");
   }
   if (failure !== undefined) throw failure;
+}
+
+async function withDeadline<T>(operation: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
 }
 
 export interface ProvisionedFileSnapshot {
@@ -688,7 +767,12 @@ export async function runBounded(
   timeoutMs = SPRINT4_RUNNER_TIMEOUT_MS,
 ): Promise<SpawnResult> {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { cwd: options.cwd, env: options.env, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(command, args, {
+      cwd: options.cwd,
+      env: options.env,
+      stdio: ["ignore", "pipe", "pipe"],
+      detached: true,
+    });
     const stdoutChunks: Buffer[] = [];
     const stderrChunks: Buffer[] = [];
     let stdoutBytes = 0;
@@ -696,6 +780,28 @@ export async function runBounded(
     let stdoutOverflow = false;
     let stderrOverflow = false;
     let overflowed = false;
+    let terminationTimer: NodeJS.Timeout | undefined;
+    let terminationCompletion: Promise<void> | undefined;
+    const terminateTree = (): void => {
+      if (child.pid === undefined || terminationCompletion !== undefined) return;
+      try {
+        process.kill(-child.pid, "SIGTERM");
+      } catch {
+        child.kill("SIGTERM");
+      }
+      terminationCompletion = new Promise((resolveTermination) => {
+        terminationTimer = setTimeout(() => {
+          if (child.pid !== undefined) {
+            try {
+              process.kill(-child.pid, "SIGKILL");
+            } catch {
+              child.kill("SIGKILL");
+            }
+          }
+          resolveTermination();
+        }, 100);
+      });
+    };
     const append = (target: "stdout" | "stderr", chunk: Buffer): void => {
       if (target === "stdout") {
         stdoutBytes += chunk.length;
@@ -710,7 +816,7 @@ export async function runBounded(
       }
       if ((stdoutOverflow || stderrOverflow) && !overflowed) {
         overflowed = true;
-        child.kill("SIGKILL");
+        terminateTree();
       }
     };
     child.stdout.on("data", (chunk: Buffer) => append("stdout", chunk));
@@ -718,22 +824,30 @@ export async function runBounded(
     let timedOut = false;
     const timer = setTimeout(() => {
       timedOut = true;
-      child.kill("SIGKILL");
+      terminateTree();
     }, timeoutMs);
     timer.unref();
-    child.once("error", (error) => { clearTimeout(timer); reject(error); });
+    child.once("error", (error) => {
+      clearTimeout(timer);
+      if (terminationTimer !== undefined) clearTimeout(terminationTimer);
+      reject(error);
+    });
     child.once("close", (code) => {
       clearTimeout(timer);
-      if (timedOut) reject(new Error("Sprint 4 client fixture timed out."));
-      else resolve({
-        code: code ?? 1,
-        stdout: Buffer.concat(stdoutChunks).toString("utf8"),
-        stderr: Buffer.concat(stderrChunks).toString("utf8"),
-        stdoutOverflow,
-        stderrOverflow,
-        stdoutBytes,
-        stderrBytes,
-      });
+      const finish = (): void => {
+        if (timedOut) reject(new Error("Sprint 4 client fixture timed out."));
+        else resolve({
+          code: code ?? 1,
+          stdout: Buffer.concat(stdoutChunks).toString("utf8"),
+          stderr: Buffer.concat(stderrChunks).toString("utf8"),
+          stdoutOverflow,
+          stderrOverflow,
+          stdoutBytes,
+          stderrBytes,
+        });
+      };
+      if (terminationCompletion === undefined) finish();
+      else void terminationCompletion.then(finish);
     });
   });
 }

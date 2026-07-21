@@ -25,10 +25,11 @@
     <div class="grid">
       <section>
         <h2>Setup: Fresh Installation</h2>
-        <pre><span class="ok">Local server prepared.</span>
+        <pre><span class="ok">Local server setup completed.</span>
 Artifact: borgmcp-server@&lt;version&gt; (&lt;artifact digest&gt;)
-Recovery credential (store offline; authorizes recovery and new invitations; shown once): &lt;credential&gt;
-Bootstrap owner enrollment invitation (enrolls the first owner; single-use; shown once): &lt;invitation&gt;
+No server process started.
+Initial owner enrollment is handled by borg assimilate.
+Next: start the server, then run borg assimilate.
       </section>
       <section>
         <h2>Setup: Existing Installation</h2>
@@ -66,6 +67,13 @@ Artifact: borgmcp-server@&lt;version&gt; (&lt;artifact digest&gt;)
       <section>
         <h2>Non-TTY Output</h2>
         <pre>{"status":"running","artifact":"borgmcp-server@&lt;version&gt;","build_identity":"&lt;identity&gt;","mode":"foreground","data_identity":"available"}
+      </section>
+      <section>
+        <h2>Invitation</h2>
+        <pre>Invitation (single-use; shown once): &lt;invitation&gt;
+Share it only with the intended recipient.
+
+Non-TTY: Invitation creation requires an interactive terminal.</pre>
       </section>
     </div>
     <section class="full">

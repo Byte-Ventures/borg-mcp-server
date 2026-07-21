@@ -18,7 +18,7 @@ The server owns artifact verification, activation, data and identity preservatio
 
 ### Setup
 
-First setup must say that local identity and data storage were prepared, identify the verified artifact, state that no server process started, and give the foreground start command as the next action.
+First setup must say that local identity and data storage were prepared, identify the verified artifact, state that no server process started, and give the foreground start command as the next action. It must not print a recovery credential or bootstrap invitation. Initial local owner enrollment is handled by the existing `borg assimilate` flow.
 
 Repeated setup must be idempotent. It must say that data and identity are unchanged and that no process started. It must not print credentials, recovery material, or ambiguous "already running" language.
 
@@ -48,21 +48,40 @@ The implementation must not invent a canonical service subcommand until #109 set
 
 Non-TTY output is one bounded machine-readable record with no ANSI, progress animation, secrets, recovery material, service-file contents, or checkout-derived identity. It carries the same evidence as TTY output: state, artifact, build identity when known, mode, data-identity state, and a bounded error code when unsuccessful.
 
+### Invitation
+
+`borg-mcp-server invite` and `borg server invite` create a single-use invitation only when explicitly run in an interactive terminal. They reuse existing authenticated invitation generation behavior; setup never creates or prints an invitation.
+
+Interactive output is exactly:
+
+```text
+Invitation (single-use; shown once): <invitation>
+Share it only with the intended recipient.
+```
+
+Non-TTY invitation creation is rejected before generating an invitation, exits `1`, and prints exactly:
+
+```text
+Invitation creation requires an interactive terminal.
+```
+
 ## Copy Rules
 
 - Say "artifact" and "build identity" for immutable runtime evidence. Do not say "current checkout" or infer one.
 - Say "data and identity: preserved" only after the server verifies preservation.
 - Use "last verified runtime" rather than promising a rollback when none occurred.
 - Use bounded, actionable failures: what stopped, whether activation occurred, what remains available, and the next command.
-- Do not expose artifact URLs, credentials, recovery material, local secret paths, CA material, or raw process errors, except for the narrow trusted-terminal fresh-setup handoff below.
-- During successful fresh TTY setup only, output these two lines once:
+- Do not expose artifact URLs, credentials, recovery material, local secret paths, CA material, or raw process errors. Invitation tokens are the sole exception, and only the direct result of an explicit interactive `invite` command.
+- Successful fresh setup output is bounded and nonsecret:
 
 ```text
-Recovery credential (store offline; authorizes recovery and new invitations; shown once): <credential>
-Bootstrap owner enrollment invitation (enrolls the first owner; single-use; shown once): <invitation>
+Local server setup completed.
+No server process started.
+Initial owner enrollment is handled by borg assimilate.
+Next: start the server, then run borg assimilate.
 ```
 
-  These values must never appear during non-TTY setup, repeated setup, status, update, logs, diagnostics, or error output.
+  Setup, status, update, repeated setup, logs, diagnostics, and error output must never print an invitation token.
 - Do not add retry loops, service installation, or LAN enablement implicitly.
 
 ## Client Facade Copy
@@ -79,6 +98,7 @@ Commands:
   start    Start the verified server in the foreground.
   status   Report verified runtime evidence.
   update   Verify and activate a local server artifact.
+  invite   Create a single-use invitation in an interactive terminal.
 
 Run borg server <command> --help for server command options.
 ```
@@ -87,7 +107,7 @@ Run borg server <command> --help for server command options.
 
 ```text
 Unknown server command: <command>.
-Available commands: setup, start, status, update.
+Available commands: setup, start, status, update, invite.
 Next: run borg server --help.
 ```
 
@@ -117,7 +137,7 @@ No server command was started.
 
 ### Facade Non-TTY
 
-For the four client-owned messages above, non-TTY behavior is the same bounded plain text with no ANSI, JSON, stack trace, searched path, or checkout hint. Server-provided non-TTY lifecycle output remains server-owned and follows the lifecycle mockup.
+For the four client-owned messages above, non-TTY behavior is the same bounded plain text with no ANSI, JSON, stack trace, searched path, or checkout hint. `borg server invite` passes server-owned invitation output through unchanged; its non-TTY rejection follows the Invitation rule. Server-provided non-TTY lifecycle output remains server-owned and follows the lifecycle mockup.
 
 ## Accessibility And Portability
 

@@ -29,13 +29,14 @@ Commands:
   start    Start the verified server in the foreground.
   status   Report verified runtime evidence.
   update   Verify and activate a local server artifact.
+  invite   Create a single-use invitation in an interactive terminal.
 
 Run <span class="ok">borg server &lt;command&gt; --help</span> for server command options.</pre>
     </section>
     <section>
       <h2>Unsupported Command</h2>
       <pre><span class="bad">Unknown server command: &lt;command&gt;.</span>
-Available commands: setup, start, status, update.
+Available commands: setup, start, status, update, invite.
 Next: run <span class="ok">borg server --help</span>.</pre>
     </section>
     <section>
@@ -52,6 +53,15 @@ Next: check local permissions and system resources, then rerun
 <span class="ok">borg server &lt;command&gt;</span>.
 <span class="dim">No server command was started.</span></pre>
       <p>Use this only when process creation fails for a reason other than ENOENT. It exits 1. ENOENT alone uses Missing Executable and exits 127. Render command tokens as inert text, capped at 80 Unicode code points total; replace each Unicode control code point with <code>?</code> and reserve the final three code points for <code>...</code> when truncated.</p>
+    </section>
+    <section>
+      <h2>Invite</h2>
+      <pre><span class="ok">borg server invite</span> forwards to the server. Interactive server output is passed through unchanged:
+
+Invitation (single-use; shown once): &lt;invitation&gt;
+Share it only with the intended recipient.
+
+Non-TTY: Invitation creation requires an interactive terminal.</pre>
     </section>
     <section>
       <h2>Non-TTY</h2>

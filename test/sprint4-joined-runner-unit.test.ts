@@ -213,6 +213,16 @@ describe("Sprint 4 joined runner safeguards", () => {
       expect(mappedWriters).toMatchObject([{ drone_id: "55555555-5555-4555-8555-555555555555" }, { drone_id: "77777777-7777-4777-8777-777777777777" }]);
       expect(Object.keys(mappedWriters[0]!).sort()).toEqual(["cube_id", "drone_id", "endpoint", "role_id", "session_credential", "session_id", "trust_identity"]);
       expect(mappedWriters.some((writer) => "client_id" in writer || "client_credential" in writer || "trust_material_reference" in writer)).toBe(false);
+      const suppliedSensitiveValues = [
+        mapped[SPRINT4_CLIENT_DIRECTORY]!, mapped["BORG_E2E_CA_PATH"]!, mapped["BORG_E2E_READER_TOKEN"]!,
+        mapped["BORG_E2E_WRITER_REFS"]!, ...mappedWriters.map((writer) => writer["session_credential"] as string),
+      ];
+      try {
+        const echoed = suppliedSensitiveValues.join(" ");
+        assertSuccessfulSpawnResult({ code: 1, stdout: echoed, stderr: "", stdoutOverflow: false, stderrOverflow: false, stdoutBytes: Buffer.byteLength(echoed), stderrBytes: 0 });
+      } catch (error) {
+        for (const sensitive of suppliedSensitiveValues) expect((error as Error).message).not.toContain(sensitive);
+      }
       let selected = false;
       let cleaned = false;
       let provisionedCaPath = "";
@@ -324,23 +334,44 @@ describe("Sprint 4 joined runner safeguards", () => {
   it("terminates credential-holding descendant trees on timeout and overflow", async () => {
     const root = await mkdtemp(join(tmpdir(), "borg-s4-runner-tree-"));
     const grandchildSource = "setTimeout(() => require('node:fs').writeFileSync(process.env.MARKER, process.env.CHILD_SECRET), 300); setInterval(() => {}, 1000);";
-    const parentSource = (overflow: boolean): string =>
-      `require('node:child_process').spawn(process.execPath, ['-e', ${JSON.stringify(grandchildSource)}], { env: process.env, stdio: 'ignore' }); ${overflow ? `process.stdout.write('x'.repeat(${SPRINT4_RUNNER_OUTPUT_LIMIT + 1}));` : ""} setInterval(() => {}, 1000);`;
+    const parentSource = (mode: "timeout" | "stdout" | "stderr" | "failure"): string => {
+      const trigger = mode === "stdout" ? `process.stdout.write('x'.repeat(${SPRINT4_RUNNER_OUTPUT_LIMIT + 1}));`
+        : mode === "stderr" ? `process.stderr.write('x'.repeat(${SPRINT4_RUNNER_OUTPUT_LIMIT + 1}));`
+          : mode === "failure" ? "setTimeout(() => process.exit(1), 20);"
+            : "";
+      return `require('node:child_process').spawn(process.execPath, ['-e', ${JSON.stringify(grandchildSource)}], { env: process.env, stdio: 'ignore' }); ${trigger} setInterval(() => {}, 1000);`;
+    };
+    const assertAbsent = async (path: string): Promise<void> => {
+      await new Promise((resolve) => setTimeout(resolve, 350));
+      await expect(access(path)).rejects.toThrow();
+    };
     try {
       const timeoutMarker = join(root, "timeout-secret");
-      await expect(runBounded(process.execPath, ["-e", parentSource(false)], {
+      await expect(runBounded(process.execPath, ["-e", parentSource("timeout")], {
         cwd: process.cwd(), env: { ...process.env, MARKER: timeoutMarker, CHILD_SECRET: "timeout-secret" },
       }, 20)).rejects.toThrow("timed out");
-      await new Promise((resolve) => setTimeout(resolve, 350));
-      await expect(access(timeoutMarker)).rejects.toThrow();
+      await assertAbsent(timeoutMarker);
 
       const overflowMarker = join(root, "overflow-secret");
-      const overflow = await runBounded(process.execPath, ["-e", parentSource(true)], {
+      const overflow = await runBounded(process.execPath, ["-e", parentSource("stdout")], {
         cwd: process.cwd(), env: { ...process.env, MARKER: overflowMarker, CHILD_SECRET: "overflow-secret" },
       });
       expect(overflow.stdoutOverflow).toBe(true);
-      await new Promise((resolve) => setTimeout(resolve, 350));
-      await expect(access(overflowMarker)).rejects.toThrow();
+      await assertAbsent(overflowMarker);
+
+      const stderrMarker = join(root, "stderr-secret");
+      const stderr = await runBounded(process.execPath, ["-e", parentSource("stderr")], {
+        cwd: process.cwd(), env: { ...process.env, MARKER: stderrMarker, CHILD_SECRET: "stderr-secret" },
+      });
+      expect(stderr.stderrOverflow).toBe(true);
+      await assertAbsent(stderrMarker);
+
+      const failureMarker = join(root, "failure-secret");
+      const failure = await runBounded(process.execPath, ["-e", parentSource("failure")], {
+        cwd: process.cwd(), env: { ...process.env, MARKER: failureMarker, CHILD_SECRET: "failure-secret" },
+      });
+      expect(failure.code).toBe(1);
+      await assertAbsent(failureMarker);
     } finally {
       await rm(root, { recursive: true, force: true });
     }

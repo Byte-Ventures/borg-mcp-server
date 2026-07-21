@@ -103,6 +103,7 @@ export async function executeJoinedRunner(
     const finalFiles = await snapshotOwnedProvisionedFiles(run, root);
     assertSameProvisionedFiles(initialFiles, finalFiles);
     const caHandoff = await materializeClientCaHandoff(root, finalFiles.trust);
+    await verifyPins(configuration.clientDirectory);
     const spawnFiles = await snapshotOwnedProvisionedFiles(run, root);
     assertSameProvisionedFiles(finalFiles, spawnFiles);
     const spawnCaHandoff = await snapshotClientCaHandoff(root, caHandoff.canonicalPath);
@@ -116,7 +117,6 @@ export async function executeJoinedRunner(
       spawnCaHandoff.canonicalPath,
     );
     const proofBinding = buildProofBinding(run, spawnFiles);
-    await verifyPins(configuration.clientDirectory);
     const result = await (dependencies.spawn ?? runBounded)(
       "npx",
       ["vitest", "run", "__tests__/s4-coupled-e2e.test.ts"],
@@ -834,6 +834,14 @@ export async function runBounded(
     });
     child.once("close", (code) => {
       clearTimeout(timer);
+      if (child.pid !== undefined && terminationCompletion === undefined) {
+        try {
+          process.kill(-child.pid, 0);
+          terminateTree();
+        } catch {
+          // The owned process group is already gone.
+        }
+      }
       const finish = (): void => {
         if (timedOut) reject(new Error("Sprint 4 client fixture timed out."));
         else resolve({

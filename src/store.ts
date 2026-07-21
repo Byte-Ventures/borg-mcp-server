@@ -1516,25 +1516,13 @@ class SqliteScopedStore implements ScopedStore {
         SELECT credential.verifier_digest, credential.revoked_at AS credential_revoked_at,
                session.id AS session_id, session.client_id, session.cube_id, session.drone_id,
                session.expires_at, session.revoked_at AS session_revoked_at,
-               drone.role_id, drone.label, drone.evicted_at,
-               EXISTS (
-                 SELECT 1 FROM drone_sessions AS replacement
-                 JOIN drone_session_credentials AS replacement_credential
-                   ON replacement_credential.session_id = replacement.id
-                 WHERE replacement.drone_id = session.drone_id
-                   AND replacement.client_id = session.client_id
-                   AND replacement.cube_id = session.cube_id
-                   AND replacement.id <> session.id
-                   AND replacement.revoked_at IS NULL
-                   AND replacement_credential.revoked_at IS NULL
-                   AND replacement.expires_at > ?
-               ) AS taken_over
+               session.superseded_at, drone.role_id, drone.label, drone.evicted_at
         FROM drone_session_credentials AS credential
         JOIN drone_sessions AS session ON session.id = credential.session_id
         JOIN drones AS drone ON drone.id = session.drone_id
           AND drone.client_id = session.client_id AND drone.cube_id = session.cube_id
         WHERE credential.lookup_digest = ?
-      `).get(now, input.credentialDigest.lookup);
+      `).get(input.credentialDigest.lookup);
       if (bound !== undefined) {
         const verifier = requiredBuffer(bound, "verifier_digest");
         if (!timingSafeEqual(verifier, input.credentialDigest.verifier) ||
@@ -1550,7 +1538,7 @@ class SqliteScopedStore implements ScopedStore {
             optionalText(bound, "session_revoked_at") !== null) {
           throw new AttachSessionRevokedError();
         }
-        if (requiredInteger(bound, "taken_over") === 1) {
+        if (optionalText(bound, "superseded_at") !== null) {
           throw new AttachSessionRejectedError();
         }
         if (requiredText(bound, "expires_at") <= now) throw new AttachSessionExpiredError();
@@ -1608,14 +1596,14 @@ class SqliteScopedStore implements ScopedStore {
           throw new AttachSessionRejectedError();
         }
         const latestSession = this.#database.prepare(`
-          SELECT session.expires_at, session.revoked_at AS session_revoked_at,
+          SELECT session.id, session.expires_at, session.revoked_at AS session_revoked_at,
                  MAX(CASE WHEN credential.revoked_at IS NOT NULL THEN 1 ELSE 0 END)
                    AS credential_revoked
           FROM drone_sessions AS session
           JOIN drone_session_credentials AS credential ON credential.session_id = session.id
           WHERE session.drone_id = ? AND session.client_id = ? AND session.cube_id = ?
+            AND session.superseded_at IS NULL
           GROUP BY session.id
-          ORDER BY session.created_at DESC, session.id DESC
           LIMIT 1
         `).get(priorSeatId, this.#principal.id, input.cubeId);
         if (latestSession === undefined) throw new AttachSessionRejectedError();
@@ -1628,6 +1616,13 @@ class SqliteScopedStore implements ScopedStore {
         }
         droneId = priorSeatId;
         droneLabel = requiredText(priorSeat, "label");
+        const superseded = this.#database.prepare(`
+          UPDATE drone_sessions SET superseded_at = ?
+          WHERE id = ? AND superseded_at IS NULL
+        `).run(now, requiredText(latestSession, "id"));
+        if (Number(superseded.changes) !== 1) {
+          throw new Error("Expired session supersession was not atomic.");
+        }
         this.#database.prepare("UPDATE drones SET last_seen = ? WHERE id = ?").run(now, droneId);
       } else {
         droneId = input.droneId;
@@ -2588,19 +2583,7 @@ class SqliteCredentialStore implements CredentialStore {
              credential.session_id, session.client_id, session.cube_id, session.drone_id,
              session.expires_at,
              COALESCE(credential.revoked_at, session.revoked_at, client.revoked_at) AS revoked_at,
-             drone.evicted_at,
-             EXISTS (
-               SELECT 1 FROM drone_sessions AS replacement
-               JOIN drone_session_credentials AS replacement_credential
-                 ON replacement_credential.session_id = replacement.id
-               WHERE replacement.drone_id = session.drone_id
-                 AND replacement.client_id = session.client_id
-                 AND replacement.cube_id = session.cube_id
-                 AND replacement.id <> session.id
-                 AND replacement.revoked_at IS NULL
-                 AND replacement_credential.revoked_at IS NULL
-                 AND replacement.expires_at > ?
-             ) AS taken_over
+             drone.evicted_at, session.superseded_at
       FROM drone_session_credentials AS credential
       JOIN drone_sessions AS session ON session.id = credential.session_id
       JOIN clients AS client ON client.id = session.client_id
@@ -2608,7 +2591,7 @@ class SqliteCredentialStore implements CredentialStore {
         AND drone.client_id = session.client_id
         AND drone.cube_id = session.cube_id
       WHERE credential.lookup_digest = ?
-    `).get(this.#now(), lookup);
+    `).get(lookup);
     return row === undefined ? null : storedDroneSessionDigest(row);
   }
 
@@ -3078,7 +3061,7 @@ function storedDroneSessionDigest(row: Record<string, unknown>): StoredDroneSess
     droneId: requiredText(row, "drone_id"),
     expiresAt: requiredText(row, "expires_at"),
     evictedAt: nullableText(row, "evicted_at"),
-    takenOver: requiredInteger(row, "taken_over") === 1,
+    takenOver: nullableText(row, "superseded_at") !== null,
   };
 }
 

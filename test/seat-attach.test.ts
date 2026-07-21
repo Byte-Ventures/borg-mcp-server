@@ -363,6 +363,53 @@ describe("client seat attach", () => {
       typeof authority.authenticateStatus(`Bearer ${credential}`) === "object"
     )).toHaveLength(1);
     expect(authority.authenticateStatus(`Bearer ${firstCredential}`)).toBe("rejected");
+
+    const acceptedIndex = restored.findIndex((response) => response.status === 201);
+    const accepted = restored[acceptedIndex]!;
+    const acceptedCredential = credentials[acceptedIndex]!;
+    now = new Date(accepted.payload.session.expires_at);
+    expect(authority.authenticateStatus(`Bearer ${firstCredential}`)).toBe("rejected");
+    expect(authority.authenticateStatus(`Bearer ${acceptedCredential}`)).toBe("expired");
+    const predecessorRetry = await attach(
+      clientA.credential,
+      ids.cubeA,
+      ids.roleA,
+      firstCredential,
+      "attach-restore-race-stale",
+      first.payload.drone.id,
+    );
+    expect(predecessorRetry).toMatchObject({
+      status: 401,
+      error: { code: "SESSION_REJECTED" },
+    });
+
+    runtime.maintenance.revokeDroneSession(accepted.payload.session.id);
+    expect(authority.authenticateStatus(`Bearer ${firstCredential}`)).toBe("rejected");
+    expect(authority.authenticateStatus(`Bearer ${acceptedCredential}`)).toBe("revoked");
+    const predecessorAfterRevocation = await attach(
+      clientA.credential,
+      ids.cubeA,
+      ids.roleA,
+      firstCredential,
+      "attach-restore-race-stale-revoked-successor",
+      first.payload.drone.id,
+    );
+    expect(predecessorAfterRevocation).toMatchObject({
+      status: 401,
+      error: { code: "SESSION_REJECTED" },
+    });
+    const successorAfterRevocation = await attach(
+      clientA.credential,
+      ids.cubeA,
+      ids.roleA,
+      acceptedCredential,
+      "attach-restore-race-revoked-successor",
+      first.payload.drone.id,
+    );
+    expect(successorAfterRevocation).toMatchObject({
+      status: 401,
+      error: { code: "SESSION_REVOKED" },
+    });
   });
 
   it("preserves the same directed recipient and unread entry beyond two session TTLs", async () => {

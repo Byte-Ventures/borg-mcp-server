@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -12,7 +12,7 @@ import {
   SPRINT4_CLIENT_FIXTURE_SHA256,
   SPRINT4_CLIENT_SHA,
   assertClientPinValues,
-  assertOwnedCredentialReferences,
+  assertOwnedProvisionedFiles,
   assertProvisionedRun,
   assertStructuredResultContract,
   buildClientFixtureEnvironment,
@@ -56,23 +56,25 @@ describe("Sprint 4 joined runner safeguards", () => {
   });
 
   it("maps checked provisioner references into the selected client fixture contract", async () => {
-    const root = await mkdtemp(join(tmpdir(), "borg-s4-runner-contract-"));
+    const root = await realpath(await mkdtemp(join(tmpdir(), "borg-s4-runner-contract-")));
     const endpoint = "https://127.0.0.1:1234";
     const trust = "spki-sha256:" + "a".repeat(64);
     const ref = async (name: string, client: string, drone: string, session: string, credential: string): Promise<string> => {
-      const path = join(root, name);
+      const path = join(root, "server", "s4-e2e-credentials", name);
       await writeFile(path, JSON.stringify({
-        endpoint, trust_material_reference: join(root, "ca.crt"), trust_identity: trust, cube_id: "11111111-1111-4111-8111-111111111111",
+        endpoint, trust_material_reference: join(root, "server", "ca.crt"), trust_identity: trust, cube_id: "11111111-1111-4111-8111-111111111111",
         client_id: client, client_credential: `${credential}-client`, role_id: "22222222-2222-4222-8222-222222222222", drone_id: drone,
         session_id: session, session_credential: credential,
       }), { mode: 0o600 });
       return path;
     };
+    await mkdir(join(root, "server", "s4-e2e-credentials"), { recursive: true, mode: 0o700 });
+    await writeFile(join(root, "server", "ca.crt"), "test-ca", { mode: 0o600 });
     const reader = await ref("reader.json", "reader-client", "33333333-3333-4333-8333-333333333333", "44444444-4444-4444-8444-444444444444", "r".repeat(43));
     const writerA = await ref("writer-a.json", "writer-a-client", "55555555-5555-4555-8555-555555555555", "66666666-6666-4666-8666-666666666666", "a".repeat(43));
     const writerB = await ref("writer-b.json", "writer-b-client", "77777777-7777-4777-8777-777777777777", "88888888-8888-4888-8888-888888888888", "b".repeat(43));
     const run = {
-      endpoint, trustMaterialReference: join(root, "ca.crt"), trustIdentity: trust, cubeId: "11111111-1111-4111-8111-111111111111",
+      endpoint, trustMaterialReference: join(root, "server", "ca.crt"), trustIdentity: trust, cubeId: "11111111-1111-4111-8111-111111111111",
       credentialReferences: { reader, writerA, writerB },
       clientIds: { reader: "reader-client", writerA: "writer-a-client", writerB: "writer-b-client" },
       seats: {
@@ -82,19 +84,19 @@ describe("Sprint 4 joined runner safeguards", () => {
       }, cleanup: async () => {},
     } as Sprint4ProvisionedRun;
     try {
-      await expect(assertOwnedCredentialReferences(run, root)).resolves.toBeUndefined();
+      await expect(assertOwnedProvisionedFiles(run, root)).resolves.toBeUndefined();
       const shared = await mkdtemp(join(tmpdir(), "borg-s4-runner-shared-"));
       try {
         const sharedReference = join(shared, "reader.json");
         await writeFile(sharedReference, await readFile(reader), { mode: 0o600 });
-        await expect(assertOwnedCredentialReferences({ ...run, credentialReferences: { ...run.credentialReferences, reader: sharedReference } }, root)).rejects.toThrow("owned canonical 0600");
+        await expect(assertOwnedProvisionedFiles({ ...run, credentialReferences: { ...run.credentialReferences, reader: sharedReference } }, root)).rejects.toThrow("shared or cross-wired");
       } finally {
         await rm(shared, { recursive: true, force: true });
       }
       const mapped = await buildClientFixtureEnvironment({}, "/tmp/disposable-client", run);
       expect(mapped).toMatchObject({
         BORG_S4_COUPLED_E2E: "1", BORG_E2E_CLIENT_SHA: SPRINT4_CLIENT_SHA,
-        BORG_API_URL: endpoint, BORG_E2E_CA_PATH: join(root, "ca.crt"), BORG_E2E_TRUST_IDENTITY: trust,
+        BORG_API_URL: endpoint, BORG_E2E_CA_PATH: join(root, "server", "ca.crt"), BORG_E2E_TRUST_IDENTITY: trust,
         BORG_E2E_CUBE_ID: "11111111-1111-4111-8111-111111111111",
         BORG_E2E_READER_DRONE_ID: "33333333-3333-4333-8333-333333333333",
         BORG_E2E_READER_TOKEN: "r".repeat(43),
@@ -110,13 +112,19 @@ describe("Sprint 4 joined runner safeguards", () => {
           provision: async (input) => {
             const references = join(input.dataDirectory, "s4-e2e-credentials");
             await mkdir(references, { recursive: true, mode: 0o700 });
+            const caPath = join(input.dataDirectory, "ca.crt");
+            await writeFile(caPath, "test-ca", { mode: 0o600 });
             const copy = async (name: "reader" | "writerA" | "writerB"): Promise<string> => {
-              const path = join(references, `${name}.json`);
-              await writeFile(path, await readFile(run.credentialReferences[name]), { mode: 0o600 });
+              const filename = name === "writerA" ? "writer-a.json" : name === "writerB" ? "writer-b.json" : "reader.json";
+              const path = join(references, filename);
+              const reference = JSON.parse(await readFile(run.credentialReferences[name], "utf8")) as Record<string, unknown>;
+              reference["trust_material_reference"] = caPath;
+              await writeFile(path, JSON.stringify(reference), { mode: 0o600 });
               return path;
             };
             return {
               ...run,
+              trustMaterialReference: caPath,
               credentialReferences: { reader: await copy("reader"), writerA: await copy("writerA"), writerB: await copy("writerB") },
               cleanup: async () => { cleaned = true; },
             };
@@ -124,7 +132,7 @@ describe("Sprint 4 joined runner safeguards", () => {
           spawn: async (command, args, options) => {
             selected = command === "npx" && args.join(" ") === "vitest run __tests__/s4-coupled-e2e.test.ts" &&
               options.env["BORG_S4_COUPLED_E2E"] === "1" && options.env["BORG_E2E_READER_TOKEN"] === "r".repeat(43);
-            return { code: 0, stderr: "", stdout: `S4_COUPLED_E2E ${JSON.stringify({ pass: true, cleanup_verified: true, client_sha: SPRINT4_CLIENT_SHA, origin: endpoint })}`, stdoutOverflow: false, stderrOverflow: false };
+            return { code: 0, stderr: "", stdout: `S4_COUPLED_E2E ${JSON.stringify({ pass: true, cleanup_verified: true, client_sha: SPRINT4_CLIENT_SHA, origin: endpoint })}`, stdoutOverflow: false, stderrOverflow: false, stdoutBytes: 100, stderrBytes: 0 };
           },
         },
       );
@@ -132,13 +140,13 @@ describe("Sprint 4 joined runner safeguards", () => {
       expect(selected).toBe(true);
       expect(cleaned).toBe(true);
       await writeFile(writerB, JSON.stringify({
-        endpoint, trust_material_reference: join(root, "ca.crt"), trust_identity: trust, cube_id: "11111111-1111-4111-8111-111111111111",
+        endpoint, trust_material_reference: join(root, "server", "ca.crt"), trust_identity: trust, cube_id: "11111111-1111-4111-8111-111111111111",
         client_id: "writer-b-client", client_credential: "unused", role_id: "22222222-2222-4222-8222-222222222222",
         drone_id: "77777777-7777-4777-8777-777777777777", session_id: "88888888-8888-4888-8888-888888888888", session_credential: "r".repeat(43),
       }));
       await expect(buildClientFixtureEnvironment({}, "/tmp/disposable-client", run)).rejects.toThrow("cross-wired");
       await writeFile(writerB, JSON.stringify({
-        endpoint: "https://127.0.0.1:9999", trust_material_reference: join(root, "ca.crt"), trust_identity: trust, cube_id: "11111111-1111-4111-8111-111111111111",
+        endpoint: "https://127.0.0.1:9999", trust_material_reference: join(root, "server", "ca.crt"), trust_identity: trust, cube_id: "11111111-1111-4111-8111-111111111111",
         client_id: "writer-b-client", client_credential: "unused", role_id: "22222222-2222-4222-8222-222222222222",
         drone_id: "77777777-7777-4777-8777-777777777777", session_id: "88888888-8888-4888-8888-888888888888", session_credential: "b".repeat(43),
       }));
@@ -174,8 +182,15 @@ describe("Sprint 4 joined runner safeguards", () => {
     const record = `S4_COUPLED_E2E ${JSON.stringify({ pass: true, cleanup_verified: true })}`;
     const before = await runBounded(process.execPath, ["-e", `process.stdout.write('x'.repeat(${SPRINT4_RUNNER_OUTPUT_LIMIT + 1}) + ${JSON.stringify(record)})`], { cwd: process.cwd(), env: process.env });
     const after = await runBounded(process.execPath, ["-e", `process.stdout.write(${JSON.stringify(record)} + 'x'.repeat(${SPRINT4_RUNNER_OUTPUT_LIMIT + 1}))`], { cwd: process.cwd(), env: process.env });
+    const straddling = await runBounded(process.execPath, ["-e", `process.stdout.write(${JSON.stringify(record)} + 'x'.repeat(${SPRINT4_RUNNER_OUTPUT_LIMIT}) + ${JSON.stringify(record)})`], { cwd: process.cwd(), env: process.env });
+    const stderr = await runBounded(process.execPath, ["-e", `process.stderr.write('x'.repeat(${SPRINT4_RUNNER_OUTPUT_LIMIT + 1}))`], { cwd: process.cwd(), env: process.env });
+    const exact = await runBounded(process.execPath, ["-e", `process.stdout.write('x'.repeat(${SPRINT4_RUNNER_OUTPUT_LIMIT}))`], { cwd: process.cwd(), env: process.env });
     expect(before.stdoutOverflow).toBe(true);
     expect(after.stdoutOverflow).toBe(true);
+    expect(straddling.stdoutOverflow).toBe(true);
+    expect(stderr.stderrOverflow).toBe(true);
+    expect(exact.stdoutOverflow).toBe(false);
+    expect(exact.stdoutBytes).toBe(SPRINT4_RUNNER_OUTPUT_LIMIT);
   });
 
   it("cleans owned state even if provisioner cleanup fails", async () => {

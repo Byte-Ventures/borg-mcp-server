@@ -29,6 +29,8 @@ export interface SpawnResult {
   readonly stderr: string;
   readonly stdoutOverflow: boolean;
   readonly stderrOverflow: boolean;
+  readonly stdoutBytes: number;
+  readonly stderrBytes: number;
 }
 
 export interface JoinedRunnerDependencies {
@@ -84,7 +86,7 @@ export async function executeJoinedRunner(
 ): Promise<Record<string, unknown>> {
   const configuration = validateJoinedRunnerEnvironment(env);
   await (dependencies.verifyClientPins ?? verifyClientPins)(configuration.clientDirectory);
-  const root = await mkdtemp(join(tmpdir(), "borg-s4-joined-"));
+  const root = await realpath(await mkdtemp(join(tmpdir(), "borg-s4-joined-")));
   let run: Sprint4ProvisionedRun | undefined;
   try {
     run = await (dependencies.provision ?? provisionSprint4E2e)({
@@ -94,8 +96,9 @@ export async function executeJoinedRunner(
       port: 0,
     });
     assertProvisionedRun(run);
-    await assertOwnedCredentialReferences(run, root);
+    await assertOwnedProvisionedFiles(run, root);
     const clientEnvironment = await buildClientFixtureEnvironment(env, configuration.clientDirectory, run);
+    await assertOwnedProvisionedFiles(run, root);
     const result = await (dependencies.spawn ?? runBounded)(
       "npx",
       ["vitest", "run", "__tests__/s4-coupled-e2e.test.ts"],
@@ -277,18 +280,43 @@ export async function cleanupJoinedRun(
   if (failure !== undefined) throw failure;
 }
 
-export async function assertOwnedCredentialReferences(run: Sprint4ProvisionedRun, root: string): Promise<void> {
+export async function assertOwnedProvisionedFiles(run: Sprint4ProvisionedRun, root: string): Promise<void> {
   const canonicalRoot = await realpath(root);
-  await Promise.all(Object.values(run.credentialReferences).map(async (reference) => {
-    const canonicalReference = await realpath(reference);
-    const pathFromRoot = relative(canonicalRoot, canonicalReference);
-    const metadata = await lstat(reference);
-    if (pathFromRoot === "" || pathFromRoot.startsWith("..") || isAbsolute(pathFromRoot) ||
-        !metadata.isFile() || metadata.isSymbolicLink() || (metadata.mode & 0o777) !== 0o600 ||
-        (typeof process.getuid === "function" && metadata.uid !== process.getuid())) {
-      throw new Error("Sprint 4 credential reference must be an owned canonical 0600 file.");
+  const serverDirectory = join(canonicalRoot, "server");
+  const credentialDirectory = join(serverDirectory, "s4-e2e-credentials");
+  await assertOwnedPath(canonicalRoot, serverDirectory, 0o700, true);
+  await assertOwnedPath(canonicalRoot, credentialDirectory, 0o700, true);
+  await assertOwnedPath(canonicalRoot, run.trustMaterialReference, 0o600, false, join(serverDirectory, "ca.crt"));
+  const expected = {
+    reader: join(credentialDirectory, "reader.json"),
+    writerA: join(credentialDirectory, "writer-a.json"),
+    writerB: join(credentialDirectory, "writer-b.json"),
+  } as const;
+  await Promise.all((Object.keys(expected) as Array<keyof typeof expected>).map(async (name) => {
+    if (run.credentialReferences[name] !== expected[name]) {
+      throw new Error("Sprint 4 credential references must not be shared or cross-wired.");
     }
+    await assertOwnedPath(canonicalRoot, run.credentialReferences[name], 0o600, false, expected[name]);
   }));
+}
+
+async function assertOwnedPath(
+  root: string,
+  path: string,
+  mode: number,
+  directory: boolean,
+  expected?: string,
+): Promise<void> {
+  const canonicalPath = await realpath(path);
+  const fromRoot = relative(root, canonicalPath);
+  const metadata = await lstat(path);
+  if (path !== canonicalPath || (expected !== undefined && canonicalPath !== expected) ||
+      fromRoot === "" || fromRoot.startsWith("..") || isAbsolute(fromRoot) ||
+      metadata.isSymbolicLink() || (directory ? !metadata.isDirectory() : !metadata.isFile()) ||
+      (metadata.mode & 0o777) !== mode ||
+      (typeof process.getuid === "function" && metadata.uid !== process.getuid())) {
+    throw new Error("Sprint 4 provisioner path must be owned, canonical, and private.");
+  }
 }
 
 export function assertProvisionedRun(run: Sprint4ProvisionedRun): void {
@@ -316,19 +344,24 @@ export async function runBounded(
 ): Promise<SpawnResult> {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { cwd: options.cwd, env: options.env, stdio: ["ignore", "pipe", "pipe"] });
-    let stdout = "";
-    let stderr = "";
+    const stdoutChunks: Buffer[] = [];
+    const stderrChunks: Buffer[] = [];
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
     let stdoutOverflow = false;
     let stderrOverflow = false;
     let overflowed = false;
     const append = (target: "stdout" | "stderr", chunk: Buffer): void => {
-      const value = chunk.toString("utf8");
       if (target === "stdout") {
-        if (stdout.length + value.length > SPRINT4_RUNNER_OUTPUT_LIMIT) stdoutOverflow = true;
-        stdout = (stdout + value).slice(0, SPRINT4_RUNNER_OUTPUT_LIMIT);
+        stdoutBytes += chunk.length;
+        if (stdoutBytes > SPRINT4_RUNNER_OUTPUT_LIMIT) stdoutOverflow = true;
+        const retained = Math.max(0, SPRINT4_RUNNER_OUTPUT_LIMIT - (stdoutBytes - chunk.length));
+        if (retained > 0) stdoutChunks.push(chunk.subarray(0, retained));
       } else {
-        if (stderr.length + value.length > SPRINT4_RUNNER_OUTPUT_LIMIT) stderrOverflow = true;
-        stderr = (stderr + value).slice(0, SPRINT4_RUNNER_OUTPUT_LIMIT);
+        stderrBytes += chunk.length;
+        if (stderrBytes > SPRINT4_RUNNER_OUTPUT_LIMIT) stderrOverflow = true;
+        const retained = Math.max(0, SPRINT4_RUNNER_OUTPUT_LIMIT - (stderrBytes - chunk.length));
+        if (retained > 0) stderrChunks.push(chunk.subarray(0, retained));
       }
       if ((stdoutOverflow || stderrOverflow) && !overflowed) {
         overflowed = true;
@@ -347,7 +380,15 @@ export async function runBounded(
     child.once("close", (code) => {
       clearTimeout(timer);
       if (timedOut) reject(new Error("Sprint 4 client fixture timed out."));
-      else resolve({ code: code ?? 1, stdout, stderr, stdoutOverflow, stderrOverflow });
+      else resolve({
+        code: code ?? 1,
+        stdout: Buffer.concat(stdoutChunks).toString("utf8"),
+        stderr: Buffer.concat(stderrChunks).toString("utf8"),
+        stdoutOverflow,
+        stderrOverflow,
+        stdoutBytes,
+        stderrBytes,
+      });
     });
   });
 }

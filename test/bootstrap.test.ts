@@ -1,10 +1,11 @@
-import { chmod, copyFile, mkdtemp, readFile, readdir, realpath, rm, stat, symlink } from "node:fs/promises";
+import { access, chmod, copyFile, mkdtemp, readFile, readdir, realpath, rm, stat, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { X509Certificate } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { bootstrapServer, loadDigestKey, loadTlsPrivateKey } from "../src/bootstrap.js";
+import type { PortableServerCredential } from "../src/portable-credential-store.js";
 import { openStore } from "../src/store.js";
 
 const directories: string[] = [];
@@ -17,6 +18,35 @@ afterEach(async () => {
 });
 
 describe("offline bootstrap", () => {
+  it("binds one direct owner credential before setup completes", async () => {
+    const parent = await temporaryDirectory();
+    let captured: PortableServerCredential | undefined;
+    const result = await bootstrapServer(
+      join(parent, "server"),
+      "127.0.0.1",
+      () => new Date(),
+      async (record) => { captured = record; },
+    );
+    expect(captured).toEqual({
+      version: 2,
+      origin: "https://127.0.0.1:7091",
+      trustIdentity: `spki-sha256:${result.caFingerprint}`,
+      credential: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/u),
+      clientId: result.ownerAccess.clientId,
+      serverCapabilities: ["create_cube"],
+    });
+  });
+
+  it("removes partial server identity when portable owner persistence fails", async () => {
+    const parent = await temporaryDirectory();
+    const directory = join(parent, "server");
+    await expect(bootstrapServer(directory, "127.0.0.1", () => new Date(), async () => {
+      throw new Error("credential persistence failed");
+    })).rejects.toThrow("credential persistence failed");
+    await expect(access(join(directory, "server.json"))).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(access(join(directory, "borg.db"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("creates private trust, identity, digest, and one-time bootstrap material", async () => {
     const parent = await temporaryDirectory();
     const result = await bootstrapServer(join(parent, "server"));
@@ -57,7 +87,7 @@ describe("offline bootstrap", () => {
       cubes: 0,
       roles: 0,
       grants: 0,
-      enrolled_clients: 0,
+      enrolled_clients: 1,
     });
     runtime.close();
   });

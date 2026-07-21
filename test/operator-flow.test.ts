@@ -16,6 +16,7 @@ import { acquireRuntimeLock, createOfflineCredentialService } from "../src/servi
 import { openStore } from "../src/store.js";
 import type { Principal } from "../src/principal.js";
 import { DEFAULT_SERVICE_LIMITS } from "../src/https-server.js";
+import type { PortableServerCredential } from "../src/portable-credential-store.js";
 
 const directories: string[] = [];
 
@@ -38,8 +39,9 @@ describe("offline operator flow", () => {
     digestKey.fill(0);
     const authority = new CredentialAuthority(runtime.credentials, digester);
     const credential = generateSecret();
+    const invitation = authority.createInvitation(bootstrap.recoveryCredential, 60_000)!;
     const enrolled = authority.exchangeInvitation({
-      invitation: bootstrap.initialInvitation,
+      invitation,
       retryKey: randomUUID(),
       clientCredential: credential,
       clientName: "eviction-client",
@@ -102,12 +104,15 @@ describe("offline operator flow", () => {
     const dataDirectory = join(parent, "server");
     const bootstrap = await bootstrapServer(dataDirectory);
     const credential = generateSecret();
-    const enrolled = await withAuthority(dataDirectory, (authority) => authority.exchangeInvitation({
-      invitation: bootstrap.initialInvitation,
-      retryKey: randomUUID(),
-      clientCredential: credential,
-      clientName: "grant-client",
-    }));
+    const enrolled = await withAuthority(dataDirectory, (authority) => {
+      const invitation = authority.createInvitation(bootstrap.recoveryCredential, 60_000)!;
+      return authority.exchangeInvitation({
+        invitation,
+        retryKey: randomUUID(),
+        clientCredential: credential,
+        clientName: "grant-client",
+      });
+    });
     if (enrolled === null) throw new Error("Enrollment failed.");
     const cubeId = "00000000-0000-4000-8000-000000000031";
     const runtime = await openStore({ path: bootstrap.paths.database });
@@ -139,13 +144,15 @@ describe("offline operator flow", () => {
     const dataDirectory = join(parent, "server");
     const bootstrap = await bootstrapServer(dataDirectory);
     const credential = generateSecret();
-    const enrolled = await withAuthority(dataDirectory, (authority) =>
-      authority.exchangeInvitation({
-        invitation: bootstrap.initialInvitation,
+    const enrolled = await withAuthority(dataDirectory, (authority) => {
+      const invitation = authority.createInvitation(bootstrap.recoveryCredential, 60_000)!;
+      return authority.exchangeInvitation({
+        invitation,
         retryKey: randomUUID(),
         clientCredential: credential,
         clientName: "operator",
-      }));
+      });
+    });
     expect(enrolled).not.toBeNull();
     const service = createOfflineCredentialService(dataDirectory);
 
@@ -177,8 +184,9 @@ describe("offline operator flow", () => {
     digestKey.fill(0);
     const authority = new CredentialAuthority(runtime.credentials, digester);
     const credential = generateSecret();
+    const invitation = authority.createInvitation(bootstrap.recoveryCredential, 60_000)!;
     const enrolled = authority.exchangeInvitation({
-      invitation: bootstrap.initialInvitation,
+      invitation,
       retryKey: randomUUID(),
       clientCredential: credential,
       clientName: "quota-client",
@@ -246,7 +254,14 @@ describe("offline operator flow", () => {
   it("bootstraps, enrolls, authenticates, and revokes without cloud access", async () => {
     const parent = await realpath(await mkdtemp(join(tmpdir(), "borg-operator-flow-")));
     directories.push(parent);
-    const bootstrap = await bootstrapServer(join(parent, "server"));
+    let ownerRecord: PortableServerCredential | undefined;
+    const bootstrap = await bootstrapServer(
+      join(parent, "server"),
+      "127.0.0.1",
+      () => new Date(),
+      async (record) => { ownerRecord = record; },
+    );
+    if (ownerRecord === undefined) throw new Error("Owner credential was not provisioned.");
     const runtime = await openStore({ path: bootstrap.paths.database });
     const digestKey = await loadDigestKey(bootstrap.paths.digestKey);
     const digester = new CredentialDigester(digestKey);
@@ -265,6 +280,7 @@ describe("offline operator flow", () => {
     });
 
     try {
+      const invitation = authority.createInvitation(bootstrap.recoveryCredential, 60_000)!;
       const authCube = "00000000-0000-4000-8000-000000000011";
       for (const [path, body, method] of [
         ["/api/cubes", undefined, "GET"],
@@ -309,7 +325,7 @@ describe("offline operator flow", () => {
           protocol_version: "2",
           request_id: "request-1234",
           payload: {
-            invitation: bootstrap.initialInvitation,
+            invitation,
             retry_key: "00000000-0000-4000-8000-000000000101",
             client_credential: `${"z".repeat(42)}A`,
             client_name: "operator-laptop",
@@ -318,10 +334,10 @@ describe("offline operator flow", () => {
       );
       expect(enrollment.status).toBe(201);
       const payload = (JSON.parse(enrollment.body) as {
-        payload: { client_id: string; purpose: "owner"; server_capabilities: ["create_cube"] };
+        payload: { client_id: string; purpose: "client"; server_capabilities: [] };
       }).payload;
-      const clientCredential = `${"z".repeat(42)}A`;
-      expect(payload).toMatchObject({ purpose: "owner", server_capabilities: ["create_cube"] });
+      const clientCredential = ownerRecord.credential;
+      expect(payload).toMatchObject({ purpose: "client", server_capabilities: [] });
       expect(runtime.maintenance.observeAuthorityState()).toMatchObject({ cubes: 0, roles: 0, grants: 0 });
       const creation = await request(
         server.origin,
@@ -443,7 +459,7 @@ describe("offline operator flow", () => {
         `/api/cubes/${cubeId}/stream`,
         `Bearer ${clientCredential}`,
       );
-      authority.revokeClient(payload.client_id);
+      authority.revokeClient(ownerRecord.clientId);
       await expect(Promise.race([
         liveStream.closed,
         new Promise((_, reject) => setTimeout(() => reject(new Error("Stream remained open.")), 500)),

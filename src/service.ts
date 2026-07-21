@@ -27,6 +27,11 @@ import {
   type RunningServer,
 } from "./https-server.js";
 import { resolveBindOptions } from "./network-policy.js";
+import { DEFAULT_PORT } from "./network-policy.js";
+import {
+  readPortableServerCredential,
+  writePortableServerCredential,
+} from "./portable-credential-store.js";
 import {
   invitationCubeAmbiguousError,
   operatorErrors,
@@ -69,6 +74,7 @@ export interface ServerService {
     access?: CubeAccess,
   ) => Promise<string | CubeInvitationResult>;
   readonly replaceOwnerInvitation?: (recoveryCredential: string) => Promise<string>;
+  readonly invite?: () => Promise<string>;
 }
 
 export interface SetupOptions {
@@ -76,7 +82,7 @@ export interface SetupOptions {
 }
 
 export type ServerSetupResult =
-  | (BootstrapResult & {
+  | (Omit<BootstrapResult, "recoveryCredential" | "initialInvitation"> & {
       readonly artifact?: { readonly version: string; readonly integrity: string; readonly sourceSha: string | null };
     })
   | {
@@ -434,6 +440,7 @@ function storageOperatorErrorCode(name: string): OperatorErrorCode {
 const serverEnvironment = selectServerEnvironment(process.env);
 const dataDirectory = serverEnvironment.BORG_SERVER_DATA_DIR ?? join(homedir(), ".borg", "server");
 const runtimeDirectory = serverEnvironment.BORG_SERVER_RUNTIME_DIR ?? join(homedir(), ".borg", "server-runtime");
+const credentialDirectory = join(homedir(), ".borg", "credentials");
 const nodeRuntimeOperator = createNodeRuntimeOperator(runtimeDirectory, dataDirectory);
 const startOnlyService = createNodeServerService({
   environment: { ...serverEnvironment, BORG_SERVER_DATA_DIR: dataDirectory },
@@ -488,7 +495,19 @@ export const nodeServerService: ServerService = {
       dataDirectory,
       bindHost,
       options,
+      credentialDirectory,
     );
+    if (!("existing" in result)) {
+      const { recoveryCredential: _recovery, initialInvitation: _invitation, ...publicResult } = result;
+      return {
+        ...publicResult,
+        artifact: {
+          version: artifact.version,
+          integrity: artifact.integrity,
+          sourceSha: artifact.sourceSha,
+        },
+      };
+    }
     return {
       ...result,
       artifact: {
@@ -500,7 +519,7 @@ export const nodeServerService: ServerService = {
   },
   status: () => inspectNodeRuntime(dataDirectory, runtimeDirectory),
   update: () => nodeRuntimeOperator.updateLatest(30_000),
-  ...createOfflineCredentialService(dataDirectory),
+  ...createOfflineCredentialService(dataDirectory, credentialDirectory),
 };
 
 function createNodeRuntimeOperator(managedRuntimeDirectory: string, runtimeDataDirectory: string) {
@@ -616,6 +635,7 @@ export async function setupNodeServerInstallation(
   setupDataDirectory: string,
   bindHost: string,
   options: SetupOptions,
+  credentialRoot?: string,
 ): Promise<BootstrapResult | { readonly existing: true }> {
   const directory = await preparePrivateDataDirectory(setupDataDirectory);
   const runtimeLock = await acquireRuntimeLock(directory);
@@ -639,7 +659,14 @@ export async function setupNodeServerInstallation(
     if (options.reinitialize) {
       for (const path of existing) await unlink(path);
     }
-    return await bootstrapServer(directory, bindHost);
+    return await bootstrapServer(
+      directory,
+      bindHost,
+      () => new Date(),
+      credentialRoot === undefined
+        ? async () => undefined
+        : (record) => writePortableServerCredential(credentialRoot, record),
+    );
   } finally {
     if (invitationLock === undefined) await runtimeLock.release();
     else await invitationLock.release().finally(() => runtimeLock.release());
@@ -673,9 +700,10 @@ function resolveSetupBindHost(environment: ServerEnvironment): string {
 
 export function createOfflineCredentialService(
   offlineDataDirectory: string,
+  credentialRoot?: string,
 ): Pick<Required<ServerService>,
   "rotateClient" | "revokeClient" | "grantClient" | "ungrantClient" |
-  "createClientInvitation" | "replaceOwnerInvitation"
+  "createClientInvitation" | "replaceOwnerInvitation" | "invite"
 > {
   const withAuthority = async <T>(operation: (
     authority: CredentialAuthority,
@@ -699,7 +727,9 @@ export function createOfflineCredentialService(
       else await invitationLock.release().finally(() => runtimeLock.release());
     }
   };
-  const withInvitationAuthority = async <T>(operation: (authority: CredentialAuthority) => T): Promise<T> => {
+  const withInvitationAuthority = async <T>(
+    operation: (authority: CredentialAuthority) => T | Promise<T>,
+  ): Promise<T> => {
     const invitationLock = await acquireInvitationMintLock(offlineDataDirectory);
     let offlineRuntimeLock: RuntimeLock | undefined;
     let runtime: Awaited<ReturnType<typeof openStore>> | undefined;
@@ -714,7 +744,7 @@ export function createOfflineCredentialService(
       const digestKey = await loadDigestKey(join(offlineDataDirectory, "credential-digest.key"));
       digester = new CredentialDigester(digestKey);
       digestKey.fill(0);
-      return operation(new CredentialAuthority(runtime.credentials, digester));
+      return await operation(new CredentialAuthority(runtime.credentials, digester));
     } catch (error) {
       if (error instanceof MigrationCompatibilityError) throw operatorErrors.INVITATION_SCHEMA_MISMATCH;
       if (isSqliteContention(error)) throw operatorErrors.INVITATION_CONTENTION;
@@ -761,6 +791,22 @@ export function createOfflineCredentialService(
     replaceOwnerInvitation: (recoveryCredential) => withInvitationAuthority((authority) => {
       const invitation = authority.replaceOwnerInvitation(recoveryCredential, 15 * 60_000);
       if (invitation === null) throw operatorErrors.RECOVERY_INVALID;
+      return invitation;
+    }),
+    invite: () => withInvitationAuthority(async (authority) => {
+      if (credentialRoot === undefined) throw new Error("Local owner credential store is unavailable.");
+      const config = JSON.parse((await readFile(join(offlineDataDirectory, "server.json"))).toString("utf8")) as {
+        bind_host?: unknown;
+        ca_spki_sha256?: unknown;
+      };
+      if (typeof config.bind_host !== "string" || typeof config.ca_spki_sha256 !== "string") {
+        throw new Error("Server identity is invalid.");
+      }
+      const origin = `https://${config.bind_host === "::1" ? "[::1]" : config.bind_host}:${DEFAULT_PORT}`;
+      const trustIdentity = `spki-sha256:${config.ca_spki_sha256}`;
+      const record = await readPortableServerCredential(credentialRoot, origin, trustIdentity);
+      const invitation = authority.createInvitationForOwnerCredential(record.credential, 15 * 60_000);
+      if (invitation === null) throw new Error("Local owner credential is invalid.");
       return invitation;
     }),
   };

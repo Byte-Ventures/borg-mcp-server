@@ -34,7 +34,7 @@ describe("runCli", () => {
     expect(service.setup).toHaveBeenCalledWith({ reinitialize: false });
     expect(listen).not.toHaveBeenCalled();
     expect(io.stdout).toHaveBeenCalledWith(
-      `Local server prepared.\nArtifact: unavailable\nBuild identity: unavailable\nData and identity: prepared\nNo server process started.\nRecovery credential (shown once; keep offline): ${"a".repeat(43)}\nOwner enrollment invitation (single-use, shown once; enroll the owner client): ${"b".repeat(43)}\nSetup created no cube.\nNext: borg-mcp-server start`,
+      "Local server setup completed.\nArtifact: unavailable\nLocal owner access: prepared.\nNo server process started.\nNext: start the server, then run borg assimilate.",
     );
   });
 
@@ -58,6 +58,41 @@ describe("runCli", () => {
       `Local server is already prepared.\nArtifact: borgmcp-server@0.1.8 (sha512-${"A".repeat(86)}==)\nBuild identity: ${"a".repeat(40)}\nData and identity: unchanged\nNo server process started.\nNext: borg-mcp-server start`,
     );
     expect(output).not.toMatch(/credential|invitation/iu);
+  });
+
+  it("renders the bounded non-interactive setup record without secrets", async () => {
+    const service: ServerService = {
+      start: vi.fn(),
+      setup: vi.fn().mockResolvedValue({
+        existing: true,
+        artifact: { version: "0.1.8", integrity: "sha512-safe", sourceSha: "abc123" },
+      }),
+    };
+    const io = { ...createIo(), isTTY: false };
+    expect(await runCli(["setup"], service, io)).toBe(0);
+    expect(io.stdout).toHaveBeenCalledWith(JSON.stringify({
+      status: "prepared",
+      artifact: "borgmcp-server@0.1.8",
+      build_identity: "abc123",
+      owner_access: "prepared",
+      process: "stopped",
+    }));
+  });
+
+  it("creates an invitation only in an interactive terminal with the approved copy", async () => {
+    const invite = vi.fn().mockResolvedValue("i".repeat(43));
+    const interactive = { ...createIo(), isTTY: true };
+    expect(await runCli(["invite"], { start: vi.fn(), invite }, interactive)).toBe(0);
+    expect(interactive.stdout).toHaveBeenCalledWith(
+      `Invitation (single-use; shown once): ${"i".repeat(43)}\nShare it only with the intended recipient.`,
+    );
+
+    const nonInteractive = { ...createIo(), isTTY: false };
+    expect(await runCli(["invite"], { start: vi.fn(), invite }, nonInteractive)).toBe(1);
+    expect(nonInteractive.stderr).toHaveBeenCalledWith(
+      "Invitation creation requires an interactive terminal.",
+    );
+    expect(invite).toHaveBeenCalledTimes(1);
   });
 
   it("requires an explicit unambiguous setup reinitialization flag", async () => {

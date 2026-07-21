@@ -24,6 +24,7 @@ import {
   setupNodeServerInstallation,
 } from "../src/service.js";
 import { createRuntimeBuildIdentity } from "../src/runtime-identity.js";
+import { writePortableServerCredential } from "../src/portable-credential-store.js";
 
 function requireFreshSetup(
   result: Awaited<ReturnType<typeof setupNodeServerInstallation>>,
@@ -33,6 +34,63 @@ function requireFreshSetup(
 }
 
 describe("node server service", () => {
+  it("authorizes explicit invitations with the directly provisioned portable owner credential", async () => {
+    const parent = await realpath(await mkdtemp(join(tmpdir(), "borg-owner-invite-")));
+    try {
+      const directory = join(parent, "server");
+      const credentials = join(parent, "credentials");
+      await bootstrapServer(
+        directory,
+        "127.0.0.1",
+        () => new Date(),
+        (record) => writePortableServerCredential(credentials, record),
+      );
+      const invitation = await createOfflineCredentialService(directory, credentials).invite();
+      expect(invitation).toMatch(/^[A-Za-z0-9_-]{43}$/u);
+      const runtime = await openStore({ path: join(directory, "borg.db") });
+      try {
+        const key = await loadDigestKey(join(directory, "credential-digest.key"));
+        const authority = new CredentialAuthority(runtime.credentials, new CredentialDigester(key));
+        key.fill(0);
+        expect(authority.exchangeInvitation({
+          invitation,
+          retryKey: randomUUID(),
+          clientCredential: generateSecret(),
+        })).toMatchObject({ purpose: "client", serverCapabilities: [] });
+      } finally {
+        runtime.close();
+      }
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves portable owner access across idempotent setup", async () => {
+    const parent = await realpath(await mkdtemp(join(tmpdir(), "borg-owner-preserve-")));
+    try {
+      const directory = join(parent, "server");
+      const credentials = join(parent, "credentials");
+      const first = await setupNodeServerInstallation(
+        directory,
+        "127.0.0.1",
+        { reinitialize: false },
+        credentials,
+      );
+      expect("existing" in first).toBe(false);
+      const before = await readFile(join(credentials, "credentials.json"));
+      const second = await setupNodeServerInstallation(
+        directory,
+        "127.0.0.1",
+        { reinitialize: false },
+        credentials,
+      );
+      expect(second).toEqual({ existing: true });
+      expect(await readFile(join(credentials, "credentials.json"))).toEqual(before);
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
   it("starts and stops the liveness scheduler with the authenticated runtime", async () => {
     const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-liveness-service-")));
     try {
@@ -284,7 +342,7 @@ describe("node server service", () => {
     }
   });
 
-  it("mints owner and client invitations beside a live server and enrolls immediately", async () => {
+  it("mints client invitations beside a live server after direct owner provisioning", async () => {
     const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-live-invitation-")));
     let runtime: Awaited<ReturnType<typeof openStore>> | undefined;
     let digester: CredentialDigester | undefined;
@@ -304,14 +362,6 @@ describe("node server service", () => {
       }
       running = await acquireRuntimeLock(directory, "server");
       const administration = createOfflineCredentialService(directory);
-
-      const ownerInvitation = await administration.replaceOwnerInvitation(installation.recoveryCredential);
-      const owner = liveAuthority.exchangeInvitation({
-        invitation: ownerInvitation,
-        retryKey: randomUUID(),
-        clientCredential: generateSecret(),
-      });
-      expect(owner).toMatchObject({ purpose: "owner", serverCapabilities: ["create_cube"] });
 
       const clientInvitation = await administration.createClientInvitation(installation.recoveryCredential);
       if (typeof clientInvitation !== "string") throw new Error("Expected a plain invitation.");
@@ -561,7 +611,7 @@ describe("node server service", () => {
       expect(await readFile(unrelated, "utf8")).toBe("preserve me");
       const freshRuntime = await openStore({ path: second.paths.database });
       expect(freshRuntime.maintenance.observeAuthorityState()).toMatchObject({
-        enrolled_clients: 0,
+        enrolled_clients: 1,
         cubes: 0,
         roles: 0,
         grants: 0,

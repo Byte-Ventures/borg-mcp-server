@@ -23,15 +23,18 @@ describe("immutable runtime lifecycle", () => {
   it("uses bounded shell-free Unix tooling and rejects unsafe archive entries before extraction", async () => {
     const root = await mkdtemp(join(tmpdir(), "borg-runtime-unpacker-"));
     directories.push(root);
-    const tarball = join(root, "server.tgz");
+    const archive = Buffer.from("verified archive bytes");
     const staging = join(root, "staging");
     await mkdir(staging);
     const calls: Array<{ executable: string; args: readonly string[]; cwd?: string }> = [];
+    const tarInputs: Buffer[] = [];
     const run = vi.fn(async (executable: string, args: readonly string[], options: {
       readonly cwd?: string;
       readonly signal: AbortSignal;
+      readonly stdin?: Buffer;
     }) => {
       calls.push({ executable, args, ...(options.cwd === undefined ? {} : { cwd: options.cwd }) });
+      if (options.stdin !== undefined) tarInputs.push(options.stdin);
       if (args[0] === "-xzf") await mkdir(join(staging, "package"));
       return { stdout: args[0] === "-tzf" ? "package/package.json\npackage/dist/main.js\n" : "", stderr: "" };
     });
@@ -40,20 +43,21 @@ describe("immutable runtime lifecycle", () => {
       npmExecutable: "/usr/bin/npm",
       run,
     });
-    await unpack(tarball, staging, new AbortController().signal);
+    await unpack(archive, staging, new AbortController().signal);
     expect(calls).toEqual([
-      { executable: "/usr/bin/tar", args: ["-tzf", tarball] },
-      { executable: "/usr/bin/tar", args: ["-xzf", tarball, "-C", staging] },
+      { executable: "/usr/bin/tar", args: ["-tzf", "-"] },
+      { executable: "/usr/bin/tar", args: ["-xzf", "-", "-C", staging] },
       {
         executable: "/usr/bin/npm",
         args: ["ci", "--omit=dev", "--ignore-scripts", "--no-audit", "--no-fund"],
         cwd: join(staging, "package"),
       },
     ]);
+    expect(tarInputs).toEqual([archive, archive]);
 
     run.mockResolvedValueOnce({ stdout: "package/../escape\n", stderr: "" });
     await expect(unpack(
-      tarball,
+      archive,
       staging,
       new AbortController().signal,
     )).rejects.toThrow("Runtime artifact archive entries are invalid.");
@@ -104,17 +108,19 @@ describe("immutable runtime lifecycle", () => {
     })).rejects.toThrow("Runtime artifact content changed.");
   });
 
-  it("unpacks only an owned frozen copy and rejects replacement of that copy", async () => {
+  it("binds the unpack consumer to verified bytes despite source-path replacement", async () => {
     const fixture = await createFixture();
     const archive = await writeArchive(fixture.root, "verified-original");
-    let frozenPath = "";
+    let consumed: Buffer | undefined;
     const lifecycle = createRuntimeLifecycle({
-      unpack: async (frozen, staging) => {
-        frozenPath = frozen;
-        expect(frozen).not.toBe(archive.path);
+      unpack: async (verifiedBytes, staging) => {
         await writeFile(archive.path, "unverified-replacement");
-        await expect(readFile(frozen, "utf8")).resolves.toBe("verified-original");
-        await unpackVersion("0.2.0")(frozen, staging);
+        const stagingReplacement = join(staging, "replacement.tgz");
+        await writeFile(stagingReplacement, "staging-path-replacement");
+        consumed = verifiedBytes;
+        expect(verifiedBytes.toString("utf8")).toBe("verified-original");
+        await rm(stagingReplacement);
+        await unpackVersion("0.2.0")(verifiedBytes, staging);
       },
       restart: vi.fn(),
       stop: vi.fn(),
@@ -128,28 +134,9 @@ describe("immutable runtime lifecycle", () => {
       expectedVersion: "0.2.0",
       timeoutMs: 1_000,
     });
-    expect(frozenPath).toMatch(/\/\.staging-[^/]+\/verified-artifact\.tgz$/u);
-    await expect(access(frozenPath)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(consumed?.toString("utf8")).toBe("verified-original");
+    expect(await readFile(archive.path, "utf8")).toBe("unverified-replacement");
     expect(await readdir(artifact.artifactDirectory)).not.toContain("verified-artifact.tgz");
-
-    const hostileArchive = await writeArchive(fixture.root, "verified-hostile");
-    const hostile = createRuntimeLifecycle({
-      unpack: async (frozen, staging) => {
-        await rm(frozen);
-        await writeFile(frozen, "replacement", { mode: 0o600 });
-        await unpackVersion("0.3.0")(frozen, staging);
-      },
-      restart: vi.fn(),
-      stop: vi.fn(),
-      probe: vi.fn(),
-    });
-    await expect(hostile.stage({
-      runtimeRoot: fixture.runtimeRoot,
-      tarballPath: hostileArchive.path,
-      expectedIntegrity: hostileArchive.integrity,
-      expectedVersion: "0.3.0",
-      timeoutMs: 1_000,
-    })).rejects.toThrow("Frozen runtime artifact changed.");
     expect((await readdir(fixture.runtimeRoot)).filter((name) => name.startsWith(".staging-")))
       .toEqual([]);
     expect(await readdir(join(fixture.runtimeRoot, "artifacts"))).toHaveLength(1);
@@ -405,7 +392,7 @@ async function writeArchive(root: string, value: string): Promise<{ path: string
   };
 }
 
-function unpackVersion(version: string): (tarball: string, staging: string) => Promise<void> {
+function unpackVersion(version: string): (archive: Buffer, staging: string) => Promise<void> {
   return async (_tarball, staging) => {
     const packageDirectory = join(staging, "package");
     await mkdir(join(packageDirectory, "dist"), { recursive: true });

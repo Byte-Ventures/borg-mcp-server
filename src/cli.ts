@@ -15,6 +15,7 @@ Commands:
   start    Start the server process
   status [--json]  Report exact local runtime evidence
   update [--json]  Verify and activate the latest server artifact
+  invite   Create a single-use invitation in an interactive terminal.
   client-rotate <client-id>  Rotate one client credential offline
   client-revoke <client-id>  Revoke one client and its credentials offline
   client-grant <client-id> <cube-id> <read|write|manage>  Set one offline cube grant
@@ -62,9 +63,22 @@ export async function runCli(
         return 1;
       }
       const result = await service.setup({ reinitialize: extraArgs[0] === "--reinitialize" });
+      const artifactIdentity = result.artifact === undefined
+        ? "borgmcp-server@unavailable"
+        : `borgmcp-server@${result.artifact.version}`;
       const artifact = result.artifact === undefined
         ? "Artifact: unavailable"
-        : `Artifact: borgmcp-server@${result.artifact.version} (${result.artifact.integrity})`;
+        : `Artifact: ${artifactIdentity} (${result.artifact.integrity})`;
+      if (io.isTTY === false) {
+        io.stdout(JSON.stringify({
+          status: "prepared",
+          artifact: artifactIdentity,
+          build_identity: result.artifact?.sourceSha ?? null,
+          owner_access: "prepared",
+          process: "stopped",
+        }));
+        return 0;
+      }
       if ("existing" in result) {
         io.stdout([
           "Local server is already prepared.",
@@ -77,15 +91,11 @@ export async function runCli(
         return 0;
       }
       io.stdout([
-        "Local server prepared.",
+        "Local server setup completed.",
         artifact,
-        `Build identity: ${result.artifact?.sourceSha ?? "unavailable"}`,
-        "Data and identity: prepared",
+        "Local owner access: prepared.",
         "No server process started.",
-        `Recovery credential (shown once; keep offline): ${result.recoveryCredential}`,
-        `Owner enrollment invitation (single-use, shown once; enroll the owner client): ${result.initialInvitation}`,
-        "Setup created no cube.",
-        "Next: borg-mcp-server start",
+        "Next: start the server, then run borg assimilate.",
       ].join("\n"));
       return 0;
     case "start":
@@ -206,6 +216,16 @@ export async function runCli(
           `Client enrollment invitation (single-use, shown once): ${result.invitation}`,
         );
       }
+      return 0;
+    }
+    case "invite": {
+      if (extraArgs.length !== 0 || service.invite === undefined) return invalidArguments(io);
+      if (io.isTTY !== true) {
+        io.stderr("Invitation creation requires an interactive terminal.");
+        return 1;
+      }
+      const invitation = await service.invite();
+      io.stdout(`Invitation (single-use; shown once): ${invitation}\nShare it only with the intended recipient.`);
       return 0;
     }
     case "help":

@@ -258,6 +258,7 @@ export interface CredentialStore {
   readonly findClientCredential: (lookup: Buffer) => StoredSecretDigest | null;
   readonly clientExists: (clientId: string) => boolean;
   readonly clientIsActive: (clientId: string) => boolean;
+  readonly clientHasServerCapability: (clientId: string, capability: "create_cube") => boolean;
   readonly findDroneSessionCredential: (lookup: Buffer) => StoredDroneSessionDigest | null;
   readonly findActiveDroneSessionExpiry: (sessionId: string) => string | null;
   readonly rotateClientCredential: (input: {
@@ -2574,6 +2575,15 @@ class SqliteCredentialStore implements CredentialStore {
     return this.#database.prepare(
       "SELECT 1 FROM clients WHERE id = ? AND revoked_at IS NULL",
     ).get(clientId) !== undefined;
+  }
+
+  clientHasServerCapability(clientId: string, capability: "create_cube"): boolean {
+    assertCanonicalUuid(clientId, "Client id");
+    return this.#database.prepare(`
+      SELECT 1 FROM client_server_capabilities AS capability
+      JOIN clients AS client ON client.id = capability.client_id
+      WHERE capability.client_id = ? AND capability.capability = ? AND client.revoked_at IS NULL
+    `).get(clientId, capability) !== undefined;
   }
 
   findDroneSessionCredential(lookup: Buffer): StoredDroneSessionDigest | null {

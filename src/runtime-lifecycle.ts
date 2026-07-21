@@ -32,7 +32,7 @@ export interface VerifiedRuntimeArtifact {
 
 export interface RuntimeLifecycleDependencies {
   readonly unpack: (
-    tarballPath: string,
+    archive: Buffer,
     stagingDirectory: string,
     signal: AbortSignal,
   ) => Promise<void>;
@@ -120,13 +120,8 @@ async function stageRuntimeArtifact(
   const existing = await existingArtifact(target, input);
   if (existing !== null) return existing;
   const staging = await mkdtemp(join(root, ".staging-"));
-  const frozenArchive = join(staging, "verified-artifact.tgz");
   try {
-    await writeFile(frozenArchive, archive, { flag: "wx", mode: 0o600 });
-    const frozenSnapshot = await snapshotFrozenArchive(frozenArchive, actualIntegrity, archive.length);
-    await withDeadline(input.timeoutMs, (signal) => unpack(frozenArchive, staging, signal));
-    await assertFrozenArchive(frozenArchive, frozenSnapshot);
-    await rm(frozenArchive);
+    await withDeadline(input.timeoutMs, (signal) => unpack(archive, staging, signal));
     const packageDirectory = await validateUnpackedPackage(staging, input.expectedVersion);
     await makeTreeReadOnly(packageDirectory);
     const treeSha256 = await hashArtifactTree(packageDirectory);
@@ -155,46 +150,6 @@ async function stageRuntimeArtifact(
     await removeOwnedStaging(staging);
     throw error;
   }
-}
-
-interface FrozenArchiveSnapshot {
-  readonly device: number;
-  readonly inode: number;
-  readonly size: number;
-  readonly integrity: string;
-}
-
-async function snapshotFrozenArchive(
-  path: string,
-  integrity: string,
-  expectedSize: number,
-): Promise<FrozenArchiveSnapshot> {
-  const metadata = await lstat(path);
-  if (!metadata.isFile() || metadata.isSymbolicLink() || (metadata.mode & 0o077) !== 0 ||
-      metadata.size !== expectedSize) {
-    throw new Error("Frozen runtime artifact is invalid.");
-  }
-  const content = await readRegularFile(path, 2 * 1024 * 1024);
-  const actualIntegrity = `sha512-${createHash("sha512").update(content).digest("base64")}`;
-  if (actualIntegrity !== integrity) throw new Error("Frozen runtime artifact changed.");
-  return Object.freeze({
-    device: metadata.dev,
-    inode: metadata.ino,
-    size: metadata.size,
-    integrity,
-  });
-}
-
-async function assertFrozenArchive(path: string, snapshot: FrozenArchiveSnapshot): Promise<void> {
-  const metadata = await lstat(path);
-  if (!metadata.isFile() || metadata.isSymbolicLink() || (metadata.mode & 0o077) !== 0 ||
-      metadata.dev !== snapshot.device || metadata.ino !== snapshot.inode ||
-      metadata.size !== snapshot.size) {
-    throw new Error("Frozen runtime artifact changed.");
-  }
-  const content = await readRegularFile(path, 2 * 1024 * 1024);
-  const integrity = `sha512-${createHash("sha512").update(content).digest("base64")}`;
-  if (integrity !== snapshot.integrity) throw new Error("Frozen runtime artifact changed.");
 }
 
 async function activateRuntimeArtifact(
@@ -260,7 +215,7 @@ export interface RuntimeCommandRunner {
   (
     executable: string,
     args: readonly string[],
-    options: { readonly cwd?: string; readonly signal: AbortSignal },
+    options: { readonly cwd?: string; readonly signal: AbortSignal; readonly stdin?: Buffer },
   ): Promise<RuntimeCommandResult>;
 }
 
@@ -272,8 +227,8 @@ export function createUnixNpmArtifactUnpacker(options: {
   const tarExecutable = options.tarExecutable ?? "tar";
   const npmExecutable = options.npmExecutable ?? "npm";
   const run = options.run ?? runRuntimeCommand;
-  return async (tarballPath, stagingDirectory, signal) => {
-    const listing = await run(tarExecutable, ["-tzf", tarballPath], { signal });
+  return async (archive, stagingDirectory, signal) => {
+    const listing = await run(tarExecutable, ["-tzf", "-"], { signal, stdin: archive });
     const entries = listing.stdout.trim().split("\n").filter(Boolean);
     if (entries.length === 0 || entries.length > 544 || entries.some((entry) => {
       const segments = entry.split("/");
@@ -282,7 +237,10 @@ export function createUnixNpmArtifactUnpacker(options: {
     })) {
       throw new Error("Runtime artifact archive entries are invalid.");
     }
-    await run(tarExecutable, ["-xzf", tarballPath, "-C", stagingDirectory], { signal });
+    await run(tarExecutable, ["-xzf", "-", "-C", stagingDirectory], {
+      signal,
+      stdin: archive,
+    });
     await hashArtifactTree(join(stagingDirectory, "package"));
     await run(npmExecutable, [
       "ci",
@@ -297,14 +255,14 @@ export function createUnixNpmArtifactUnpacker(options: {
 async function runRuntimeCommand(
   executable: string,
   args: readonly string[],
-  options: { readonly cwd?: string; readonly signal: AbortSignal },
+  options: { readonly cwd?: string; readonly signal: AbortSignal; readonly stdin?: Buffer },
 ): Promise<RuntimeCommandResult> {
   return new Promise((resolve, reject) => {
     const child = spawn(executable, args, {
       ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
       detached: process.platform !== "win32",
       shell: false,
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: ["pipe", "pipe", "pipe"],
     });
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
@@ -346,6 +304,7 @@ async function runRuntimeCommand(
     };
     child.stdout.on("data", (chunk: Buffer) => capture(stdout, chunk));
     child.stderr.on("data", (chunk: Buffer) => capture(stderr, chunk));
+    child.stdin.end(options.stdin);
     child.once("error", (error) => {
       if (!settled) {
         settled = true;

@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -11,8 +11,9 @@ import {
   SPRINT4_RUNNER_OUTPUT_LIMIT,
   SPRINT4_CLIENT_FIXTURE_SHA256,
   SPRINT4_CLIENT_SHA,
+  SPRINT4_EXPECTED_CLIENT_MAIN_SHA,
   assertClientPinValues,
-  assertOwnedProvisionedFiles,
+  assertSameProvisionedFiles,
   assertProvisionedRun,
   assertStructuredResultContract,
   buildClientFixtureEnvironment,
@@ -22,8 +23,44 @@ import {
   parseStructuredResult,
   redactOutput,
   runBounded,
+  snapshotOwnedProvisionedFiles,
   validateJoinedRunnerEnvironment,
 } from "./sprint4-joined-runner.js";
+
+const writerAId = "55555555-5555-4555-8555-555555555555";
+const writerBId = "77777777-7777-4777-8777-777777777777";
+
+function validSuccess(origin = "https://127.0.0.1:1234"): Record<string, unknown> {
+  return {
+    schema_version: "s4-coupled-e2e/v1", pass: true, client_sha: SPRINT4_EXPECTED_CLIENT_MAIN_SHA, origin,
+    simulated_idle_ms: 2_400_000, idle_accepted_model_turns: 0,
+    idle_log_before_count: 0, idle_log_after_count: 0, idle_log_before: [], idle_log_after: [], idle_log_stable: true,
+    idle_cursor_before: null, idle_cursor_after: null, idle_cursor_stable: true,
+    directed_items: 1, directed_accepted_model_turns: 1, directed_unread_occurrences: 1,
+    authenticated_writer_ids: [writerAId, writerBId],
+    validated_writer_refs: [
+      { cube_id: "11111111-1111-4111-8111-111111111111", drone_id: writerAId },
+      { cube_id: "11111111-1111-4111-8111-111111111111", drone_id: writerBId },
+    ],
+    authenticated_writer_count: 2, writer_ids_match_configured: true,
+    burst_expected: 150, burst_drained: 150, burst_unique: 150, order_expected_count: 150,
+    order_mismatch_count: 0, burst_order_exact: true, drain_pages: 3,
+    missing_ids: [], duplicate_count: 0, unexpected_ids: [], status_counts: { "201": 150 },
+    http_429_count: 0, econnreset_count: 0, transport_errors: [], forbidden_fetch_attempts: 0,
+    all_requests_same_origin: true, phase_complete: true, turn_validation_errors: [], app_server_methods: [],
+    phase: {
+      stream_headers_ready_at: "2026-07-21T10:00:00.000Z", deadline_fired: false,
+      directed_append_succeeded: true, directed_turn_count: 1,
+      quiescence_started_at: "2026-07-21T10:00:01.000Z", quiescence_ended_at: "2026-07-21T10:00:07.000Z",
+      quiescence_elapsed_ms: 6_000, wall_quiescence_elapsed_ms: 6_000,
+      abort_issued_at: "2026-07-21T10:00:07.001Z", abort_reason: "directed observation complete",
+      stream_error: { origin: "iterator", code: "ABORT_ERR", message: "directed observation complete" },
+      stream_shutdown_clean: true, directed_drain: "succeeded", request_error_count: 0, socket_event_count: 0,
+      requests: [], sockets: [],
+    },
+    cleanup_verified: true,
+  };
+}
 
 describe("Sprint 4 joined runner safeguards", () => {
   it("requires the narrow declaration-time gate and an absolute client directory", () => {
@@ -50,9 +87,38 @@ describe("Sprint 4 joined runner safeguards", () => {
 
   it("requires a successful, pinned, credential-safe result", () => {
     const run = { endpoint: "https://127.0.0.1:1234" } as never;
-    expect(() => assertStructuredResultContract({ pass: true, cleanup_verified: true, client_sha: SPRINT4_CLIENT_SHA, origin: "https://127.0.0.1:1234" }, run)).not.toThrow();
-    expect(() => assertStructuredResultContract({ pass: true, cleanup_verified: true, client_sha: "other", origin: "https://127.0.0.1:1234" }, run)).toThrow("pinned");
-    expect(() => assertStructuredResultContract({ pass: true, cleanup_verified: true, client_sha: SPRINT4_CLIENT_SHA, origin: "https://127.0.0.1:1234", session_token: "secret" }, run)).toThrow("credential-bearing");
+    expect(() => assertStructuredResultContract(validSuccess(), run)).not.toThrow();
+    expect(() => assertStructuredResultContract({ ...validSuccess(), client_sha: "other" }, run)).toThrow("pinned");
+    expect(() => assertStructuredResultContract({ ...validSuccess(), session_token: "secret" }, run)).toThrow("unexpected");
+    expect(() => assertStructuredResultContract({ ...validSuccess(), burst_drained: 149 }, run)).toThrow("burst");
+    expect(() => assertStructuredResultContract({ ...validSuccess(), idle_cursor_stable: false }, run)).toThrow("idle-cursor");
+    expect(() => assertStructuredResultContract({ ...validSuccess(), phase: { ...(validSuccess()["phase"] as object), quiescence_elapsed_ms: 5_999 } }, run)).toThrow("quiescence");
+  });
+
+  it("rejects every missing, contradictory, or over-cap proof class", () => {
+    const run = { endpoint: "https://127.0.0.1:1234" } as never;
+    const invalid = (mutate: (result: Record<string, unknown>) => void): void => {
+      const result = structuredClone(validSuccess());
+      mutate(result);
+      expect(() => assertStructuredResultContract(result, run)).toThrow();
+    };
+    invalid((result) => { delete result["schema_version"]; });
+    invalid((result) => { result["unexpected"] = true; });
+    invalid((result) => { result["pass"] = false; });
+    invalid((result) => { result["cleanup_verified"] = false; });
+    invalid((result) => { result["idle_log_before"] = [{ id: writerAId, created_at: "2026-07-21T10:00:00.000Z" }]; result["idle_log_before_count"] = 1; });
+    invalid((result) => { result["directed_unread_occurrences"] = 2; });
+    invalid((result) => { result["authenticated_writer_ids"] = [writerAId, writerBId, "99999999-9999-4999-8999-999999999999"]; });
+    invalid((result) => { result["order_mismatch_count"] = 1; });
+    invalid((result) => { result["status_counts"] = { "429": 1 }; result["http_429_count"] = 1; });
+    invalid((result) => { result["transport_errors"] = [{ code: "ECONNRESET", message: "transport failure" }]; });
+    invalid((result) => { result["forbidden_fetch_attempts"] = 1; });
+    invalid((result) => { result["app_server_methods"] = ["x".repeat(65)]; });
+    invalid((result) => { (result["phase"] as Record<string, unknown>)["stream_shutdown_clean"] = false; });
+    invalid((result) => { (result["phase"] as Record<string, unknown>)["abort_reason"] = "other"; });
+    invalid((result) => { (result["phase"] as Record<string, unknown>)["request_error_count"] = 10_001; });
+    invalid((result) => { (result["phase"] as Record<string, unknown>)["socket_event_count"] = 10_001; });
+    invalid((result) => { (result["phase"] as Record<string, unknown>)["sockets"] = Array.from({ length: 513 }, (_, index) => ({ event: "socket_free", socket_id: `s${index}` })); });
   });
 
   it("maps checked provisioner references into the selected client fixture contract", async () => {
@@ -84,18 +150,19 @@ describe("Sprint 4 joined runner safeguards", () => {
       }, cleanup: async () => {},
     } as Sprint4ProvisionedRun;
     try {
-      await expect(assertOwnedProvisionedFiles(run, root)).resolves.toBeUndefined();
+      const initialSnapshot = await snapshotOwnedProvisionedFiles(run, root);
+      await expect(snapshotOwnedProvisionedFiles(run, root)).resolves.toBeDefined();
       const shared = await mkdtemp(join(tmpdir(), "borg-s4-runner-shared-"));
       try {
         const sharedReference = join(shared, "reader.json");
         await writeFile(sharedReference, await readFile(reader), { mode: 0o600 });
-        await expect(assertOwnedProvisionedFiles({ ...run, credentialReferences: { ...run.credentialReferences, reader: sharedReference } }, root)).rejects.toThrow("shared or cross-wired");
+        await expect(snapshotOwnedProvisionedFiles({ ...run, credentialReferences: { ...run.credentialReferences, reader: sharedReference } }, root)).rejects.toThrow("shared or cross-wired");
       } finally {
         await rm(shared, { recursive: true, force: true });
       }
       const mapped = await buildClientFixtureEnvironment({}, "/tmp/disposable-client", run);
       expect(mapped).toMatchObject({
-        BORG_S4_COUPLED_E2E: "1", BORG_E2E_CLIENT_SHA: SPRINT4_CLIENT_SHA,
+        BORG_S4_COUPLED_E2E: "1", BORG_E2E_CLIENT_SHA: SPRINT4_EXPECTED_CLIENT_MAIN_SHA,
         BORG_API_URL: endpoint, BORG_E2E_CA_PATH: join(root, "server", "ca.crt"), BORG_E2E_TRUST_IDENTITY: trust,
         BORG_E2E_CUBE_ID: "11111111-1111-4111-8111-111111111111",
         BORG_E2E_READER_DRONE_ID: "33333333-3333-4333-8333-333333333333",
@@ -132,7 +199,8 @@ describe("Sprint 4 joined runner safeguards", () => {
           spawn: async (command, args, options) => {
             selected = command === "npx" && args.join(" ") === "vitest run __tests__/s4-coupled-e2e.test.ts" &&
               options.env["BORG_S4_COUPLED_E2E"] === "1" && options.env["BORG_E2E_READER_TOKEN"] === "r".repeat(43);
-            return { code: 0, stderr: "", stdout: `S4_COUPLED_E2E ${JSON.stringify({ pass: true, cleanup_verified: true, client_sha: SPRINT4_CLIENT_SHA, origin: endpoint })}`, stdoutOverflow: false, stderrOverflow: false, stdoutBytes: 100, stderrBytes: 0 };
+            const stdout = `S4_COUPLED_E2E ${JSON.stringify(validSuccess(endpoint))}`;
+            return { code: 0, stderr: "", stdout, stdoutOverflow: false, stderrOverflow: false, stdoutBytes: Buffer.byteLength(stdout), stderrBytes: 0 };
           },
         },
       );
@@ -153,6 +221,18 @@ describe("Sprint 4 joined runner safeguards", () => {
       await expect(buildClientFixtureEnvironment({}, "/tmp/disposable-client", run)).rejects.toThrow("does not match");
       await writeFile(writerB, "{}");
       await expect(buildClientFixtureEnvironment({}, "/tmp/disposable-client", run)).rejects.toThrow("incomplete");
+      const changedSnapshot = await snapshotOwnedProvisionedFiles(run, root);
+      expect(() => assertSameProvisionedFiles(initialSnapshot, changedSnapshot)).toThrow("changed before spawn");
+      await writeFile(join(root, "server", "ca.crt"), "changed", { mode: 0o600 });
+      const changedCaSnapshot = await snapshotOwnedProvisionedFiles(run, root);
+      expect(() => assertSameProvisionedFiles(changedSnapshot, changedCaSnapshot)).toThrow("changed before spawn");
+      const replacement = join(root, "server", "s4-e2e-credentials", "reader-replacement.json");
+      await writeFile(replacement, await readFile(reader), { mode: 0o600 });
+      await rename(replacement, reader);
+      const swappedSnapshot = await snapshotOwnedProvisionedFiles(run, root);
+      expect(() => assertSameProvisionedFiles(changedCaSnapshot, swappedSnapshot)).toThrow("changed before spawn");
+      await chmod(writerA, 0o640);
+      await expect(snapshotOwnedProvisionedFiles(run, root)).rejects.toThrow("private");
     } finally {
       await rm(root, { recursive: true, force: true });
     }

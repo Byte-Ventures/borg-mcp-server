@@ -49,6 +49,8 @@ describe("HTTPS service", () => {
       tls: { key, cert: certificate },
       authorizeCoordination: async (authorization) => authorization === "Bearer accepted-test-token"
         ? clientPrincipal("00000000-0000-4000-8000-000000000200")
+        : authorization === "Bearer expired-test-token" ? "expired"
+        : authorization === "Bearer rejected-test-token" ? "rejected"
         : authorization === undefined ? "missing" : "invalid",
       exchangeEnrollment: async (body) => {
         if (body === undefined) {
@@ -208,6 +210,48 @@ describe("HTTPS service", () => {
 
     expect(response).toMatchObject({ status: 403, body: "" });
     expect(response.headers["access-control-allow-origin"]).toBeUndefined();
+  });
+
+  it("reports an expired session distinctly before routing", async () => {
+    coordinationCalls = 0;
+    for (const path of [
+      "/api/cubes",
+      "/api/cubes/00000000-0000-4000-8000-000000000001/stream",
+    ]) {
+      const response = await request(
+        server.origin,
+        certificate,
+        path,
+        { authorization: "Bearer expired-test-token" },
+      );
+      expect(response.status).toBe(401);
+      expect(JSON.parse(response.body)).toEqual({
+        protocol_version: "2",
+        error: { code: "AUTH_EXPIRED", message: "Authentication failed." },
+      });
+    }
+    expect(coordinationCalls).toBe(0);
+  });
+
+  it("reports a taken-over session distinctly before routing", async () => {
+    coordinationCalls = 0;
+    for (const path of [
+      "/api/cubes",
+      "/api/cubes/00000000-0000-4000-8000-000000000001/stream",
+    ]) {
+      const response = await request(
+        server.origin,
+        certificate,
+        path,
+        { authorization: "Bearer rejected-test-token" },
+      );
+      expect(response.status).toBe(401);
+      expect(JSON.parse(response.body)).toEqual({
+        protocol_version: "2",
+        error: { code: "SESSION_REJECTED", message: "Authentication failed." },
+      });
+    }
+    expect(coordinationCalls).toBe(0);
   });
 
   it.each([

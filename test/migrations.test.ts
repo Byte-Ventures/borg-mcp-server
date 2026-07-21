@@ -34,7 +34,7 @@ describe("SQLite migrations", () => {
     expect(first.diagnostics()).toEqual({
       journalMode: "wal",
       foreignKeys: true,
-      schemaVersions: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+      schemaVersions: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
     });
     expect((await stat(join(directory, "data"))).mode & 0o777).toBe(0o700);
     expect((await stat(databasePath)).mode & 0o777).toBe(0o600);
@@ -43,7 +43,7 @@ describe("SQLite migrations", () => {
     first.close();
 
     const second = await openStore({ path: databasePath });
-    expect(second.diagnostics().schemaVersions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+    expect(second.diagnostics().schemaVersions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
     second.close();
     await expect(access(databasePath)).resolves.toBeUndefined();
   });
@@ -190,6 +190,63 @@ describe("SQLite migrations", () => {
       "00000000-0000-4000-8000-000000000022",
       "00000000-0000-4000-8000-000000000021",
     )).toThrow("invalid invitation cube scope");
+    database.close();
+  });
+
+  it("persists existing drone-session supersession independently of successor liveness", () => {
+    const database = new DatabaseSync(":memory:");
+    applyMigrations(database, STORE_MIGRATIONS.slice(0, -1));
+    const clientId = "00000000-0000-4000-8000-000000000031";
+    const cubeId = "00000000-0000-4000-8000-000000000032";
+    const roleId = "00000000-0000-4000-8000-000000000033";
+    const droneId = "00000000-0000-4000-8000-000000000034";
+    database.prepare("INSERT INTO clients (id, name, created_at) VALUES (?, 'client', ?)")
+      .run(clientId, "2026-07-16T00:00:00.000Z");
+    database.prepare(`
+      INSERT INTO cubes (id, name, directive, created_at, updated_at, owner_id)
+      VALUES (?, 'cube', '', ?, ?, ?)
+    `).run(
+      cubeId,
+      "2026-07-16T00:00:00.000Z",
+      "2026-07-16T00:00:00.000Z",
+      clientId,
+    );
+    database.prepare(`
+      INSERT INTO roles (id, cube_id, name, created_at, role_class)
+      VALUES (?, ?, 'Builder', ?, 'worker')
+    `).run(roleId, cubeId, "2026-07-16T00:00:00.000Z");
+    database.prepare(`
+      INSERT INTO drones (id, cube_id, role_id, client_id, label, created_at, last_seen)
+      VALUES (?, ?, ?, ?, 'builder-seat', ?, ?)
+    `).run(
+      droneId,
+      cubeId,
+      roleId,
+      clientId,
+      "2026-07-16T00:00:00.000Z",
+      "2026-07-16T00:00:00.000Z",
+    );
+    const insertSession = database.prepare(`
+      INSERT INTO drone_sessions (id, client_id, cube_id, drone_id, created_at, expires_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `);
+    for (const [id, createdAt] of [
+      ["00000000-0000-4000-8000-000000000035", "2026-07-16T00:00:00.000Z"],
+      ["00000000-0000-4000-8000-000000000036", "2026-07-17T00:00:00.000Z"],
+      ["00000000-0000-4000-8000-000000000037", "2026-07-18T00:00:00.000Z"],
+    ] as const) {
+      insertSession.run(id, clientId, cubeId, droneId, createdAt, "2026-07-19T00:00:00.000Z");
+    }
+
+    applyMigrations(database, STORE_MIGRATIONS);
+
+    expect(database.prepare(`
+      SELECT id, superseded_at FROM drone_sessions ORDER BY created_at
+    `).all()).toEqual([
+      { id: "00000000-0000-4000-8000-000000000035", superseded_at: "2026-07-17T00:00:00.000Z" },
+      { id: "00000000-0000-4000-8000-000000000036", superseded_at: "2026-07-18T00:00:00.000Z" },
+      { id: "00000000-0000-4000-8000-000000000037", superseded_at: null },
+    ]);
     database.close();
   });
 

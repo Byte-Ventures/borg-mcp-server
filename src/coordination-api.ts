@@ -21,7 +21,10 @@ import {
 import type { CredentialAuthority } from "./credentials.js";
 import {
   CursorExpiredError,
+  AttachDroneEvictedError,
+  AttachSessionExpiredError,
   AttachSessionRejectedError,
+  AttachSessionRevokedError,
   AccessDeniedError,
   CreateCubeConflictError,
   DefaultRoleRequiredError,
@@ -131,6 +134,15 @@ export class CoordinationApi {
           return error.code === ErrorCode.UNSUPPORTED_PROTOCOL_VERSION
             ? failure(426, error.code, "Unsupported protocol version.", requestId)
             : failure(400, "INVALID_INPUT", "Invalid protocol request.", requestId);
+        }
+        if (error instanceof AttachDroneEvictedError) {
+          return failure(410, ErrorCode.DRONE_EVICTED, error.message, requestId);
+        }
+        if (error instanceof AttachSessionExpiredError) {
+          return failure(401, ErrorCode.AUTH_EXPIRED, error.message, requestId);
+        }
+        if (error instanceof AttachSessionRevokedError) {
+          return failure(401, ErrorCode.SESSION_REVOKED, error.message, requestId);
         }
         if (error instanceof AttachSessionRejectedError) {
           return failure(401, ErrorCode.SESSION_REJECTED, error.message, requestId);

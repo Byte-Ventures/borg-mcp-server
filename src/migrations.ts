@@ -378,6 +378,29 @@ export const STORE_MIGRATIONS: readonly Migration[] = Object.freeze([
       ) STRICT;
     `,
   },
+  {
+    version: 12,
+    name: "drone_session_supersession",
+    sql: `
+      ALTER TABLE drone_sessions ADD COLUMN superseded_at TEXT;
+
+      WITH lineage AS (
+        SELECT rowid AS session_rowid,
+               LEAD(created_at) OVER (
+                 PARTITION BY client_id, cube_id, drone_id
+                 ORDER BY created_at, rowid
+               ) AS successor_at
+        FROM drone_sessions
+      )
+      UPDATE drone_sessions
+      SET superseded_at = (
+        SELECT successor_at FROM lineage WHERE session_rowid = drone_sessions.rowid
+      )
+      WHERE rowid IN (
+        SELECT session_rowid FROM lineage WHERE successor_at IS NOT NULL
+      );
+    `,
+  },
 ]);
 
 interface AppliedMigrationRow {

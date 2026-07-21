@@ -1,6 +1,7 @@
 import { Agent, request as httpsRequest } from "node:https";
 import type { IncomingHttpHeaders } from "node:http";
 import { connect as connectTcp, type Socket } from "node:net";
+import { connect as connectTls, type TLSSocket } from "node:tls";
 import { generate } from "selfsigned";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
@@ -391,6 +392,72 @@ describe("HTTPS service", () => {
         expect((await request(bounded.origin, certificate, "/healthz")).status).toBe(204);
       }
     } finally {
+      await bounded.close();
+    }
+  });
+
+  it("bounds incomplete handshakes per address without exhausting the independent global limit", async () => {
+    let connections = 0;
+    const bounded = await startHttpsServer({
+      bind: { port: 0 },
+      tls: { key, cert: certificate },
+      testHooks: {
+        identifyConnectionAddress: () => {
+          connections += 1;
+          return connections <= 31 ? "attacker" : "fresh";
+        },
+      },
+      limits: {
+        ...DEFAULT_SERVICE_LIMITS,
+        maxConnections: 32,
+        maxConnectionsPerAddress: 30,
+        maxStreamsPerCredential: 8,
+        tlsHandshakeTimeoutMs: 1_000,
+      },
+    });
+    const attackers: Socket[] = [];
+    try {
+      attackers.push(...await Promise.all(Array.from({ length: 31 }, () => openRawSocket(bounded.origin))));
+      expect((await request(
+        bounded.origin,
+        certificate,
+        "/healthz",
+        {},
+        "",
+        "GET",
+      )).status).toBe(204);
+
+      await Promise.all(attackers.map((socket) => waitForSocketClose(socket, 2_000)));
+      expect((await request(bounded.origin, certificate, "/healthz")).status).toBe(204);
+    } finally {
+      attackers.forEach((socket) => socket.destroy());
+      await bounded.close();
+    }
+  });
+
+  it("allows only one requestless over-cap TLS socket per address", async () => {
+    const bounded = await startHttpsServer({
+      bind: { port: 0 },
+      tls: { key, cert: certificate },
+      limits: {
+        ...DEFAULT_SERVICE_LIMITS,
+        maxConnections: 32,
+        maxConnectionsPerAddress: 30,
+        maxStreamsPerCredential: 8,
+      },
+    });
+    const secureSockets: TLSSocket[] = [];
+    let overflow: Socket | undefined;
+    try {
+      secureSockets.push(...await Promise.all(Array.from(
+        { length: 31 },
+        () => openSecureSocket(bounded.origin, certificate),
+      )));
+      overflow = await openRawSocket(bounded.origin);
+      await expect(waitForSocketClose(overflow, 500)).resolves.toBeUndefined();
+    } finally {
+      overflow?.destroy();
+      secureSockets.forEach((socket) => socket.destroy());
       await bounded.close();
     }
   });
@@ -1414,11 +1481,34 @@ function request(
   });
 }
 
-function openRawSocket(origin: string): Promise<Socket> {
+function openRawSocket(origin: string, localAddress?: string): Promise<Socket> {
   const url = new URL(origin);
   return new Promise((resolve, reject) => {
-    const socket = connectTcp({ host: url.hostname, port: Number(url.port) });
+    const socket = connectTcp({
+      host: url.hostname,
+      port: Number(url.port),
+      ...(localAddress === undefined ? {} : { localAddress }),
+    });
     socket.once("connect", () => resolve(socket));
+    socket.once("error", reject);
+  });
+}
+
+function openSecureSocket(
+  origin: string,
+  ca: string,
+  localAddress?: string,
+): Promise<TLSSocket> {
+  const url = new URL(origin);
+  return new Promise((resolve, reject) => {
+    const socket = connectTls({
+      host: url.hostname,
+      port: Number(url.port),
+      ca,
+      rejectUnauthorized: true,
+      ...(localAddress === undefined ? {} : { localAddress }),
+    });
+    socket.once("secureConnect", () => resolve(socket));
     socket.once("error", reject);
   });
 }

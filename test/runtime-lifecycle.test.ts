@@ -104,6 +104,57 @@ describe("immutable runtime lifecycle", () => {
     })).rejects.toThrow("Runtime artifact content changed.");
   });
 
+  it("unpacks only an owned frozen copy and rejects replacement of that copy", async () => {
+    const fixture = await createFixture();
+    const archive = await writeArchive(fixture.root, "verified-original");
+    let frozenPath = "";
+    const lifecycle = createRuntimeLifecycle({
+      unpack: async (frozen, staging) => {
+        frozenPath = frozen;
+        expect(frozen).not.toBe(archive.path);
+        await writeFile(archive.path, "unverified-replacement");
+        await expect(readFile(frozen, "utf8")).resolves.toBe("verified-original");
+        await unpackVersion("0.2.0")(frozen, staging);
+      },
+      restart: vi.fn(),
+      stop: vi.fn(),
+      probe: vi.fn(),
+    });
+
+    const artifact = await lifecycle.stage({
+      runtimeRoot: fixture.runtimeRoot,
+      tarballPath: archive.path,
+      expectedIntegrity: archive.integrity,
+      expectedVersion: "0.2.0",
+      timeoutMs: 1_000,
+    });
+    expect(frozenPath).toMatch(/\/\.staging-[^/]+\/verified-artifact\.tgz$/u);
+    await expect(access(frozenPath)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await readdir(artifact.artifactDirectory)).not.toContain("verified-artifact.tgz");
+
+    const hostileArchive = await writeArchive(fixture.root, "verified-hostile");
+    const hostile = createRuntimeLifecycle({
+      unpack: async (frozen, staging) => {
+        await rm(frozen);
+        await writeFile(frozen, "replacement", { mode: 0o600 });
+        await unpackVersion("0.3.0")(frozen, staging);
+      },
+      restart: vi.fn(),
+      stop: vi.fn(),
+      probe: vi.fn(),
+    });
+    await expect(hostile.stage({
+      runtimeRoot: fixture.runtimeRoot,
+      tarballPath: hostileArchive.path,
+      expectedIntegrity: hostileArchive.integrity,
+      expectedVersion: "0.3.0",
+      timeoutMs: 1_000,
+    })).rejects.toThrow("Frozen runtime artifact changed.");
+    expect((await readdir(fixture.runtimeRoot)).filter((name) => name.startsWith(".staging-")))
+      .toEqual([]);
+    expect(await readdir(join(fixture.runtimeRoot, "artifacts"))).toHaveLength(1);
+  });
+
   it("rejects a symbolic-link runtime root before staging", async () => {
     const fixture = await createFixture();
     const actualRoot = join(fixture.root, "actual-runtime");

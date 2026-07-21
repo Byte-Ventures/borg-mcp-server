@@ -120,8 +120,13 @@ async function stageRuntimeArtifact(
   const existing = await existingArtifact(target, input);
   if (existing !== null) return existing;
   const staging = await mkdtemp(join(root, ".staging-"));
+  const frozenArchive = join(staging, "verified-artifact.tgz");
   try {
-    await withDeadline(input.timeoutMs, (signal) => unpack(input.tarballPath, staging, signal));
+    await writeFile(frozenArchive, archive, { flag: "wx", mode: 0o600 });
+    const frozenSnapshot = await snapshotFrozenArchive(frozenArchive, actualIntegrity, archive.length);
+    await withDeadline(input.timeoutMs, (signal) => unpack(frozenArchive, staging, signal));
+    await assertFrozenArchive(frozenArchive, frozenSnapshot);
+    await rm(frozenArchive);
     const packageDirectory = await validateUnpackedPackage(staging, input.expectedVersion);
     await makeTreeReadOnly(packageDirectory);
     const treeSha256 = await hashArtifactTree(packageDirectory);
@@ -150,6 +155,46 @@ async function stageRuntimeArtifact(
     await removeOwnedStaging(staging);
     throw error;
   }
+}
+
+interface FrozenArchiveSnapshot {
+  readonly device: number;
+  readonly inode: number;
+  readonly size: number;
+  readonly integrity: string;
+}
+
+async function snapshotFrozenArchive(
+  path: string,
+  integrity: string,
+  expectedSize: number,
+): Promise<FrozenArchiveSnapshot> {
+  const metadata = await lstat(path);
+  if (!metadata.isFile() || metadata.isSymbolicLink() || (metadata.mode & 0o077) !== 0 ||
+      metadata.size !== expectedSize) {
+    throw new Error("Frozen runtime artifact is invalid.");
+  }
+  const content = await readRegularFile(path, 2 * 1024 * 1024);
+  const actualIntegrity = `sha512-${createHash("sha512").update(content).digest("base64")}`;
+  if (actualIntegrity !== integrity) throw new Error("Frozen runtime artifact changed.");
+  return Object.freeze({
+    device: metadata.dev,
+    inode: metadata.ino,
+    size: metadata.size,
+    integrity,
+  });
+}
+
+async function assertFrozenArchive(path: string, snapshot: FrozenArchiveSnapshot): Promise<void> {
+  const metadata = await lstat(path);
+  if (!metadata.isFile() || metadata.isSymbolicLink() || (metadata.mode & 0o077) !== 0 ||
+      metadata.dev !== snapshot.device || metadata.ino !== snapshot.inode ||
+      metadata.size !== snapshot.size) {
+    throw new Error("Frozen runtime artifact changed.");
+  }
+  const content = await readRegularFile(path, 2 * 1024 * 1024);
+  const integrity = `sha512-${createHash("sha512").update(content).digest("base64")}`;
+  if (integrity !== snapshot.integrity) throw new Error("Frozen runtime artifact changed.");
 }
 
 async function activateRuntimeArtifact(

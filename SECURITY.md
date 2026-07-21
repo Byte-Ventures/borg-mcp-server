@@ -31,8 +31,19 @@ has been coordinated.
   private LAN.
 - Restrict the data directory and all generated credentials to the service
   account.
-- Capture one-time setup and rotation credentials only in a private terminal.
+- Keep `~/.borg` owner-controlled and not group/world-writable, and keep the
+  `~/.borg/credentials` file owner-only (`0600`); setup never prints the local owner credential.
+- Never automatically replace or reclaim `~/.borg/credentials.lock`; confirm no
+  Borg process is running before manually removing a reported stale lock.
+- Create single-use invitations only in a private interactive terminal.
 - Stop the server before offline credential rotation or revocation.
 - Back up sensitive state using encrypted storage and test restoration in a
   separate environment.
 - Review dependency and release provenance before upgrading.
+- Use the verified runtime lifecycle rather than pointing a service at a mutable
+  source checkout. Activation verifies npm integrity and the staged artifact
+  tree, switches the `current` target atomically, and accepts a restarted process
+  only when its authenticated runtime identity matches the selected artifact.
+- Review generated launchd or systemd definitions before enabling them. They
+  must retain the intended data directory and execute the immutable `current`
+  artifact target.

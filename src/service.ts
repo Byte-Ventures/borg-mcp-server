@@ -1,7 +1,9 @@
 import { randomUUID } from "node:crypto";
+import { execFile } from "node:child_process";
 import { lstat, open, readFile, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
+import { promisify } from "node:util";
 
 import {
   bootstrapServer,
@@ -25,6 +27,11 @@ import {
   type RunningServer,
 } from "./https-server.js";
 import { resolveBindOptions } from "./network-policy.js";
+import { DEFAULT_PORT } from "./network-policy.js";
+import {
+  readPortableServerCredential,
+  writePortableServerCredential,
+} from "./portable-credential-store.js";
 import {
   invitationCubeAmbiguousError,
   operatorErrors,
@@ -41,10 +48,22 @@ import {
   type StorageLimits,
 } from "./store.js";
 import type { CubeAccess } from "./store.js";
+import { fileURLToPath } from "node:url";
+import { loadRuntimeBuildIdentity, type RuntimeBuildIdentity } from "./runtime-identity.js";
+import {
+  createRuntimeLifecycle,
+  createUnixNpmArtifactUnpacker,
+  inspectActiveRuntimeArtifact,
+} from "./runtime-lifecycle.js";
+import { createRegistryArtifactSource } from "./registry-artifact.js";
+import { createRuntimeOperator, type RuntimeUpdateResult } from "./runtime-operator.js";
+import { createManagedServiceDefinition } from "./managed-service.js";
 
 export interface ServerService {
   readonly start: (args: readonly string[]) => Promise<void>;
-  readonly setup?: (options: SetupOptions) => Promise<BootstrapResult>;
+  readonly setup?: (options: SetupOptions) => Promise<ServerSetupResult>;
+  readonly status?: () => Promise<ServerRuntimeStatus>;
+  readonly update?: () => Promise<RuntimeUpdateResult>;
   readonly rotateClient?: (clientId: string) => Promise<string>;
   readonly revokeClient?: (clientId: string) => Promise<void>;
   readonly grantClient?: (clientId: string, cubeId: string, access: CubeAccess) => Promise<void>;
@@ -55,10 +74,29 @@ export interface ServerService {
     access?: CubeAccess,
   ) => Promise<string | CubeInvitationResult>;
   readonly replaceOwnerInvitation?: (recoveryCredential: string) => Promise<string>;
+  readonly invite?: () => Promise<string>;
 }
 
 export interface SetupOptions {
   readonly reinitialize: boolean;
+}
+
+export type ServerSetupResult =
+  | (Omit<BootstrapResult, "recoveryCredential" | "initialInvitation"> & {
+      readonly artifact?: { readonly version: string; readonly integrity: string; readonly sourceSha: string | null };
+    })
+  | {
+      readonly existing: true;
+      readonly artifact?: { readonly version: string; readonly integrity: string; readonly sourceSha: string | null };
+    };
+
+export interface ServerRuntimeStatus {
+  readonly status: "running" | "stopped";
+  readonly artifact: { readonly version: string; readonly integrity: string } | null;
+  readonly buildIdentity: string | null;
+  readonly endpoint: string | null;
+  readonly mode: "foreground" | "managed" | "stopped";
+  readonly dataIdentity: "available" | "unavailable";
 }
 
 export interface ServerEnvironment {
@@ -70,6 +108,10 @@ export interface ServerEnvironment {
   readonly BORG_SERVER_MAX_ACTIVITY_ENTRIES_PER_CUBE?: string;
   readonly BORG_SERVER_MAX_DATABASE_BYTES?: string;
   readonly BORG_SERVER_MIN_FREE_DISK_BYTES?: string;
+  readonly BORG_SERVER_SOURCE_SHA?: string;
+  readonly BORG_SERVER_ARTIFACT_INTEGRITY?: string;
+  readonly BORG_SERVER_PROCESS_MODE?: "foreground" | "managed";
+  readonly BORG_SERVER_RUNTIME_DIR?: string;
 }
 
 interface ServiceDependencies {
@@ -77,7 +119,7 @@ interface ServiceDependencies {
   readonly readFile: (path: string) => Promise<Buffer>;
   readonly readPrivateKey: (path: string) => Promise<Buffer>;
   readonly startServer: (options: HttpsServerOptions) => Promise<RunningServer>;
-  readonly onStarted: (origin: string) => void;
+  readonly onStarted: (origin: string, identity: RuntimeBuildIdentity) => void;
   readonly waitForShutdown: (server: RunningServer, signal?: AbortSignal) => Promise<void>;
   readonly debugOutput?: (line: string) => void;
   readonly installShutdownHandlers?: () => { readonly signal: AbortSignal; readonly dispose: () => void };
@@ -97,6 +139,16 @@ interface RuntimeResources {
   readonly runtimeLock: RuntimeLock | undefined;
   readonly livenessScheduler: { readonly stop: () => void } | undefined;
 }
+
+export type RuntimeLockStatus =
+  | { readonly running: false }
+  | {
+      readonly running: true;
+      readonly pid: number;
+      readonly identity: RuntimeBuildIdentity | null;
+      readonly endpoint: string | null;
+      readonly mode: "foreground" | "managed";
+    };
 
 const guardedRuntimeFailures = new Set<RuntimeResources>();
 
@@ -163,8 +215,25 @@ export function createNodeServerService(dependencies: ServiceDependencies): Serv
       }
 
       let runtimeLock: Awaited<ReturnType<typeof acquireRuntimeLock>> | undefined;
+      let runtimeIdentity: RuntimeBuildIdentity;
       try {
-        runtimeLock = dataDirectory === undefined ? undefined : await acquireRuntimeLock(dataDirectory, "server");
+        runtimeIdentity = await loadRuntimeBuildIdentity({
+          ...(dependencies.environment.BORG_SERVER_SOURCE_SHA === undefined
+            ? {}
+            : { sourceSha: dependencies.environment.BORG_SERVER_SOURCE_SHA }),
+          ...(dependencies.environment.BORG_SERVER_ARTIFACT_INTEGRITY === undefined
+            ? {}
+            : { artifactIntegrity: dependencies.environment.BORG_SERVER_ARTIFACT_INTEGRITY }),
+          artifactDescriptorPath: fileURLToPath(new URL("../../artifact.json", import.meta.url)),
+        });
+        runtimeLock = dataDirectory === undefined
+          ? undefined
+          : await acquireRuntimeLock(
+              dataDirectory,
+              "server",
+              runtimeIdentity,
+              dependencies.environment.BORG_SERVER_PROCESS_MODE ?? "foreground",
+            );
         await dependencies.onStartupPhase?.("post-lock");
         throwIfShutdown(shutdown?.signal);
       } catch (error) {
@@ -239,6 +308,7 @@ export function createNodeServerService(dependencies: ServiceDependencies): Serv
             ? {}
             : { handleCoordination: (request) => coordinationApi.handle(request) }),
           debugLogger,
+          runtimeIdentity,
         });
         throwIfShutdown(shutdown?.signal);
         if (authRuntime !== undefined) {
@@ -263,7 +333,8 @@ export function createNodeServerService(dependencies: ServiceDependencies): Serv
       let failure: unknown;
       try {
         throwIfShutdown(shutdown?.signal);
-        dependencies.onStarted(running.origin);
+        await runtimeLock?.updateOrigin?.(running.origin);
+        dependencies.onStarted(running.origin, runtimeIdentity);
         debugLogger.emit({ event: "lifecycle", action: "listening" });
         await dependencies.waitForShutdown(running, shutdown?.signal);
       } catch (error) {
@@ -303,6 +374,13 @@ export function selectServerEnvironment(environment: NodeJS.ProcessEnv): ServerE
   const maxActivityEntries = environment["BORG_SERVER_MAX_ACTIVITY_ENTRIES_PER_CUBE"];
   const maxDatabaseBytes = environment["BORG_SERVER_MAX_DATABASE_BYTES"];
   const minFreeDiskBytes = environment["BORG_SERVER_MIN_FREE_DISK_BYTES"];
+  const sourceSha = environment["BORG_SERVER_SOURCE_SHA"];
+  const artifactIntegrity = environment["BORG_SERVER_ARTIFACT_INTEGRITY"];
+  const processMode = environment["BORG_SERVER_PROCESS_MODE"];
+  const runtimeDirectory = environment["BORG_SERVER_RUNTIME_DIR"];
+  if (processMode !== undefined && processMode !== "foreground" && processMode !== "managed") {
+    throw new Error("BORG_SERVER_PROCESS_MODE is invalid.");
+  }
   return {
     ...(keyFile === undefined ? {} : { BORG_SERVER_TLS_KEY_FILE: keyFile }),
     ...(certificateFile === undefined
@@ -316,6 +394,10 @@ export function selectServerEnvironment(environment: NodeJS.ProcessEnv): ServerE
       : { BORG_SERVER_MAX_ACTIVITY_ENTRIES_PER_CUBE: maxActivityEntries }),
     ...(maxDatabaseBytes === undefined ? {} : { BORG_SERVER_MAX_DATABASE_BYTES: maxDatabaseBytes }),
     ...(minFreeDiskBytes === undefined ? {} : { BORG_SERVER_MIN_FREE_DISK_BYTES: minFreeDiskBytes }),
+    ...(sourceSha === undefined ? {} : { BORG_SERVER_SOURCE_SHA: sourceSha }),
+    ...(artifactIntegrity === undefined ? {} : { BORG_SERVER_ARTIFACT_INTEGRITY: artifactIntegrity }),
+    ...(processMode === undefined ? {} : { BORG_SERVER_PROCESS_MODE: processMode }),
+    ...(runtimeDirectory === undefined ? {} : { BORG_SERVER_RUNTIME_DIR: runtimeDirectory }),
   };
 }
 
@@ -357,6 +439,9 @@ function storageOperatorErrorCode(name: string): OperatorErrorCode {
 
 const serverEnvironment = selectServerEnvironment(process.env);
 const dataDirectory = serverEnvironment.BORG_SERVER_DATA_DIR ?? join(homedir(), ".borg", "server");
+const runtimeDirectory = serverEnvironment.BORG_SERVER_RUNTIME_DIR ?? join(homedir(), ".borg", "server-runtime");
+const credentialFile = join(homedir(), ".borg", "credentials");
+const nodeRuntimeOperator = createNodeRuntimeOperator(runtimeDirectory, dataDirectory);
 const startOnlyService = createNodeServerService({
   environment: { ...serverEnvironment, BORG_SERVER_DATA_DIR: dataDirectory },
   readFile,
@@ -365,8 +450,28 @@ const startOnlyService = createNodeServerService({
     const running = await startHttpsServer(options);
     return nodeServerTestHooks?.wrapRunningServer?.(running) ?? running;
   },
-  onStarted: (origin) => {
-    console.error(`Borg server listening on ${origin}`);
+  onStarted: (origin, identity) => {
+    if (process.stderr.isTTY !== true || serverEnvironment.BORG_SERVER_PROCESS_MODE === "managed") {
+      console.error(JSON.stringify({
+        status: "running",
+        artifact: `borgmcp-server@${identity.package_version}`,
+        artifact_integrity: identity.artifact_integrity,
+        build_identity: identity.source_sha,
+        endpoint: origin,
+        mode: serverEnvironment.BORG_SERVER_PROCESS_MODE ?? "foreground",
+        data_identity: "available",
+      }));
+    } else {
+      console.error([
+        "Starting verified local server in the foreground.",
+        `Artifact: borgmcp-server@${identity.package_version} (${identity.artifact_integrity ?? "unavailable"})`,
+        `Build identity: ${identity.source_sha ?? "unavailable"}`,
+        `Endpoint: ${origin}`,
+        "Data and identity: preserved",
+        "Ctrl-C stops the foreground process.",
+        "Foreground mode does not manage persistence.",
+      ].join("\n"));
+    }
     nodeServerTestHooks?.onListening?.(origin);
   },
   onStartupPhase: (phase) => nodeServerTestHooks?.onStartupPhase?.(phase) ?? Promise.resolve(),
@@ -382,13 +487,136 @@ const startOnlyService = createNodeServerService({
 });
 export const nodeServerService: ServerService = {
   start: startOnlyService.start,
-  setup: (options) => setupNodeServerInstallation(
-    dataDirectory,
-    resolveSetupBindHost(serverEnvironment),
-    options,
-  ),
-  ...createOfflineCredentialService(dataDirectory),
+  setup: async (options) => {
+    const bindHost = resolveSetupBindHost(serverEnvironment);
+    if ((await inspectRuntimeLock(dataDirectory)).running) throw operatorErrors.RUNTIME_ACTIVE;
+    const artifact = await nodeRuntimeOperator.prepareLatest(30_000);
+    const result = await setupNodeServerInstallation(
+      dataDirectory,
+      bindHost,
+      options,
+      credentialFile,
+    );
+    if (!("existing" in result)) {
+      const { recoveryCredential: _recovery, initialInvitation: _invitation, ...publicResult } = result;
+      return {
+        ...publicResult,
+        artifact: {
+          version: artifact.version,
+          integrity: artifact.integrity,
+          sourceSha: artifact.sourceSha,
+        },
+      };
+    }
+    return {
+      ...result,
+      artifact: {
+        version: artifact.version,
+        integrity: artifact.integrity,
+        sourceSha: artifact.sourceSha,
+      },
+    };
+  },
+  status: () => inspectNodeRuntime(dataDirectory, runtimeDirectory),
+  update: () => nodeRuntimeOperator.updateLatest(30_000),
+  ...createOfflineCredentialService(dataDirectory, credentialFile),
 };
+
+function createNodeRuntimeOperator(managedRuntimeDirectory: string, runtimeDataDirectory: string) {
+  const platform = process.platform === "darwin" ? "launchd" : "systemd";
+  const definition = createManagedServiceDefinition({
+    platform,
+    nodeExecutable: process.execPath,
+    runtimeRoot: managedRuntimeDirectory,
+    dataDirectory: runtimeDataDirectory,
+    definitionPath: platform === "launchd"
+      ? join(homedir(), "Library", "LaunchAgents", "ai.borgmcp.server.plist")
+      : join(homedir(), ".config", "systemd", "user", "ai.borgmcp.server.service"),
+    ...(platform === "launchd" ? { launchdDomain: `gui/${process.getuid?.() ?? 0}` } : {}),
+  });
+  const run = async (command: readonly [string, ...string[]], signal: AbortSignal): Promise<void> => {
+    const [executable, ...args] = command;
+    await promisify(execFile)(executable, args, {
+      signal,
+      timeout: 20_000,
+      maxBuffer: 64 * 1024,
+      encoding: "utf8",
+    });
+  };
+  const lifecycle = createRuntimeLifecycle({
+    unpack: createUnixNpmArtifactUnpacker(),
+    restart: (signal) => run(definition.restart, signal),
+    stop: (signal) => run(definition.stop, signal),
+    probe: (signal) => waitForRuntimeIdentity(runtimeDataDirectory, signal),
+  });
+  return createRuntimeOperator({
+    runtimeRoot: managedRuntimeDirectory,
+    artifacts: createRegistryArtifactSource(),
+    lifecycle,
+    isRunning: async () => {
+      const status = await inspectRuntimeLock(runtimeDataDirectory);
+      if (status.running && status.mode !== "managed") {
+        throw new Error("Foreground runtime must be stopped before artifact activation.");
+      }
+      return status.running;
+    },
+  });
+}
+
+async function waitForRuntimeIdentity(
+  runtimeDataDirectory: string,
+  signal: AbortSignal,
+): Promise<RuntimeBuildIdentity> {
+  while (!signal.aborted) {
+    try {
+      const status = await inspectRuntimeLock(runtimeDataDirectory);
+      if (status.running && status.identity !== null) return status.identity;
+    } catch (error) {
+      if (error !== operatorErrors.RUNTIME_LOCK_STALE) throw error;
+    }
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, 50);
+      signal.addEventListener("abort", () => {
+        clearTimeout(timer);
+        resolve();
+      }, { once: true });
+    });
+  }
+  throw new Error("Managed runtime identity probe was cancelled.");
+}
+
+export async function inspectNodeRuntime(
+  runtimeDataDirectory: string,
+  managedRuntimeDirectory: string,
+): Promise<ServerRuntimeStatus> {
+  const [lock, activeArtifact, dataIdentity] = await Promise.all([
+    inspectRuntimeLock(runtimeDataDirectory),
+    inspectActiveRuntimeArtifact(managedRuntimeDirectory),
+    hasDataIdentity(runtimeDataDirectory),
+  ]);
+  const identity = lock.running ? lock.identity : null;
+  const artifact = identity?.artifact_integrity === null || identity === null
+    ? activeArtifact === null ? null : { version: activeArtifact.version, integrity: activeArtifact.integrity }
+    : { version: identity.package_version, integrity: identity.artifact_integrity };
+  return Object.freeze({
+    status: lock.running ? "running" : "stopped",
+    artifact,
+    buildIdentity: identity?.source_sha ?? null,
+    endpoint: lock.running ? lock.endpoint : null,
+    mode: lock.running ? lock.mode : "stopped",
+    dataIdentity,
+  });
+}
+
+async function hasDataIdentity(directory: string): Promise<"available" | "unavailable"> {
+  try {
+    const metadata = await lstat(join(directory, "server.json"));
+    return metadata.isFile() && !metadata.isSymbolicLink() ? "available" : "unavailable";
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return "unavailable";
+    throw error;
+  }
+}
 
 const managedInstallationFiles = Object.freeze([
   "borg.db",
@@ -407,18 +635,38 @@ export async function setupNodeServerInstallation(
   setupDataDirectory: string,
   bindHost: string,
   options: SetupOptions,
-): Promise<BootstrapResult> {
+  credentialRoot?: string,
+): Promise<BootstrapResult | { readonly existing: true }> {
   const directory = await preparePrivateDataDirectory(setupDataDirectory);
   const runtimeLock = await acquireRuntimeLock(directory);
   let invitationLock: RuntimeLock | undefined;
   try {
     invitationLock = await acquireInvitationMintLock(directory);
     const existing = await inspectManagedInstallation(directory);
-    if (existing.length !== 0 && !options.reinitialize) throw operatorErrors.INSTALLATION_EXISTS;
+    if (existing.length !== 0 && !options.reinitialize) {
+      const names = new Set(existing.map((path) => basename(path)));
+      const complete = [
+        "borg.db",
+        "credential-digest.key",
+        "ca.crt",
+        "server.key",
+        "server.crt",
+        "server.json",
+      ].every((name) => names.has(name));
+      if (!complete) throw operatorErrors.INSTALLATION_EXISTS;
+      return Object.freeze({ existing: true });
+    }
     if (options.reinitialize) {
       for (const path of existing) await unlink(path);
     }
-    return await bootstrapServer(directory, bindHost);
+    return await bootstrapServer(
+      directory,
+      bindHost,
+      () => new Date(),
+      credentialRoot === undefined
+        ? async () => undefined
+        : (record) => writePortableServerCredential(credentialRoot, record),
+    );
   } finally {
     if (invitationLock === undefined) await runtimeLock.release();
     else await invitationLock.release().finally(() => runtimeLock.release());
@@ -452,9 +700,10 @@ function resolveSetupBindHost(environment: ServerEnvironment): string {
 
 export function createOfflineCredentialService(
   offlineDataDirectory: string,
+  credentialRoot?: string,
 ): Pick<Required<ServerService>,
   "rotateClient" | "revokeClient" | "grantClient" | "ungrantClient" |
-  "createClientInvitation" | "replaceOwnerInvitation"
+  "createClientInvitation" | "replaceOwnerInvitation" | "invite"
 > {
   const withAuthority = async <T>(operation: (
     authority: CredentialAuthority,
@@ -478,7 +727,9 @@ export function createOfflineCredentialService(
       else await invitationLock.release().finally(() => runtimeLock.release());
     }
   };
-  const withInvitationAuthority = async <T>(operation: (authority: CredentialAuthority) => T): Promise<T> => {
+  const withInvitationAuthority = async <T>(
+    operation: (authority: CredentialAuthority) => T | Promise<T>,
+  ): Promise<T> => {
     const invitationLock = await acquireInvitationMintLock(offlineDataDirectory);
     let offlineRuntimeLock: RuntimeLock | undefined;
     let runtime: Awaited<ReturnType<typeof openStore>> | undefined;
@@ -493,7 +744,7 @@ export function createOfflineCredentialService(
       const digestKey = await loadDigestKey(join(offlineDataDirectory, "credential-digest.key"));
       digester = new CredentialDigester(digestKey);
       digestKey.fill(0);
-      return operation(new CredentialAuthority(runtime.credentials, digester));
+      return await operation(new CredentialAuthority(runtime.credentials, digester));
     } catch (error) {
       if (error instanceof MigrationCompatibilityError) throw operatorErrors.INVITATION_SCHEMA_MISMATCH;
       if (isSqliteContention(error)) throw operatorErrors.INVITATION_CONTENTION;
@@ -542,6 +793,22 @@ export function createOfflineCredentialService(
       if (invitation === null) throw operatorErrors.RECOVERY_INVALID;
       return invitation;
     }),
+    invite: () => withInvitationAuthority(async (authority) => {
+      if (credentialRoot === undefined) throw new Error("Local owner credential store is unavailable.");
+      const config = JSON.parse((await readFile(join(offlineDataDirectory, "server.json"))).toString("utf8")) as {
+        bind_host?: unknown;
+        ca_spki_sha256?: unknown;
+      };
+      if (typeof config.bind_host !== "string" || typeof config.ca_spki_sha256 !== "string") {
+        throw new Error("Server identity is invalid.");
+      }
+      const origin = `https://${config.bind_host === "::1" ? "[::1]" : config.bind_host}:${DEFAULT_PORT}`;
+      const trustIdentity = `spki-sha256:${config.ca_spki_sha256}`;
+      const record = await readPortableServerCredential(credentialRoot, origin, trustIdentity);
+      const invitation = authority.createInvitationForOwnerCredential(record.credential, 15 * 60_000);
+      if (invitation === null) throw new Error("Local owner credential is invalid.");
+      return invitation;
+    }),
   };
 }
 
@@ -560,6 +827,7 @@ function parseInvitationCubeSelector(
 
 interface RuntimeLock {
   readonly release: () => Promise<void>;
+  readonly updateOrigin?: (origin: string) => Promise<void>;
 }
 
 async function teardownRuntime(resources: RuntimeResources): Promise<void> {
@@ -624,19 +892,44 @@ function fatalTeardownError(primary: unknown, cleanup: unknown): FatalTeardownEr
 export async function acquireRuntimeLock(
   runtimeDataDirectory: string,
   purpose: "server" | "exclusive-admin" = "exclusive-admin",
+  identity?: RuntimeBuildIdentity,
+  mode: "foreground" | "managed" = "foreground",
 ): Promise<RuntimeLock> {
   const path = join(runtimeDataDirectory, "runtime.lock");
   const nonce = randomUUID();
   try {
     const handle = await open(path, "wx", 0o600);
+    const record: {
+      readonly pid: number;
+      readonly nonce: string;
+      readonly purpose: "server" | "exclusive-admin";
+      readonly mode: "foreground" | "managed";
+      readonly runtime_identity?: RuntimeBuildIdentity;
+      endpoint?: string;
+    } = {
+      pid: process.pid,
+      nonce,
+      purpose,
+      mode,
+      ...(identity === undefined ? {} : { runtime_identity: identity }),
+    };
     try {
-      await handle.writeFile(JSON.stringify({ pid: process.pid, nonce, purpose }));
+      await handle.writeFile(JSON.stringify(record));
     } catch (error) {
       await handle.close();
       await unlink(path).catch(() => undefined);
       throw error;
     }
     return {
+      updateOrigin: async (origin) => {
+        if (!/^https:\/\/(?:\[[0-9a-f:]+\]|[0-9.]+):[0-9]{1,5}$/u.test(origin)) {
+          throw new Error("Runtime endpoint is invalid.");
+        }
+        record.endpoint = origin;
+        await handle.truncate(0);
+        await handle.write(JSON.stringify(record), 0, "utf8");
+        await handle.sync();
+      },
       release: async () => {
         await handle.close();
         try {
@@ -664,6 +957,94 @@ export async function acquireRuntimeLock(
     if (processIsAlive(pid)) throw operatorErrors.RUNTIME_ACTIVE;
     throw operatorErrors.RUNTIME_LOCK_STALE;
   }
+}
+
+export async function inspectRuntimeLock(runtimeDataDirectory: string): Promise<RuntimeLockStatus> {
+  const path = join(runtimeDataDirectory, "runtime.lock");
+  let metadata;
+  try {
+    metadata = await lstat(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return Object.freeze({ running: false });
+    throw error;
+  }
+  if (!metadata.isFile() || metadata.isSymbolicLink() || (metadata.mode & 0o077) !== 0 ||
+      metadata.size > 8 * 1024) {
+    throw operatorErrors.RUNTIME_LOCK_UNSAFE;
+  }
+  try {
+    const value = JSON.parse(await readFile(path, "utf8")) as {
+      pid?: unknown;
+      purpose?: unknown;
+      runtime_identity?: unknown;
+      endpoint?: unknown;
+      mode?: unknown;
+    };
+    if (!Number.isSafeInteger(value.pid) || (value.pid as number) <= 0 || value.purpose !== "server" ||
+        (value.endpoint !== undefined &&
+          (typeof value.endpoint !== "string" || !isRuntimeEndpoint(value.endpoint))) ||
+        (value.mode !== "foreground" && value.mode !== "managed")) {
+      throw new Error();
+    }
+    const pid = value.pid as number;
+    if (!processIsAlive(pid)) throw operatorErrors.RUNTIME_LOCK_STALE;
+    return Object.freeze({
+      running: true,
+      pid,
+      identity: decodeRuntimeLockIdentity(value.runtime_identity),
+      endpoint: value.endpoint ?? null,
+      mode: value.mode,
+    });
+  } catch (error) {
+    if (error === operatorErrors.RUNTIME_LOCK_STALE) throw error;
+    throw operatorErrors.RUNTIME_LOCK_INVALID;
+  }
+}
+
+function isRuntimeEndpoint(value: string): boolean {
+  if (value.length > 512) return false;
+  try {
+    const endpoint = new URL(value);
+    if (endpoint.protocol !== "https:" || endpoint.username !== "" || endpoint.password !== "" ||
+        endpoint.pathname !== "/" || endpoint.search !== "" || endpoint.hash !== "") return false;
+    const host = endpoint.hostname.startsWith("[") && endpoint.hostname.endsWith("]")
+      ? endpoint.hostname.slice(1, -1)
+      : endpoint.hostname;
+    resolveBindOptions({ host, port: Number(endpoint.port || "443"), lanConsent: true });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function decodeRuntimeLockIdentity(value: unknown): RuntimeBuildIdentity | null {
+  if (value === undefined) return null;
+  if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error();
+  const identity = value as Record<string, unknown>;
+  const packageVersion = identity["package_version"];
+  const sourceSha = identity["source_sha"];
+  const artifactIntegrity = identity["artifact_integrity"];
+  const protocolVersion = identity["protocol_version"];
+  const startedAt = identity["started_at"];
+  if (typeof packageVersion !== "string" ||
+      !/^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$/u.test(packageVersion) ||
+      (sourceSha !== null &&
+        (typeof sourceSha !== "string" || !/^[0-9a-f]{40}$/u.test(sourceSha))) ||
+      (artifactIntegrity !== null &&
+        (typeof artifactIntegrity !== "string" ||
+          !/^sha512-[A-Za-z0-9+/]{86}==$/u.test(artifactIntegrity))) ||
+      typeof protocolVersion !== "string" || protocolVersion.length < 1 || protocolVersion.length > 32 ||
+      typeof startedAt !== "string" || startedAt.length > 64 ||
+      !Number.isFinite(Date.parse(startedAt)) || new Date(startedAt).toISOString() !== startedAt) {
+    throw new Error();
+  }
+  return Object.freeze({
+    package_version: packageVersion,
+    source_sha: sourceSha as string | null,
+    artifact_integrity: artifactIntegrity as string | null,
+    protocol_version: protocolVersion,
+    started_at: startedAt,
+  });
 }
 
 export async function acquireInvitationMintLock(runtimeDataDirectory: string): Promise<RuntimeLock> {

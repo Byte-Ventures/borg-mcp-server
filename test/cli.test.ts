@@ -2,6 +2,7 @@ import { Server } from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { runCli, type CliIo, type ServerService } from "../src/index.js";
+import { RuntimeUpdateFailure } from "../src/runtime-operator.js";
 
 function createIo() {
   const stdout = vi.fn((_message: string): void => undefined);
@@ -33,8 +34,65 @@ describe("runCli", () => {
     expect(service.setup).toHaveBeenCalledWith({ reinitialize: false });
     expect(listen).not.toHaveBeenCalled();
     expect(io.stdout).toHaveBeenCalledWith(
-      `Server setup complete.\nRecovery credential (shown once; keep offline): ${"a".repeat(43)}\nOwner enrollment invitation (single-use, shown once; enroll the owner client): ${"b".repeat(43)}\nSetup created no cube.\nNext: start the server with \`borg-mcp-server start\`.`,
+      "Local server setup completed.\nArtifact: unavailable\nLocal owner access: prepared.\nNo server process started.\nNext: start the server, then run borg assimilate.",
     );
+  });
+
+  it("renders repeated setup without replaying credentials", async () => {
+    const service: ServerService = {
+      start: vi.fn(),
+      setup: vi.fn().mockResolvedValue({
+        existing: true,
+        artifact: {
+          version: "0.1.8",
+          integrity: `sha512-${"A".repeat(86)}==`,
+          sourceSha: "a".repeat(40),
+        },
+      }),
+    };
+    const io = createIo();
+
+    expect(await runCli(["setup"], service, io)).toBe(0);
+    const output = io.stdout.mock.calls[0]![0];
+    expect(output).toBe(
+      `Local server is already prepared.\nArtifact: borgmcp-server@0.1.8 (sha512-${"A".repeat(86)}==)\nBuild identity: ${"a".repeat(40)}\nData and identity: unchanged\nNo server process started.\nNext: borg-mcp-server start`,
+    );
+    expect(output).not.toMatch(/credential|invitation/iu);
+  });
+
+  it("renders the bounded non-interactive setup record without secrets", async () => {
+    const service: ServerService = {
+      start: vi.fn(),
+      setup: vi.fn().mockResolvedValue({
+        existing: true,
+        artifact: { version: "0.1.8", integrity: "sha512-safe", sourceSha: "abc123" },
+      }),
+    };
+    const io = { ...createIo(), isTTY: false };
+    expect(await runCli(["setup"], service, io)).toBe(0);
+    expect(io.stdout).toHaveBeenCalledWith(JSON.stringify({
+      status: "prepared",
+      artifact: "borgmcp-server@0.1.8",
+      build_identity: "abc123",
+      owner_access: "prepared",
+      process: "stopped",
+    }));
+  });
+
+  it("creates an invitation only in an interactive terminal with the approved copy", async () => {
+    const invite = vi.fn().mockResolvedValue("i".repeat(43));
+    const interactive = { ...createIo(), isTTY: true };
+    expect(await runCli(["invite"], { start: vi.fn(), invite }, interactive)).toBe(0);
+    expect(interactive.stdout).toHaveBeenCalledWith(
+      `Invitation (single-use; shown once): ${"i".repeat(43)}\nShare it only with the intended recipient.`,
+    );
+
+    const nonInteractive = { ...createIo(), isTTY: false };
+    expect(await runCli(["invite"], { start: vi.fn(), invite }, nonInteractive)).toBe(1);
+    expect(nonInteractive.stderr).toHaveBeenCalledWith(
+      "Invitation creation requires an interactive terminal.",
+    );
+    expect(invite).toHaveBeenCalledTimes(1);
   });
 
   it("requires an explicit unambiguous setup reinitialization flag", async () => {
@@ -65,6 +123,91 @@ describe("runCli", () => {
 
     expect(exitCode).toBe(0);
     expect(service.start).toHaveBeenCalledWith(["--lan"]);
+  });
+
+  it("renders approved exact runtime evidence and bounded non-TTY JSON without guessing", async () => {
+    const status = vi.fn().mockResolvedValue({
+      status: "running",
+      artifact: { version: "0.1.8", integrity: `sha512-${"A".repeat(86)}==` },
+      buildIdentity: null,
+      endpoint: "https://127.0.0.1:7091",
+      mode: "managed",
+      dataIdentity: "available",
+    });
+    const service: ServerService = { start: vi.fn(), status };
+    const tty = { ...createIo(), isTTY: true };
+    const machine = { ...createIo(), isTTY: false };
+
+    expect(await runCli(["status"], service, tty)).toBe(0);
+    expect(tty.stdout).toHaveBeenCalledWith(expect.stringContaining(
+      "Local server is reachable, but its running build identity is unavailable.",
+    ));
+    expect(tty.stdout).toHaveBeenCalledWith(expect.stringContaining("Build identity: unavailable"));
+    expect(await runCli(["status"], service, machine)).toBe(0);
+    expect(JSON.parse(machine.stdout.mock.calls[0]![0])).toEqual({
+      status: "running",
+      artifact: "borgmcp-server@0.1.8",
+      artifact_integrity: `sha512-${"A".repeat(86)}==`,
+      build_identity: null,
+      endpoint: "https://127.0.0.1:7091",
+      mode: "managed",
+      data_identity: "available",
+    });
+    expect(status).toHaveBeenCalledTimes(2);
+  });
+
+  it("renders bounded verification and rollback failures without raw errors", async () => {
+    const tty = createIo();
+    const verification: ServerService = {
+      start: vi.fn(),
+      update: vi.fn().mockRejectedValue(new RuntimeUpdateFailure("ARTIFACT_VERIFICATION_FAILED")),
+    };
+    expect(await runCli(["update"], verification, tty)).toBe(1);
+    expect(tty.stderr).toHaveBeenCalledWith(
+      "Update stopped: artifact verification failed.\nNo activation occurred.\nThe last verified runtime remains available.\nNext: borg-mcp-server status",
+    );
+
+    const machine = { ...createIo(), isTTY: false };
+    const rollback: ServerService = {
+      start: vi.fn(),
+      update: vi.fn().mockRejectedValue(new RuntimeUpdateFailure("ACTIVATION_FAILED", "restored")),
+    };
+    expect(await runCli(["update"], rollback, machine)).toBe(1);
+    expect(JSON.parse(machine.stdout.mock.calls[0]![0])).toEqual({
+      status: "failed",
+      error_code: "ACTIVATION_FAILED",
+      recovery: "restored",
+      data_identity: "preserved",
+    });
+    expect(machine.stderr).not.toHaveBeenCalled();
+  });
+
+  it("renders approved verified update evidence without exposing raw artifact locations", async () => {
+    const update = vi.fn().mockResolvedValue({
+      outcome: "updated",
+      artifact: {
+        artifactDirectory: "/private/runtime/artifacts/secret",
+        packageDirectory: "/private/runtime/artifacts/secret/package",
+        version: "0.2.0",
+        integrity: `sha512-${"A".repeat(86)}==`,
+        sourceSha: "a".repeat(40),
+      },
+      runningIdentity: {
+        package_version: "0.2.0",
+        artifact_integrity: `sha512-${"A".repeat(86)}==`,
+        source_sha: "a".repeat(40),
+        protocol_version: "2",
+        started_at: "2026-07-21T12:00:00.000Z",
+      },
+      dataIdentity: "preserved",
+    });
+    const service: ServerService = { start: vi.fn(), update };
+    const io = { ...createIo(), isTTY: true };
+
+    expect(await runCli(["update"], service, io)).toBe(0);
+    expect(io.stdout).toHaveBeenCalledWith(expect.stringContaining("Artifact verified and activated."));
+    expect(io.stdout).toHaveBeenCalledWith(expect.stringContaining("Data and identity: preserved"));
+    expect(io.stdout.mock.calls[0]![0]).not.toContain("/private/runtime");
   });
 
   it("rotates and revokes clients only through explicit offline commands", async () => {

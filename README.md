@@ -63,19 +63,49 @@ npm install --global borgmcp-server
 
 The default data directory is `~/.borg/server`. Setup creates the local
 database, credential-digest key, local certificate authority, server
-certificate, one recovery credential, and one owner enrollment invitation. It
-creates no cube. Run it in a private terminal because both secrets are shown
-once; the owner enrollment invitation is single-use and enrolls the owner client.
+certificate, and one same-machine owner binding. The matching client credential
+is written atomically to the portable owner-only file at
+`~/.borg/credentials` (mode `0600`). Its `~/.borg` parent must be owner-controlled
+and not group/world-writable. Setup prints no credential, invitation, or credential path,
+and creates no cube.
+
+Credential updates share the client-compatible `~/.borg/credentials.lock` protocol.
+A live holder is waited on for a bounded interval. A corrupt or dead-holder lock
+fails closed and is never reclaimed automatically; remove it only after confirming
+that no Borg process is running.
 
 ```sh
 borg-mcp-server setup
 borg-mcp-server start
+borg assimilate
 ```
 
-Running `setup` again refuses to change an existing installation. After stopping
-the server, `borg-mcp-server setup --reinitialize` explicitly destroys and
-recreates the server identity and database; use it only when prior state may be
-discarded.
+Setup verifies and prepares the latest immutable npm artifact, but starts no
+listener or managed service. Running `setup` again is idempotent: it preserves
+the existing data and identity and never repeats credentials. After stopping the
+server, `borg-mcp-server setup --reinitialize` explicitly destroys and recreates
+the server identity and database; use it only when prior state may be discarded.
+
+`borg-mcp-server start` remains a foreground command. Ctrl-C stops it, and it
+does not install or enable persistence. Inspect exact running evidence or stage
+and activate a verified update with:
+
+```sh
+borg-mcp-server status
+borg-mcp-server update
+```
+
+When stdout is not a terminal, `status` and `update` emit one bounded JSON
+record. Status never derives a build identity from a source checkout. If an
+older package does not provide embedded source identity, the field is reported
+as unavailable.
+
+The server library provides matching launchd and systemd adapter definitions
+that point at the atomically selected `current` artifact and preserve
+`BORG_SERVER_DATA_DIR`. Managed persistence is an explicit, separately reviewed
+handoff; foreground start never installs it. The lifecycle contract and terminal
+copy are documented in
+[`docs/design/sprint-6-server-lifecycle.md`](docs/design/sprint-6-server-lifecycle.md).
 
 The server listens on `https://127.0.0.1:7091` by default. Use
 `BORG_SERVER_DATA_DIR` to select another data directory.
@@ -123,37 +153,19 @@ before running those commands.
 ```sh
 borg-mcp-server client-rotate <client-id>
 borg-mcp-server client-revoke <client-id>
-borg-mcp-server client-invite
-borg-mcp-server client-invite <cube-name-or-id> [--access <read|write|manage>]
-borg-mcp-server owner-invite
+borg-mcp-server invite
 borg-mcp-server client-grant <client-id> <cube-id> <read|write|manage>
 borg-mcp-server client-ungrant <client-id> <cube-id>
 ```
 
-Invitation commands visibly prompt with `Recovery credential (hidden input):`
-before reading the recovery credential from a private hidden terminal, never argv
-or environment. `owner-invite` prints an owner enrollment invitation. A plain
-`client-invite` remains an enroll-only invitation with no cube grant. Supplying a
-cube selector atomically binds one grant to the invitation. `read` attaches an
-observer that can discover the cube and read shared activity, but cannot post,
-acknowledge, claim, administer, be selected as a direct recipient, or receive
-directed stream events. `write` attaches a participant that can coordinate and is
-the default; explicit `manage` adds cube administration. Attach responses and
-drone listings identify the effective `observer` or `participant` posture. The
-command prints the resolved display name, full cube ID,
-effective access, and capability summary before the single-use invitation.
+`invite` uses the locally stored owner credential to authorize one existing
+single-use client invitation and prints it only in an interactive terminal. It
+never places a credential or invitation in argv or environment, and refuses
+non-interactive output. The invitation can then be exchanged through the existing
+enrollment protocol. It grants no server capability or cube access.
 
-For automation and duplicate-name environments, use the full lowercase canonical
-cube UUID. A display name must match exactly and case-sensitively. Unknown names,
-UUID-like malformed selectors, and duplicate names fail without creating or
-printing an invitation; duplicate-name errors list the candidate IDs so the
-operator can rerun unambiguously. Claiming a scoped invitation atomically creates
-the client credential binding and exactly that cube grant. It grants no server
-capability and no access to any other cube.
-
-Both invitation forms are single-use and shown once. Treat setup, enrollment,
-invitation, and rotation output as secrets; do not paste it into issues, logs, or
-chat.
+Invitations and rotation output are secrets; do not paste them into issues, logs,
+or chat.
 
 ## Capacity controls
 

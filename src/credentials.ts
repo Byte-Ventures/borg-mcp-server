@@ -210,6 +210,13 @@ export class CredentialAuthority {
     return this.#createInvitation("client", ttlMs);
   }
 
+  createInvitationForOwnerCredential(clientCredential: string, ttlMs: number): string | null {
+    const principal = this.authenticate(`Bearer ${clientCredential}`);
+    if (principal?.kind !== "client" ||
+        !this.#store.clientHasServerCapability(principal.id, "create_cube")) return null;
+    return this.#createInvitation("client", ttlMs);
+  }
+
   createCubeInvitation(
     recoveryCredential: string,
     cubeSelector: { readonly kind: "id" | "name"; readonly value: string },

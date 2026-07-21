@@ -1,16 +1,23 @@
 import { createHash, randomBytes, randomUUID, X509Certificate } from "node:crypto";
-import { lstat, readFile, stat, writeFile } from "node:fs/promises";
+import { lstat, readFile, stat, unlink, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { generate } from "selfsigned";
 
-import { CredentialAuthority, CredentialDigester } from "./credentials.js";
+import { CredentialAuthority, CredentialDigester, generateSecret } from "./credentials.js";
+import type { PortableServerCredential } from "./portable-credential-store.js";
 import { openStore } from "./store.js";
 
 export interface BootstrapResult {
   readonly serverId: string;
   readonly caFingerprint: string;
+  /** @deprecated Retained for offline administrative compatibility; never rendered by setup. */
   readonly recoveryCredential: string;
+  /** @deprecated The already-consumed bootstrap invitation; never rendered by setup. */
   readonly initialInvitation: string;
+  readonly ownerAccess: {
+    readonly clientId: string;
+    readonly serverCapabilities: readonly ["create_cube"];
+  };
   readonly paths: {
     readonly database: string;
     readonly digestKey: string;
@@ -26,6 +33,7 @@ export async function bootstrapServer(
   dataDirectory: string,
   bindHost = "127.0.0.1",
   clock: () => Date = () => new Date(),
+  persistOwnerCredential: (record: PortableServerCredential) => Promise<void> = async () => undefined,
 ): Promise<BootstrapResult> {
   const directory = resolve(dataDirectory);
   const paths = {
@@ -63,6 +71,7 @@ export async function bootstrapServer(
     .digest("hex");
   const digestKey = randomBytes(32);
   const runtime = await openStore({ path: paths.database, clock });
+  let completed = false;
   try {
     await Promise.all([
       writePrivate(paths.digestKey, digestKey),
@@ -81,20 +90,52 @@ export async function bootstrapServer(
     try {
       const authority = new CredentialAuthority(runtime.credentials, digester, clock);
       const recoveryCredential = authority.createRecoveryCredential();
-      const initialInvitation = authority.createBootstrapInvitation(15 * 60_000);
-      return {
+      const invitation = authority.createBootstrapInvitation(15 * 60_000);
+      const credential = generateSecret();
+      const enrollment = authority.exchangeInvitation({
+        invitation,
+        retryKey: randomUUID(),
+        clientCredential: credential,
+        clientName: "Local owner",
+      });
+      if (enrollment?.purpose !== "owner" || enrollment.serverCapabilities[0] !== "create_cube") {
+        throw new Error("Local owner provisioning failed.");
+      }
+      await persistOwnerCredential(Object.freeze({
+        version: 2,
+        origin: `https://${bindHost === "::1" ? "[::1]" : bindHost}:7091`,
+        trustIdentity: `spki-sha256:${caFingerprint}`,
+        credential,
+        clientId: enrollment.clientId,
+        serverCapabilities: ["create_cube"] as const,
+      }));
+      const result = {
         serverId,
         caFingerprint,
         recoveryCredential,
-        initialInvitation,
+        initialInvitation: invitation,
+        ownerAccess: {
+          clientId: enrollment.clientId,
+          serverCapabilities: ["create_cube"] as const,
+        },
         paths,
       };
+      completed = true;
+      return result;
     } finally {
       digester.destroy();
     }
   } finally {
     digestKey.fill(0);
     runtime.close();
+    if (!completed) {
+      await Promise.all([
+        ...Object.values(paths),
+        `${paths.database}-wal`,
+        `${paths.database}-shm`,
+        `${paths.database}-journal`,
+      ].map((path) => unlink(path).catch(() => undefined)));
+    }
   }
 }
 

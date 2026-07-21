@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it, vi } from "vitest";
 
-import { bootstrapServer, loadDigestKey } from "../src/bootstrap.js";
+import { bootstrapServer, loadDigestKey, type BootstrapResult } from "../src/bootstrap.js";
 import { CredentialAuthority, CredentialDigester, generateSecret } from "../src/credentials.js";
 import { applyMigrations, STORE_MIGRATIONS } from "../src/migrations.js";
 import { operatorPublicMessage } from "../src/operator-error.js";
@@ -18,12 +18,79 @@ import {
   createNodeServerService,
   createOfflineCredentialService,
   isFatalTeardownError,
+  inspectRuntimeLock,
   resolveStorageLimits,
   selectServerEnvironment,
   setupNodeServerInstallation,
 } from "../src/service.js";
+import { createRuntimeBuildIdentity } from "../src/runtime-identity.js";
+import { writePortableServerCredential } from "../src/portable-credential-store.js";
+
+function requireFreshSetup(
+  result: Awaited<ReturnType<typeof setupNodeServerInstallation>>,
+): BootstrapResult {
+  if ("existing" in result) throw new Error("Expected a fresh server installation.");
+  return result;
+}
 
 describe("node server service", () => {
+  it("authorizes explicit invitations with the directly provisioned portable owner credential", async () => {
+    const parent = await realpath(await mkdtemp(join(tmpdir(), "borg-owner-invite-")));
+    try {
+      const directory = join(parent, "server");
+      const credentials = join(parent, "credentials");
+      await bootstrapServer(
+        directory,
+        "127.0.0.1",
+        () => new Date(),
+        (record) => writePortableServerCredential(credentials, record),
+      );
+      const invitation = await createOfflineCredentialService(directory, credentials).invite();
+      expect(invitation).toMatch(/^[A-Za-z0-9_-]{43}$/u);
+      const runtime = await openStore({ path: join(directory, "borg.db") });
+      try {
+        const key = await loadDigestKey(join(directory, "credential-digest.key"));
+        const authority = new CredentialAuthority(runtime.credentials, new CredentialDigester(key));
+        key.fill(0);
+        expect(authority.exchangeInvitation({
+          invitation,
+          retryKey: randomUUID(),
+          clientCredential: generateSecret(),
+        })).toMatchObject({ purpose: "client", serverCapabilities: [] });
+      } finally {
+        runtime.close();
+      }
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves portable owner access across idempotent setup", async () => {
+    const parent = await realpath(await mkdtemp(join(tmpdir(), "borg-owner-preserve-")));
+    try {
+      const directory = join(parent, "server");
+      const credentials = join(parent, "credentials");
+      const first = await setupNodeServerInstallation(
+        directory,
+        "127.0.0.1",
+        { reinitialize: false },
+        credentials,
+      );
+      expect("existing" in first).toBe(false);
+      const before = await readFile(credentials);
+      const second = await setupNodeServerInstallation(
+        directory,
+        "127.0.0.1",
+        { reinitialize: false },
+        credentials,
+      );
+      expect(second).toEqual({ existing: true });
+      expect(await readFile(credentials)).toEqual(before);
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
   it("starts and stops the liveness scheduler with the authenticated runtime", async () => {
     const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-liveness-service-")));
     try {
@@ -143,7 +210,10 @@ describe("node server service", () => {
     const options = startServer.mock.calls[0]?.[0];
     expect(options?.bind).toEqual({});
     expect(options?.tls.ca).toEqual(Buffer.from("test-certificate"));
-    expect(onStarted).toHaveBeenCalledWith("https://127.0.0.1:7091");
+    expect(onStarted).toHaveBeenCalledWith(
+      "https://127.0.0.1:7091",
+      expect.objectContaining({ package_version: "0.1.8" }),
+    );
     expect(waitForShutdown).toHaveBeenCalledOnce();
     expect(keyBuffer.every((byte) => byte === 0)).toBe(true);
   });
@@ -250,7 +320,29 @@ describe("node server service", () => {
     }
   });
 
-  it("mints owner and client invitations beside a live server and enrolls immediately", async () => {
+  it("records exact running build identity without inferring it from a checkout", async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-runtime-status-")));
+    const identity = createRuntimeBuildIdentity({
+      artifactIntegrity: `sha512-${"A".repeat(86)}==`,
+      startedAt: new Date("2026-07-21T12:00:00.000Z"),
+    });
+    try {
+      const lock = await acquireRuntimeLock(directory, "server", identity);
+      await expect(inspectRuntimeLock(directory)).resolves.toEqual({
+        running: true,
+        pid: process.pid,
+        identity,
+        endpoint: null,
+        mode: "foreground",
+      });
+      await lock.release();
+      await expect(inspectRuntimeLock(directory)).resolves.toEqual({ running: false });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("mints client invitations beside a live server after direct owner provisioning", async () => {
     const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-live-invitation-")));
     let runtime: Awaited<ReturnType<typeof openStore>> | undefined;
     let digester: CredentialDigester | undefined;
@@ -270,14 +362,6 @@ describe("node server service", () => {
       }
       running = await acquireRuntimeLock(directory, "server");
       const administration = createOfflineCredentialService(directory);
-
-      const ownerInvitation = await administration.replaceOwnerInvitation(installation.recoveryCredential);
-      const owner = liveAuthority.exchangeInvitation({
-        invitation: ownerInvitation,
-        retryKey: randomUUID(),
-        clientCredential: generateSecret(),
-      });
-      expect(owner).toMatchObject({ purpose: "owner", serverCapabilities: ["create_cube"] });
 
       const clientInvitation = await administration.createClientInvitation(installation.recoveryCredential);
       if (typeof clientInvitation !== "string") throw new Error("Expected a plain invitation.");
@@ -456,20 +540,39 @@ describe("node server service", () => {
     }
   });
 
-  it("keeps fresh setup behavior and refuses an existing installation without mutation", async () => {
+  it("keeps fresh setup behavior and treats a complete existing installation idempotently", async () => {
     const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-setup-existing-")));
     try {
-      const first = await setupNodeServerInstallation(directory, "127.0.0.1", { reinitialize: false });
+      const first = requireFreshSetup(await setupNodeServerInstallation(
+        directory,
+        "127.0.0.1",
+        { reinitialize: false },
+      ));
       expect(first.recoveryCredential).toMatch(/^[A-Za-z0-9_-]{43}$/u);
       expect(first.initialInvitation).toMatch(/^[A-Za-z0-9_-]{43}$/u);
       const before = await Promise.all(Object.values(first.paths).map((path) => readFile(path)));
 
       await expect(setupNodeServerInstallation(directory, "127.0.0.1", { reinitialize: false }))
+        .resolves.toEqual({ existing: true });
+      const after = await Promise.all(Object.values(first.paths).map((path) => readFile(path)));
+      expect(after).toEqual(before);
+      await expect(access(join(directory, "runtime.lock"))).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects an incomplete existing installation without mutation", async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-setup-partial-")));
+    try {
+      const partial = join(directory, "server.json");
+      await writeFile(partial, "partial", { mode: 0o600 });
+
+      await expect(setupNodeServerInstallation(directory, "127.0.0.1", { reinitialize: false }))
         .rejects.toThrow(
           "An installation already exists in BORG_SERVER_DATA_DIR. To destroy and recreate it, stop the server and run borg-mcp-server setup --reinitialize.",
         );
-      const after = await Promise.all(Object.values(first.paths).map((path) => readFile(path)));
-      expect(after).toEqual(before);
+      await expect(readFile(partial, "utf8")).resolves.toBe("partial");
       await expect(access(join(directory, "runtime.lock"))).rejects.toMatchObject({ code: "ENOENT" });
     } finally {
       await rm(directory, { recursive: true, force: true });
@@ -479,7 +582,11 @@ describe("node server service", () => {
   it("reinitializes only through the explicit destructive path", async () => {
     const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-setup-reinitialize-")));
     try {
-      const first = await setupNodeServerInstallation(directory, "127.0.0.1", { reinitialize: false });
+      const first = requireFreshSetup(await setupNodeServerInstallation(
+        directory,
+        "127.0.0.1",
+        { reinitialize: false },
+      ));
       const runtime = await openStore({ path: first.paths.database });
       runtime.maintenance.createClient({
         id: "00000000-0000-4000-8000-000000000071",
@@ -494,13 +601,17 @@ describe("node server service", () => {
       const unrelated = join(directory, "operator-notes.txt");
       await writeFile(unrelated, "preserve me", { mode: 0o600 });
 
-      const second = await setupNodeServerInstallation(directory, "127.0.0.1", { reinitialize: true });
+      const second = requireFreshSetup(await setupNodeServerInstallation(
+        directory,
+        "127.0.0.1",
+        { reinitialize: true },
+      ));
       expect(second.serverId).not.toBe(first.serverId);
       expect(second.caFingerprint).not.toBe(first.caFingerprint);
       expect(await readFile(unrelated, "utf8")).toBe("preserve me");
       const freshRuntime = await openStore({ path: second.paths.database });
       expect(freshRuntime.maintenance.observeAuthorityState()).toMatchObject({
-        enrolled_clients: 0,
+        enrolled_clients: 1,
         cubes: 0,
         roles: 0,
         grants: 0,
@@ -515,9 +626,11 @@ describe("node server service", () => {
   it("refuses all setup modes while the runtime lock is live", async () => {
     const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-setup-live-lock-")));
     try {
-      const installation = await setupNodeServerInstallation(directory, "127.0.0.1", {
-        reinitialize: false,
-      });
+      const installation = requireFreshSetup(await setupNodeServerInstallation(
+        directory,
+        "127.0.0.1",
+        { reinitialize: false },
+      ));
       const before = await Promise.all(Object.values(installation.paths).map((path) => readFile(path)));
       const running = await acquireRuntimeLock(directory);
       try {

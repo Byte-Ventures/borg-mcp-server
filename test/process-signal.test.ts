@@ -362,7 +362,7 @@ function waitForListeningOrigin(child: ChildProcess): Promise<string> {
     const timer = setTimeout(() => reject(new Error("Production main did not report readiness.")), 3_000);
     child.stderr?.on("data", (chunk: Buffer) => {
       stderr += chunk.toString("utf8");
-      const match = /Borg server listening on (https:\/\/\S+)/u.exec(stderr);
+      const match = /"endpoint":"(https:\/\/[^"]+)"/u.exec(stderr);
       if (match?.[1] === undefined) return;
       clearTimeout(timer);
       resolve(match[1]);

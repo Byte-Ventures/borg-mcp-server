@@ -12,8 +12,8 @@ import { isAbsolute, join, relative, resolve } from "node:path";
 
 import { provisionSprint4E2e, type Sprint4ProvisionedRun } from "./sprint4-e2e-provisioning.js";
 
-export const SPRINT4_CLIENT_SHA = "027a9af4dfba06148b7f39ddde71d3299dfc2109";
-export const SPRINT4_CLIENT_FIXTURE_SHA256 = "158198b92f5c4bc35d48e40e9405bdc8e0025fd49ccc619cd3324e8ba1eeeca9";
+export const SPRINT4_CLIENT_SHA = "f7ed0bdb8db983f80ddddec91d6bad7bcf1ee177";
+export const SPRINT4_CLIENT_FIXTURE_SHA256 = "838b66f11c869c50d29ffa3a144f1e8143ce8d3eee45ae2421a6d8e0bfeb760a";
 export const SPRINT4_EXPECTED_CLIENT_MAIN_SHA = "710e9a90446de07a819291307f6d75f9a21784aa";
 export const SPRINT4_JOINED_GATE = "BORG_RUN_S4_JOINED_E2E";
 export const SPRINT4_CLIENT_DIRECTORY = "BORG_RQ_CLIENT_DIRECTORY";

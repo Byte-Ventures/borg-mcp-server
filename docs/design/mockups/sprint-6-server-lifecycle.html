@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sprint 6 Server Lifecycle CLI</title>
+  <style>
+    :root { color-scheme: dark; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    body { margin: 0; background: #101316; color: #e8e2d8; }
+    main { max-width: 1040px; margin: 0 auto; padding: 36px 20px 56px; }
+    h1 { font-family: ui-sans-serif, system-ui, sans-serif; font-size: 28px; margin: 0 0 8px; }
+    p { color: #a9b1ba; line-height: 1.55; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); gap: 16px; }
+    section { border: 1px solid #303841; background: #171c21; padding: 16px; }
+    h2 { font-family: ui-sans-serif, system-ui, sans-serif; font-size: 15px; letter-spacing: .04em; margin: 0 0 12px; text-transform: uppercase; }
+    pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.48; }
+    .ok { color: #83d3a2; } .warn { color: #efc879; } .bad { color: #f48f8f; } .dim { color: #a9b1ba; }
+    .full { margin-top: 16px; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Sprint 6: Verified Local Server Lifecycle</h1>
+    <p>Terminal mockup for server #104/#109 and client #91. Values in angle brackets are runtime values, not literals. The foreground command never claims managed persistence.</p>
+    <div class="grid">
+      <section>
+        <h2>Setup: Fresh Installation</h2>
+        <pre><span class="ok">Local server prepared.</span>
+Artifact: borgmcp-server@&lt;version&gt; (&lt;artifact digest&gt;)
+      </section>
+      <section>
+        <h2>Setup: Existing Installation</h2>
+        <pre><span class="ok">Local server is already prepared.</span>
+Artifact: borgmcp-server@&lt;version&gt; (&lt;artifact digest&gt;)
+      </section>
+      <section>
+        <h2>Foreground Start</h2>
+        <pre><span class="ok">Starting verified local server in the foreground.</span>
+      </section>
+      <section>
+        <h2>Status: Running</h2>
+        <pre><span class="ok">Local server is running.</span>
+      </section>
+      <section>
+        <h2>Status: Unavailable Identity</h2>
+        <pre><span class="warn">Local server is reachable, but its running build identity is unavailable.</span>
+      </section>
+      <section>
+        <h2>Update: Verified Activation</h2>
+        <pre>Verifying borgmcp-server@&lt;version&gt;...
+      </section>
+      <section>
+        <h2>Update: Verification Failure</h2>
+        <pre><span class="bad">Update stopped: artifact verification failed.</span>
+      </section>
+      <section>
+        <h2>Restart And Rollback</h2>
+        <pre>Restarting the verified local server...
+      </section>
+      <section>
+        <h2>Managed Service Handoff</h2>
+        <pre>Foreground mode is active by default.
+      </section>
+      <section>
+        <h2>Non-TTY Output</h2>
+        <pre>{"status":"running","artifact":"borgmcp-server@&lt;version&gt;","build_identity":"&lt;identity&gt;","mode":"foreground","data_identity":"available"}
+      </section>
+    </div>
+    <section class="full">
+      <h2>Facade Ownership</h2>
+      <pre><span class="ok">borg server ...</span> is the client facade: it forwards and renders server lifecycle evidence.
+<span class="ok">borg-mcp-server ...</span> owns artifact verification, activation, rollback, authenticated runtime identity, and service adapters.
+Neither surface may silently discover a checkout, start a daemon during setup, or claim managed persistence for a foreground process.</pre>
+    </section>
+  </main>
+</body>
+</html>

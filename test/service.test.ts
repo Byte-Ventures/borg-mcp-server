@@ -212,7 +212,7 @@ describe("node server service", () => {
     expect(options?.tls.ca).toEqual(Buffer.from("test-certificate"));
     expect(onStarted).toHaveBeenCalledWith(
       "https://127.0.0.1:7091",
-      expect.objectContaining({ package_version: "0.1.8" }),
+      expect.objectContaining({ package_version: "0.1.9" }),
     );
     expect(waitForShutdown).toHaveBeenCalledOnce();
     expect(keyBuffer.every((byte) => byte === 0)).toBe(true);

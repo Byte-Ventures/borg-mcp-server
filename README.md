@@ -6,7 +6,7 @@ HTTPS.
 
 ## Release status
 
-The current public preview is `borgmcp-server@0.1.7`, published on npm.
+The current public preview is `borgmcp-server@0.1.8`, published on npm.
 Versions `0.1.2` and `0.1.3` were not published; their immutable tags are
 preserved failed-release evidence and are not installation or dogfood targets.
 Version `0.1.5` includes the reviewed owner-enrollment, idempotent multi-cube
@@ -16,18 +16,20 @@ redacted debug logging, and cube-scoped invitation baseline. Relative to
 taxonomy routing, durable SSE replay and heartbeat delivery, fleet liveness
 signals, typed terminal drone eviction, and explicit manage-access denials for
 visible non-managing principals. Immutable `v0.1.6` failed safely before artifact
-upload or npm publication and is not an install target. The published `0.1.7`
-package is the reviewed recovery release and consumes the audited exact
-`borgmcp-shared@0.4.2` registry release. Current source is the unpublished
-`borgmcp-server@0.1.8` release candidate and consumes the verified exact
-`borgmcp-shared@0.4.3` registry release. Version `0.1.7` remains the current
+upload or npm publication and is not an install target. The published `0.1.8`
+package is the reviewed session-continuity release and consumes the audited exact
+`borgmcp-shared@0.4.3` registry release. Current source is the unpublished
+`borgmcp-server@0.1.9` release candidate, adding the verified immutable runtime
+lifecycle, portable managed-service adapters, and direct local owner setup.
+Version `0.1.8` remains the current
 install target until the candidate passes exact-SHA review, immutable tag
 publication, and bounded registry verification.
 
-Setup prepares local identity and storage and prints one-time recovery and
-owner-enrollment secrets; it creates no cube. Version `0.1.1` completed the
+Setup prepares local identity and storage, writes owner access to the private
+portable credential file, and prints no credential or invitation; it creates no cube.
+Version `0.1.1` completed the
 documented exact-source, tagged-artifact, and protected-publication gates.
-Version `0.1.7` completed a fresh exact-source, tagged-artifact, tokenless OIDC
+Version `0.1.8` completed a fresh exact-source, tagged-artifact, tokenless OIDC
 publication, provenance, signature, and attestation gate chain.
 
 ## Repository topology

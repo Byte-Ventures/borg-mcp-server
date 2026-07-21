@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -8,9 +8,11 @@ import type { Sprint4ProvisionedRun } from "./sprint4-e2e-provisioning.js";
 import {
   SPRINT4_CLIENT_DIRECTORY,
   SPRINT4_JOINED_GATE,
+  SPRINT4_RUNNER_OUTPUT_LIMIT,
   SPRINT4_CLIENT_FIXTURE_SHA256,
   SPRINT4_CLIENT_SHA,
   assertClientPinValues,
+  assertOwnedCredentialReferences,
   assertProvisionedRun,
   assertStructuredResultContract,
   buildClientFixtureEnvironment,
@@ -63,7 +65,7 @@ describe("Sprint 4 joined runner safeguards", () => {
         endpoint, trust_material_reference: join(root, "ca.crt"), trust_identity: trust, cube_id: "11111111-1111-4111-8111-111111111111",
         client_id: client, client_credential: `${credential}-client`, role_id: "22222222-2222-4222-8222-222222222222", drone_id: drone,
         session_id: session, session_credential: credential,
-      }));
+      }), { mode: 0o600 });
       return path;
     };
     const reader = await ref("reader.json", "reader-client", "33333333-3333-4333-8333-333333333333", "44444444-4444-4444-8444-444444444444", "r".repeat(43));
@@ -80,6 +82,15 @@ describe("Sprint 4 joined runner safeguards", () => {
       }, cleanup: async () => {},
     } as Sprint4ProvisionedRun;
     try {
+      await expect(assertOwnedCredentialReferences(run, root)).resolves.toBeUndefined();
+      const shared = await mkdtemp(join(tmpdir(), "borg-s4-runner-shared-"));
+      try {
+        const sharedReference = join(shared, "reader.json");
+        await writeFile(sharedReference, await readFile(reader), { mode: 0o600 });
+        await expect(assertOwnedCredentialReferences({ ...run, credentialReferences: { ...run.credentialReferences, reader: sharedReference } }, root)).rejects.toThrow("owned canonical 0600");
+      } finally {
+        await rm(shared, { recursive: true, force: true });
+      }
       const mapped = await buildClientFixtureEnvironment({}, "/tmp/disposable-client", run);
       expect(mapped).toMatchObject({
         BORG_S4_COUPLED_E2E: "1", BORG_E2E_CLIENT_SHA: SPRINT4_CLIENT_SHA,
@@ -96,11 +107,24 @@ describe("Sprint 4 joined runner safeguards", () => {
         { [SPRINT4_JOINED_GATE]: "1", [SPRINT4_CLIENT_DIRECTORY]: "/tmp/disposable-client" },
         {
           verifyClientPins: async () => {},
-          provision: async () => ({ ...run, cleanup: async () => { cleaned = true; } }),
+          provision: async (input) => {
+            const references = join(input.dataDirectory, "s4-e2e-credentials");
+            await mkdir(references, { recursive: true, mode: 0o700 });
+            const copy = async (name: "reader" | "writerA" | "writerB"): Promise<string> => {
+              const path = join(references, `${name}.json`);
+              await writeFile(path, await readFile(run.credentialReferences[name]), { mode: 0o600 });
+              return path;
+            };
+            return {
+              ...run,
+              credentialReferences: { reader: await copy("reader"), writerA: await copy("writerA"), writerB: await copy("writerB") },
+              cleanup: async () => { cleaned = true; },
+            };
+          },
           spawn: async (command, args, options) => {
             selected = command === "npx" && args.join(" ") === "vitest run __tests__/s4-coupled-e2e.test.ts" &&
               options.env["BORG_S4_COUPLED_E2E"] === "1" && options.env["BORG_E2E_READER_TOKEN"] === "r".repeat(43);
-            return { code: 0, stderr: "", stdout: `S4_COUPLED_E2E ${JSON.stringify({ pass: true, cleanup_verified: true, client_sha: SPRINT4_CLIENT_SHA, origin: endpoint })}` };
+            return { code: 0, stderr: "", stdout: `S4_COUPLED_E2E ${JSON.stringify({ pass: true, cleanup_verified: true, client_sha: SPRINT4_CLIENT_SHA, origin: endpoint })}`, stdoutOverflow: false, stderrOverflow: false };
           },
         },
       );
@@ -144,6 +168,14 @@ describe("Sprint 4 joined runner safeguards", () => {
   it("bounds spawn errors and stalled children", async () => {
     await expect(runBounded("definitely-not-a-command", [], { cwd: process.cwd(), env: {} }, 100)).rejects.toThrow();
     await expect(runBounded(process.execPath, ["-e", "setTimeout(() => {}, 1000)"], { cwd: process.cwd(), env: process.env }, 10)).rejects.toThrow("timed out");
+  });
+
+  it("fails closed when spawned stdout overflows before or after a plausible result", async () => {
+    const record = `S4_COUPLED_E2E ${JSON.stringify({ pass: true, cleanup_verified: true })}`;
+    const before = await runBounded(process.execPath, ["-e", `process.stdout.write('x'.repeat(${SPRINT4_RUNNER_OUTPUT_LIMIT + 1}) + ${JSON.stringify(record)})`], { cwd: process.cwd(), env: process.env });
+    const after = await runBounded(process.execPath, ["-e", `process.stdout.write(${JSON.stringify(record)} + 'x'.repeat(${SPRINT4_RUNNER_OUTPUT_LIMIT + 1}))`], { cwd: process.cwd(), env: process.env });
+    expect(before.stdoutOverflow).toBe(true);
+    expect(after.stdoutOverflow).toBe(true);
   });
 
   it("cleans owned state even if provisioner cleanup fails", async () => {

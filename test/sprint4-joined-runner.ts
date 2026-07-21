@@ -5,10 +5,10 @@
  * "1". This module deliberately owns no production surface.
  */
 import { createHash } from "node:crypto";
-import { access, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
+import { access, lstat, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
-import { isAbsolute, join, resolve } from "node:path";
+import { isAbsolute, join, relative, resolve } from "node:path";
 
 import { provisionSprint4E2e, type Sprint4ProvisionedRun } from "./sprint4-e2e-provisioning.js";
 
@@ -27,6 +27,8 @@ export interface SpawnResult {
   readonly code: number;
   readonly stdout: string;
   readonly stderr: string;
+  readonly stdoutOverflow: boolean;
+  readonly stderrOverflow: boolean;
 }
 
 export interface JoinedRunnerDependencies {
@@ -92,6 +94,7 @@ export async function executeJoinedRunner(
       port: 0,
     });
     assertProvisionedRun(run);
+    await assertOwnedCredentialReferences(run, root);
     const clientEnvironment = await buildClientFixtureEnvironment(env, configuration.clientDirectory, run);
     const result = await (dependencies.spawn ?? runBounded)(
       "npx",
@@ -101,6 +104,9 @@ export async function executeJoinedRunner(
         env: clientEnvironment,
       },
     );
+    if (result.stdoutOverflow || result.stderrOverflow) {
+      throw new Error(`Sprint 4 client fixture output exceeded its bound: ${redactOutput(result.stderr || result.stdout)}`);
+    }
     if (result.code !== 0) throw new Error(`Sprint 4 client fixture failed: ${redactOutput(result.stderr || result.stdout)}`);
     if (result.stderr.trim() !== "") throw new Error(`Sprint 4 client fixture wrote to stderr: ${redactOutput(result.stderr)}`);
     const structured = parseStructuredResult(result.stdout);
@@ -271,6 +277,20 @@ export async function cleanupJoinedRun(
   if (failure !== undefined) throw failure;
 }
 
+export async function assertOwnedCredentialReferences(run: Sprint4ProvisionedRun, root: string): Promise<void> {
+  const canonicalRoot = await realpath(root);
+  await Promise.all(Object.values(run.credentialReferences).map(async (reference) => {
+    const canonicalReference = await realpath(reference);
+    const pathFromRoot = relative(canonicalRoot, canonicalReference);
+    const metadata = await lstat(reference);
+    if (pathFromRoot === "" || pathFromRoot.startsWith("..") || isAbsolute(pathFromRoot) ||
+        !metadata.isFile() || metadata.isSymbolicLink() || (metadata.mode & 0o777) !== 0o600 ||
+        (typeof process.getuid === "function" && metadata.uid !== process.getuid())) {
+      throw new Error("Sprint 4 credential reference must be an owned canonical 0600 file.");
+    }
+  }));
+}
+
 export function assertProvisionedRun(run: Sprint4ProvisionedRun): void {
   if (!/^https:\/\/127\.0\.0\.1:\d+$/u.test(run.endpoint) ||
       !/^spki-sha256:[0-9a-f]{64}$/u.test(run.trustIdentity) ||
@@ -298,10 +318,22 @@ export async function runBounded(
     const child = spawn(command, args, { cwd: options.cwd, env: options.env, stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
+    let stdoutOverflow = false;
+    let stderrOverflow = false;
+    let overflowed = false;
     const append = (target: "stdout" | "stderr", chunk: Buffer): void => {
       const value = chunk.toString("utf8");
-      if (target === "stdout") stdout = (stdout + value).slice(0, SPRINT4_RUNNER_OUTPUT_LIMIT);
-      else stderr = (stderr + value).slice(0, SPRINT4_RUNNER_OUTPUT_LIMIT);
+      if (target === "stdout") {
+        if (stdout.length + value.length > SPRINT4_RUNNER_OUTPUT_LIMIT) stdoutOverflow = true;
+        stdout = (stdout + value).slice(0, SPRINT4_RUNNER_OUTPUT_LIMIT);
+      } else {
+        if (stderr.length + value.length > SPRINT4_RUNNER_OUTPUT_LIMIT) stderrOverflow = true;
+        stderr = (stderr + value).slice(0, SPRINT4_RUNNER_OUTPUT_LIMIT);
+      }
+      if ((stdoutOverflow || stderrOverflow) && !overflowed) {
+        overflowed = true;
+        child.kill("SIGKILL");
+      }
     };
     child.stdout.on("data", (chunk: Buffer) => append("stdout", chunk));
     child.stderr.on("data", (chunk: Buffer) => append("stderr", chunk));
@@ -315,7 +347,7 @@ export async function runBounded(
     child.once("close", (code) => {
       clearTimeout(timer);
       if (timedOut) reject(new Error("Sprint 4 client fixture timed out."));
-      else resolve({ code: code ?? 1, stdout, stderr });
+      else resolve({ code: code ?? 1, stdout, stderr, stdoutOverflow, stderrOverflow });
     });
   });
 }

@@ -1,6 +1,7 @@
 import { Agent, request as httpsRequest } from "node:https";
 import type { IncomingHttpHeaders } from "node:http";
 import { connect as connectTcp, type Socket } from "node:net";
+import { connect as connectTls, type TLSSocket } from "node:tls";
 import { generate } from "selfsigned";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
@@ -391,6 +392,72 @@ describe("HTTPS service", () => {
         expect((await request(bounded.origin, certificate, "/healthz")).status).toBe(204);
       }
     } finally {
+      await bounded.close();
+    }
+  });
+
+  it("bounds incomplete handshakes per address without exhausting the independent global limit", async () => {
+    let connections = 0;
+    const bounded = await startHttpsServer({
+      bind: { port: 0 },
+      tls: { key, cert: certificate },
+      testHooks: {
+        identifyConnectionAddress: () => {
+          connections += 1;
+          return connections <= 31 ? "attacker" : "fresh";
+        },
+      },
+      limits: {
+        ...DEFAULT_SERVICE_LIMITS,
+        maxConnections: 32,
+        maxConnectionsPerAddress: 30,
+        maxStreamsPerCredential: 8,
+        tlsHandshakeTimeoutMs: 1_000,
+      },
+    });
+    const attackers: Socket[] = [];
+    try {
+      attackers.push(...await Promise.all(Array.from({ length: 31 }, () => openRawSocket(bounded.origin))));
+      expect((await request(
+        bounded.origin,
+        certificate,
+        "/healthz",
+        {},
+        "",
+        "GET",
+      )).status).toBe(204);
+
+      await Promise.all(attackers.map((socket) => waitForSocketClose(socket, 2_000)));
+      expect((await request(bounded.origin, certificate, "/healthz")).status).toBe(204);
+    } finally {
+      attackers.forEach((socket) => socket.destroy());
+      await bounded.close();
+    }
+  });
+
+  it("allows only one requestless over-cap TLS socket per address", async () => {
+    const bounded = await startHttpsServer({
+      bind: { port: 0 },
+      tls: { key, cert: certificate },
+      limits: {
+        ...DEFAULT_SERVICE_LIMITS,
+        maxConnections: 32,
+        maxConnectionsPerAddress: 30,
+        maxStreamsPerCredential: 8,
+      },
+    });
+    const secureSockets: TLSSocket[] = [];
+    let overflow: Socket | undefined;
+    try {
+      secureSockets.push(...await Promise.all(Array.from(
+        { length: 31 },
+        () => openSecureSocket(bounded.origin, certificate),
+      )));
+      overflow = await openRawSocket(bounded.origin);
+      await expect(waitForSocketClose(overflow, 500)).resolves.toBeUndefined();
+    } finally {
+      overflow?.destroy();
+      secureSockets.forEach((socket) => socket.destroy());
       await bounded.close();
     }
   });
@@ -863,6 +930,123 @@ describe("HTTPS service", () => {
     }
   });
 
+  it("admits thirty simultaneous same-loopback TLS appends and drains each entry exactly once", async () => {
+    const messages: string[] = [];
+    let releaseAppends!: () => void;
+    const allAppendsAdmitted = new Promise<void>((resolve) => { releaseAppends = resolve; });
+    const path = "/api/cubes/00000000-0000-4000-8000-000000000228/logs";
+    const burst = await startHttpsServer({
+      bind: { port: 0 },
+      tls: { key, cert: certificate },
+      authorizeCoordination: async () => clientPrincipal(
+        "00000000-0000-4000-8000-000000000229",
+      ),
+      handleCoordination: async (coordinationRequest) => {
+        if (coordinationRequest.path === path && coordinationRequest.method === "POST") {
+          const message = (coordinationRequest.body as { payload: { message: string } }).payload.message;
+          messages.push(message);
+          if (messages.length === 30) releaseAppends();
+          await allAppendsAdmitted;
+          return { status: 201, body: { protocol_version: "2", payload: { accepted: true } } };
+        }
+        if (coordinationRequest.path === path && coordinationRequest.method === "PUT") {
+          return {
+            status: 200,
+            body: {
+              protocol_version: "2",
+              payload: { entries: messages.map((message) => ({ message })) },
+            },
+          };
+        }
+        return { status: 404 };
+      },
+    });
+    const submitted = Array.from({ length: 30 }, (_, index) => `append-${index}`);
+    try {
+      const responses = await Promise.all(submitted.map((message, index) => request(
+        burst.origin,
+        certificate,
+        path,
+        { authorization: "Bearer burst-client" },
+        JSON.stringify({ protocol_version: "2", request_id: `append-${index}`, payload: { message } }),
+        "POST",
+      )));
+      expect(responses.map((response) => response.status)).toEqual(Array.from({ length: 30 }, () => 201));
+
+      const drained = await request(
+        burst.origin,
+        certificate,
+        path,
+        { authorization: "Bearer burst-client" },
+        JSON.stringify({ protocol_version: "2", request_id: "drain", payload: {} }),
+        "PUT",
+      );
+      expect(drained.status).toBe(200);
+      const entries = (JSON.parse(drained.body) as { payload: { entries: Array<{ message: string }> } })
+        .payload.entries.map((entry) => entry.message);
+      expect(entries).toHaveLength(30);
+      expect(new Set(entries)).toEqual(new Set(submitted));
+      expect(new Set(messages)).toEqual(new Set(submitted));
+    } finally {
+      await burst.close();
+    }
+  });
+
+  it("returns controlled 429 admission backpressure above the same-address connection cap without mutation", async () => {
+    const messages: string[] = [];
+    let markAppendsAdmitted!: () => void;
+    const allAppendsAdmitted = new Promise<void>((resolve) => { markAppendsAdmitted = resolve; });
+    let releaseAppends!: () => void;
+    const releaseHeldAppends = new Promise<void>((resolve) => { releaseAppends = resolve; });
+    const path = "/api/cubes/00000000-0000-4000-8000-000000000230/logs";
+    const burst = await startHttpsServer({
+      bind: { port: 0 },
+      tls: { key, cert: certificate },
+      authorizeCoordination: async () => clientPrincipal(
+        "00000000-0000-4000-8000-000000000231",
+      ),
+      handleCoordination: async (coordinationRequest) => {
+        if (coordinationRequest.path !== path || coordinationRequest.method !== "POST") {
+          return { status: 404 };
+        }
+        const message = (coordinationRequest.body as { payload: { message: string } }).payload.message;
+        messages.push(message);
+        if (messages.length === 30) markAppendsAdmitted();
+        await releaseHeldAppends;
+        return { status: 201, body: { protocol_version: "2", payload: { accepted: true } } };
+      },
+    });
+    const submitted = Array.from({ length: 31 }, (_, index) => `append-${index}`);
+    try {
+      const acceptedRequests = submitted.slice(0, 30).map((message, index) => request(
+        burst.origin,
+        certificate,
+        path,
+        { authorization: "Bearer burst-client" },
+        JSON.stringify({ protocol_version: "2", request_id: `over-cap-${index}`, payload: { message } }),
+        "POST",
+      ));
+      await allAppendsAdmitted;
+      const rejected = await request(
+        burst.origin,
+        certificate,
+        path,
+        { authorization: "Bearer burst-client" },
+        JSON.stringify({ protocol_version: "2", request_id: "over-cap-30", payload: { message: submitted[30] } }),
+        "POST",
+      );
+      expect(rejected.status).toBe(429);
+      expect(rejected.headers.connection).toBe("close");
+      releaseAppends();
+      const acceptedResponses = await Promise.all(acceptedRequests);
+      expect(acceptedResponses.map((response) => response.status)).toEqual(Array.from({ length: 30 }, () => 201));
+      expect(messages).toHaveLength(30);
+      expect(new Set(messages)).toEqual(new Set(submitted.slice(0, 30)));
+    } finally {
+      await burst.close();
+    }
+  });
+
   it("does not allocate credential quota state for unauthenticated identities", async () => {
     const limited = await startHttpsServer({
       bind: { port: 0 },
@@ -1297,11 +1481,34 @@ function request(
   });
 }
 
-function openRawSocket(origin: string): Promise<Socket> {
+function openRawSocket(origin: string, localAddress?: string): Promise<Socket> {
   const url = new URL(origin);
   return new Promise((resolve, reject) => {
-    const socket = connectTcp({ host: url.hostname, port: Number(url.port) });
+    const socket = connectTcp({
+      host: url.hostname,
+      port: Number(url.port),
+      ...(localAddress === undefined ? {} : { localAddress }),
+    });
     socket.once("connect", () => resolve(socket));
+    socket.once("error", reject);
+  });
+}
+
+function openSecureSocket(
+  origin: string,
+  ca: string,
+  localAddress?: string,
+): Promise<TLSSocket> {
+  const url = new URL(origin);
+  return new Promise((resolve, reject) => {
+    const socket = connectTls({
+      host: url.hostname,
+      port: Number(url.port),
+      ca,
+      rejectUnauthorized: true,
+      ...(localAddress === undefined ? {} : { localAddress }),
+    });
+    socket.once("secureConnect", () => resolve(socket));
     socket.once("error", reject);
   });
 }

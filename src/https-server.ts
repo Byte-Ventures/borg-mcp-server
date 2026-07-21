@@ -39,7 +39,7 @@ export interface ServiceLimits {
 
 export const DEFAULT_SERVICE_LIMITS: ServiceLimits = {
   maxConnections: 100,
-  maxConnectionsPerAddress: 25,
+  maxConnectionsPerAddress: 30,
   maxRequestsPerWindow: 120,
   maxRequestsPerAddressWindow: 600,
   maxRequestsGlobalWindow: 5_000,
@@ -82,6 +82,7 @@ export interface HttpsServerOptions {
   readonly debugLogger?: DebugLogger;
   readonly testHooks?: {
     readonly identifyRemoteAddress?: (socket: Socket) => string;
+    readonly identifyConnectionAddress?: (socket: Socket) => string;
   };
 }
 
@@ -100,6 +101,15 @@ export async function startHttpsServer(options: HttpsServerOptions): Promise<Run
   validateLimits(limits);
   validateTlsCertificate(options.tls.cert, bind.host, bind.mode, options.tls.ca);
   const handlerContext = createRequestHandlerContext(options);
+  const identifyRemoteAddress = options.testHooks?.identifyRemoteAddress ??
+    ((socket: Socket) => socket.remoteAddress ?? "unknown");
+  const identifyConnectionAddress = options.testHooks?.identifyConnectionAddress ??
+    ((socket: Socket) => socket.remoteAddress ?? "unknown");
+  const addressConnectionLimiter = new AddressConnectionLimiter(
+    limits.maxConnectionsPerAddress,
+    limits.maxConnections,
+    identifyConnectionAddress,
+  );
 
   const server = createServer(
     {
@@ -112,11 +122,19 @@ export async function startHttpsServer(options: HttpsServerOptions): Promise<Run
       headersTimeout: limits.headersTimeoutMs,
       keepAliveTimeout: limits.keepAliveTimeoutMs,
     },
-    createRequestListener(handlerContext, limits, options.testHooks?.identifyRemoteAddress),
+    createRequestListener(
+      handlerContext,
+      limits,
+      identifyRemoteAddress,
+      (socket) => addressConnectionLimiter.isRejected(socket),
+    ),
   );
 
-  const acceptedSockets = applyServerLimits(server, limits);
-  server.on("secureConnection", (socket) => socket.disableRenegotiation());
+  const acceptedSockets = applyServerLimits(server, limits, addressConnectionLimiter);
+  server.on("secureConnection", (socket) => {
+    socket.disableRenegotiation();
+    addressConnectionLimiter.admit(socket);
+  });
   server.on("tlsClientError", (_error, socket) => {
     handlerContext.debugLogger.emit({ event: "transport_rejection", reason: "tls_client_error" });
     socket.destroy();
@@ -173,6 +191,7 @@ function createRequestListener(
   context: RequestHandlerContext,
   limits: ServiceLimits,
   identifyRemoteAddress: (socket: Socket) => string = (socket) => socket.remoteAddress ?? "unknown",
+  isConnectionRejected: (socket: Socket) => boolean = () => false,
 ): (request: IncomingMessage, response: ServerResponse) => void {
   const admissionLimiter = new PreAuthAdmissionLimiter(limits);
   const credentialRateLimiter = new RequestRateLimiter(limits, limits.maxRequestsPerWindow);
@@ -204,6 +223,11 @@ function createRequestListener(
     };
     response.once("finish", emitDebug);
     response.once("close", emitDebug);
+    if (isConnectionRejected(request.socket)) {
+      request.resume();
+      sendRateLimited(response, 1);
+      return;
+    }
     const controller = new AbortController();
     response.once("close", () => controller.abort());
     let timer: NodeJS.Timeout | undefined;
@@ -603,7 +627,11 @@ function credentialRateLimitIdentity(
   return `client:${principal.kind === "drone-session" ? principal.clientId : principal.id}`;
 }
 
-function applyServerLimits(server: HttpsServer, limits: ServiceLimits): Set<Socket> {
+function applyServerLimits(
+  server: HttpsServer,
+  limits: ServiceLimits,
+  addressConnectionLimiter: AddressConnectionLimiter,
+): Set<Socket> {
   server.maxConnections = limits.maxConnections;
   server.maxRequestsPerSocket = limits.maxRequestsPerSocket;
   server.requestTimeout = limits.requestTimeoutMs;
@@ -613,21 +641,56 @@ function applyServerLimits(server: HttpsServer, limits: ServiceLimits): Set<Sock
     Math.min(limits.handlerTimeoutMs * 2, 2_147_483_647),
     (socket) => socket.destroy(),
   );
-  const addressConnections = new ConcurrentQuota(limits.maxConnectionsPerAddress);
   const acceptedSockets = new Set<Socket>();
   server.on("connection", (socket) => {
     const tracked = socket as Socket;
     acceptedSockets.add(tracked);
     tracked.once("close", () => acceptedSockets.delete(tracked));
-    const identity = tracked.remoteAddress ?? "unknown";
-    const release = addressConnections.acquire(identity);
+    addressConnectionLimiter.admitRaw(tracked);
+  });
+  return acceptedSockets;
+}
+
+class AddressConnectionLimiter {
+  readonly #rawConnections: ConcurrentQuota;
+  readonly #connections: ConcurrentQuota;
+  readonly #rejected = new WeakSet<Socket>();
+  readonly #identifyRemoteAddress: (socket: Socket) => string;
+
+  constructor(
+    limit: number,
+    globalLimit: number,
+    identifyRemoteAddress: (socket: Socket) => string,
+  ) {
+    // Keep exactly one per-address raw socket available beyond normal secure
+    // admission so it can receive a controlled HTTP 429 after TLS. All later
+    // raw sockets are rejected before they can consume the global pool.
+    this.#rawConnections = new ConcurrentQuota(Math.min(limit + 1, globalLimit));
+    this.#connections = new ConcurrentQuota(limit);
+    this.#identifyRemoteAddress = identifyRemoteAddress;
+  }
+
+  admitRaw(socket: Socket): void {
+    const release = this.#rawConnections.acquire(this.#identifyRemoteAddress(socket));
     if (release === null) {
       socket.destroy();
       return;
     }
     socket.once("close", release);
-  });
-  return acceptedSockets;
+  }
+
+  admit(socket: Socket): void {
+    const release = this.#connections.acquire(this.#identifyRemoteAddress(socket));
+    if (release === null) {
+      this.#rejected.add(socket);
+      return;
+    }
+    socket.once("close", release);
+  }
+
+  isRejected(socket: Socket): boolean {
+    return this.#rejected.has(socket);
+  }
 }
 
 function validateLimits(limits: ServiceLimits): void {

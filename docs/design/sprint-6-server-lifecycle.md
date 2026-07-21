@@ -54,7 +54,15 @@ Non-TTY output is one bounded machine-readable record with no ANSI, progress ani
 - Say "data and identity: preserved" only after the server verifies preservation.
 - Use "last verified runtime" rather than promising a rollback when none occurred.
 - Use bounded, actionable failures: what stopped, whether activation occurred, what remains available, and the next command.
-- Do not expose artifact URLs, credentials, recovery material, local secret paths, CA material, or raw process errors.
+- Do not expose artifact URLs, credentials, recovery material, local secret paths, CA material, or raw process errors, except for the narrow trusted-terminal fresh-setup handoff below.
+- During successful fresh TTY setup only, output these two lines once:
+
+```text
+Recovery credential (store offline; authorizes recovery and new invitations; shown once): <credential>
+Bootstrap owner enrollment invitation (enrolls the first owner; single-use; shown once): <invitation>
+```
+
+  These values must never appear during non-TTY setup, repeated setup, status, update, logs, diagnostics, or error output.
 - Do not add retry loops, service installation, or LAN enablement implicitly.
 
 ## Client Facade Copy

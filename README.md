@@ -72,10 +72,32 @@ borg-mcp-server setup
 borg-mcp-server start
 ```
 
-Running `setup` again refuses to change an existing installation. After stopping
-the server, `borg-mcp-server setup --reinitialize` explicitly destroys and
-recreates the server identity and database; use it only when prior state may be
-discarded.
+Setup verifies and prepares the latest immutable npm artifact, but starts no
+listener or managed service. Running `setup` again is idempotent: it preserves
+the existing data and identity and never repeats credentials. After stopping the
+server, `borg-mcp-server setup --reinitialize` explicitly destroys and recreates
+the server identity and database; use it only when prior state may be discarded.
+
+`borg-mcp-server start` remains a foreground command. Ctrl-C stops it, and it
+does not install or enable persistence. Inspect exact running evidence or stage
+and activate a verified update with:
+
+```sh
+borg-mcp-server status
+borg-mcp-server update
+```
+
+When stdout is not a terminal, `status` and `update` emit one bounded JSON
+record. Status never derives a build identity from a source checkout. If an
+older package does not provide embedded source identity, the field is reported
+as unavailable.
+
+The server library provides matching launchd and systemd adapter definitions
+that point at the atomically selected `current` artifact and preserve
+`BORG_SERVER_DATA_DIR`. Managed persistence is an explicit, separately reviewed
+handoff; foreground start never installs it. The lifecycle contract and terminal
+copy are documented in
+[`docs/design/sprint-6-server-lifecycle.md`](docs/design/sprint-6-server-lifecycle.md).
 
 The server listens on `https://127.0.0.1:7091` by default. Use
 `BORG_SERVER_DATA_DIR` to select another data directory.

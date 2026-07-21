@@ -1,9 +1,11 @@
 import type { ServerService } from "./service.js";
+import { RuntimeUpdateFailure } from "./runtime-operator.js";
 
 export interface CliIo {
   readonly stdout: (message: string) => void;
   readonly stderr: (message: string) => void;
   readonly readSecret?: (prompt: string) => Promise<string>;
+  readonly isTTY?: boolean;
 }
 
 const usage = `Usage: borg-mcp-server <command> [options]
@@ -11,6 +13,8 @@ const usage = `Usage: borg-mcp-server <command> [options]
 Commands:
   setup [--reinitialize]  Prepare an offline server installation
   start    Start the server process
+  status [--json]  Report exact local runtime evidence
+  update [--json]  Verify and activate the latest server artifact
   client-rotate <client-id>  Rotate one client credential offline
   client-revoke <client-id>  Revoke one client and its credentials offline
   client-grant <client-id> <cube-id> <read|write|manage>  Set one offline cube grant
@@ -58,11 +62,100 @@ export async function runCli(
         return 1;
       }
       const result = await service.setup({ reinitialize: extraArgs[0] === "--reinitialize" });
-      io.stdout(`Server setup complete.\nRecovery credential (shown once; keep offline): ${result.recoveryCredential}\nOwner enrollment invitation (single-use, shown once; enroll the owner client): ${result.initialInvitation}\nSetup created no cube.\nNext: start the server with \`borg-mcp-server start\`.`);
+      const artifact = result.artifact === undefined
+        ? "Artifact: unavailable"
+        : `Artifact: borgmcp-server@${result.artifact.version} (${result.artifact.integrity})`;
+      if ("existing" in result) {
+        io.stdout([
+          "Local server is already prepared.",
+          artifact,
+          `Build identity: ${result.artifact?.sourceSha ?? "unavailable"}`,
+          "Data and identity: unchanged",
+          "No server process started.",
+          "Next: borg-mcp-server start",
+        ].join("\n"));
+        return 0;
+      }
+      io.stdout([
+        "Local server prepared.",
+        artifact,
+        `Build identity: ${result.artifact?.sourceSha ?? "unavailable"}`,
+        "Data and identity: prepared",
+        "No server process started.",
+        `Recovery credential (shown once; keep offline): ${result.recoveryCredential}`,
+        `Owner enrollment invitation (single-use, shown once; enroll the owner client): ${result.initialInvitation}`,
+        "Setup created no cube.",
+        "Next: borg-mcp-server start",
+      ].join("\n"));
       return 0;
     case "start":
       await service.start(extraArgs);
       return 0;
+    case "status": {
+      if (extraArgs.length > 1 || (extraArgs.length === 1 && extraArgs[0] !== "--json") ||
+          service.status === undefined) return invalidArguments(io);
+      const status = await service.status();
+      if (extraArgs[0] === "--json" || io.isTTY === false) {
+        io.stdout(JSON.stringify({
+          status: status.status,
+          artifact: status.artifact === null
+            ? null
+            : `borgmcp-server@${status.artifact.version}`,
+          artifact_integrity: status.artifact?.integrity ?? null,
+          build_identity: status.buildIdentity,
+          endpoint: status.endpoint,
+          mode: status.mode,
+          data_identity: status.dataIdentity,
+        }));
+      } else {
+        io.stdout(renderRuntimeStatus(status));
+      }
+      return 0;
+    }
+    case "update": {
+      if (extraArgs.length > 1 || (extraArgs.length === 1 && extraArgs[0] !== "--json") ||
+          service.update === undefined) return invalidArguments(io);
+      let result: Awaited<ReturnType<NonNullable<ServerService["update"]>>>;
+      try {
+        result = await service.update();
+      } catch (error) {
+        if (!(error instanceof RuntimeUpdateFailure)) throw error;
+        renderUpdateFailure(error, io, extraArgs[0] === "--json" || io.isTTY === false);
+        return 1;
+      }
+      if (extraArgs[0] === "--json" || io.isTTY === false) {
+        io.stdout(JSON.stringify({
+          status: result.outcome,
+          artifact: `borgmcp-server@${result.artifact.version}`,
+          artifact_integrity: result.artifact.integrity,
+          build_identity: result.runningIdentity?.source_sha ?? result.artifact.sourceSha,
+          mode: result.outcome === "updated" ? "managed" : "stopped",
+          data_identity: result.dataIdentity,
+        }));
+      } else if (result.outcome === "updated") {
+        io.stdout([
+          `Verifying borgmcp-server@${result.artifact.version}...`,
+          "Artifact verified and activated.",
+          "Restarting the verified local server...",
+          `Local server is running.`,
+          `Artifact: borgmcp-server@${result.artifact.version} (${result.artifact.integrity})`,
+          `Build identity: ${result.runningIdentity?.source_sha ?? "unavailable"}`,
+          "Data and identity: preserved",
+          "Next: borg-mcp-server status",
+        ].join("\n"));
+      } else {
+        io.stdout([
+          `Verifying borgmcp-server@${result.artifact.version}...`,
+          "Artifact verified and activated.",
+          "No server process started.",
+          `Artifact: borgmcp-server@${result.artifact.version} (${result.artifact.integrity})`,
+          `Build identity: ${result.artifact.sourceSha ?? "unavailable"}`,
+          "Data and identity: preserved",
+          "Next: borg-mcp-server start",
+        ].join("\n"));
+      }
+      return 0;
+    }
     case "client-rotate":
       if (extraArgs.length !== 1 || service.rotateClient === undefined) return invalidArguments(io);
       io.stdout(`Client credential rotated (shown once): ${await service.rotateClient(extraArgs[0]!)}`);
@@ -125,6 +218,63 @@ export async function runCli(
       io.stderr("Unknown command.");
       return 1;
   }
+}
+
+function renderUpdateFailure(failure: RuntimeUpdateFailure, io: CliIo, machine: boolean): void {
+  const state = failure.code === "ARTIFACT_VERIFICATION_FAILED"
+    ? "verification_failed"
+    : failure.recovery === "restored"
+      ? "restored"
+      : failure.recovery === "stopped"
+        ? "stopped"
+        : "recovery_failed";
+  if (machine) {
+    io.stdout(JSON.stringify({
+      status: "failed",
+      error_code: failure.code,
+      recovery: state,
+      data_identity: "preserved",
+    }));
+    return;
+  }
+  if (failure.code === "ARTIFACT_VERIFICATION_FAILED") {
+    io.stderr([
+      "Update stopped: artifact verification failed.",
+      "No activation occurred.",
+      "The last verified runtime remains available.",
+      "Next: borg-mcp-server status",
+    ].join("\n"));
+    return;
+  }
+  io.stderr([
+    "Update stopped: activation did not complete.",
+    failure.recovery === "restored"
+      ? "The last verified runtime was restored."
+      : failure.recovery === "stopped"
+        ? "The server stopped safely."
+        : "Recovery did not complete; inspect server status.",
+    "Data and identity: preserved",
+    "Next: borg-mcp-server status",
+  ].join("\n"));
+}
+
+function renderRuntimeStatus(status: Awaited<ReturnType<NonNullable<ServerService["status"]>>>): string {
+  const heading = status.status === "running"
+    ? status.buildIdentity === null
+      ? "Local server is reachable, but its running build identity is unavailable."
+      : "Local server is running."
+    : "Local server is stopped.";
+  const artifact = status.artifact === null
+    ? "Artifact: unavailable"
+    : `Artifact: borgmcp-server@${status.artifact.version} (${status.artifact.integrity})`;
+  return [
+    heading,
+    artifact,
+    `Build identity: ${status.buildIdentity ?? "unavailable"}`,
+    `Endpoint: ${status.endpoint ?? "unavailable"}`,
+    `Mode: ${status.mode}`,
+    `Data and identity: ${status.dataIdentity}`,
+  ].join("\n");
 }
 
 function parseClientInviteArguments(

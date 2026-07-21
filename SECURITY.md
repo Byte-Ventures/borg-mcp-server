@@ -36,3 +36,10 @@ has been coordinated.
 - Back up sensitive state using encrypted storage and test restoration in a
   separate environment.
 - Review dependency and release provenance before upgrading.
+- Use the verified runtime lifecycle rather than pointing a service at a mutable
+  source checkout. Activation verifies npm integrity and the staged artifact
+  tree, switches the `current` target atomically, and accepts a restarted process
+  only when its authenticated runtime identity matches the selected artifact.
+- Review generated launchd or systemd definitions before enabling them. They
+  must retain the intended data directory and execute the immutable `current`
+  artifact target.

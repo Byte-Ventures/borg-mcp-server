@@ -10,6 +10,7 @@ const io = {
   stdout: (message: string): void => console.log(message),
   stderr: (message: string): void => console.error(message),
   readSecret: readHiddenSecret,
+  isTTY: process.stdout.isTTY === true,
 };
 
 async function readHiddenSecret(prompt: string): Promise<string> {

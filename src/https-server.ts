@@ -17,6 +17,7 @@ import { resolveBindOptions, type BindOptionsInput } from "./network-policy.js";
 import type { CoordinationRequest, CoordinationResponse } from "./coordination-api.js";
 import type { Principal } from "./principal.js";
 import { disabledDebugLogger, type DebugLogger, type DebugRoute } from "./debug-log.js";
+import { RUNTIME_INFO_PATH, type RuntimeBuildIdentity } from "./runtime-identity.js";
 
 export interface ServiceLimits {
   readonly maxConnections: number;
@@ -66,6 +67,7 @@ export interface RequestHandlerContext {
   ) => Promise<Principal | "missing" | "invalid" | "expired" | "revoked" | "evicted" | "rejected">;
   readonly handleCoordination?: (request: CoordinationRequest) => Promise<CoordinationResponse>;
   readonly debugLogger: DebugLogger;
+  readonly runtimeIdentity?: RuntimeBuildIdentity;
 }
 
 export interface HttpsServerOptions {
@@ -80,6 +82,7 @@ export interface HttpsServerOptions {
   readonly handleCoordination?: RequestHandlerContext["handleCoordination"];
   readonly limits?: ServiceLimits;
   readonly debugLogger?: DebugLogger;
+  readonly runtimeIdentity?: RuntimeBuildIdentity;
   readonly testHooks?: {
     readonly identifyRemoteAddress?: (socket: Socket) => string;
     readonly identifyConnectionAddress?: (socket: Socket) => string;
@@ -183,6 +186,7 @@ export function createRequestHandlerContext(
     ...(options.handleCoordination === undefined
       ? {}
       : { handleCoordination: options.handleCoordination }),
+    ...(options.runtimeIdentity === undefined ? {} : { runtimeIdentity: options.runtimeIdentity }),
     debugLogger: options.debugLogger ?? disabledDebugLogger,
   });
 }
@@ -342,7 +346,7 @@ async function handleRequest(
     return;
   }
 
-  if (isCoordinationPath(path) && context.handleCoordination !== undefined) {
+  if (isAuthenticatedPath(path) && context.authorizeCoordination !== undefined) {
     let decoded: unknown;
     if (requestBody.length === 0) {
       decoded = undefined;
@@ -354,12 +358,7 @@ async function handleRequest(
       }
     }
     const authorization = request.headers.authorization;
-    const authorizeCoordination = context.authorizeCoordination;
-    if (authorizeCoordination === undefined) {
-      sendJson(response, 500, protocolError("INTERNAL_ERROR", "Coordination authentication is unavailable."), true);
-      return;
-    }
-    const authentication = await authorizeCoordination(authorization, signal);
+    const authentication = await context.authorizeCoordination(authorization, signal);
     trace.authentication = typeof authentication === "string" ? authentication : "accepted";
     if (signal.aborted) return;
     if (typeof authentication === "string") {
@@ -376,6 +375,22 @@ async function handleRequest(
       return;
     }
     trace.principal = authentication;
+    if (path === RUNTIME_INFO_PATH) {
+      if (request.method !== "GET" || requestBody.length !== 0) {
+        sendEmpty(response, request.method === "GET" ? 400 : 405, true);
+        return;
+      }
+      if (context.runtimeIdentity === undefined) {
+        sendEmpty(response, 404);
+        return;
+      }
+      sendJson(response, 200, context.runtimeIdentity);
+      return;
+    }
+    if (context.handleCoordination === undefined) {
+      sendJson(response, 500, protocolError("INTERNAL_ERROR", "Coordination handling is unavailable."), true);
+      return;
+    }
     const clientIdentity = credentialRateLimitIdentity(authentication, request.method, path);
     const credentialRetry = credentialRateLimiter.consume(clientIdentity);
     if (credentialRetry !== null) return sendRateLimited(response, credentialRetry);
@@ -431,6 +446,7 @@ function debugRoute(rawUrl: string | undefined): DebugRoute {
   if (path === null) return "unknown";
   if (path === HEALTH_PATH) return "health";
   if (path === PROTOCOL_INFO_PATH) return "protocol";
+  if (path === RUNTIME_INFO_PATH) return "runtime";
   if (path === ENROLLMENT_EXCHANGE_PATH) return "enrollment_exchange";
   if (path === ATTACH_PATH) return "client_attach";
   if (path === "/api/cubes") return "cubes";
@@ -614,6 +630,10 @@ function parseCoordinationQuery(
 function isCoordinationPath(path: string | null): path is string {
   return path === ATTACH_PATH || path === CUBES_PATH ||
     path?.startsWith("/api/cubes/") === true;
+}
+
+function isAuthenticatedPath(path: string | null): path is string {
+  return path === RUNTIME_INFO_PATH || isCoordinationPath(path);
 }
 
 function credentialRateLimitIdentity(

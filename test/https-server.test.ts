@@ -17,6 +17,7 @@ import {
 } from "../src/https-server.js";
 import { clientPrincipal, droneSessionPrincipal } from "../src/principal.js";
 import { createDebugLogger, disabledDebugLogger } from "../src/debug-log.js";
+import { createRuntimeBuildIdentity } from "../src/runtime-identity.js";
 
 interface TestResponse {
   readonly status: number;
@@ -85,6 +86,11 @@ describe("HTTPS service", () => {
         };
         return { status: 200, body: { protocol_version: "2", request_id: "unexpected" } };
       },
+      runtimeIdentity: createRuntimeBuildIdentity({
+        sourceSha: "a".repeat(40),
+        artifactIntegrity: `sha512-${"A".repeat(86)}==`,
+        startedAt: new Date("2026-07-21T12:00:00.000Z"),
+      }),
       limits: {
         maxConnections: 4,
         maxConnectionsPerAddress: 4,
@@ -127,6 +133,29 @@ describe("HTTPS service", () => {
 
     expect(missing).toMatchObject({ status: 200, body: '{"protocol_version":"2"}' });
     expect(invalid).toMatchObject({ status: 200, body: '{"protocol_version":"2"}' });
+  });
+
+  it("serves build identity only to an authenticated principal without coordination mutation", async () => {
+    const before = coordinationCalls;
+    const missing = await request(server.origin, certificate, "/api/runtime");
+    const invalid = await request(server.origin, certificate, "/api/runtime", {
+      authorization: "Bearer invalid-test-token",
+    });
+    const accepted = await request(server.origin, certificate, "/api/runtime", {
+      authorization: "Bearer accepted-test-token",
+    });
+
+    expect(missing.status).toBe(401);
+    expect(invalid.status).toBe(401);
+    expect(accepted.status).toBe(200);
+    expect(JSON.parse(accepted.body)).toEqual({
+      package_version: "0.1.8",
+      source_sha: "a".repeat(40),
+      artifact_integrity: `sha512-${"A".repeat(86)}==`,
+      protocol_version: "2",
+      started_at: "2026-07-21T12:00:00.000Z",
+    });
+    expect(coordinationCalls).toBe(before);
   });
 
   it("does not log secret-bearing authentication or enrollment failures", async () => {

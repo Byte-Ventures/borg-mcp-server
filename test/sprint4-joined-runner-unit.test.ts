@@ -1,4 +1,4 @@
-import { chmod, mkdir, mkdtemp, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -13,6 +13,7 @@ import {
   SPRINT4_CLIENT_SHA,
   SPRINT4_EXPECTED_CLIENT_MAIN_SHA,
   assertClientPinValues,
+  assertSameProvisionedFile,
   assertSameProvisionedFiles,
   assertProvisionedRun,
   assertStructuredResultContract,
@@ -20,9 +21,11 @@ import {
   cleanupJoinedRun,
   executeJoinedRunner,
   isJoinedRunEnabled,
+  materializeClientCaHandoff,
   parseStructuredResult,
   redactOutput,
   runBounded,
+  snapshotClientCaHandoff,
   snapshotOwnedProvisionedFiles,
   validateJoinedRunnerEnvironment,
 } from "./sprint4-joined-runner.js";
@@ -152,6 +155,25 @@ describe("Sprint 4 joined runner safeguards", () => {
     try {
       const initialSnapshot = await snapshotOwnedProvisionedFiles(run, root);
       await expect(snapshotOwnedProvisionedFiles(run, root)).resolves.toBeDefined();
+      const caHandoff = await materializeClientCaHandoff(root, initialSnapshot.trust);
+      expect(caHandoff.canonicalPath).not.toBe(run.trustMaterialReference);
+      expect(caHandoff.bytes.equals(initialSnapshot.trust.bytes)).toBe(true);
+      await writeFile(caHandoff.canonicalPath, "changed", { mode: 0o600 });
+      const changedHandoff = await snapshotClientCaHandoff(root, caHandoff.canonicalPath);
+      expect(() => assertSameProvisionedFile(caHandoff, changedHandoff)).toThrow("changed before spawn");
+      const handoffReplacement = join(root, "s4-client-ca-replacement.crt");
+      await writeFile(handoffReplacement, changedHandoff.bytes, { mode: 0o600 });
+      await rename(handoffReplacement, caHandoff.canonicalPath);
+      const replacedHandoff = await snapshotClientCaHandoff(root, caHandoff.canonicalPath);
+      expect(() => assertSameProvisionedFile(changedHandoff, replacedHandoff)).toThrow("changed before spawn");
+      await chmod(caHandoff.canonicalPath, 0o640);
+      await expect(snapshotClientCaHandoff(root, caHandoff.canonicalPath)).rejects.toThrow("private");
+      await chmod(caHandoff.canonicalPath, 0o600);
+      const movedHandoff = join(root, "s4-client-ca-moved.crt");
+      await rename(caHandoff.canonicalPath, movedHandoff);
+      await symlink(movedHandoff, caHandoff.canonicalPath);
+      await expect(snapshotClientCaHandoff(root, caHandoff.canonicalPath)).rejects.toThrow("private");
+      await expect(snapshotClientCaHandoff(root, run.trustMaterialReference)).rejects.toThrow("path changed");
       const shared = await mkdtemp(join(tmpdir(), "borg-s4-runner-shared-"));
       try {
         const sharedReference = join(shared, "reader.json");
@@ -172,6 +194,7 @@ describe("Sprint 4 joined runner safeguards", () => {
       expect(JSON.parse(mapped["BORG_E2E_WRITER_REFS"]!)).toMatchObject([{ drone_id: "55555555-5555-4555-8555-555555555555" }, { drone_id: "77777777-7777-4777-8777-777777777777" }]);
       let selected = false;
       let cleaned = false;
+      let provisionedCaPath = "";
       const outcome = await executeJoinedRunner(
         { [SPRINT4_JOINED_GATE]: "1", [SPRINT4_CLIENT_DIRECTORY]: "/tmp/disposable-client" },
         {
@@ -180,6 +203,7 @@ describe("Sprint 4 joined runner safeguards", () => {
             const references = join(input.dataDirectory, "s4-e2e-credentials");
             await mkdir(references, { recursive: true, mode: 0o700 });
             const caPath = join(input.dataDirectory, "ca.crt");
+            provisionedCaPath = caPath;
             await writeFile(caPath, "test-ca", { mode: 0o600 });
             const copy = async (name: "reader" | "writerA" | "writerB"): Promise<string> => {
               const filename = name === "writerA" ? "writer-a.json" : name === "writerB" ? "writer-b.json" : "reader.json";
@@ -197,8 +221,11 @@ describe("Sprint 4 joined runner safeguards", () => {
             };
           },
           spawn: async (command, args, options) => {
+            const handedOffCaPath = options.env["BORG_E2E_CA_PATH"]!;
+            await writeFile(provisionedCaPath, "changed", { mode: 0o600 });
             selected = command === "npx" && args.join(" ") === "vitest run __tests__/s4-coupled-e2e.test.ts" &&
-              options.env["BORG_S4_COUPLED_E2E"] === "1" && options.env["BORG_E2E_READER_TOKEN"] === "r".repeat(43);
+              options.env["BORG_S4_COUPLED_E2E"] === "1" && options.env["BORG_E2E_READER_TOKEN"] === "r".repeat(43) &&
+              handedOffCaPath !== provisionedCaPath && (await readFile(handedOffCaPath, "utf8")) === "test-ca";
             const stdout = `S4_COUPLED_E2E ${JSON.stringify(validSuccess(endpoint))}`;
             return { code: 0, stderr: "", stdout, stdoutOverflow: false, stderrOverflow: false, stdoutBytes: Buffer.byteLength(stdout), stderrBytes: 0 };
           },

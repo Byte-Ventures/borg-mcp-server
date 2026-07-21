@@ -5,7 +5,7 @@
  * "1". This module deliberately owns no production surface.
  */
 import { createHash } from "node:crypto";
-import { access, lstat, mkdtemp, readFile, realpath, rm, stat } from "node:fs/promises";
+import { access, lstat, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, resolve } from "node:path";
@@ -100,11 +100,18 @@ export async function executeJoinedRunner(
     const initialFiles = await snapshotOwnedProvisionedFiles(run, root);
     const finalFiles = await snapshotOwnedProvisionedFiles(run, root);
     assertSameProvisionedFiles(initialFiles, finalFiles);
+    const caHandoff = await materializeClientCaHandoff(root, finalFiles.trust);
+    const spawnFiles = await snapshotOwnedProvisionedFiles(run, root);
+    assertSameProvisionedFiles(finalFiles, spawnFiles);
+    const spawnCaHandoff = await snapshotClientCaHandoff(root, caHandoff.canonicalPath);
+    assertSameProvisionedFile(caHandoff, spawnCaHandoff);
+    assertSameTrustMaterial(spawnFiles.trust, spawnCaHandoff);
     const clientEnvironment = buildClientFixtureEnvironmentFromSnapshots(
       env,
       configuration.clientDirectory,
       run,
-      finalFiles,
+      spawnFiles,
+      spawnCaHandoff.canonicalPath,
     );
     const result = await (dependencies.spawn ?? runBounded)(
       "npx",
@@ -160,6 +167,7 @@ function buildClientFixtureEnvironmentFromSnapshots(
   clientDirectory: string,
   run: Sprint4ProvisionedRun,
   files: ProvisionedFileSnapshots,
+  caPath: string,
 ): NodeJS.ProcessEnv {
   return buildClientFixtureEnvironmentFromReferences(
     env,
@@ -167,6 +175,7 @@ function buildClientFixtureEnvironmentFromSnapshots(
     run,
     readCredentialReference(files.reader.bytes),
     [readCredentialReference(files.writerA.bytes), readCredentialReference(files.writerB.bytes)],
+    caPath,
   );
 }
 
@@ -176,6 +185,7 @@ function buildClientFixtureEnvironmentFromReferences(
   run: Sprint4ProvisionedRun,
   reader: CredentialReference,
   writers: readonly [CredentialReference, CredentialReference] | CredentialReference[],
+  caPath = run.trustMaterialReference,
 ): NodeJS.ProcessEnv {
   const writerA = writers[0];
   const writerB = writers[1];
@@ -198,7 +208,7 @@ function buildClientFixtureEnvironmentFromReferences(
     BORG_S4_COUPLED_E2E: "1",
     BORG_E2E_CLIENT_SHA: SPRINT4_EXPECTED_CLIENT_MAIN_SHA,
     BORG_API_URL: run.endpoint,
-    BORG_E2E_CA_PATH: run.trustMaterialReference,
+    BORG_E2E_CA_PATH: caPath,
     BORG_E2E_TRUST_IDENTITY: run.trustIdentity,
     BORG_E2E_CUBE_ID: run.cubeId,
     BORG_E2E_READER_DRONE_ID: reader.drone_id,
@@ -581,6 +591,38 @@ export function assertSameProvisionedFiles(initial: ProvisionedFileSnapshots, fi
       throw new Error("Sprint 4 provisioner handoff files changed before spawn.");
     }
   }
+}
+
+export function assertSameProvisionedFile(initial: ProvisionedFileSnapshot, final: ProvisionedFileSnapshot): void {
+  if (initial.canonicalPath !== final.canonicalPath || initial.device !== final.device || initial.inode !== final.inode ||
+      initial.mode !== final.mode || initial.size !== final.size || initial.digest !== final.digest) {
+    throw new Error("Sprint 4 runner CA handoff changed before spawn.");
+  }
+}
+
+function assertSameTrustMaterial(source: ProvisionedFileSnapshot, handoff: ProvisionedFileSnapshot): void {
+  if (source.size !== handoff.size || source.digest !== handoff.digest || !source.bytes.equals(handoff.bytes)) {
+    throw new Error("Sprint 4 runner CA handoff does not match the final provisioner trust material.");
+  }
+}
+
+export async function materializeClientCaHandoff(
+  root: string,
+  trust: ProvisionedFileSnapshot,
+): Promise<ProvisionedFileSnapshot> {
+  const canonicalRoot = await realpath(root);
+  const path = join(canonicalRoot, "s4-client-ca.crt");
+  await writeFile(path, trust.bytes, { flag: "wx", mode: 0o600 });
+  const handoff = await snapshotOwnedFile(canonicalRoot, path, path);
+  assertSameTrustMaterial(trust, handoff);
+  return handoff;
+}
+
+export async function snapshotClientCaHandoff(root: string, path: string): Promise<ProvisionedFileSnapshot> {
+  const canonicalRoot = await realpath(root);
+  const expected = join(canonicalRoot, "s4-client-ca.crt");
+  if (path !== expected) throw new Error("Sprint 4 runner CA handoff path changed before spawn.");
+  return snapshotOwnedFile(canonicalRoot, path, expected);
 }
 
 async function snapshotOwnedFile(root: string, path: string, expected: string): Promise<ProvisionedFileSnapshot> {

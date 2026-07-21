@@ -83,7 +83,7 @@ Available commands: setup, start, status, update.
 Next: run borg server --help.
 ```
 
-`<command>` is the parsed command token rendered as inert text. Do not include remaining user-supplied arguments.
+`<command>` is the parsed command token rendered as inert text. Do not include remaining user-supplied arguments. Render at most 80 Unicode code points total; replace each Unicode control code point with `?`, and, when truncated, reserve the final three code points for `...`. The renderer must not emit terminal control sequences.
 
 ### Missing Server Executable
 
@@ -95,9 +95,21 @@ No checkout fallback is attempted.
 
 `<command>` is the requested lifecycle command. The client must not search a checkout, infer a local binary path, or start another process after this error.
 
+### Server Command Startup Failure
+
+This state applies when process creation fails for a reason other than `ENOENT`. It is distinct from Missing Server Executable and exits `1`; only `ENOENT` renders Missing Server Executable and exits `127`.
+
+```text
+Local server command could not be started.
+Next: check local permissions and system resources, then rerun borg server <command>.
+No server command was started.
+```
+
+`<command>` uses the same bounded inert rendering rule as Unsupported Command. Do not expose the raw spawn error, error code, executable path, or a checkout hint.
+
 ### Facade Non-TTY
 
-For the three client-owned messages above, non-TTY behavior is the same bounded plain text with no ANSI, JSON, stack trace, searched path, or checkout hint. Server-provided non-TTY lifecycle output remains server-owned and follows the lifecycle mockup.
+For the four client-owned messages above, non-TTY behavior is the same bounded plain text with no ANSI, JSON, stack trace, searched path, or checkout hint. Server-provided non-TTY lifecycle output remains server-owned and follows the lifecycle mockup.
 
 ## Accessibility And Portability
 
@@ -115,4 +127,6 @@ Core command wording is identical on Linux and macOS. Only the adapter name and 
 - Restart/rollback preserves data and identity or reports a safe stopped state.
 - Managed persistence is an explicit action and identifies its adapter.
 - Non-TTY output is bounded and machine-readable.
+- Client-rendered command tokens are inert, control-safe, and capped at 80 characters.
+- Missing executable is `ENOENT` only; other spawn failures use the distinct bounded startup-failure state.
 - Any new lifecycle copy, service command grammar, or error state is returned to Product Design before hardening.

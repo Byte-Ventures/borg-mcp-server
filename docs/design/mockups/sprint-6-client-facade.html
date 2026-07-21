@@ -46,8 +46,16 @@ Next: install a verified borgmcp-server release, then rerun
 <span class="dim">No checkout fallback is attempted.</span></pre>
     </section>
     <section>
+      <h2>Server Command Startup Failure</h2>
+      <pre><span class="bad">Local server command could not be started.</span>
+Next: check local permissions and system resources, then rerun
+<span class="ok">borg server &lt;command&gt;</span>.
+<span class="dim">No server command was started.</span></pre>
+      <p>Use this only when process creation fails for a reason other than ENOENT. It exits 1. ENOENT alone uses Missing Executable and exits 127. Render command tokens as inert text, capped at 80 Unicode code points total; replace each Unicode control code point with <code>?</code> and reserve the final three code points for <code>...</code> when truncated.</p>
+    </section>
+    <section>
       <h2>Non-TTY</h2>
-      <pre>Use the same plain text. Do not emit ANSI, JSON, a stack trace, a searched path, or a checkout hint for facade errors.</pre>
+      <pre>Use the same bounded plain text. Do not emit ANSI, JSON, a stack trace, a searched path, raw spawn errors, or a checkout hint for facade errors.</pre>
     </section>
   </main>
 </body>

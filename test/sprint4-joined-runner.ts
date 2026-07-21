@@ -31,6 +31,7 @@ export interface SpawnResult {
 
 export interface JoinedRunnerDependencies {
   readonly provision?: typeof provisionSprint4E2e;
+  readonly verifyClientPins?: typeof verifyClientPins;
   readonly spawn?: (
     command: string,
     args: readonly string[],
@@ -80,7 +81,7 @@ export async function executeJoinedRunner(
   dependencies: JoinedRunnerDependencies = {},
 ): Promise<Record<string, unknown>> {
   const configuration = validateJoinedRunnerEnvironment(env);
-  await verifyClientPins(configuration.clientDirectory);
+  await (dependencies.verifyClientPins ?? verifyClientPins)(configuration.clientDirectory);
   const root = await mkdtemp(join(tmpdir(), "borg-s4-joined-"));
   let run: Sprint4ProvisionedRun | undefined;
   try {
@@ -91,42 +92,157 @@ export async function executeJoinedRunner(
       port: 0,
     });
     assertProvisionedRun(run);
+    const clientEnvironment = await buildClientFixtureEnvironment(env, configuration.clientDirectory, run);
     const result = await (dependencies.spawn ?? runBounded)(
       "npx",
       ["vitest", "run", "__tests__/s4-coupled-e2e.test.ts"],
       {
         cwd: configuration.clientDirectory,
-        env: {
-          ...minimalEnvironment(env),
-          [SPRINT4_JOINED_GATE]: "1",
-          [SPRINT4_CLIENT_DIRECTORY]: configuration.clientDirectory,
-          BORG_RQ_SPRINT4_SERVER_RUN: JSON.stringify({
-            endpoint: run.endpoint,
-            trust_material_reference: run.trustMaterialReference,
-            trust_identity: run.trustIdentity,
-            cube_id: run.cubeId,
-            credential_references: run.credentialReferences,
-          }),
-        },
+        env: clientEnvironment,
       },
     );
     if (result.code !== 0) throw new Error(`Sprint 4 client fixture failed: ${redactOutput(result.stderr || result.stdout)}`);
-    return parseStructuredResult(result.stdout);
+    if (result.stderr.trim() !== "") throw new Error(`Sprint 4 client fixture wrote to stderr: ${redactOutput(result.stderr)}`);
+    const structured = parseStructuredResult(result.stdout);
+    assertStructuredResultContract(structured, run);
+    return structured;
   } finally {
     await cleanupJoinedRun(run, root);
   }
 }
 
-export function parseStructuredResult(output: string): Record<string, unknown> {
-  const line = output.split("\n").find((value) => value.startsWith("S4_COUPLED_E2E "));
-  if (line === undefined) throw new Error("Sprint 4 client fixture did not emit a structured result.");
+interface CredentialReference {
+  readonly endpoint: string;
+  readonly trust_material_reference: string;
+  readonly trust_identity: string;
+  readonly cube_id: string;
+  readonly client_id: string;
+  readonly client_credential: string;
+  readonly role_id: string;
+  readonly drone_id: string;
+  readonly session_id: string;
+  readonly session_credential: string;
+}
+
+/** Maps the reviewed client fixture contract from existing provisioner refs. */
+export async function buildClientFixtureEnvironment(
+  env: NodeJS.ProcessEnv,
+  clientDirectory: string,
+  run: Sprint4ProvisionedRun,
+): Promise<NodeJS.ProcessEnv> {
+  assertProvisionedRun(run);
+  const reader = await readCredentialReference(run.credentialReferences.reader);
+  const writers = await Promise.all([
+    readCredentialReference(run.credentialReferences.writerA),
+    readCredentialReference(run.credentialReferences.writerB),
+  ]);
+  assertReferenceContract(run, reader, run.clientIds.reader, run.seats.reader);
+  assertReferenceContract(run, writers[0], run.clientIds.writerA, run.seats.writerA);
+  assertReferenceContract(run, writers[1], run.clientIds.writerB, run.seats.writerB);
+  if (writers[0].session_credential === reader.session_credential ||
+      writers[1].session_credential === reader.session_credential ||
+      writers[0].session_credential === writers[1].session_credential ||
+      writers[0].drone_id === reader.drone_id ||
+      writers[1].drone_id === reader.drone_id ||
+      writers[0].drone_id === writers[1].drone_id) {
+    throw new Error("Sprint 4 provisioner returned cross-wired session credentials.");
+  }
+  return {
+    ...minimalEnvironment(env),
+    [SPRINT4_JOINED_GATE]: "1",
+    [SPRINT4_CLIENT_DIRECTORY]: clientDirectory,
+    BORG_S4_COUPLED_E2E: "1",
+    BORG_E2E_CLIENT_SHA: SPRINT4_CLIENT_SHA,
+    BORG_API_URL: run.endpoint,
+    BORG_E2E_CA_PATH: run.trustMaterialReference,
+    BORG_E2E_TRUST_IDENTITY: run.trustIdentity,
+    BORG_E2E_CUBE_ID: run.cubeId,
+    BORG_E2E_READER_DRONE_ID: reader.drone_id,
+    BORG_E2E_READER_TOKEN: reader.session_credential,
+    BORG_E2E_WRITER_REFS: JSON.stringify(writers),
+  };
+}
+
+async function readCredentialReference(path: string): Promise<CredentialReference> {
+  let decoded: unknown;
   try {
-    const value: unknown = JSON.parse(line.slice("S4_COUPLED_E2E ".length));
+    decoded = JSON.parse(await readFile(path, "utf8"));
+  } catch {
+    throw new Error("Sprint 4 credential reference is unreadable.");
+  }
+  if (decoded === null || typeof decoded !== "object" || Array.isArray(decoded)) {
+    throw new Error("Sprint 4 credential reference is invalid.");
+  }
+  const value = decoded as Record<string, unknown>;
+  const names = [
+    "endpoint", "trust_material_reference", "trust_identity", "cube_id", "client_id",
+    "client_credential", "role_id", "drone_id", "session_id", "session_credential",
+  ] as const;
+  if (names.some((name) => typeof value[name] !== "string" || value[name].length === 0)) {
+    throw new Error("Sprint 4 credential reference is incomplete.");
+  }
+  return value as unknown as CredentialReference;
+}
+
+function assertReferenceContract(
+  run: Sprint4ProvisionedRun,
+  reference: CredentialReference,
+  clientId: string,
+  seat: Sprint4ProvisionedRun["seats"]["reader"],
+): void {
+  if (reference.endpoint !== run.endpoint ||
+      reference.trust_material_reference !== run.trustMaterialReference ||
+      reference.trust_identity !== run.trustIdentity ||
+      reference.cube_id !== run.cubeId ||
+      reference.client_id !== clientId ||
+      reference.role_id !== seat.roleId ||
+      reference.drone_id !== seat.droneId ||
+      reference.session_id !== seat.sessionId ||
+      reference.session_credential.length < 43 ||
+      !isUuid(reference.cube_id) ||
+      !isUuid(reference.role_id) ||
+      !isUuid(reference.drone_id) ||
+      !isUuid(reference.session_id)) {
+    throw new Error("Sprint 4 credential reference does not match the provisioned seat.");
+  }
+}
+
+function isUuid(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(value);
+}
+
+export function parseStructuredResult(output: string): Record<string, unknown> {
+  if (output.length > SPRINT4_RUNNER_OUTPUT_LIMIT) {
+    throw new Error("Sprint 4 client fixture structured output exceeded its bound.");
+  }
+  const lines = output.split("\n").filter((value) => value.startsWith("S4_COUPLED_E2E "));
+  if (lines.length !== 1) throw new Error("Sprint 4 client fixture must emit exactly one structured result.");
+  try {
+    const value: unknown = JSON.parse(lines[0]!.slice("S4_COUPLED_E2E ".length));
     if (value === null || typeof value !== "object" || Array.isArray(value)) throw new Error();
-    return value as Record<string, unknown>;
+    const result = value as Record<string, unknown>;
+    if (result["pass"] !== true || result["cleanup_verified"] !== true) {
+      throw new Error("Sprint 4 client fixture did not verify a successful cleanup.");
+    }
+    return result;
   } catch {
     throw new Error("Sprint 4 client fixture emitted an invalid structured result.");
   }
+}
+
+export function assertStructuredResultContract(result: Record<string, unknown>, run: Pick<Sprint4ProvisionedRun, "endpoint">): void {
+  if (result["client_sha"] !== SPRINT4_CLIENT_SHA || result["origin"] !== run.endpoint) {
+    throw new Error("Sprint 4 client fixture result does not match the pinned joined contract.");
+  }
+  if (containsSensitiveResultField(result)) {
+    throw new Error("Sprint 4 client fixture result contains a credential-bearing field.");
+  }
+}
+
+function containsSensitiveResultField(value: unknown): boolean {
+  if (value === null || typeof value !== "object") return false;
+  return Object.entries(value).some(([key, child]) =>
+    /(?:credential|token|secret|authorization)/iu.test(key) || containsSensitiveResultField(child));
 }
 
 export function redactOutput(value: string): string {

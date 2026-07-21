@@ -33,6 +33,8 @@ has been coordinated.
   account.
 - Keep `~/.borg` owner-controlled and not group/world-writable, and keep the
   `~/.borg/credentials` file owner-only (`0600`); setup never prints the local owner credential.
+- Never automatically replace or reclaim `~/.borg/credentials.lock`; confirm no
+  Borg process is running before manually removing a reported stale lock.
 - Create single-use invitations only in a private interactive terminal.
 - Stop the server before offline credential rotation or revocation.
 - Back up sensitive state using encrypted storage and test restoration in a

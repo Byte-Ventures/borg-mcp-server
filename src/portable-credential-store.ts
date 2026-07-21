@@ -1,6 +1,6 @@
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { constants } from "node:fs";
-import { lstat, open, realpath, rename, unlink } from "node:fs/promises";
+import { link, lstat, mkdir, open, realpath, rename, unlink } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { isIP } from "node:net";
 
@@ -21,6 +21,14 @@ interface PortableCredentialDocument {
 const credentialPattern = /^[A-Za-z0-9_-]{43}$/u;
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const trustPattern = /^spki-sha256:[0-9a-f]{64}$/u;
+const defaultLockAttempts = 500;
+const defaultLockWaitMs = 10;
+
+export interface PortableCredentialLockOptions {
+  readonly attempts?: number;
+  readonly waitMs?: number;
+  readonly onAcquired?: (lockPath: string) => Promise<void>;
+}
 
 export function portableCredentialAccount(origin: string, trustIdentity: string): string {
   return `borg-server-credential:${createHash("sha256").update(origin).update("\0").update(trustIdentity).digest("hex")}`;
@@ -29,14 +37,13 @@ export function portableCredentialAccount(origin: string, trustIdentity: string)
 export async function writePortableServerCredential(
   path: string,
   record: PortableServerCredential,
+  lockOptions: PortableCredentialLockOptions = {},
 ): Promise<void> {
   validateRecord(record);
   const target = await credentialPath(path);
   const canonicalRoot = dirname(target);
   const lock = `${target}.lock`;
-  const lockHandle = await open(lock, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, 0o600);
-  try {
-    await assertPrivateFile(lock);
+  await withCredentialLock(lock, lockOptions, async () => {
     const original = await readPrivateBytesIfPresent(target);
     const document = parseDocument(original);
     const account = portableCredentialAccount(record.origin, record.trustIdentity);
@@ -66,10 +73,7 @@ export async function writePortableServerCredential(
     const directory = await open(canonicalRoot, constants.O_RDONLY);
     try { await directory.sync(); } finally { await directory.close(); }
     await assertPrivateFile(target);
-  } finally {
-    await lockHandle.close();
-    await unlink(lock).catch(() => undefined);
-  }
+  });
 }
 
 export async function readPortableServerCredential(
@@ -91,9 +95,19 @@ export async function readPortableServerCredential(
 }
 
 async function credentialPath(path: string): Promise<string> {
-  const target = resolve(path);
+  if (path !== resolve(path)) throw new Error("Portable credential path is unsafe.");
+  const target = path;
   const parent = dirname(target);
-  const parentMetadata = await lstat(parent);
+  let parentMetadata;
+  try {
+    parentMetadata = await lstat(parent);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    await mkdir(parent, { mode: 0o700 }).catch((mkdirError: unknown) => {
+      if ((mkdirError as NodeJS.ErrnoException).code !== "EEXIST") throw mkdirError;
+    });
+    parentMetadata = await lstat(parent);
+  }
   if (!parentMetadata.isDirectory() || parentMetadata.isSymbolicLink() ||
       (parentMetadata.mode & 0o022) !== 0 ||
       (typeof process.getuid === "function" && parentMetadata.uid !== process.getuid()) ||
@@ -101,6 +115,111 @@ async function credentialPath(path: string): Promise<string> {
     throw new Error("Portable credential parent directory is unsafe.");
   }
   return target;
+}
+
+async function withCredentialLock<T>(
+  lockPath: string,
+  options: PortableCredentialLockOptions,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const attempts = options.attempts ?? defaultLockAttempts;
+  const waitMs = options.waitMs ?? defaultLockWaitMs;
+  if (!Number.isSafeInteger(attempts) || attempts < 1 || attempts > 10_000 ||
+      !Number.isSafeInteger(waitMs) || waitMs < 0 || waitMs > 1_000) {
+    throw new Error("Portable credential lock options are invalid.");
+  }
+  await credentialPath(lockPath.slice(0, -".lock".length));
+  const stage = `${lockPath}.${process.pid}.${randomBytes(6).toString("hex")}.acq`;
+  const payload = Buffer.from(JSON.stringify({
+    pid: process.pid,
+    startTime: new Date(Date.now() - Math.round(process.uptime() * 1_000)).toISOString(),
+  }));
+  const stageHandle = await open(stage, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, 0o600);
+  try {
+    try {
+      await stageHandle.writeFile(payload);
+      await stageHandle.sync();
+    } finally {
+      await stageHandle.close();
+    }
+  } catch (error) {
+    await unlink(stage).catch(() => undefined);
+    throw error;
+  }
+  let acquired = false;
+  try {
+    await assertPrivateFile(stage);
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      try {
+        await link(stage, lockPath);
+        acquired = true;
+        break;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      }
+      const state = await inspectContendedLock(lockPath);
+      if (state === "missing") continue;
+      if (state === "stale") throw new Error(`Borg credential lock is stale: ${lockPath}`);
+      if (waitMs > 0) await new Promise((resolve) => setTimeout(resolve, waitMs));
+    }
+    if (!acquired) throw new Error("Borg seat store is busy");
+    await options.onAcquired?.(lockPath);
+    return await operation();
+  } finally {
+    let releaseError: unknown;
+    if (acquired) {
+      try {
+        await unlink(lockPath);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") releaseError = error;
+      }
+    }
+    await unlink(stage).catch(() => undefined);
+    if (releaseError !== undefined) throw releaseError;
+  }
+}
+
+async function inspectContendedLock(lockPath: string): Promise<"live" | "stale" | "missing"> {
+  try {
+    await credentialPath(lockPath.slice(0, -".lock".length));
+    const before = await lstat(lockPath);
+    if (!before.isFile() || before.isSymbolicLink() || (before.mode & 0o777) !== 0o600 ||
+        (typeof process.getuid === "function" && before.uid !== process.getuid())) {
+      throw new Error("Portable credential lock is unsafe.");
+    }
+    const handle = await open(lockPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+    let bytes: Buffer;
+    try {
+      const opened = await handle.stat();
+      if (!opened.isFile() || opened.dev !== before.dev || opened.ino !== before.ino ||
+          opened.size !== before.size || opened.size > 4_096) {
+        throw new Error("Portable credential lock is unsafe.");
+      }
+      bytes = await handle.readFile();
+      const after = await handle.stat();
+      if (after.dev !== opened.dev || after.ino !== opened.ino || after.size !== opened.size) {
+        throw new Error("Portable credential lock is unsafe.");
+      }
+    } finally {
+      await handle.close();
+    }
+    await credentialPath(lockPath.slice(0, -".lock".length));
+    let parsed: unknown;
+    try { parsed = JSON.parse(bytes.toString("utf8")); } catch { return "stale"; }
+    const pid = typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+      ? (parsed as { pid?: unknown }).pid
+      : undefined;
+    if (!Number.isSafeInteger(pid) || (pid as number) < 1) return "stale";
+    try {
+      process.kill(pid as number, 0);
+      return "live";
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code === "EPERM" ? "live" : "stale";
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return "missing";
+    throw error;
+  }
 }
 
 async function assertPrivateFile(path: string): Promise<void> {

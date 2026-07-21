@@ -69,6 +69,11 @@ is written atomically to the portable owner-only file at
 and not group/world-writable. Setup prints no credential, invitation, or credential path,
 and creates no cube.
 
+Credential updates share the client-compatible `~/.borg/credentials.lock` protocol.
+A live holder is waited on for a bounded interval. A corrupt or dead-holder lock
+fails closed and is never reclaimed automatically; remove it only after confirming
+that no Borg process is running.
+
 ```sh
 borg-mcp-server setup
 borg-mcp-server start

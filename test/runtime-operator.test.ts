@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { createRuntimeOperator, RuntimeUpdateFailure } from "../src/runtime-operator.js";
-import { RuntimeActivationError } from "../src/runtime-lifecycle.js";
+import { operatorErrors, operatorPublicMessage } from "../src/operator-error.js";
+import { RuntimeActivationError, RuntimeArtifactInstallError } from "../src/runtime-lifecycle.js";
 import type { RegistryRuntimeArtifact } from "../src/registry-artifact.js";
 import type { RuntimeLifecycle, VerifiedRuntimeArtifact } from "../src/runtime-lifecycle.js";
 
@@ -64,6 +65,23 @@ describe("runtime operator", () => {
     });
     await vi.waitFor(() => expect(cleanup).toHaveBeenCalledOnce());
     expect(fixture.lifecycle.stage).not.toHaveBeenCalled();
+  });
+
+  it("maps artifact install failure to bounded setup guidance", async () => {
+    const fixture = createFixture(false);
+    fixture.lifecycle.stage.mockRejectedValueOnce(new RuntimeArtifactInstallError());
+
+    let failure: unknown;
+    try {
+      await fixture.operator.prepareLatest(1_000);
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toBe(operatorErrors.RUNTIME_ARTIFACT_INSTALL_FAILED);
+    expect(operatorPublicMessage(failure)).toBe(
+      "Setup could not prepare the verified runtime.\n" +
+      "Next: check your Node.js and npm installation, then rerun setup.",
+    );
   });
 
   it("reports verification failure before activation and bounded rollback outcome after activation", async () => {

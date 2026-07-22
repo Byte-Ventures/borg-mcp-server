@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createRuntimeLifecycle,
   createUnixNpmArtifactUnpacker,
+  RuntimeArtifactInstallError,
 } from "../src/runtime-lifecycle.js";
 import type { RuntimeBuildIdentity } from "../src/runtime-identity.js";
 
@@ -24,8 +25,10 @@ describe("immutable runtime lifecycle", () => {
     const root = await mkdtemp(join(tmpdir(), "borg-runtime-unpacker-"));
     directories.push(root);
     const archive = Buffer.from("verified archive bytes");
+    const shrinkwrap = Buffer.from('{"lockfileVersion":3,"packages":{}}\n');
     const staging = join(root, "staging");
     await mkdir(staging);
+    const canonicalStaging = await realpath(staging);
     const calls: Array<{ executable: string; args: readonly string[]; cwd?: string }> = [];
     const tarInputs: Buffer[] = [];
     const run = vi.fn(async (executable: string, args: readonly string[], options: {
@@ -35,7 +38,13 @@ describe("immutable runtime lifecycle", () => {
     }) => {
       calls.push({ executable, args, ...(options.cwd === undefined ? {} : { cwd: options.cwd }) });
       if (options.stdin !== undefined) tarInputs.push(options.stdin);
-      if (args[0] === "-xzf") await mkdir(join(staging, "package"));
+      if (args[0] === "-xzf") {
+        await mkdir(join(staging, "package"));
+        await writeFile(join(staging, "package", "npm-shrinkwrap.json"), shrinkwrap);
+      }
+      if (executable === "/usr/bin/npm") {
+        expect(await readFile(join(staging, "package", "package-lock.json"))).toEqual(shrinkwrap);
+      }
       return { stdout: args[0] === "-tzf" ? "package/package.json\npackage/dist/main.js\n" : "", stderr: "" };
     });
     const unpack = createUnixNpmArtifactUnpacker({
@@ -50,10 +59,11 @@ describe("immutable runtime lifecycle", () => {
       {
         executable: "/usr/bin/npm",
         args: ["ci", "--omit=dev", "--ignore-scripts", "--no-audit", "--no-fund"],
-        cwd: join(staging, "package"),
+        cwd: join(canonicalStaging, "package"),
       },
     ]);
     expect(tarInputs).toEqual([archive, archive]);
+    expect(await readFile(join(staging, "package", "package-lock.json"))).toEqual(shrinkwrap);
 
     run.mockResolvedValueOnce({ stdout: "package/../escape\n", stderr: "" });
     await expect(unpack(
@@ -61,6 +71,81 @@ describe("immutable runtime lifecycle", () => {
       staging,
       new AbortController().signal,
     )).rejects.toThrow("Runtime artifact archive entries are invalid.");
+  });
+
+  it.each(["11.18.0", "12.0.1"])("uses the materialized lock with npm %s", async (npmVersion) => {
+    const root = await mkdtemp(join(tmpdir(), "borg-runtime-npm-compat-"));
+    directories.push(root);
+    const staging = join(root, "staging");
+    await mkdir(join(staging, "package"), { recursive: true });
+    const shrinkwrap = Buffer.from('{"lockfileVersion":3,"packages":{}}\n');
+    const run = vi.fn(async (_executable: string, args: readonly string[]) => {
+      if (args[0] === "-xzf") {
+        await writeFile(join(staging, "package", "npm-shrinkwrap.json"), shrinkwrap);
+      }
+      if (args[0] === "ci") {
+        expect(await readFile(join(staging, "package", "package-lock.json"))).toEqual(shrinkwrap);
+      }
+      return { stdout: args[0] === "-tzf" ? "package/npm-shrinkwrap.json\n" : "", stderr: "" };
+    });
+
+    await createUnixNpmArtifactUnpacker({ npmExecutable: `npm-${npmVersion}`, run })(
+      Buffer.from("verified archive"),
+      staging,
+      new AbortController().signal,
+    );
+    expect(run).toHaveBeenLastCalledWith(
+      `npm-${npmVersion}`,
+      ["ci", "--omit=dev", "--ignore-scripts", "--no-audit", "--no-fund"],
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+  });
+
+  it("types install failures and removes their partial staging tree", async () => {
+    const fixture = await createFixture();
+    const archive = await writeArchive(fixture.root, "failed-install");
+    const lifecycle = createRuntimeLifecycle({
+      unpack: vi.fn(async () => { throw new Error("npm stderr with /private/operator/path"); }),
+      restart: vi.fn(),
+      stop: vi.fn(),
+      probe: vi.fn(),
+    });
+
+    await expect(lifecycle.stage({
+      runtimeRoot: fixture.runtimeRoot,
+      tarballPath: archive.path,
+      expectedIntegrity: archive.integrity,
+      expectedVersion: "0.2.0",
+      timeoutMs: 1_000,
+    })).rejects.toEqual(new RuntimeArtifactInstallError());
+    expect((await readdir(fixture.runtimeRoot)).filter((name) => name.startsWith(".staging-")))
+      .toEqual([]);
+  });
+
+  it("rejects an extracted package-root link before materializing or installing the lock", async () => {
+    const root = await mkdtemp(join(tmpdir(), "borg-runtime-unpacker-link-"));
+    directories.push(root);
+    const staging = join(root, "staging");
+    const outside = join(root, "outside");
+    await mkdir(staging);
+    await mkdir(outside);
+    await writeFile(join(outside, "npm-shrinkwrap.json"), '{"lockfileVersion":3}\n');
+    const run = vi.fn(async (_executable: string, args: readonly string[]) => {
+      if (args[0] === "-xzf") await symlink(outside, join(staging, "package"), "dir");
+      return {
+        stdout: args[0] === "-tzf" ? "package/npm-shrinkwrap.json\n" : "",
+        stderr: "",
+      };
+    });
+    const unpack = createUnixNpmArtifactUnpacker({ run });
+
+    await expect(unpack(
+      Buffer.from("verified archive"),
+      staging,
+      new AbortController().signal,
+    )).rejects.toThrow("Runtime artifact package escaped staging.");
+    expect(run).toHaveBeenCalledTimes(2);
+    await expect(access(join(outside, "package-lock.json"))).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("verifies archive bytes and stages a read-only versioned package", async () => {
@@ -214,7 +299,7 @@ describe("immutable runtime lifecycle", () => {
       expectedIntegrity: archive.integrity,
       expectedVersion: "0.2.0",
       timeoutMs: 100,
-    })).rejects.toThrow("Runtime lifecycle operation timed out.");
+    })).rejects.toEqual(new RuntimeArtifactInstallError());
     expect(aborted).toBe(true);
     expect((await readdir(fixture.runtimeRoot)).filter((name) => name.startsWith(".staging-"))).toEqual([]);
   });

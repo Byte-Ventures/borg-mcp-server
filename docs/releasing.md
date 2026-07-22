@@ -343,13 +343,12 @@ artifacts were produced, and `borgmcp-server` remained unclaimed in the npm regi
 move, delete, or reuse that tag. Recovery uses separately authorized version `0.1.1`, a fresh reviewed
 source and merge commit, pre-tag repository-variable evidence, and a never-before-used annotated tag.
 
-The live `borgmcp-server@0.1.11` package consumes the audited exact
+The live `borgmcp-server@0.1.12` package consumes the audited exact
 `borgmcp-shared@0.4.3` registry release. Immutable `v0.1.6` and `v0.1.10` are failed prepublication
-evidence and are not install targets. Current source is the unpublished
-`borgmcp-server@0.1.12` release candidate and retains that verified exact shared registry dependency;
-the shrinkwrap must resolve that registry tarball with the matching SRI.
-Version `0.1.11` remains the install target until the
-candidate passes exact-SHA review, an authorized immutable tag publication, and bounded registry
-integrity and signature verification.
+evidence and are not install targets. Current post-`v0.1.12` source pins the audited exact
+`borgmcp-shared@0.5.0` registry release for the next server candidate; the shrinkwrap must resolve
+that registry tarball with the matching SRI.
+Version `0.1.12` remains the install target until the next candidate passes exact-SHA review, an
+authorized immutable tag publication, and bounded registry integrity and signature verification.
 The source-lock, artifact, audit, signature, and consumer gates must pass without Git dependencies;
 SBOM generation is supplemental and outside the publication-critical path.

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { decodeAttachResponseEnvelope } from "borgmcp-shared/protocol";
 
 import { CoordinationApi } from "../src/coordination-api.js";
 import {
@@ -421,7 +422,7 @@ describe("client seat attach", () => {
       path: "/api/client/attach",
       principal: authenticatedPrincipal(clientA.credential),
       body: {
-        protocol_version: "1",
+        protocol_version: "2",
         request_id: "attach-version-old",
         payload: {
           cube_id: ids.cubeA,
@@ -434,7 +435,7 @@ describe("client seat attach", () => {
     expect(response).toMatchObject({
       status: 426,
       body: {
-        protocol_version: "2",
+        protocol_version: "3",
         request_id: "attach-version-old",
         error: {
           code: "UNSUPPORTED_PROTOCOL_VERSION",
@@ -503,9 +504,12 @@ async function attach(
     signal: new AbortController().signal,
   });
   const body = response.body as { payload?: unknown; error?: { code: string } };
+  const payload = body.payload === undefined
+    ? undefined
+    : decodeAttachResponseEnvelope(response.body).payload;
   return {
     status: response.status,
-    payload: body.payload as Awaited<ReturnType<typeof attach>>["payload"],
+    payload: payload as Awaited<ReturnType<typeof attach>>["payload"],
     ...(body.error === undefined ? {} : { error: body.error }),
   };
 }
@@ -517,7 +521,7 @@ function authenticatedPrincipal(credential: string) {
 }
 
 function envelope(requestId: string, payload: Record<string, unknown>) {
-  return { protocol_version: "2", request_id: requestId, payload };
+  return { protocol_version: "3", request_id: requestId, payload };
 }
 
 function count(table: "drones" | "drone_sessions" | "drone_session_credentials"): number {

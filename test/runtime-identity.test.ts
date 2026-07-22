@@ -23,7 +23,7 @@ describe("runtime build identity", () => {
       package_version: SERVER_PACKAGE_VERSION,
       source_sha: "a".repeat(40),
       artifact_integrity: `sha512-${"A".repeat(86)}==`,
-      protocol_version: "2",
+      protocol_version: "3",
       started_at: "2026-07-21T12:00:00.000Z",
     });
     expect(RUNTIME_INFO_PATH).toBe("/api/runtime");

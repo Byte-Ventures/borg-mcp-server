@@ -161,10 +161,9 @@ describe("server release lane", () => {
       "71ea6e5add780674c0ec1ee9d5558c96ac473dfe",
       "29931051243",
       "sha512-FhNtO2OC8im4/ZByoG8qMbvYjNh/dTyn2tmnnwDNp6K3GLB2nzDXBlxMAamdYCZhdPPq70+LTri53Byrhre6kA==",
-      "`borgmcp-server@0.1.12` release candidate",
-      "The `latest` tag resolves to `0.1.11`",
-      "Version `0.1.11` remains the install target",
-      "borgmcp-shared@0.4.3",
+      "live `borgmcp-server@0.1.12` package",
+      "Version `0.1.12` remains the install target",
+      "borgmcp-shared@0.5.0",
       "github.com/Byte-Ventures/borg-mcp-client",
       "github.com/Byte-Ventures/borg-mcp-shared",
     ]) {

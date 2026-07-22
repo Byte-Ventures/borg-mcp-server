@@ -225,7 +225,7 @@ describe("runCli", () => {
         package_version: "0.2.0",
         artifact_integrity: `sha512-${"A".repeat(86)}==`,
         source_sha: "a".repeat(40),
-        protocol_version: "2",
+        protocol_version: "3",
         started_at: "2026-07-21T12:00:00.000Z",
       },
       dataIdentity: "preserved",

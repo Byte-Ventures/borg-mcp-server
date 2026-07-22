@@ -37,7 +37,12 @@ describe("borgmcp-shared server adapter", () => {
       });
 
       expect(report.results.filter((result) => !result.ok)).toEqual([
-        expect.objectContaining({ id: "security.drone-session-rejection-causes" }),
+        {
+          id: "security.drone-session-rejection-causes",
+          ok: false,
+          error: "expired seat probe did not return AUTH_EXPIRED.",
+          observations: {},
+        },
       ]);
       expect(report.results).toHaveLength(19);
     } finally {

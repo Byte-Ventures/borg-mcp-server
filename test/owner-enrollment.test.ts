@@ -5,6 +5,10 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { CredentialAuthority, CredentialDigester, generateSecret } from "../src/credentials.js";
+import {
+  PLATFORM_QUEEN_DETAILED_DESCRIPTION,
+  PLATFORM_QUEEN_SHORT_DESCRIPTION,
+} from "../src/platform-queen.js";
 import { StorageCapacityError, openStore, type StoreRuntime } from "../src/store.js";
 
 const directories: string[] = [];
@@ -180,6 +184,42 @@ describe("owner enrollment and multi-cube creation", () => {
     expect(fixture.runtime.maintenance.observeAuthorityState()).toMatchObject({
       cubes: 1, roles: 2, grants: 1, cube_create_bindings: 1,
     });
+    fixture.runtime.close();
+    fixture.digester.destroy();
+  });
+
+  it("creates a generic platform queen-class coordinating seat independently of the cube template", async () => {
+    const fixture = await authorityFixture();
+    const credential = generateSecret();
+    const enrolled = fixture.authority.exchangeInvitation({
+      invitation: fixture.authority.createBootstrapInvitation(60_000),
+      retryKey: randomUUID(),
+      clientCredential: credential,
+    });
+    if (enrolled === null) throw new Error("Owner enrollment failed.");
+    const principal = fixture.authority.authenticate(`Bearer ${credential}`);
+    if (principal === null) throw new Error("Owner authentication failed.");
+
+    const store = fixture.runtime.forPrincipal(principal);
+    const created = store.createCube({
+      retryKey: randomUUID(),
+      name: "Any kind of work",
+      template: "default",
+    });
+    const queen = store.listRoles(created.cubeId).find((role) => role.id === created.humanSeatRoleId);
+
+    expect(queen).toMatchObject({
+      short_description: PLATFORM_QUEEN_SHORT_DESCRIPTION,
+      detailed_description: PLATFORM_QUEEN_DETAILED_DESCRIPTION,
+      is_default: false,
+      is_human_seat: true,
+      role_class: "queen",
+    });
+    expect(PLATFORM_QUEEN_DETAILED_DESCRIPTION).not.toMatch(
+      /software|code|git|branch|commit|pull request|security review|release quality/i,
+    );
+    expect(store.listRoles(created.cubeId).filter((role) => role.role_class === "queen")).toHaveLength(1);
+
     fixture.runtime.close();
     fixture.digester.destroy();
   });

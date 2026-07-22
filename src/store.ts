@@ -14,6 +14,10 @@ import {
 } from "./principal.js";
 import { patchRoleSectionText, type RoleSectionPatchOp } from "./role-section.js";
 import { validateMessageTaxonomy } from "./message-taxonomy.js";
+import {
+  PLATFORM_QUEEN_DETAILED_DESCRIPTION,
+  PLATFORM_QUEEN_SHORT_DESCRIPTION,
+} from "./platform-queen.js";
 
 export type CubeAccess = "read" | "write" | "manage";
 
@@ -756,8 +760,14 @@ class SqliteScopedStore implements ScopedStore {
         INSERT INTO roles (
           id, cube_id, name, short_description, detailed_description,
           is_default, is_human_seat, role_class, created_at
-        ) VALUES (?, ?, 'Coordinator', 'Human coordination seat', '', 0, 1, 'queen', ?)
-      `).run(humanSeatRoleId, cubeId, now);
+        ) VALUES (?, ?, 'Coordinator', ?, ?, 0, 1, 'queen', ?)
+      `).run(
+        humanSeatRoleId,
+        cubeId,
+        PLATFORM_QUEEN_SHORT_DESCRIPTION,
+        PLATFORM_QUEEN_DETAILED_DESCRIPTION,
+        now,
+      );
       this.#mutationHook?.("cube.insert-human-role");
       this.#database.prepare(`
         INSERT INTO roles (

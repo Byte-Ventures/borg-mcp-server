@@ -134,12 +134,13 @@ released from `borg-mcp-shared` first; server releases consume an exact audited 
 never a Git or SSH dependency. Client releases follow their own repository gates.
 
 The server repository is public; visibility is complete, and `borgmcp-server@0.1.1`,
-`borgmcp-server@0.1.4`, `borgmcp-server@0.1.5`, `borgmcp-server@0.1.7`, and
-`borgmcp-server@0.1.8`, and `borgmcp-server@0.1.9` are live on npm under the sole expected maintainer.
-The `latest` tag resolves to `0.1.9`.
+`borgmcp-server@0.1.4`, `borgmcp-server@0.1.5`, `borgmcp-server@0.1.7`,
+`borgmcp-server@0.1.8`, `borgmcp-server@0.1.9`, and `borgmcp-server@0.1.11` are live on npm
+under the sole expected maintainer.
+The `latest` tag resolves to `0.1.11`.
 Versions `0.1.2` and `0.1.3` are
 unpublished immutable failure evidence and must never be customer, install, or dogfood targets.
-Version `0.1.9` completed the full
+Version `0.1.11` completed the full
 exact-source, tagged-artifact, tokenless OIDC publication, registry verification, provenance,
 signature, and attestation gate chain recorded below.
 
@@ -300,6 +301,15 @@ npm continued to return E404 for `borgmcp-server@0.1.10`. Never rerun the workfl
 or reuse the tag; recovery uses the unused `0.1.11` identity with the reviewed deterministic
 equal-work regression.
 
+The immutable annotated `v0.1.11` tag object
+`e44b79d6259fb460758231320274b8acad4b9e42` peels to protected-main merge
+`71ea6e5add780674c0ec1ee9d5558c96ac473dfe`. Workflow run `29931051243`, attempt 1, built,
+published, and registry-verified the exact reviewed artifact. npm reports integrity
+`sha512-FhNtO2OC8im4/ZByoG8qMbvYjNh/dTyn2tmnnwDNp6K3GLB2nzDXBlxMAamdYCZhdPPq70+LTri53Byrhre6kA==`
+and `latest` resolves to `0.1.11`. The tokenless OIDC publication and postpublication checks
+verified registry integrity and ownership, provenance, signatures, and the Trusted Publishing
+attestation.
+
 The immutable annotated `v0.1.4` tag object
 `1604077e6249c7c0f7ce17b3f2848caad2bc773e` peels to protected-main merge
 `1f7e60a695f27d92b2d46233b0e3cad5aa43bd0d`, whose tree is byte-identical to reviewed source
@@ -333,12 +343,12 @@ artifacts were produced, and `borgmcp-server` remained unclaimed in the npm regi
 move, delete, or reuse that tag. Recovery uses separately authorized version `0.1.1`, a fresh reviewed
 source and merge commit, pre-tag repository-variable evidence, and a never-before-used annotated tag.
 
-The live `borgmcp-server@0.1.9` package consumes the audited exact
+The live `borgmcp-server@0.1.11` package consumes the audited exact
 `borgmcp-shared@0.4.3` registry release. Immutable `v0.1.6` and `v0.1.10` are failed prepublication
 evidence and are not install targets. Current source is the unpublished
-`borgmcp-server@0.1.11` release candidate
-and retains that verified exact shared registry dependency; the shrinkwrap must resolve that registry
-tarball with the matching SRI. Version `0.1.9` remains the install target until the
+`borgmcp-server@0.1.12` release candidate and retains that verified exact shared registry dependency;
+the shrinkwrap must resolve that registry tarball with the matching SRI.
+Version `0.1.11` remains the install target until the
 candidate passes exact-SHA review, an authorized immutable tag publication, and bounded registry
 integrity and signature verification.
 The source-lock, artifact, audit, signature, and consumer gates must pass without Git dependencies;

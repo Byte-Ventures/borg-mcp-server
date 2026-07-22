@@ -2,9 +2,8 @@ import { randomUUID } from "node:crypto";
 import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { performance } from "node:perf_hooks";
 import { DatabaseSync } from "node:sqlite";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   CredentialAuthority,
@@ -336,7 +335,7 @@ describe("credential authority", () => {
     expect(() => authority.replaceOwnerInvitation(recovery, 60_000)).toThrow("Access denied.");
   });
 
-  it("keeps rejected invitation states in one timing class", () => {
+  it("keeps rejected invitation states on one verification and claim path", () => {
     const recovery = authority.createRecoveryCredential();
     const revoked = authority.createBootstrapInvitation(60_000);
     if (authority.replaceOwnerInvitation(recovery, 60_000) === null) {
@@ -355,21 +354,30 @@ describe("credential authority", () => {
       enrollmentRequest(revoked),
       { ...consumedRequest, retryKey: randomUUID(), clientCredential: generateSecret() },
     ] as const;
-    for (let iteration = 0; iteration < 200; iteration += 1) {
-      for (const request of requests) expect(authority.exchangeInvitation(request)).toBeNull();
-    }
 
-    const elapsed = requests.map(() => 0);
-    for (let iteration = 0; iteration < 4_000; iteration += 1) {
-      const offset = iteration % requests.length;
-      for (let index = 0; index < requests.length; index += 1) {
-        const requestIndex = (index + offset) % requests.length;
-        const startedAt = performance.now();
-        authority.exchangeInvitation(requests[requestIndex]!);
-        elapsed[requestIndex]! += performance.now() - startedAt;
-      }
+    const digester = new CredentialDigester(Buffer.alloc(32, 7));
+    const tracedAuthority = new CredentialAuthority(runtime.credentials, digester, () => now);
+    const digest = vi.spyOn(digester, "digest");
+    const verify = vi.spyOn(digester, "verify");
+    const findInvitation = vi.spyOn(runtime.credentials, "findInvitation");
+    const claimInvitation = vi.spyOn(runtime.credentials, "claimInvitation");
+
+    for (const request of requests) {
+      digest.mockClear();
+      verify.mockClear();
+      findInvitation.mockClear();
+      claimInvitation.mockClear();
+
+      expect(tracedAuthority.exchangeInvitation(request)).toBeNull();
+      expect(digest.mock.calls.map(([, purpose]) => purpose)).toEqual([
+        "invitation",
+        "invitation",
+        "client",
+      ]);
+      expect(verify.mock.calls.map(([, purpose]) => purpose)).toEqual(["invitation"]);
+      expect(findInvitation).toHaveBeenCalledOnce();
+      expect(claimInvitation).toHaveBeenCalledOnce();
     }
-    expect(Math.max(...elapsed) / Math.min(...elapsed)).toBeLessThan(1.25);
   });
 });
 

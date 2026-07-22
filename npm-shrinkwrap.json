@@ -1,15 +1,15 @@
 {
   "name": "borgmcp-server",
-  "version": "0.1.12",
+  "version": "0.1.14",
   "lockfileVersion": 3,
   "requires": true,
   "packages": {
     "": {
       "name": "borgmcp-server",
-      "version": "0.1.12",
+      "version": "0.1.14",
       "license": "SEE LICENSE IN LICENSE",
       "dependencies": {
-        "borgmcp-shared": "0.4.3",
+        "borgmcp-shared": "0.5.0",
         "selfsigned": "5.5.0"
       },
       "bin": {
@@ -1059,9 +1059,9 @@
       }
     },
     "node_modules/borgmcp-shared": {
-      "version": "0.4.3",
-      "resolved": "https://registry.npmjs.org/borgmcp-shared/-/borgmcp-shared-0.4.3.tgz",
-      "integrity": "sha512-VuQ+nOVhNY5xTzQENK4CnwI4QR5G8bucwoXvWNW0R+IfXx3utCN/CLy5D2WJF9RRVkbbbvApyquok7PV4FX1Uw==",
+      "version": "0.5.0",
+      "resolved": "https://registry.npmjs.org/borgmcp-shared/-/borgmcp-shared-0.5.0.tgz",
+      "integrity": "sha512-kOAfMTMPTHRvctB0wpPo/+nNPjiBsk0FddnLgGQged8K8PwQqYWv7zQizPU2mgyExpurjCKKPbi9M+QcfmXNKA==",
       "license": "Apache-2.0",
       "engines": {
         "node": ">=20"

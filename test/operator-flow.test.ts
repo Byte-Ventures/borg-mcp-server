@@ -387,7 +387,7 @@ describe("offline operator flow", () => {
       );
       expect(attachment.status).toBe(201);
       const attached = (JSON.parse(attachment.body) as {
-        payload: { result: "created"; session: { id: string; expires_at: string } };
+        payload: { result: "created"; session: { id: string } };
       }).payload;
       expect(attached.result).toBe("created");
       expect(attached.session).not.toHaveProperty("token");

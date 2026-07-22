@@ -19,6 +19,7 @@ import {
   createOfflineCredentialService,
   isFatalTeardownError,
   inspectRuntimeLock,
+  stopServerRuntime,
   resolveStorageLimits,
   selectServerEnvironment,
   setupNodeServerInstallation,
@@ -340,6 +341,105 @@ describe("node server service", () => {
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
+  });
+
+  it("recognizes a live 0.1.8 runtime lock without inventing its process mode", async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-legacy-runtime-lock-")));
+    try {
+      await writeFile(join(directory, "runtime.lock"), JSON.stringify({
+        pid: process.pid,
+        nonce: "legacy-runtime",
+        purpose: "server",
+        endpoint: "https://127.0.0.1:7091",
+      }), { mode: 0o600 });
+      await expect(inspectRuntimeLock(directory)).resolves.toEqual({
+        running: true,
+        pid: process.pid,
+        identity: null,
+        endpoint: "https://127.0.0.1:7091",
+        mode: "legacy",
+      });
+      await writeFile(join(directory, "runtime.lock"), JSON.stringify({
+        pid: process.pid,
+        purpose: "server",
+        mode: "unknown",
+      }), { mode: 0o600 });
+      await expect(inspectRuntimeLock(directory)).rejects.toThrow(
+        "A live process owns runtime.lock. Stop the server through a supported command; do not remove the lock.",
+      );
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("stops only managed runtimes and waits for lock disappearance", async () => {
+    const managed = {
+      running: true as const,
+      pid: 123,
+      identity: null,
+      endpoint: "https://127.0.0.1:7091",
+      mode: "managed" as const,
+    };
+    const inspect = vi.fn()
+      .mockResolvedValueOnce(managed)
+      .mockResolvedValueOnce(managed)
+      .mockResolvedValueOnce({ running: false });
+    const stopManaged = vi.fn().mockResolvedValue(undefined);
+    await expect(stopServerRuntime({
+      runtimeDataDirectory: "/owned/server",
+      timeoutMs: 1_000,
+      isManagedServiceActive: vi.fn().mockResolvedValue(true),
+      stopManaged,
+      inspect,
+    })).resolves.toEqual({ outcome: "stopped" });
+    expect(stopManaged).toHaveBeenCalledOnce();
+
+    await expect(stopServerRuntime({
+      runtimeDataDirectory: "/owned/server",
+      timeoutMs: 1_000,
+      isManagedServiceActive: vi.fn().mockResolvedValue(false),
+      stopManaged,
+      inspect: vi.fn().mockResolvedValue({ running: false }),
+    })).resolves.toEqual({ outcome: "already-stopped" });
+    expect(stopManaged).toHaveBeenCalledOnce();
+
+    const legacyInspector = vi.fn()
+      .mockResolvedValueOnce({ ...managed, mode: "legacy" })
+      .mockResolvedValueOnce({ running: false });
+    await expect(stopServerRuntime({
+      runtimeDataDirectory: "/owned/server",
+      timeoutMs: 1_000,
+      isManagedServiceActive: vi.fn().mockResolvedValue(true),
+      stopManaged,
+      inspect: legacyInspector,
+    })).resolves.toEqual({ outcome: "stopped" });
+    expect(stopManaged).toHaveBeenCalledTimes(2);
+
+    await expect(stopServerRuntime({
+      runtimeDataDirectory: "/owned/server",
+      timeoutMs: 1_000,
+      isManagedServiceActive: vi.fn().mockResolvedValue(false),
+      stopManaged,
+      inspect: vi.fn().mockResolvedValue({ ...managed, mode: "foreground" }),
+    })).resolves.toEqual({ outcome: "foreground-action-required" });
+    expect(stopManaged).toHaveBeenCalledTimes(2);
+
+    await expect(stopServerRuntime({
+      runtimeDataDirectory: "/owned/server",
+      timeoutMs: 100,
+      isManagedServiceActive: vi.fn().mockResolvedValue(true),
+      stopManaged,
+      inspect: vi.fn().mockResolvedValue(managed),
+    })).rejects.toThrow("Managed server stop timed out.");
+
+    const failure = new Error("adapter failed");
+    await expect(stopServerRuntime({
+      runtimeDataDirectory: "/owned/server",
+      timeoutMs: 1_000,
+      isManagedServiceActive: vi.fn().mockResolvedValue(true),
+      stopManaged: vi.fn().mockRejectedValue(failure),
+      inspect: vi.fn().mockResolvedValue(managed),
+    })).rejects.toBe(failure);
   });
 
   it("mints client invitations beside a live server after direct owner provisioning", async () => {

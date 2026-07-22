@@ -64,7 +64,7 @@ export interface RequestHandlerContext {
   readonly authorizeCoordination?: (
     authorization: string | undefined,
     signal: AbortSignal,
-  ) => Promise<Principal | "missing" | "invalid" | "expired" | "revoked" | "evicted" | "rejected">;
+  ) => Promise<Principal | "missing" | "invalid" | "revoked" | "evicted" | "rejected">;
   readonly handleCoordination?: (request: CoordinationRequest) => Promise<CoordinationResponse>;
   readonly debugLogger: DebugLogger;
   readonly runtimeIdentity?: RuntimeBuildIdentity;
@@ -366,9 +366,7 @@ async function handleRequest(
         sendJson(response, 410, protocolError(ErrorCode.DRONE_EVICTED, "Authentication failed."));
         return;
       }
-      const code = authentication === "expired"
-        ? ErrorCode.AUTH_EXPIRED
-        : authentication === "revoked" ? ErrorCode.SESSION_REVOKED
+      const code = authentication === "revoked" ? ErrorCode.SESSION_REVOKED
         : authentication === "rejected" ? ErrorCode.SESSION_REJECTED
         : authentication === "missing" || authorization === undefined ? "AUTH_MISSING" : "AUTH_INVALID";
       sendJson(response, 401, protocolError(code, "Authentication failed."));
@@ -432,7 +430,7 @@ async function handleRequest(
 interface RequestTrace {
   readonly route: DebugRoute;
   readonly method: string;
-  authentication: "not_required" | "missing" | "invalid" | "expired" | "revoked" | "evicted" | "rejected" | "accepted";
+  authentication: "not_required" | "missing" | "invalid" | "revoked" | "evicted" | "rejected" | "accepted";
   principal?: Principal;
 }
 

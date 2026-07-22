@@ -39,6 +39,9 @@ describe("managed service adapters", () => {
     expect(service.restart).toEqual([
       "launchctl", "kickstart", "-k", "gui/501/ai.borgmcp.server",
     ]);
+    expect(service.stop).toEqual([
+      "launchctl", "bootout", "gui/501/ai.borgmcp.server",
+    ]);
     expect(service.content).not.toContain("Development");
   });
 

@@ -50,7 +50,7 @@ describe("HTTPS service", () => {
       tls: { key, cert: certificate },
       authorizeCoordination: async (authorization) => authorization === "Bearer accepted-test-token"
         ? clientPrincipal("00000000-0000-4000-8000-000000000200")
-        : authorization === "Bearer expired-test-token" ? "expired"
+        : authorization === "Bearer revoked-test-token" ? "revoked"
         : authorization === "Bearer rejected-test-token" ? "rejected"
         : authorization === undefined ? "missing" : "invalid",
       exchangeEnrollment: async (body) => {
@@ -241,7 +241,7 @@ describe("HTTPS service", () => {
     expect(response.headers["access-control-allow-origin"]).toBeUndefined();
   });
 
-  it("reports an expired session distinctly before routing", async () => {
+  it("reports a revoked session distinctly before routing", async () => {
     coordinationCalls = 0;
     for (const path of [
       "/api/cubes",
@@ -251,12 +251,12 @@ describe("HTTPS service", () => {
         server.origin,
         certificate,
         path,
-        { authorization: "Bearer expired-test-token" },
+        { authorization: "Bearer revoked-test-token" },
       );
       expect(response.status).toBe(401);
       expect(JSON.parse(response.body)).toEqual({
         protocol_version: "2",
-        error: { code: "AUTH_EXPIRED", message: "Authentication failed." },
+        error: { code: "SESSION_REVOKED", message: "Authentication failed." },
       });
     }
     expect(coordinationCalls).toBe(0);

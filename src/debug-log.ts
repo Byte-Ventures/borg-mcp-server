@@ -22,7 +22,7 @@ export type DebugRoute =
 export type DebugEvent =
   | { readonly event: "startup"; readonly bindMode: "loopback" | "lan"; readonly port: number; readonly dataDirectory: "configured" | "tls_only" }
   | { readonly event: "lifecycle"; readonly action: "listening" | "stopped" }
-  | { readonly event: "request"; readonly route: DebugRoute; readonly method: string; readonly authentication: "not_required" | "missing" | "invalid" | "expired" | "revoked" | "evicted" | "rejected" | "accepted"; readonly authorization: "not_checked" | "accepted" | "denied_or_not_found"; readonly principal?: Principal; readonly status: number; readonly durationMs: number }
+  | { readonly event: "request"; readonly route: DebugRoute; readonly method: string; readonly authentication: "not_required" | "missing" | "invalid" | "revoked" | "evicted" | "rejected" | "accepted"; readonly authorization: "not_checked" | "accepted" | "denied_or_not_found"; readonly principal?: Principal; readonly status: number; readonly durationMs: number }
   | { readonly event: "activity_append"; readonly cubeId: string; readonly entryId: string; readonly principal: Principal; readonly droneId: string | null; readonly visibility: "broadcast" | "direct"; readonly recipientDroneIds: readonly string[] }
   | { readonly event: "cursor_replay"; readonly mode: "page" | "sse"; readonly cubeId: string; readonly cursorId: string | null; readonly returnedCount: number; readonly behindBy: number; readonly truncated: boolean }
   | { readonly event: "ack_write"; readonly cubeId: string; readonly entryId: string; readonly kind: "ack" | "claim"; readonly principal: Principal }
@@ -161,6 +161,6 @@ function enumValue<const T extends string>(value: unknown, allowed: readonly T[]
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const DEBUG_ROUTES: readonly DebugRoute[] = ["health", "protocol", "runtime", "enrollment_exchange", "client_attach", "cubes", "cube", "cube_roles", "cube_role", "cube_role_section_patch", "cube_taxonomy_patch", "cube_drones", "cube_logs", "cube_acks", "cube_decisions", "cube_stream", "unknown"];
 const HTTP_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "OTHER"] as const;
-const AUTH_RESULTS = ["not_required", "missing", "invalid", "expired", "revoked", "evicted", "rejected", "accepted"] as const;
+const AUTH_RESULTS = ["not_required", "missing", "invalid", "revoked", "evicted", "rejected", "accepted"] as const;
 const AUTHZ_RESULTS = ["not_checked", "accepted", "denied_or_not_found"] as const;
 const CREDENTIAL_ACTIONS = ["invitation_created", "enrollment_accepted", "enrollment_rejected", "session_created", "session_revoked", "client_rotated", "client_revoked"] as const;

@@ -22,7 +22,6 @@ import type { CredentialAuthority } from "./credentials.js";
 import {
   CursorExpiredError,
   AttachDroneEvictedError,
-  AttachSessionExpiredError,
   AttachSessionRejectedError,
   AttachSessionRevokedError,
   AccessDeniedError,
@@ -126,7 +125,6 @@ export class CoordinationApi {
           drone: attachment.drone,
           session: {
             id: attachment.sessionId,
-            expires_at: attachment.expiresAt,
           },
         });
       } catch (error) {
@@ -137,9 +135,6 @@ export class CoordinationApi {
         }
         if (error instanceof AttachDroneEvictedError) {
           return failure(410, ErrorCode.DRONE_EVICTED, error.message, requestId);
-        }
-        if (error instanceof AttachSessionExpiredError) {
-          return failure(401, ErrorCode.AUTH_EXPIRED, error.message, requestId);
         }
         if (error instanceof AttachSessionRevokedError) {
           return failure(401, ErrorCode.SESSION_REVOKED, error.message, requestId);

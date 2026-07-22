@@ -135,10 +135,11 @@ never a Git or SSH dependency. Client releases follow their own repository gates
 
 The server repository is public; visibility is complete, and `borgmcp-server@0.1.1`,
 `borgmcp-server@0.1.4`, `borgmcp-server@0.1.5`, `borgmcp-server@0.1.7`, and
-`borgmcp-server@0.1.8` are live on npm under the sole expected maintainer. The `latest` tag resolves to `0.1.8`.
+`borgmcp-server@0.1.8`, and `borgmcp-server@0.1.9` are live on npm under the sole expected maintainer.
+The `latest` tag resolves to `0.1.9`.
 Versions `0.1.2` and `0.1.3` are
 unpublished immutable failure evidence and must never be customer, install, or dogfood targets.
-Version `0.1.8` completed the full
+Version `0.1.9` completed the full
 exact-source, tagged-artifact, tokenless OIDC publication, registry verification, provenance,
 signature, and attestation gate chain recorded below.
 
@@ -280,6 +281,15 @@ and `latest` resolves to `0.1.8`. The tokenless OIDC publication and postpublica
 registry integrity and ownership, SLSA provenance, signatures, and attestations for this tag and
 commit.
 
+The immutable annotated `v0.1.9` tag object
+`118e498e327606d8f823868f8043ad9288730f8b` peels to protected-main merge
+`e57a8ec11aa6bd9b06ab54404089b9b56691b4dc`. Workflow run `29852829882`, attempt 1, built,
+published, and verified the exact reviewed artifact. npm reports integrity
+`sha512-x00mCOR2zQM+rXlNyYvYnATqa7JX1MPRkCdmzNdTNdqLInHLjxAcHJ8KorqKFGH9GBiTnW9c7x00leiRjpgpTw==`
+and `latest` resolves to `0.1.9`. The tokenless OIDC publication and postpublication checks verified
+registry integrity and ownership, SLSA provenance, signatures, and attestations for this tag and
+commit.
+
 The immutable annotated `v0.1.4` tag object
 `1604077e6249c7c0f7ce17b3f2848caad2bc773e` peels to protected-main merge
 `1f7e60a695f27d92b2d46233b0e3cad5aa43bd0d`, whose tree is byte-identical to reviewed source
@@ -313,11 +323,11 @@ artifacts were produced, and `borgmcp-server` remained unclaimed in the npm regi
 move, delete, or reuse that tag. Recovery uses separately authorized version `0.1.1`, a fresh reviewed
 source and merge commit, pre-tag repository-variable evidence, and a never-before-used annotated tag.
 
-The live `borgmcp-server@0.1.8` package consumes the audited exact
+The live `borgmcp-server@0.1.9` package consumes the audited exact
 `borgmcp-shared@0.4.3` registry release. Immutable `v0.1.6` is failed prepublication evidence and is
-not an install target. Current source is the unpublished `borgmcp-server@0.1.9` release candidate
+not an install target. Current source is the unpublished `borgmcp-server@0.1.10` release candidate
 and retains that verified exact shared registry dependency; the shrinkwrap must resolve that
-registry tarball with the matching SRI. Version `0.1.8` remains the install target until the
+registry tarball with the matching SRI. Version `0.1.9` remains the install target until the
 candidate passes exact-SHA review, an authorized immutable tag publication, and bounded registry
 integrity and signature verification.
 The source-lock, artifact, audit, signature, and consumer gates must pass without Git dependencies;

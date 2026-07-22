@@ -1,5 +1,6 @@
 import type { ServerService } from "./service.js";
 import { RuntimeUpdateFailure } from "./runtime-operator.js";
+import { SERVER_PACKAGE_VERSION } from "./runtime-identity.js";
 
 export interface CliIo {
   readonly stdout: (message: string) => void;
@@ -14,7 +15,9 @@ Commands:
   setup [--reinitialize]  Prepare an offline server installation
   start    Start the server process
   status [--json]  Report exact local runtime evidence
+  version [--json]  Report the installed controller version
   update [--json]  Verify and activate the latest server artifact
+  stop [--json]  Stop the managed local server
   invite   Create a single-use invitation in an interactive terminal.
   client-rotate <client-id>  Rotate one client credential offline
   client-revoke <client-id>  Revoke one client and its credentials offline
@@ -54,6 +57,19 @@ export async function runCli(
   const [command, ...extraArgs] = args;
 
   switch (command) {
+    case "--version":
+    case "version": {
+      if (command === "--version" ? extraArgs.length !== 0 :
+          extraArgs.length > 1 || (extraArgs.length === 1 && extraArgs[0] !== "--json")) {
+        return invalidArguments(io);
+      }
+      if (extraArgs[0] === "--json" || io.isTTY === false) {
+        io.stdout(JSON.stringify({ controller: `borgmcp-server@${SERVER_PACKAGE_VERSION}` }));
+      } else {
+        io.stdout(`borgmcp-server@${SERVER_PACKAGE_VERSION}`);
+      }
+      return 0;
+    }
     case "setup":
       if (extraArgs.length > 1 || (extraArgs.length === 1 && extraArgs[0] !== "--reinitialize")) {
         return invalidArguments(io);
@@ -108,19 +124,42 @@ export async function runCli(
       if (extraArgs[0] === "--json" || io.isTTY === false) {
         io.stdout(JSON.stringify({
           status: status.status,
-          artifact: status.artifact === null
+          installed_controller: `borgmcp-server@${status.controllerVersion}`,
+          prepared_runtime: status.preparedArtifact === null
             ? null
-            : `borgmcp-server@${status.artifact.version}`,
-          artifact_integrity: status.artifact?.integrity ?? null,
+            : `borgmcp-server@${status.preparedArtifact.version}`,
+          prepared_integrity: status.preparedArtifact?.integrity ?? null,
+          running_runtime: status.runningArtifact === null
+            ? null
+            : `borgmcp-server@${status.runningArtifact.version}`,
+          running_integrity: status.runningArtifact?.integrity ?? null,
           build_identity: status.buildIdentity,
           endpoint: status.endpoint,
           mode: status.mode,
+          service_adapter: status.serviceAdapter,
           data_identity: status.dataIdentity,
+          next_action: status.nextAction,
         }));
       } else {
         io.stdout(renderRuntimeStatus(status));
       }
       return 0;
+    }
+    case "stop": {
+      if (extraArgs.length > 1 || (extraArgs.length === 1 && extraArgs[0] !== "--json") ||
+          service.stop === undefined) return invalidArguments(io);
+      const result = await service.stop();
+      const machine = extraArgs[0] === "--json" || io.isTTY === false;
+      if (machine) {
+        io.stdout(JSON.stringify({ status: result.outcome, data_identity: "preserved" }));
+      } else if (result.outcome === "stopped") {
+        io.stdout("Managed local server stopped.\nData and identity: preserved\nNext: borg-mcp-server start");
+      } else if (result.outcome === "already-stopped") {
+        io.stdout("Local server is already stopped.\nData and identity: preserved\nNext: borg-mcp-server start");
+      } else {
+        io.stdout("The local server is running in the foreground.\nStop it with Ctrl-C in its owning terminal.");
+      }
+      return result.outcome === "foreground-action-required" ? 1 : 0;
     }
     case "update": {
       if (extraArgs.length > 1 || (extraArgs.length === 1 && extraArgs[0] !== "--json") ||
@@ -284,17 +323,24 @@ function renderRuntimeStatus(status: Awaited<ReturnType<NonNullable<ServerServic
       ? "Local server is reachable, but its running build identity is unavailable."
       : "Local server is running."
     : "Local server is stopped.";
-  const artifact = status.artifact === null
-    ? "Artifact: unavailable"
-    : `Artifact: borgmcp-server@${status.artifact.version} (${status.artifact.integrity})`;
-  return [
+  const lines = [
     heading,
-    artifact,
+    `Installed controller: borgmcp-server@${status.controllerVersion}`,
+    status.preparedArtifact === null
+      ? "Prepared runtime: unavailable"
+      : `Prepared runtime: borgmcp-server@${status.preparedArtifact.version} (${status.preparedArtifact.integrity})`,
+    status.runningArtifact === null
+      ? "Running runtime: unavailable"
+      : `Running runtime: borgmcp-server@${status.runningArtifact.version} (${status.runningArtifact.integrity ?? "unavailable"})`,
     `Build identity: ${status.buildIdentity ?? "unavailable"}`,
     `Endpoint: ${status.endpoint ?? "unavailable"}`,
-    `Mode: ${status.mode}`,
+    `Mode: ${status.mode === "managed" && status.serviceAdapter !== null
+      ? `managed (${status.serviceAdapter})`
+      : status.mode}`,
     `Data and identity: ${status.dataIdentity}`,
-  ].join("\n");
+  ];
+  if (status.nextAction !== null) lines.push(`Next: ${status.nextAction}.`);
+  return lines.join("\n");
 }
 
 function parseClientInviteArguments(

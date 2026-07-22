@@ -230,7 +230,6 @@ export interface StoredDroneSessionDigest extends StoredSecretDigest {
   readonly clientId: string;
   readonly cubeId: string;
   readonly droneId: string;
-  readonly expiresAt: string;
   readonly evictedAt: string | null;
   readonly takenOver: boolean;
 }
@@ -260,7 +259,6 @@ export interface CredentialStore {
   readonly clientIsActive: (clientId: string) => boolean;
   readonly clientHasServerCapability: (clientId: string, capability: "create_cube") => boolean;
   readonly findDroneSessionCredential: (lookup: Buffer) => StoredDroneSessionDigest | null;
-  readonly findActiveDroneSessionExpiry: (sessionId: string) => string | null;
   readonly rotateClientCredential: (input: {
     readonly clientId: string;
     readonly credentialId: string;
@@ -358,8 +356,6 @@ export interface SeatAttachInput {
   readonly sessionId: string;
   readonly credentialId: string;
   readonly credentialDigest: DigestPair;
-  readonly expiresAt: string;
-  readonly renewIfExpiresAtOrBefore: string;
 }
 
 export interface SeatAttachRecord {
@@ -378,7 +374,6 @@ export interface SeatAttachRecord {
     readonly label: string;
   };
   readonly sessionId: string;
-  readonly expiresAt: string;
   readonly result: "created" | "reused";
 }
 
@@ -437,11 +432,9 @@ export interface MaintenanceStore {
     readonly clientId: string;
     readonly cubeId: string;
     readonly droneId: string;
-    readonly expiresAt: string;
   }) => void;
   readonly revokeClient: (clientId: string) => void;
   readonly revokeDroneSession: (sessionId: string) => void;
-  readonly expireDroneSession: (sessionId: string) => void;
   readonly inspectManagedDrone: (droneId: string) => {
     readonly role_id: string;
     readonly evicted: boolean;
@@ -522,15 +515,6 @@ export class AttachSessionRejectedError extends Error {
   constructor() {
     super("The saved session is not accepted for this seat.");
     this.name = "AttachSessionRejectedError";
-  }
-}
-
-export class AttachSessionExpiredError extends Error {
-  readonly code = "AUTH_EXPIRED";
-
-  constructor() {
-    super("Authentication failed.");
-    this.name = "AttachSessionExpiredError";
   }
 }
 
@@ -1493,8 +1477,6 @@ class SqliteScopedStore implements ScopedStore {
     assertCanonicalUuid(input.sessionId, "Drone session id");
     assertCanonicalUuid(input.credentialId, "Drone session credential id");
     validateDigest(input.credentialDigest);
-    validateTimestamp(input.expiresAt);
-    validateTimestamp(input.renewIfExpiresAtOrBefore);
     const scope = this.#scope("read");
     const authorizedRole = this.#database.prepare(`
       SELECT 1 FROM cubes AS c JOIN roles AS role ON role.cube_id = c.id
@@ -1516,7 +1498,7 @@ class SqliteScopedStore implements ScopedStore {
       const bound = this.#database.prepare(`
         SELECT credential.verifier_digest, credential.revoked_at AS credential_revoked_at,
                session.id AS session_id, session.client_id, session.cube_id, session.drone_id,
-               session.expires_at, session.revoked_at AS session_revoked_at,
+               session.revoked_at AS session_revoked_at,
                session.superseded_at, drone.role_id, drone.label, drone.evicted_at
         FROM drone_session_credentials AS credential
         JOIN drone_sessions AS session ON session.id = credential.session_id
@@ -1542,18 +1524,8 @@ class SqliteScopedStore implements ScopedStore {
         if (optionalText(bound, "superseded_at") !== null) {
           throw new AttachSessionRejectedError();
         }
-        if (requiredText(bound, "expires_at") <= now) throw new AttachSessionExpiredError();
         const droneId = requiredText(bound, "drone_id");
         const sessionId = requiredText(bound, "session_id");
-        const previousExpiry = requiredText(bound, "expires_at");
-        const committedExpiry = input.expiresAt > previousExpiry &&
-            previousExpiry <= input.renewIfExpiresAtOrBefore
-          ? input.expiresAt
-          : previousExpiry;
-        if (committedExpiry !== previousExpiry) {
-          this.#database.prepare("UPDATE drone_sessions SET expires_at = ? WHERE id = ?")
-            .run(committedExpiry, sessionId);
-        }
         this.#database.prepare("UPDATE drones SET last_seen = ? WHERE id = ?").run(now, droneId);
         const attachedRoleRow = this.#database.prepare(`
           SELECT id AS role_id, name AS role_name, role_class, is_human_seat
@@ -1578,7 +1550,6 @@ class SqliteScopedStore implements ScopedStore {
           },
           drone: { id: droneId, label: requiredText(bound, "label") },
           sessionId,
-          expiresAt: committedExpiry,
           result: "reused",
         };
       }
@@ -1597,7 +1568,7 @@ class SqliteScopedStore implements ScopedStore {
           throw new AttachSessionRejectedError();
         }
         const latestSession = this.#database.prepare(`
-          SELECT session.id, session.expires_at, session.revoked_at AS session_revoked_at,
+          SELECT session.id, session.revoked_at AS session_revoked_at,
                  MAX(CASE WHEN credential.revoked_at IS NOT NULL THEN 1 ELSE 0 END)
                    AS credential_revoked
           FROM drone_sessions AS session
@@ -1612,19 +1583,7 @@ class SqliteScopedStore implements ScopedStore {
             requiredInteger(latestSession, "credential_revoked") === 1) {
           throw new AttachSessionRevokedError();
         }
-        if (requiredText(latestSession, "expires_at") > now) {
-          throw new AttachSessionRejectedError();
-        }
-        droneId = priorSeatId;
-        droneLabel = requiredText(priorSeat, "label");
-        const superseded = this.#database.prepare(`
-          UPDATE drone_sessions SET superseded_at = ?
-          WHERE id = ? AND superseded_at IS NULL
-        `).run(now, requiredText(latestSession, "id"));
-        if (Number(superseded.changes) !== 1) {
-          throw new Error("Expired session supersession was not atomic.");
-        }
-        this.#database.prepare("UPDATE drones SET last_seen = ? WHERE id = ?").run(now, droneId);
+        throw new AttachSessionRejectedError();
       } else {
         droneId = input.droneId;
         droneLabel = seatLabel(requiredText(roleRow, "role_name"), droneId);
@@ -1637,15 +1596,14 @@ class SqliteScopedStore implements ScopedStore {
       }
       this.#database.prepare(`
         INSERT INTO drone_sessions (
-          id, client_id, cube_id, drone_id, created_at, expires_at
-        ) VALUES (?, ?, ?, ?, ?, ?)
+          id, client_id, cube_id, drone_id, created_at
+        ) VALUES (?, ?, ?, ?, ?)
       `).run(
         input.sessionId,
         this.#principal.id,
         input.cubeId,
         droneId,
         now,
-        input.expiresAt,
       );
       this.#database.prepare(`
         INSERT INTO drone_session_credentials (
@@ -1681,7 +1639,6 @@ class SqliteScopedStore implements ScopedStore {
         },
         drone: { id: droneId, label: droneLabel },
         sessionId: input.sessionId,
-        expiresAt: input.expiresAt,
         result: "created",
       };
     } catch (error) {
@@ -1905,7 +1862,6 @@ class SqliteScopedStore implements ScopedStore {
           AND authorized_session.drone_id = ?
           AND authorized_session.cube_id = c.id
           AND authorized_session.revoked_at IS NULL
-          AND authorized_session.expires_at > ?
           AND authorized_client.revoked_at IS NULL
           AND authorized_drone.evicted_at IS NULL
           AND parent_grant.access IN (${placeholders})
@@ -1915,7 +1871,6 @@ class SqliteScopedStore implements ScopedStore {
         this.#principal.clientId,
         this.#principal.cubeId,
         this.#principal.droneId,
-        this.#now(),
         ...allowed,
       ],
     };
@@ -2120,24 +2075,21 @@ class SqliteMaintenanceStore implements MaintenanceStore {
     readonly clientId: string;
     readonly cubeId: string;
     readonly droneId: string;
-    readonly expiresAt: string;
   }): void {
     assertCanonicalUuid(input.id, "Drone session id");
     assertCanonicalUuid(input.clientId, "Client id");
     assertCanonicalUuid(input.cubeId, "Cube id");
     assertCanonicalUuid(input.droneId, "Drone id");
-    validateTimestamp(input.expiresAt);
     this.#database.prepare(`
       INSERT INTO drone_sessions (
-        id, client_id, cube_id, drone_id, created_at, expires_at
-      ) VALUES (?, ?, ?, ?, ?, ?)
+        id, client_id, cube_id, drone_id, created_at
+      ) VALUES (?, ?, ?, ?, ?)
     `).run(
       input.id,
       input.clientId,
       input.cubeId,
       input.droneId,
       this.#now(),
-      input.expiresAt,
     );
   }
 
@@ -2153,12 +2105,6 @@ class SqliteMaintenanceStore implements MaintenanceStore {
     this.#database.prepare(
       "UPDATE drone_sessions SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL",
     ).run(this.#now(), sessionId);
-  }
-
-  expireDroneSession(sessionId: string): void {
-    assertCanonicalUuid(sessionId, "Drone session id");
-    this.#database.prepare("UPDATE drone_sessions SET expires_at = ? WHERE id = ?")
-      .run(new Date(0).toISOString(), sessionId);
   }
 
   inspectManagedDrone(droneId: string) {
@@ -2591,7 +2537,6 @@ class SqliteCredentialStore implements CredentialStore {
     const row = this.#database.prepare(`
       SELECT credential.id, credential.lookup_digest, credential.verifier_digest,
              credential.session_id, session.client_id, session.cube_id, session.drone_id,
-             session.expires_at,
              COALESCE(credential.revoked_at, session.revoked_at, client.revoked_at) AS revoked_at,
              drone.evicted_at, session.superseded_at
       FROM drone_session_credentials AS credential
@@ -2603,21 +2548,6 @@ class SqliteCredentialStore implements CredentialStore {
       WHERE credential.lookup_digest = ?
     `).get(lookup);
     return row === undefined ? null : storedDroneSessionDigest(row);
-  }
-
-  findActiveDroneSessionExpiry(sessionId: string): string | null {
-    assertCanonicalUuid(sessionId, "Drone session id");
-    const row = this.#database.prepare(`
-      SELECT session.expires_at
-      FROM drone_sessions AS session
-      JOIN clients AS client ON client.id = session.client_id
-      JOIN drones AS drone ON drone.id = session.drone_id
-        AND drone.client_id = session.client_id
-        AND drone.cube_id = session.cube_id
-      WHERE session.id = ? AND session.revoked_at IS NULL
-        AND client.revoked_at IS NULL AND drone.evicted_at IS NULL
-    `).get(sessionId);
-    return row === undefined ? null : requiredText(row, "expires_at");
   }
 
   rotateClientCredential(input: {
@@ -3069,7 +2999,6 @@ function storedDroneSessionDigest(row: Record<string, unknown>): StoredDroneSess
     clientId: requiredText(row, "client_id"),
     cubeId: requiredText(row, "cube_id"),
     droneId: requiredText(row, "drone_id"),
-    expiresAt: requiredText(row, "expires_at"),
     evictedAt: nullableText(row, "evicted_at"),
     takenOver: nullableText(row, "superseded_at") !== null,
   };

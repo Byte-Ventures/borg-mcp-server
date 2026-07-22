@@ -401,6 +401,17 @@ export const STORE_MIGRATIONS: readonly Migration[] = Object.freeze([
       );
     `,
   },
+  {
+    version: 13,
+    name: "non_expiring_drone_sessions",
+    sql: `
+      DROP INDEX drone_sessions_scope_idx;
+      ALTER TABLE drone_sessions DROP COLUMN expires_at;
+      CREATE INDEX drone_sessions_scope_idx
+        ON drone_sessions (client_id, cube_id, drone_id)
+        WHERE revoked_at IS NULL;
+    `,
+  },
 ]);
 
 interface AppliedMigrationRow {

@@ -128,11 +128,15 @@ describe("runCli", () => {
   it("renders approved exact runtime evidence and bounded non-TTY JSON without guessing", async () => {
     const status = vi.fn().mockResolvedValue({
       status: "running",
-      artifact: { version: "0.1.8", integrity: `sha512-${"A".repeat(86)}==` },
+      controllerVersion: "0.1.9",
+      preparedArtifact: { version: "0.1.8", integrity: `sha512-${"A".repeat(86)}==` },
+      runningArtifact: null,
       buildIdentity: null,
       endpoint: "https://127.0.0.1:7091",
       mode: "managed",
+      serviceAdapter: "launchd",
       dataIdentity: "available",
+      nextAction: "borg-mcp-server update",
     });
     const service: ServerService = { start: vi.fn(), status };
     const tty = { ...createIo(), isTTY: true };
@@ -143,17 +147,42 @@ describe("runCli", () => {
       "Local server is reachable, but its running build identity is unavailable.",
     ));
     expect(tty.stdout).toHaveBeenCalledWith(expect.stringContaining("Build identity: unavailable"));
+    expect(tty.stdout).toHaveBeenCalledWith(expect.stringContaining("Mode: managed (launchd)"));
     expect(await runCli(["status"], service, machine)).toBe(0);
     expect(JSON.parse(machine.stdout.mock.calls[0]![0])).toEqual({
       status: "running",
-      artifact: "borgmcp-server@0.1.8",
-      artifact_integrity: `sha512-${"A".repeat(86)}==`,
+      installed_controller: "borgmcp-server@0.1.9",
+      prepared_runtime: "borgmcp-server@0.1.8",
+      prepared_integrity: `sha512-${"A".repeat(86)}==`,
+      running_runtime: null,
+      running_integrity: null,
       build_identity: null,
       endpoint: "https://127.0.0.1:7091",
       mode: "managed",
+      service_adapter: "launchd",
       data_identity: "available",
+      next_action: "borg-mcp-server update",
     });
     expect(status).toHaveBeenCalledTimes(2);
+  });
+
+  it("reports the installed controller version and stops managed service idempotently", async () => {
+    const versionIo = { ...createIo(), isTTY: true };
+    expect(await runCli(["--version"], { start: vi.fn() }, versionIo)).toBe(0);
+    expect(versionIo.stdout).toHaveBeenCalledWith("borgmcp-server@0.1.9");
+
+    const stop = vi.fn()
+      .mockResolvedValueOnce({ outcome: "stopped" })
+      .mockResolvedValueOnce({ outcome: "already-stopped" })
+      .mockResolvedValueOnce({ outcome: "foreground-action-required" });
+    const service: ServerService = { start: vi.fn(), stop };
+    const tty = { ...createIo(), isTTY: true };
+    expect(await runCli(["stop"], service, tty)).toBe(0);
+    expect(tty.stdout).toHaveBeenLastCalledWith(expect.stringContaining("Managed local server stopped."));
+    expect(await runCli(["stop"], service, tty)).toBe(0);
+    expect(tty.stdout).toHaveBeenLastCalledWith(expect.stringContaining("already stopped"));
+    expect(await runCli(["stop"], service, tty)).toBe(1);
+    expect(tty.stdout).toHaveBeenLastCalledWith(expect.stringContaining("Ctrl-C"));
   });
 
   it("renders bounded verification and rollback failures without raw errors", async () => {

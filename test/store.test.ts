@@ -78,14 +78,12 @@ beforeEach(async () => {
     clientId: ids.clientA,
     cubeId: ids.cubeA,
     droneId: ids.droneA,
-    expiresAt: "2026-07-14T13:00:00.000Z",
   });
   runtime.maintenance.createDroneSession({
     id: ids.expiredSession,
     clientId: ids.clientA,
     cubeId: ids.cubeA,
     droneId: ids.droneA,
-    expiresAt: "2026-07-14T11:00:00.000Z",
   });
 });
 
@@ -157,22 +155,22 @@ describe("Principal to ScopedStore isolation", () => {
     expect(drone.getCube(ids.cubeA)).toBeNull();
   });
 
-  it("rejects read-only writes and expired drone sessions", () => {
+  it("rejects read-only writes while old session timestamps no longer affect authorization", () => {
     const client = runtime.forPrincipal(clientPrincipal(ids.clientA));
     expect(() => client.appendActivity(ids.cubeB, "read grant is not write")).toThrowError(
       expect.objectContaining({ code: "NOT_FOUND" }),
     );
 
-    const expired = runtime.forPrincipal(droneSessionPrincipal({
+    const longLived = runtime.forPrincipal(droneSessionPrincipal({
       id: ids.expiredSession,
       clientId: ids.clientA,
       cubeId: ids.cubeA,
       droneId: ids.droneA,
     }));
-    expect(expired.listCubes()).toEqual([]);
-    expect(() => expired.appendActivity(ids.cubeA, "expired")).toThrowError(
-      expect.objectContaining({ code: "NOT_FOUND" }),
-    );
+    expect(longLived.listCubes()).toEqual([expect.objectContaining({ id: ids.cubeA })]);
+    expect(longLived.appendActivity(ids.cubeA, "still authorized")).toMatchObject({
+      cubeId: ids.cubeA,
+    });
   });
 
   it("applies client and session revocation to already-created scoped stores", () => {
@@ -435,7 +433,6 @@ describe("Principal to ScopedStore isolation", () => {
       clientId: ids.clientA,
       cubeId: ids.cubeA,
       droneId: peerDroneId,
-      expiresAt: "2026-07-14T13:00:00.000Z",
     });
     const author = runtime.forPrincipal(droneSessionPrincipal({
       id: ids.sessionA,
@@ -522,7 +519,6 @@ describe("Principal to ScopedStore isolation", () => {
       clientId: ids.clientA,
       cubeId: ids.cubeA,
       droneId: peerDroneId,
-      expiresAt: "2026-07-14T12:30:00.000Z",
     });
     const drone = runtime.forPrincipal(droneSessionPrincipal({
       id: ids.sessionA,
@@ -553,13 +549,11 @@ describe("Principal to ScopedStore isolation", () => {
     expect(runtime.liveness.scan()).toEqual([]);
   });
 
-  it("never wakes expired, revoked, or evicted sessions", () => {
+  it("never wakes revoked or evicted sessions", () => {
     const manager = runtime.forPrincipal(clientPrincipal(ids.clientA));
 
     expect(runtime.liveness.scan()).toEqual([]);
     runtime.maintenance.revokeDroneSession(ids.sessionA);
-    expect(runtime.liveness.scan()).toEqual([]);
-    runtime.maintenance.expireDroneSession(ids.expiredSession);
     expect(runtime.liveness.scan()).toEqual([]);
     manager.evictDrone(ids.cubeA, ids.droneA);
     expect(runtime.liveness.scan()).toEqual([]);
@@ -581,7 +575,6 @@ describe("Principal to ScopedStore isolation", () => {
         clientId: ids.clientA,
         cubeId: ids.cubeA,
         droneId,
-        expiresAt: "2026-07-14T13:00:00.000Z",
       });
     }
     const path = join(directory, "borg.db");
@@ -734,8 +727,6 @@ describe("Principal to ScopedStore isolation", () => {
         sessionId: "00000000-0000-4000-8000-000000000033",
         credentialId: "00000000-0000-4000-8000-000000000034",
         credentialDigest: { lookup: Buffer.alloc(16), verifier: Buffer.alloc(32) },
-        expiresAt: "2026-07-15T12:00:00.000Z",
-        renewIfExpiresAtOrBefore: "2026-07-15T00:00:00.000Z",
       }),
       () => authority.exchangeInvitation({
         invitation,

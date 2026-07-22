@@ -684,7 +684,6 @@ describe("coordination stream setup", () => {
       clientId: managerId,
       cubeId,
       droneId,
-      expiresAt: "2026-07-16T13:00:00.000Z",
     });
     const manager = clientPrincipal(managerId);
     const malformedRoleId = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -934,7 +933,6 @@ describe("coordination stream setup", () => {
       clientId: managerId,
       cubeId,
       droneId,
-      expiresAt: "2026-07-19T19:00:00.000Z",
     });
     const manager = clientPrincipal(managerId);
     const snapshot = () => JSON.stringify({

@@ -94,13 +94,24 @@ and activate a verified update with:
 
 ```sh
 borg-mcp-server status
+borg-mcp-server version
 borg-mcp-server update
+borg-mcp-server stop
 ```
 
-When stdout is not a terminal, `status` and `update` emit one bounded JSON
-record. Status never derives a build identity from a source checkout. If an
-older package does not provide embedded source identity, the field is reported
-as unavailable.
+When stdout is not a terminal, `status`, `version`, `update`, and `stop` emit one
+bounded JSON record. The installed controller and the prepared/running runtime
+are separate layers: installing a newer CLI does not activate its server
+artifact. Status reports all three identities independently and prints
+`Next: borg-mcp-server update.` when the installed controller is newer than the
+prepared or running runtime. It never derives a build identity from a source
+checkout; unavailable evidence is reported as unavailable.
+
+`stop` unloads the existing managed launchd/systemd service and waits for its
+runtime lock to disappear. It is idempotent and preserves server data, TLS
+identity, credentials, cubes, artifacts, and service definition. A foreground
+server is owned by its terminal instead, so `stop` directs the operator to use
+Ctrl-C there rather than signaling a PID inferred from an untrusted lock.
 
 The server library provides matching launchd and systemd adapter definitions
 that point at the atomically selected `current` artifact and preserve

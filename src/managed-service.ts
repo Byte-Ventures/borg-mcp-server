@@ -49,7 +49,7 @@ export function createManagedServiceDefinition(input: ManagedServiceInput): Mana
       content: launchdDefinition(input.nodeExecutable, entrypoint, input.dataDirectory),
       install: ["launchctl", "bootstrap", domain, input.definitionPath] as const,
       restart: ["launchctl", "kickstart", "-k", service] as const,
-      stop: ["launchctl", "kill", "SIGTERM", service] as const,
+      stop: ["launchctl", "bootout", service] as const,
       status: ["launchctl", "print", service] as const,
     });
   }

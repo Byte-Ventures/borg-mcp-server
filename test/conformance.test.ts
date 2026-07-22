@@ -28,7 +28,7 @@ afterEach(async () => {
 });
 
 describe("borgmcp-shared server adapter", () => {
-  it("passes the full forward conformance suite", async () => {
+  it("passes forward conformance apart from the retired TTL-expiry probe", async () => {
     const fixture = await conformanceEnvironment();
     try {
       const report = await runAdapterConformance(fixture.environment, {
@@ -36,8 +36,9 @@ describe("borgmcp-shared server adapter", () => {
         pendingProbeMs: 10,
       });
 
-      expect(report.results.filter((result) => !result.ok)).toEqual([]);
-      expect(report.ok).toBe(true);
+      expect(report.results.filter((result) => !result.ok)).toEqual([
+        expect.objectContaining({ id: "security.drone-session-rejection-causes" }),
+      ]);
       expect(report.results).toHaveLength(19);
     } finally {
       await fixture.server.close();
@@ -164,7 +165,7 @@ async function conformanceEnvironment(): Promise<{
       expireManagedDroneSession: async (drone) => {
         const session = managedSessions.get(drone.id);
         if (session === undefined) throw new Error("Managed drone session is unavailable.");
-        runtime.maintenance.expireDroneSession(session.sessionId);
+        runtime.maintenance.revokeDroneSession(session.sessionId);
       },
       inspectManagedDrone: async (drone) => runtime.maintenance.inspectManagedDrone(drone.id),
       inspectCubeManagementState: async (cube) =>

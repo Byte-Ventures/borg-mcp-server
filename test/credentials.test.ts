@@ -4,12 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
 import { DatabaseSync } from "node:sqlite";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
   CredentialAuthority,
   CredentialDigester,
-  DRONE_SESSION_TTL_MS,
   generateSecret,
 } from "../src/credentials.js";
 import { type StoreRuntime, openStore } from "../src/store.js";
@@ -144,9 +143,7 @@ describe("credential authority", () => {
     expect(() => authority.rotateClient(enrolled.id)).toThrow("Provide an existing active client ID.");
   });
 
-  it("aborts a registered live drone session when its credential expires", async () => {
-    vi.useFakeTimers();
-    try {
+  it("keeps a registered live drone session active as time advances", async () => {
       const clientId = randomUUID();
       const cubeId = randomUUID();
       const roleId = randomUUID();
@@ -161,7 +158,6 @@ describe("credential authority", () => {
         clientId,
         cubeId,
         droneId,
-        expiresAt: new Date(now.getTime() + 1_000).toISOString(),
       });
       const live = authority.registerLiveSession(droneSessionPrincipal({
         id: sessionId,
@@ -171,16 +167,11 @@ describe("credential authority", () => {
       }));
 
       expect(live.signal.aborted).toBe(false);
-      await vi.advanceTimersByTimeAsync(1_000);
-      expect(live.signal.aborted).toBe(true);
-    } finally {
-      vi.useRealTimers();
-    }
+      now = new Date("2126-07-14T12:00:00.000Z");
+      expect(live.signal.aborted).toBe(false);
   });
 
-  it("moves an existing live-session deadline when its credential is renewed", async () => {
-    vi.useFakeTimers();
-    try {
+  it("reuses an existing session without a renewal timer", async () => {
       const clientId = randomUUID();
       const cubeId = randomUUID();
       const roleId = randomUUID();
@@ -200,9 +191,7 @@ describe("credential authority", () => {
         droneId: attached.drone.id,
       }));
 
-      const elapsed = DRONE_SESSION_TTL_MS / 2;
-      now = new Date(now.getTime() + elapsed);
-      await vi.advanceTimersByTimeAsync(elapsed);
+      now = new Date("2126-07-14T12:00:00.000Z");
       const renewed = authority.attachSeat(runtime.forPrincipal(parent), {
         cubeId,
         roleId,
@@ -211,13 +200,7 @@ describe("credential authority", () => {
       });
       expect(renewed).toMatchObject({ result: "reused", sessionId: attached.sessionId });
 
-      await vi.advanceTimersByTimeAsync(elapsed);
       expect(live.signal.aborted).toBe(false);
-      await vi.advanceTimersByTimeAsync(elapsed);
-      expect(live.signal.aborted).toBe(true);
-    } finally {
-      vi.useRealTimers();
-    }
   });
 
   it("domain-separates keyed lookup and verifier digests", () => {

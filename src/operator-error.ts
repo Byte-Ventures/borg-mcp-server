@@ -21,6 +21,7 @@ export type OperatorErrorCode =
   | "RUNTIME_ACTIVE"
   | "RUNTIME_LOCK_UNSAFE"
   | "RUNTIME_LOCK_INVALID"
+  | "RUNTIME_LOCK_LIVE_UNRECOGNIZED"
   | "RUNTIME_LOCK_STALE"
   | "ACTIVITY_LIMIT_INVALID"
   | "DATABASE_LIMIT_INVALID"
@@ -58,6 +59,7 @@ const publicMessages: Readonly<Record<OperatorErrorCode, string>> = Object.freez
   RUNTIME_ACTIVE: "Stop the server before running setup or offline administration.",
   RUNTIME_LOCK_UNSAFE: "Ensure runtime.lock is a private regular file before retrying.",
   RUNTIME_LOCK_INVALID: "Confirm the server is stopped, then remove the invalid runtime.lock.",
+  RUNTIME_LOCK_LIVE_UNRECOGNIZED: "A live process owns runtime.lock. Stop the server through a supported command; do not remove the lock.",
   RUNTIME_LOCK_STALE: "Confirm the recorded server process is stopped, then remove runtime.lock.",
   ACTIVITY_LIMIT_INVALID: "Set BORG_SERVER_MAX_ACTIVITY_ENTRIES_PER_CUBE to a positive integer.",
   DATABASE_LIMIT_INVALID: "Set BORG_SERVER_MAX_DATABASE_BYTES to a positive integer.",

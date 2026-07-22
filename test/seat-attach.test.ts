@@ -9,7 +9,6 @@ import { CoordinationApi } from "../src/coordination-api.js";
 import {
   CredentialAuthority,
   CredentialDigester,
-  DRONE_SESSION_TTL_MS,
   generateSecret,
 } from "../src/credentials.js";
 import { openStore, type StoreRuntime } from "../src/store.js";
@@ -64,7 +63,7 @@ describe("client seat attach", () => {
         result: "created",
         cube: { id: ids.cubeA },
         role: { id: ids.roleA },
-        session: { id: expect.any(String), expires_at: "2026-07-15T13:00:00.000Z" },
+        session: { id: expect.any(String) },
       },
     });
     expect(created.payload.session).not.toHaveProperty("token");
@@ -83,7 +82,7 @@ describe("client seat attach", () => {
     }
   });
 
-  it("keeps eviction, revocation, and expiry distinct", async () => {
+  it("keeps eviction and revocation distinct while time never expires a session", async () => {
     const revokedCredential = generateSecret();
     const revoked = await attach(
       clientA.credential, ids.cubeA, ids.roleA, revokedCredential, "attach-revoked",
@@ -100,19 +99,21 @@ describe("client seat attach", () => {
       .run("2026-07-14T13:01:00.000Z", evicted.payload.drone.id);
     database.close();
 
-    const expiredCredential = generateSecret();
-    await attach(clientA.credential, ids.cubeA, ids.roleA, expiredCredential, "attach-expired");
+    const longLivedCredential = generateSecret();
+    await attach(clientA.credential, ids.cubeA, ids.roleA, longLivedCredential, "attach-long-lived");
     now = new Date("2026-07-15T13:00:01.000Z");
 
     expect(authority.authenticateStatus(`Bearer ${revokedCredential}`)).toBe("revoked");
     expect(authority.authenticateStatus(`Bearer ${evictedCredential}`)).toBe("evicted");
-    expect(authority.authenticateStatus(`Bearer ${expiredCredential}`)).toBe("expired");
+    expect(authority.authenticateStatus(`Bearer ${longLivedCredential}`)).toMatchObject({
+      kind: "drone-session",
+    });
   });
 
-  it("renews the matching active digest without mutating session identity", async () => {
+  it("reuses the matching active digest without mutating session identity", async () => {
     const sessionCredential = generateSecret();
     const created = await attach(clientA.credential, ids.cubeA, ids.roleA, sessionCredential, "attach-reuse-1");
-    now = new Date(now.getTime() + DRONE_SESSION_TTL_MS / 2);
+    now = new Date("2126-07-14T13:00:00.000Z");
     const reused = await attach(clientA.credential, ids.cubeA, ids.roleA, sessionCredential, "attach-reuse-2");
 
     expect(reused).toMatchObject({
@@ -120,10 +121,7 @@ describe("client seat attach", () => {
       payload: {
         result: "reused",
         drone: created.payload.drone,
-        session: {
-          id: created.payload.session.id,
-          expires_at: "2026-07-16T01:00:00.000Z",
-        },
+        session: { id: created.payload.session.id },
       },
     });
     expect(count("drones")).toBe(1);
@@ -213,7 +211,7 @@ describe("client seat attach", () => {
     await iterator.return?.();
   });
 
-  it("rejects foreign, expired, and role-mismatched digest reuse", async () => {
+  it("rejects foreign and role-mismatched digest reuse without time expiry", async () => {
     const ownCredential = generateSecret();
     await attach(clientA.credential, ids.cubeA, ids.roleA, ownCredential, "attach-scope-1");
     const foreign = await attach(clientB.credential, ids.cubeB, ids.roleB, ownCredential, "attach-scope-2");
@@ -227,18 +225,18 @@ describe("client seat attach", () => {
     );
     expect(roleMismatch).toMatchObject({ status: 401, error: { code: "SESSION_REJECTED" } });
 
-    now = new Date("2026-07-15T13:00:00.000Z");
-    const expired = await attach(clientA.credential, ids.cubeA, ids.roleA, ownCredential, "attach-scope-4");
-    expect(expired).toMatchObject({ status: 401, error: { code: "AUTH_EXPIRED" } });
+    now = new Date("2126-07-15T13:00:00.000Z");
+    const reused = await attach(clientA.credential, ids.cubeA, ids.roleA, ownCredential, "attach-scope-4");
+    expect(reused).toMatchObject({ status: 200, payload: { result: "reused" } });
     expect(count("drones")).toBe(1);
   });
 
-  it("creates a replacement session only after the prior session is no longer active", async () => {
+  it("never replaces an active prior session because time elapsed", async () => {
     const firstCredential = generateSecret();
     const first = await attach(clientA.credential, ids.cubeA, ids.roleA, firstCredential, "attach-renew-1");
-    now = new Date(first.payload.session.expires_at);
+    now = new Date("2126-07-15T13:00:00.000Z");
     const nextCredential = generateSecret();
-    const renewed = await attach(
+    const rejected = await attach(
       clientA.credential,
       ids.cubeA,
       ids.roleA,
@@ -247,34 +245,13 @@ describe("client seat attach", () => {
       first.payload.drone.id,
     );
 
-    expect(renewed).toMatchObject({
-      status: 201,
-      payload: { result: "created", drone: first.payload.drone },
-    });
-    expect(renewed.payload.session.id).not.toBe(first.payload.session.id);
+    expect(rejected).toMatchObject({ status: 401, error: { code: "SESSION_REJECTED" } });
     expect(count("drones")).toBe(1);
-    expect(count("drone_sessions")).toBe(2);
-    expect(authority.authenticateStatus(`Bearer ${nextCredential}`)).toMatchObject({ kind: "drone-session" });
-
-    now = new Date(now.getTime() + 1);
-    const lostResponseRetry = await attach(
-      clientA.credential,
-      ids.cubeA,
-      ids.roleA,
-      nextCredential,
-      "attach-renew-3",
-      first.payload.drone.id,
-    );
-    expect(lostResponseRetry).toMatchObject({
-      status: 200,
-      payload: {
-        result: "reused",
-        drone: first.payload.drone,
-        session: renewed.payload.session,
-      },
+    expect(count("drone_sessions")).toBe(1);
+    expect(authority.authenticateStatus(`Bearer ${firstCredential}`)).toMatchObject({
+      kind: "drone-session",
     });
-    expect(count("drones")).toBe(1);
-    expect(count("drone_sessions")).toBe(2);
+    expect(authority.authenticateStatus(`Bearer ${nextCredential}`)).toBe("invalid");
   });
 
   it("keeps an explicitly revoked seat terminal after client rotation", async () => {
@@ -337,95 +314,20 @@ describe("client seat attach", () => {
     expect(count("drone_sessions")).toBe(1);
   });
 
-  it("serializes concurrent expired-seat restoration exactly once", async () => {
-    const firstCredential = generateSecret();
-    const first = await attach(
-      clientA.credential, ids.cubeA, ids.roleA, firstCredential, "attach-restore-race-1",
-    );
-    now = new Date(first.payload.session.expires_at);
-    const credentials = [generateSecret(), generateSecret()] as const;
-    const restored = await Promise.all(credentials.map((credential, index) => attach(
-      clientA.credential,
-      ids.cubeA,
-      ids.roleA,
-      credential,
-      `attach-restore-race-${index + 2}`,
-      first.payload.drone.id,
-    )));
-
-    expect(restored.map((response) => response.status).sort()).toEqual([201, 401]);
-    expect(restored.find((response) => response.status === 401)).toMatchObject({
-      error: { code: "SESSION_REJECTED" },
-    });
-    expect(count("drones")).toBe(1);
-    expect(count("drone_sessions")).toBe(2);
-    expect(credentials.filter((credential) =>
-      typeof authority.authenticateStatus(`Bearer ${credential}`) === "object"
-    )).toHaveLength(1);
-    expect(authority.authenticateStatus(`Bearer ${firstCredential}`)).toBe("rejected");
-
-    const acceptedIndex = restored.findIndex((response) => response.status === 201);
-    const accepted = restored[acceptedIndex]!;
-    const acceptedCredential = credentials[acceptedIndex]!;
-    now = new Date(accepted.payload.session.expires_at);
-    expect(authority.authenticateStatus(`Bearer ${firstCredential}`)).toBe("rejected");
-    expect(authority.authenticateStatus(`Bearer ${acceptedCredential}`)).toBe("expired");
-    const predecessorRetry = await attach(
-      clientA.credential,
-      ids.cubeA,
-      ids.roleA,
-      firstCredential,
-      "attach-restore-race-stale",
-      first.payload.drone.id,
-    );
-    expect(predecessorRetry).toMatchObject({
-      status: 401,
-      error: { code: "SESSION_REJECTED" },
-    });
-
-    runtime.maintenance.revokeDroneSession(accepted.payload.session.id);
-    expect(authority.authenticateStatus(`Bearer ${firstCredential}`)).toBe("rejected");
-    expect(authority.authenticateStatus(`Bearer ${acceptedCredential}`)).toBe("revoked");
-    const predecessorAfterRevocation = await attach(
-      clientA.credential,
-      ids.cubeA,
-      ids.roleA,
-      firstCredential,
-      "attach-restore-race-stale-revoked-successor",
-      first.payload.drone.id,
-    );
-    expect(predecessorAfterRevocation).toMatchObject({
-      status: 401,
-      error: { code: "SESSION_REJECTED" },
-    });
-    const successorAfterRevocation = await attach(
-      clientA.credential,
-      ids.cubeA,
-      ids.roleA,
-      acceptedCredential,
-      "attach-restore-race-revoked-successor",
-      first.payload.drone.id,
-    );
-    expect(successorAfterRevocation).toMatchObject({
-      status: 401,
-      error: { code: "SESSION_REVOKED" },
-    });
-  });
-
-  it("preserves the same directed recipient and unread entry beyond two session TTLs", async () => {
+  it("preserves the same directed recipient and unread entry far beyond the old session TTL", async () => {
     const sessionCredential = generateSecret();
     const created = await attach(
       clientA.credential, ids.cubeA, ids.roleA, sessionCredential, "attach-long-lived-1",
     );
 
-    for (let renewal = 0; renewal < 3; renewal += 1) {
-      now = new Date(now.getTime() + DRONE_SESSION_TTL_MS * 3 / 4);
+    for (let reuse = 0; reuse < 3; reuse += 1) {
+      now = new Date(now.getTime() + 100 * 365 * 24 * 60 * 60 * 1_000);
       const response = await attach(
         clientA.credential,
         ids.cubeA,
         ids.roleA,
         sessionCredential,
-        `attach-long-lived-${renewal + 2}`,
+        `attach-long-lived-${reuse + 2}`,
         created.payload.drone.id,
       );
       expect(response).toMatchObject({
@@ -446,7 +348,7 @@ describe("client seat attach", () => {
     const wake = iterator.next();
     const clientStore = runtime.forPrincipal(authenticatedPrincipal(clientA.credential));
     clientStore.appendLog(ids.cubeA, {
-      message: "directed beyond two TTLs",
+      message: "directed after centuries",
       visibility: "direct",
       recipientDroneIds: [created.payload.drone.id],
     });
@@ -454,13 +356,13 @@ describe("client seat attach", () => {
     await iterator.return?.();
     const sessionStore = runtime.forPrincipal(renewedPrincipal);
     const unread = sessionStore.readLog(ids.cubeA, null, 100);
-    expect(unread.entries.filter((entry) => entry.message === "directed beyond two TTLs"))
+    expect(unread.entries.filter((entry) => entry.message === "directed after centuries"))
       .toHaveLength(1);
     expect(count("drones")).toBe(1);
     expect(count("drone_sessions")).toBe(1);
   });
 
-  it("rejects an expired prior seat when the requested role does not match", async () => {
+  it("rejects a prior seat when the requested role does not match", async () => {
     const first = await attach(
       clientA.credential,
       ids.cubeA,
@@ -471,8 +373,6 @@ describe("client seat attach", () => {
     runtime.maintenance.createRole({ id: randomUUID(), cubeId: ids.cubeA, name: "Other" });
     const otherRoleId = runtime.forPrincipal(authenticatedPrincipal(clientA.credential))
       .listRoles(ids.cubeA).find((role) => role.name === "Other")!.id;
-    now = new Date(first.payload.session.expires_at);
-
     const rejected = await attach(
       clientA.credential,
       ids.cubeA,
@@ -586,7 +486,7 @@ async function attach(
     readonly cube: { readonly id: string; readonly name: string };
     readonly role: { readonly id: string; readonly name: string };
     readonly drone: { readonly id: string; readonly label: string };
-    readonly session: { readonly id: string; readonly expires_at: string };
+    readonly session: { readonly id: string };
   };
   readonly error?: { readonly code: string };
 }> {

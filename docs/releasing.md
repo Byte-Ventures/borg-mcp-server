@@ -354,7 +354,7 @@ source and merge commit, pre-tag repository-variable evidence, and a never-befor
 The live `borgmcp-server@0.1.12` package consumes the audited exact
 `borgmcp-shared@0.4.3` registry release. Immutable `v0.1.6` and `v0.1.10` are failed prepublication
 evidence and are not install targets. Current post-`v0.1.12` source pins the audited exact
-`borgmcp-shared@0.5.0` registry release for the unpublished `borgmcp-server@0.1.13` candidate; the
+`borgmcp-shared@0.5.0` registry release for the unpublished `borgmcp-server@0.1.14` candidate; the
 shrinkwrap must resolve that registry tarball with the matching SRI.
 Version `0.1.12` remains the install target until that candidate passes exact-SHA review, an
 authorized immutable tag publication, and bounded registry integrity and signature verification.

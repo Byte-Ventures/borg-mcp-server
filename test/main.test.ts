@@ -40,6 +40,11 @@ describe("main operator errors", () => {
     ["SERVER_FILES_MISSING", "Configure BORG_SERVER_DATA_DIR or the required TLS file variables."],
     ["INSTALLATION_EXISTS", "An installation already exists in BORG_SERVER_DATA_DIR. To destroy and recreate it, stop the server and run borg-mcp-server setup --reinitialize."],
     ["RUNTIME_ACTIVE", "Stop the server before running setup or offline administration."],
+    [
+      "RUNTIME_ARTIFACT_INSTALL_FAILED",
+      "Setup could not prepare the verified runtime.\n" +
+      "Next: check your Node.js and npm installation, then rerun setup.",
+    ],
     ["DATABASE_LIMIT_INVALID", "Set BORG_SERVER_MAX_DATABASE_BYTES to a positive integer."],
   ] as const)("prints the actionable typed error: %s", async (code, publicMessage) => {
     const previousExitCode = process.exitCode;

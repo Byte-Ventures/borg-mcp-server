@@ -190,6 +190,9 @@ export async function verifyPackedArtifact(tarballPath) {
     if (JSON.stringify(manifest.publishConfig) !== JSON.stringify({ access: 'public' })) {
       throw new Error('publishConfig must contain only access=public; registry redirects are forbidden.');
     }
+    if (!isDeepStrictEqual(manifest.engines, { node: '>=22.12.0', npm: '>=10.0.0' })) {
+      throw new Error('Package engines must match the reviewed Node and npm compatibility boundary.');
+    }
     if (!isDeepStrictEqual(manifest.files, EXPECTED_MANIFEST_FILES)) {
       throw new Error('Package files must match the reviewed public artifact boundary.');
     }

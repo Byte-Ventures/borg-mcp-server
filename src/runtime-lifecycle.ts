@@ -74,6 +74,13 @@ export class RuntimeActivationError extends Error {
   }
 }
 
+export class RuntimeArtifactInstallError extends Error {
+  constructor() {
+    super("Runtime artifact installation did not complete.");
+    this.name = "RuntimeArtifactInstallError";
+  }
+}
+
 export function createRuntimeLifecycle(
   dependencies: RuntimeLifecycleDependencies,
 ): RuntimeLifecycle {
@@ -121,7 +128,11 @@ async function stageRuntimeArtifact(
   if (existing !== null) return existing;
   const staging = await mkdtemp(join(root, ".staging-"));
   try {
-    await withDeadline(input.timeoutMs, (signal) => unpack(archive, staging, signal));
+    try {
+      await withDeadline(input.timeoutMs, (signal) => unpack(archive, staging, signal));
+    } catch {
+      throw new RuntimeArtifactInstallError();
+    }
     const packageDirectory = await validateUnpackedPackage(staging, input.expectedVersion);
     await makeTreeReadOnly(packageDirectory);
     const treeSha256 = await hashArtifactTree(packageDirectory);
@@ -241,14 +252,27 @@ export function createUnixNpmArtifactUnpacker(options: {
       signal,
       stdin: archive,
     });
-    await hashArtifactTree(join(stagingDirectory, "package"));
+    const stagingRoot = await realpath(stagingDirectory);
+    const packagePath = join(stagingRoot, "package");
+    const packageMetadata = await lstat(packagePath);
+    const packageDirectory = await realpath(packagePath);
+    if (!packageMetadata.isDirectory() || packageMetadata.isSymbolicLink() ||
+        dirname(packageDirectory) !== stagingRoot) {
+      throw new Error("Runtime artifact package escaped staging.");
+    }
+    await hashArtifactTree(packageDirectory);
+    const shrinkwrap = await readRegularFile(join(packageDirectory, "npm-shrinkwrap.json"), 2 * 1024 * 1024);
+    await writeFile(join(packageDirectory, "package-lock.json"), shrinkwrap, {
+      flag: "wx",
+      mode: 0o600,
+    });
     await run(npmExecutable, [
       "ci",
       "--omit=dev",
       "--ignore-scripts",
       "--no-audit",
       "--no-fund",
-    ], { cwd: join(stagingDirectory, "package"), signal });
+    ], { cwd: packageDirectory, signal });
   };
 }
 

@@ -1,10 +1,12 @@
 import type { RegistryArtifactSource } from "./registry-artifact.js";
 import {
   RuntimeActivationError,
+  RuntimeArtifactInstallError,
   type RuntimeLifecycle,
   type RuntimeRecoveryState,
   type VerifiedRuntimeArtifact,
 } from "./runtime-lifecycle.js";
+import { operatorErrors } from "./operator-error.js";
 import type { RuntimeBuildIdentity } from "./runtime-identity.js";
 
 export interface RuntimeOperator {
@@ -74,7 +76,15 @@ export function createRuntimeOperator(options: {
   };
   return {
     async prepareLatest(timeoutMs): Promise<VerifiedRuntimeArtifact> {
-      const artifact = await stageLatest(timeoutMs);
+      let artifact: VerifiedRuntimeArtifact;
+      try {
+        artifact = await stageLatest(timeoutMs);
+      } catch (error) {
+        if (error instanceof RuntimeArtifactInstallError) {
+          throw operatorErrors.RUNTIME_ARTIFACT_INSTALL_FAILED;
+        }
+        throw error;
+      }
       return options.lifecycle.prepare({ runtimeRoot: options.runtimeRoot, artifact });
     },
     async updateLatest(timeoutMs): Promise<RuntimeUpdateResult> {

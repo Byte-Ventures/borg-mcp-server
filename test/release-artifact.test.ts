@@ -46,6 +46,24 @@ describe("packed release artifact", () => {
     ], { cwd: fixture })).resolves.toBeDefined();
   });
 
+  it("binds the published npm compatibility boundary used by runtime staging", async () => {
+    const fixture = await packageFixture();
+    const manifest = JSON.parse(await readFile(join(fixture, "package.json"), "utf8")) as {
+      engines: unknown;
+    };
+    expect(manifest.engines).toEqual({ node: ">=22.12.0", npm: ">=10.0.0" });
+    await expect(verifyPackedArtifact(await pack(fixture))).resolves.toBeDefined();
+  });
+
+  it("rejects a packed artifact that drifts from the reviewed npm compatibility boundary", async () => {
+    const fixture = await packageFixture({
+      engines: { node: ">=22.12.0", npm: ">=10.0.0 <12" },
+    });
+    await expect(verifyPackedArtifact(await pack(fixture))).rejects.toThrow(
+      "Package engines must match the reviewed Node and npm compatibility boundary.",
+    );
+  });
+
   it("accepts the artifact with trusted npm config isolated outside the workspace", async () => {
     const fixture = await packageFixture();
     const configDirectory = await mkdtemp(join(tmpdir(), "borg-release-npm-config-"));

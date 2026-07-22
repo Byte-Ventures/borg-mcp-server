@@ -290,6 +290,16 @@ and `latest` resolves to `0.1.9`. The tokenless OIDC publication and postpublica
 registry integrity and ownership, SLSA provenance, signatures, and attestations for this tag and
 commit.
 
+The immutable annotated `v0.1.10` tag object
+`1f281f611e85340156bcf09a4cb968feb7f5517a` peels to protected-main merge
+`605f5b0b3485cfbbd800132ba92da5d18df0e56c`. Workflow run `29926421741`, attempt 1, failed safely
+in `Check, test, and build once` when the wall-clock invitation timing assertion measured
+`1.260047615675049` against a strict less-than-`1.25` threshold; 417 of 418 tests passed. Tarball
+build, verification, exercise, and upload were skipped, as were publish and registry verification.
+npm continued to return E404 for `borgmcp-server@0.1.10`. Never rerun the workflow or move, delete,
+or reuse the tag; recovery uses the unused `0.1.11` identity with the reviewed deterministic
+equal-work regression.
+
 The immutable annotated `v0.1.4` tag object
 `1604077e6249c7c0f7ce17b3f2848caad2bc773e` peels to protected-main merge
 `1f7e60a695f27d92b2d46233b0e3cad5aa43bd0d`, whose tree is byte-identical to reviewed source
@@ -324,10 +334,11 @@ move, delete, or reuse that tag. Recovery uses separately authorized version `0.
 source and merge commit, pre-tag repository-variable evidence, and a never-before-used annotated tag.
 
 The live `borgmcp-server@0.1.9` package consumes the audited exact
-`borgmcp-shared@0.4.3` registry release. Immutable `v0.1.6` is failed prepublication evidence and is
-not an install target. Current source is the unpublished `borgmcp-server@0.1.10` release candidate
-and retains that verified exact shared registry dependency; the shrinkwrap must resolve that
-registry tarball with the matching SRI. Version `0.1.9` remains the install target until the
+`borgmcp-shared@0.4.3` registry release. Immutable `v0.1.6` and `v0.1.10` are failed prepublication
+evidence and are not install targets. Current source is the unpublished
+`borgmcp-server@0.1.11` release candidate
+and retains that verified exact shared registry dependency; the shrinkwrap must resolve that registry
+tarball with the matching SRI. Version `0.1.9` remains the install target until the
 candidate passes exact-SHA review, an authorized immutable tag publication, and bounded registry
 integrity and signature verification.
 The source-lock, artifact, audit, signature, and consumer gates must pass without Git dependencies;

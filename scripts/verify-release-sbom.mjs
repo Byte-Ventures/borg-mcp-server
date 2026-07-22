@@ -73,7 +73,7 @@ export async function verifyReleaseSbom(sbomPath, rootDirectory = process.cwd())
   const manifest = JSON.parse(await readFile(join(rootDirectory, 'package.json'), 'utf8'));
   const lock = JSON.parse(await readFile(join(rootDirectory, 'npm-shrinkwrap.json'), 'utf8'));
   const rootRef = `${manifest.name}@${manifest.version}`;
-  if (manifest.name !== 'borgmcp-server' || manifest.version !== '0.1.10') {
+  if (manifest.name !== 'borgmcp-server' || manifest.version !== '0.1.11') {
     fail(`Unexpected package identity: ${rootRef}`);
   }
   if (lock.name !== manifest.name || lock.version !== manifest.version ||

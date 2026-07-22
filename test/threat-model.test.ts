@@ -32,7 +32,7 @@ describe("server threat model", () => {
     );
     expect(manifest).toMatchObject({
       private: false,
-      version: "0.1.10",
+      version: "0.1.11",
       license: "SEE LICENSE IN LICENSE",
     });
   });

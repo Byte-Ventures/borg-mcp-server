@@ -15,13 +15,14 @@ redacted debug logging, and cube-scoped invitation baseline. Relative to
 `0.1.4`, it adds idempotent prior-seat reattachment, migrated cube-context and
 taxonomy routing, durable SSE replay and heartbeat delivery, fleet liveness
 signals, typed terminal drone eviction, and explicit manage-access denials for
-visible non-managing principals. Immutable `v0.1.6` failed safely before artifact
-upload or npm publication and is not an install target. The published `0.1.9`
-package is the reviewed immutable-runtime lifecycle release and consumes the
-audited exact `borgmcp-shared@0.4.3` registry release. Current source is the
-unpublished `borgmcp-server@0.1.10` release candidate, adding non-expiring
-enrolled sessions, authoritative runtime status, safe legacy-runtime updates,
-and bounded managed-service stop behavior. Version `0.1.9` remains the current
+visible non-managing principals. Immutable `v0.1.6` and `v0.1.10` failed safely
+before artifact upload or npm publication and are not install targets. The
+published `0.1.9` package is the reviewed immutable-runtime lifecycle release
+and consumes the audited exact `borgmcp-shared@0.4.3` registry release. Current
+source is the unpublished `borgmcp-server@0.1.11` release candidate, adding
+non-expiring enrolled sessions, authoritative runtime status, safe legacy-runtime
+updates, and bounded managed-service stop behavior. Version `0.1.9` remains the
+current
 install target until the candidate passes exact-SHA review, immutable tag
 publication, and bounded registry verification.
 

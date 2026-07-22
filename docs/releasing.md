@@ -135,12 +135,13 @@ never a Git or SSH dependency. Client releases follow their own repository gates
 
 The server repository is public; visibility is complete, and `borgmcp-server@0.1.1`,
 `borgmcp-server@0.1.4`, `borgmcp-server@0.1.5`, `borgmcp-server@0.1.7`,
-`borgmcp-server@0.1.8`, `borgmcp-server@0.1.9`, and `borgmcp-server@0.1.11` are live on npm
+`borgmcp-server@0.1.8`, `borgmcp-server@0.1.9`, `borgmcp-server@0.1.11`, and
+`borgmcp-server@0.1.12` are live on npm
 under the sole expected maintainer.
-The `latest` tag resolves to `0.1.11`.
+The `latest` tag resolves to `0.1.12`.
 Versions `0.1.2` and `0.1.3` are
 unpublished immutable failure evidence and must never be customer, install, or dogfood targets.
-Version `0.1.11` completed the full
+Version `0.1.12` completed the full
 exact-source, tagged-artifact, tokenless OIDC publication, registry verification, provenance,
 signature, and attestation gate chain recorded below.
 
@@ -310,6 +311,13 @@ and `latest` resolves to `0.1.11`. The tokenless OIDC publication and postpublic
 verified registry integrity and ownership, provenance, signatures, and the Trusted Publishing
 attestation.
 
+The immutable annotated `v0.1.12` tag object
+`2d032c61800eccc385b0b321fe6f5ecd5b975e34` peels to protected-main merge
+`22da161f7491e38a3306069445ac76dd9e7433ca`. Workflow run `29941142539`, attempt 1,
+built, published, and registry-verified the exact reviewed artifact. npm reports integrity
+`sha512-byOxuZ/QM6iufynaA3f1UCERtUp2uFwxqF4fc5QavEDYgb3RJJSAhjHRJ8ImiXZQYnhnYHWN+YdStx2pGH8y5Q==`.
+Never move, delete, reuse, or rerun that tag or workflow.
+
 The immutable annotated `v0.1.4` tag object
 `1604077e6249c7c0f7ce17b3f2848caad2bc773e` peels to protected-main merge
 `1f7e60a695f27d92b2d46233b0e3cad5aa43bd0d`, whose tree is byte-identical to reviewed source
@@ -346,9 +354,9 @@ source and merge commit, pre-tag repository-variable evidence, and a never-befor
 The live `borgmcp-server@0.1.12` package consumes the audited exact
 `borgmcp-shared@0.4.3` registry release. Immutable `v0.1.6` and `v0.1.10` are failed prepublication
 evidence and are not install targets. Current post-`v0.1.12` source pins the audited exact
-`borgmcp-shared@0.5.0` registry release for the next server candidate; the shrinkwrap must resolve
-that registry tarball with the matching SRI.
-Version `0.1.12` remains the install target until the next candidate passes exact-SHA review, an
+`borgmcp-shared@0.5.0` registry release for the unpublished `borgmcp-server@0.1.13` candidate; the
+shrinkwrap must resolve that registry tarball with the matching SRI.
+Version `0.1.12` remains the install target until that candidate passes exact-SHA review, an
 authorized immutable tag publication, and bounded registry integrity and signature verification.
 The source-lock, artifact, audit, signature, and consumer gates must pass without Git dependencies;
 SBOM generation is supplemental and outside the publication-critical path.

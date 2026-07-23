@@ -86,6 +86,7 @@ export interface HttpsServerOptions {
   readonly testHooks?: {
     readonly identifyRemoteAddress?: (socket: Socket) => string;
     readonly identifyConnectionAddress?: (socket: Socket) => string;
+    readonly connectionLimitMode?: "loopback" | "lan";
   };
 }
 
@@ -112,6 +113,7 @@ export async function startHttpsServer(options: HttpsServerOptions): Promise<Run
     limits.maxConnectionsPerAddress,
     limits.maxConnections,
     identifyConnectionAddress,
+    options.testHooks?.connectionLimitMode ?? bind.mode,
   );
 
   const server = createServer(
@@ -681,12 +683,21 @@ class AddressConnectionLimiter {
     limit: number,
     globalLimit: number,
     identifyRemoteAddress: (socket: Socket) => string,
+    bindMode: "loopback" | "lan",
   ) {
-    // Keep exactly one per-address raw socket available beyond normal secure
-    // admission so it can receive a controlled HTTP 429 after TLS. All later
-    // raw sockets are rejected before they can consume the global pool.
-    this.#rawConnections = new ConcurrentQuota(Math.min(limit + 1, globalLimit));
-    this.#connections = new ConcurrentQuota(limit);
+    // Loopback clients all share one address, so a normal synchronized fleet
+    // burst must be allowed to finish TLS and receive controlled HTTP 429
+    // backpressure. LAN binds retain the tighter pre-TLS address bound against
+    // incomplete-handshake exhaustion.
+    const loopbackLimit = bindMode === "loopback"
+      ? globalLimit
+      : limit;
+    this.#rawConnections = new ConcurrentQuota(
+      bindMode === "loopback"
+        ? loopbackLimit
+        : Math.min(loopbackLimit + 1, globalLimit),
+    );
+    this.#connections = new ConcurrentQuota(loopbackLimit);
     this.#identifyRemoteAddress = identifyRemoteAddress;
   }
 

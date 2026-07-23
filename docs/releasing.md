@@ -136,12 +136,12 @@ never a Git or SSH dependency. Client releases follow their own repository gates
 The server repository is public; visibility is complete, and `borgmcp-server@0.1.1`,
 `borgmcp-server@0.1.4`, `borgmcp-server@0.1.5`, `borgmcp-server@0.1.7`,
 `borgmcp-server@0.1.8`, `borgmcp-server@0.1.9`, `borgmcp-server@0.1.11`, and
-`borgmcp-server@0.1.12` are live on npm
+`borgmcp-server@0.1.12` and `borgmcp-server@0.1.14` are live on npm
 under the sole expected maintainer.
-The `latest` tag resolves to `0.1.12`.
-Versions `0.1.2` and `0.1.3` are
+The `latest` tag resolves to `0.1.14`.
+Versions `0.1.2`, `0.1.3`, and `0.1.13` are
 unpublished immutable failure evidence and must never be customer, install, or dogfood targets.
-Version `0.1.12` completed the full
+Version `0.1.14` completed the full
 exact-source, tagged-artifact, tokenless OIDC publication, registry verification, provenance,
 signature, and attestation gate chain recorded below.
 
@@ -318,6 +318,23 @@ built, published, and registry-verified the exact reviewed artifact. npm reports
 `sha512-byOxuZ/QM6iufynaA3f1UCERtUp2uFwxqF4fc5QavEDYgb3RJJSAhjHRJ8ImiXZQYnhnYHWN+YdStx2pGH8y5Q==`.
 Never move, delete, reuse, or rerun that tag or workflow.
 
+The immutable annotated `v0.1.13` tag object
+`8bf820e1d58a7afe9c511868838914dd5d01461d` peels to protected-main merge
+`8d9f4256d007367077aba03467ec25ef36759104`. Workflow run `29955068612`, attempt 1,
+failed before artifact upload or publication while verifying the exact packed artifact because
+`THIRD_PARTY_NOTICES.md` did not match the locked production dependency tree. Exercise, publish,
+and registry-verification jobs were skipped, and npm returns E404 for `borgmcp-server@0.1.13`.
+Never rerun the workflow or move, delete, or reuse the tag.
+
+The immutable annotated `v0.1.14` tag object
+`af363916e10f20389479b04301c7e9fa0e7b7529` peels to protected-main merge
+`049fd95cd3bea10fba3324b58a31883f5f750954`. Workflow run `29955574922`, attempt 1,
+built, published, and registry-verified the exact reviewed artifact. npm reports integrity
+`sha512-lMPr6z2ta5j1xa+LHC7UWQ0UYeH66CtGFzHtgdyYhcGxFUk0b/hMoaUGbBS+bVhNDHEHILWKYcbl2DFum7KKjQ==`
+and `latest` resolves to `0.1.14`. The tokenless OIDC publication and postpublication checks
+verified registry integrity and ownership, provenance, signatures, and the Trusted Publishing
+attestation.
+
 The immutable annotated `v0.1.4` tag object
 `1604077e6249c7c0f7ce17b3f2848caad2bc773e` peels to protected-main merge
 `1f7e60a695f27d92b2d46233b0e3cad5aa43bd0d`, whose tree is byte-identical to reviewed source
@@ -351,12 +368,14 @@ artifacts were produced, and `borgmcp-server` remained unclaimed in the npm regi
 move, delete, or reuse that tag. Recovery uses separately authorized version `0.1.1`, a fresh reviewed
 source and merge commit, pre-tag repository-variable evidence, and a never-before-used annotated tag.
 
-The live `borgmcp-server@0.1.12` package consumes the audited exact
-`borgmcp-shared@0.4.3` registry release. Immutable `v0.1.6` and `v0.1.10` are failed prepublication
-evidence and are not install targets. Current post-`v0.1.12` source pins the audited exact
-`borgmcp-shared@0.5.0` registry release for the unpublished `borgmcp-server@0.1.14` candidate; the
-shrinkwrap must resolve that registry tarball with the matching SRI.
-Version `0.1.12` remains the install target until that candidate passes exact-SHA review, an
+The live `borgmcp-server@0.1.14` package consumes the audited exact
+`borgmcp-shared@0.5.0` registry release. Immutable `v0.1.6`, `v0.1.10`, and `v0.1.13` are failed
+prepublication evidence and are not install targets. Current post-`v0.1.14` source pins the audited exact
+`borgmcp-shared@0.5.0` registry release for the unpublished `borgmcp-server@0.1.15` candidate; the
+shrinkwrap must resolve that registry tarball with the matching SRI. This candidate makes the
+generic platform Queen/default two-role seed available; it is package availability and default-seed
+support, not full shared-template adoption.
+Version `0.1.14` remains the install target until that candidate passes exact-SHA review, an
 authorized immutable tag publication, and bounded registry integrity and signature verification.
 The source-lock, artifact, audit, signature, and consumer gates must pass without Git dependencies;
 SBOM generation is supplemental and outside the publication-critical path.

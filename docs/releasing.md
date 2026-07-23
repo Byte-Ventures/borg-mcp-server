@@ -389,3 +389,5 @@ Version `0.1.15` remains the install target until that candidate passes exact-SH
 authorized immutable tag publication, and bounded registry integrity and signature verification.
 The source-lock, artifact, audit, signature, and consumer gates must pass without Git dependencies;
 SBOM generation is supplemental and outside the publication-critical path.
+Canonical lock metadata reads retry only bounded HTTP 429 and 5xx responses;
+terminal HTTP statuses and metadata mismatches fail immediately.

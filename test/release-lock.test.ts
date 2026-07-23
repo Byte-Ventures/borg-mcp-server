@@ -23,6 +23,52 @@ describe("release source lock", () => {
     );
   });
 
+  it("retries only bounded transient registry metadata failures", async () => {
+    const { manifest, lockfile } = fixture();
+    const metadata = {
+      dist: {
+        tarball: "https://registry.npmjs.org/trusted/-/trusted-1.0.0.tgz",
+        integrity: VALID_INTEGRITY,
+      },
+    };
+    const response = (status: number) => new Response(
+      status === 200 ? JSON.stringify(metadata) : null,
+      { status },
+    );
+
+    const transientFetch = vi.fn()
+      .mockResolvedValueOnce(response(504))
+      .mockResolvedValueOnce(response(429))
+      .mockResolvedValueOnce(response(200));
+    const transientWait = vi.fn(async () => {});
+    await expect(verifyLockfile(manifest, lockfile, {
+      ...sourceOptions(transientFetch),
+      retryDelaysMs: [1, 2],
+      wait: transientWait,
+    })).resolves.toBeUndefined();
+    expect(transientFetch).toHaveBeenCalledTimes(3);
+    expect(transientWait).toHaveBeenNthCalledWith(1, 1);
+    expect(transientWait).toHaveBeenNthCalledWith(2, 2);
+
+    const terminalFetch = vi.fn().mockResolvedValue(response(404));
+    await expect(verifyLockfile(manifest, lockfile, {
+      ...sourceOptions(terminalFetch),
+      retryDelaysMs: [1, 2],
+      wait: vi.fn(async () => {}),
+    })).rejects.toThrow("HTTP 404");
+    expect(terminalFetch).toHaveBeenCalledTimes(1);
+
+    const exhaustedFetch = vi.fn().mockResolvedValue(response(503));
+    const exhaustedWait = vi.fn(async () => {});
+    await expect(verifyLockfile(manifest, lockfile, {
+      ...sourceOptions(exhaustedFetch),
+      retryDelaysMs: [1, 2],
+      wait: exhaustedWait,
+    })).rejects.toThrow("HTTP 503");
+    expect(exhaustedFetch).toHaveBeenCalledTimes(3);
+    expect(exhaustedWait).toHaveBeenCalledTimes(2);
+  });
+
   it("rejects a non-registry root dependency before metadata lookup", async () => {
     const { manifest, lockfile } = fixture();
     manifest["devDependencies"] = { tool: "git+ssh://git@github.com/example/tool.git#deadbeef" };

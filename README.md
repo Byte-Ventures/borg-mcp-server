@@ -19,8 +19,10 @@ visible non-managing principals. Immutable `v0.1.6` and `v0.1.10` failed safely
 before artifact upload or npm publication and are not install targets. The
 published `0.1.12` package prepares the verified runtime with npm 12 while retaining
 npm 11 behavior and consumes the audited exact `borgmcp-shared@0.4.3` registry release.
-Current source is the unpublished `borgmcp-server@0.1.14` release candidate,
-which consumes the protocol-3 `borgmcp-shared@0.5.0` attach contract.
+Current source is the unpublished `borgmcp-server@0.1.15` release candidate,
+which consumes the protocol-3 `borgmcp-shared@0.5.0` attach contract and makes
+the generic platform Queen/default two-role seed available. This is package
+availability and default-seed support, not full shared-template adoption.
 Version `0.1.12` remains the install target until the candidate passes exact-SHA
 review, immutable tag publication, and bounded registry verification.
 

@@ -475,6 +475,7 @@ describe("HTTPS service", () => {
       bind: { port: 0 },
       tls: { key, cert: certificate },
       testHooks: {
+        connectionLimitMode: "lan",
         identifyConnectionAddress: () => {
           connections += 1;
           return connections <= 31 ? "attacker" : "fresh";
@@ -508,7 +509,7 @@ describe("HTTPS service", () => {
     }
   });
 
-  it("allows only one requestless over-cap TLS socket per address", async () => {
+  it("admits loopback connections beyond the LAN per-address cap", async () => {
     const bounded = await startHttpsServer({
       bind: { port: 0 },
       tls: { key, cert: certificate },
@@ -520,16 +521,17 @@ describe("HTTPS service", () => {
       },
     });
     const secureSockets: TLSSocket[] = [];
-    let overflow: Socket | undefined;
     try {
       secureSockets.push(...await Promise.all(Array.from(
-        { length: 31 },
+        { length: 30 },
         () => openSecureSocket(bounded.origin, certificate),
       )));
-      overflow = await openRawSocket(bounded.origin);
-      await expect(waitForSocketClose(overflow, 500)).resolves.toBeUndefined();
+      const overflow = await Promise.all(Array.from(
+        { length: 2 },
+        () => request(bounded.origin, certificate, "/healthz"),
+      ));
+      expect(overflow.map((response) => response.status)).toEqual([204, 204]);
     } finally {
-      overflow?.destroy();
       secureSockets.forEach((socket) => socket.destroy());
       await bounded.close();
     }
@@ -1075,6 +1077,7 @@ describe("HTTPS service", () => {
     const burst = await startHttpsServer({
       bind: { port: 0 },
       tls: { key, cert: certificate },
+      testHooks: { connectionLimitMode: "lan" },
       authorizeCoordination: async () => clientPrincipal(
         "00000000-0000-4000-8000-000000000231",
       ),

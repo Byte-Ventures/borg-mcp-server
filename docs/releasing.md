@@ -136,12 +136,12 @@ never a Git or SSH dependency. Client releases follow their own repository gates
 The server repository is public; visibility is complete, and `borgmcp-server@0.1.1`,
 `borgmcp-server@0.1.4`, `borgmcp-server@0.1.5`, `borgmcp-server@0.1.7`,
 `borgmcp-server@0.1.8`, `borgmcp-server@0.1.9`, `borgmcp-server@0.1.11`, and
-`borgmcp-server@0.1.12` and `borgmcp-server@0.1.14` are live on npm
+`borgmcp-server@0.1.12`, `borgmcp-server@0.1.14`, and `borgmcp-server@0.1.15` are live on npm
 under the sole expected maintainer.
-The `latest` tag resolves to `0.1.14`.
+The `latest` tag resolves to `0.1.15`.
 Versions `0.1.2`, `0.1.3`, and `0.1.13` are
 unpublished immutable failure evidence and must never be customer, install, or dogfood targets.
-Version `0.1.14` completed the full
+Version `0.1.15` completed the full
 exact-source, tagged-artifact, tokenless OIDC publication, registry verification, provenance,
 signature, and attestation gate chain recorded below.
 
@@ -335,6 +335,15 @@ and `latest` resolves to `0.1.14`. The tokenless OIDC publication and postpublic
 verified registry integrity and ownership, provenance, signatures, and the Trusted Publishing
 attestation.
 
+The immutable annotated `v0.1.15` tag object
+`90dc7a418b5c7a848f01920cda3fa9ca5b44dab9` peels to protected-main merge
+`f9b2748119690044cb28fb0d90177b32b0bfd60f`. Workflow run `29988717879`, attempt 1,
+built, published, and registry-verified the exact reviewed artifact. npm reports integrity
+`sha512-xaBG29PKa2xEN+e90caMWDs20w75ZH1biyDhLlg3klYrPOWOf+dh1qD1FqkUn9Lk/Y+koxJJjsQrhw/r8+Uo3g==`
+and `latest` resolves to `0.1.15`. The tokenless OIDC publication and postpublication checks
+verified registry integrity and ownership, provenance, signatures, and the Trusted Publishing
+attestation.
+
 The immutable annotated `v0.1.4` tag object
 `1604077e6249c7c0f7ce17b3f2848caad2bc773e` peels to protected-main merge
 `1f7e60a695f27d92b2d46233b0e3cad5aa43bd0d`, whose tree is byte-identical to reviewed source
@@ -368,14 +377,17 @@ artifacts were produced, and `borgmcp-server` remained unclaimed in the npm regi
 move, delete, or reuse that tag. Recovery uses separately authorized version `0.1.1`, a fresh reviewed
 source and merge commit, pre-tag repository-variable evidence, and a never-before-used annotated tag.
 
-The live `borgmcp-server@0.1.14` package consumes the audited exact
+The live `borgmcp-server@0.1.15` package consumes the audited exact
 `borgmcp-shared@0.5.0` registry release. Immutable `v0.1.6`, `v0.1.10`, and `v0.1.13` are failed
-prepublication evidence and are not install targets. Current post-`v0.1.14` source pins the audited exact
-`borgmcp-shared@0.5.0` registry release for the unpublished `borgmcp-server@0.1.15` candidate; the
-shrinkwrap must resolve that registry tarball with the matching SRI. This candidate makes the
-generic platform Queen/default two-role seed available; it is package availability and default-seed
-support, not full shared-template adoption.
-Version `0.1.14` remains the install target until that candidate passes exact-SHA review, an
+prepublication evidence and are not install targets. Current post-`v0.1.15` source pins the audited exact
+`borgmcp-shared@0.5.0` registry release for the unpublished `borgmcp-server@0.1.16` candidate; the
+shrinkwrap must resolve that registry tarball with the matching SRI. The live package makes the
+generic platform Queen/default two-role seed available; the candidate additionally admits
+synchronized loopback client bursts under the global connection limit while retaining
+LAN per-address protections.
+Version `0.1.15` remains the install target until that candidate passes exact-SHA review, an
 authorized immutable tag publication, and bounded registry integrity and signature verification.
 The source-lock, artifact, audit, signature, and consumer gates must pass without Git dependencies;
 SBOM generation is supplemental and outside the publication-critical path.
+Canonical lock metadata reads retry only bounded HTTP 429 and 5xx responses;
+terminal HTTP statuses and metadata mismatches fail immediately.

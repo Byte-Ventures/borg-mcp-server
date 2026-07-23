@@ -4,6 +4,8 @@ export interface VerifyLockfileOptions {
   readonly dependencyFields?: readonly string[];
   readonly rejectInstallScripts?: boolean;
   readonly fetchImpl?: typeof fetch;
+  readonly retryDelaysMs?: readonly number[];
+  readonly wait?: (delayMs: number) => Promise<void>;
 }
 
 export function isExactVersion(value: unknown): value is string;

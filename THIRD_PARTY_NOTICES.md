@@ -21,7 +21,7 @@ refer to each installed package for its complete license text.
 | `@peculiar/utils` | 2.0.3 | MIT |
 | `@peculiar/x509` | 1.14.3 | MIT |
 | `asn1js` | 3.0.10 | BSD-3-Clause |
-| `borgmcp-shared` | 0.6.1 | Apache-2.0 |
+| `borgmcp-shared` | 0.6.2 | Apache-2.0 |
 | `bytestreamjs` | 2.0.1 | BSD-3-Clause |
 | `pkijs` | 3.4.0 | BSD-3-Clause |
 | `pvtsutils` | 1.3.6 | MIT |

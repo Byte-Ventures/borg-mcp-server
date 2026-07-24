@@ -135,14 +135,13 @@ The server repository is public; visibility is complete, and `borgmcp-server@0.1
 `borgmcp-server@0.1.4`, `borgmcp-server@0.1.5`, `borgmcp-server@0.1.7`,
 `borgmcp-server@0.1.8`, `borgmcp-server@0.1.9`, `borgmcp-server@0.1.11`, and
 `borgmcp-server@0.1.12`, `borgmcp-server@0.1.14`, `borgmcp-server@0.1.15`, and
-`borgmcp-server@0.1.16` are live on npm
+`borgmcp-server@0.1.16`, and `borgmcp-server@0.1.17` are live on npm
 under the sole expected maintainer.
-The `latest` tag resolves to `0.1.16`.
+The `latest` tag resolves to `0.1.17`.
 Versions `0.1.2`, `0.1.3`, and `0.1.13` are
 unpublished immutable failure evidence and must never be customer, install, or dogfood targets.
-Version `0.1.16` completed the full
-exact-source, tagged-artifact, tokenless OIDC publication, registry verification, provenance,
-signature, and attestation gate chain recorded below.
+Version `0.1.17` completed the full exact-source, tagged-artifact, tokenless OIDC publication,
+provenance, signature, and attestation gate chain recorded below.
 
 The immutable annotated `v0.1.1` tag object
 `e3f6ee268d5cd4f1e88adabdc6171c1e732cd096` peels to protected-main commit
@@ -352,6 +351,16 @@ and `latest` resolves to `0.1.16`. The tokenless OIDC publication and postpublic
 verified registry integrity and ownership, provenance, signatures, and the Trusted Publishing
 attestation.
 
+The immutable annotated `v0.1.17` tag object
+`47ce3bcfa6784bc8dcbd00f47e796732188e5601` peels to protected-main commit
+`b3e844560304fb9fbece2f4c0013ca2a2fbe1d64`. Workflow run `30059881193`, attempt 1,
+built, published, and registry-verified the exact reviewed artifact. npm reports integrity
+`sha512-riacxQ+OFbP1hK7SsHUcKX+NpDWx9Ts1QlwkqCrzGcK5NGx3qfzP54rOpiXIpkktI/hnR3VgZziqpw3YbZoY5A==`
+and `latest` resolves to `0.1.17`. The tokenless OIDC publication and then-active
+postpublication checks verified registry integrity and ownership, provenance, signatures, and the
+Trusted Publishing attestation. Those registry readbacks are immutable historical evidence; current
+releases terminate when npm accepts the single publish operation.
+
 The immutable annotated `v0.1.4` tag object
 `1604077e6249c7c0f7ce17b3f2848caad2bc773e` peels to protected-main merge
 `1f7e60a695f27d92b2d46233b0e3cad5aa43bd0d`, whose tree is byte-identical to reviewed source
@@ -371,11 +380,10 @@ First-publication run `29495546749` built and published the exact audited artifa
 concluded `failure` when the immediate postpublish ownership read returned HTTP 404 before registry
 propagation completed. The run and tag remain immutable and must not be rerun, moved, or reused.
 
-Future postpublish version reads retry only transient HTTP 404 propagation responses. The production
-envelope performs at most 18 reads over approximately three and a half minutes (1, 2, 4, and 8 second
-waits, then a 15 second cap). Every non-404 response proceeds directly to terminal status and exact
-integrity verification. The following `npm audit signatures` readback verifies npm's registry
-signatures and Trusted Publishing attestation instead of reconstructing provenance statements locally.
+Releases through `0.1.17` used bounded postpublish version reads for propagation, integrity,
+signatures, and attestations. That policy is retired: the active workflow performs no read of the
+just-published version, and successful completion of `npm publish` is the terminal release boundary.
+The prior runs remain immutable historical evidence and must not be rerun.
 
 The immutable annotated `v0.1.0` tag object
 `0f454997ced06802f0d3a0518c2e294af5a73b56` and first-attempt workflow run `29494436948`
@@ -385,17 +393,17 @@ artifacts were produced, and `borgmcp-server` remained unclaimed in the npm regi
 move, delete, or reuse that tag. Recovery uses separately authorized version `0.1.1`, a fresh reviewed
 source and merge commit, pre-tag repository-variable evidence, and a never-before-used annotated tag.
 
-The live `borgmcp-server@0.1.16` package consumes the audited exact
-`borgmcp-shared@0.5.0` registry release. Immutable `v0.1.6`, `v0.1.10`, and `v0.1.13` are failed
-prepublication evidence and are not install targets. Current post-`v0.1.16` source pins the audited exact
-`borgmcp-shared@0.6.1` registry release for the unpublished `borgmcp-server@0.1.17` candidate; the
-shrinkwrap must resolve that registry tarball with the matching SRI. The live package admits
-synchronized loopback client bursts under the global connection limit while retaining
-LAN per-address protections; the candidate additionally persists truthful advisory Agent CLI,
-reported-model, and working-repository seat metadata without changing authority or liveness.
-Version `0.1.16` remains the install target until that candidate passes exact-SHA review, an
-authorized immutable tag publication, and bounded registry integrity and signature verification.
-The source-lock, artifact, audit, signature, and consumer gates must pass without Git dependencies;
-SBOM generation is supplemental and outside the publication-critical path.
+The live `borgmcp-server@0.1.17` package consumes the audited exact
+`borgmcp-shared@0.6.1` registry release. Immutable `v0.1.6`, `v0.1.10`, and `v0.1.13` are failed
+prepublication evidence and are not install targets. Current post-`v0.1.17` source pins the audited
+exact `borgmcp-shared@0.6.2` registry release for the unpublished
+`borgmcp-server@0.1.18` candidate; the shrinkwrap must resolve that registry tarball with the
+matching SRI. The live package persists truthful advisory Agent CLI, reported-model, and
+working-repository seat metadata without changing authority or liveness. The candidate additionally
+adds the explicit Queen activation timing contract and structured, safe role-section conflict
+reasons without changing authority, routes, or rollback behavior.
+Version `0.1.17` remains the install target until that candidate passes exact-SHA review and an
+authorized immutable tag publication. The source-lock, artifact, audit, and consumer gates must pass
+without Git dependencies; SBOM generation is supplemental and outside the publication-critical path.
 Canonical lock metadata reads retry only bounded HTTP 429 and 5xx responses;
 terminal HTTP statuses and metadata mismatches fail immediately.

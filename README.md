@@ -6,7 +6,7 @@ HTTPS.
 
 ## Release status
 
-The current public preview is `borgmcp-server@0.1.16`, published on npm.
+The current public preview is `borgmcp-server@0.1.17`, published on npm.
 Versions `0.1.2`, `0.1.3`, and `0.1.13` were not published; their immutable tags are
 preserved failed-release evidence and are not installation or dogfood targets.
 Version `0.1.5` includes the reviewed owner-enrollment, idempotent multi-cube
@@ -17,20 +17,20 @@ taxonomy routing, durable SSE replay and heartbeat delivery, fleet liveness
 signals, typed terminal drone eviction, and explicit manage-access denials for
 visible non-managing principals. Immutable `v0.1.6` and `v0.1.10` failed safely
 before artifact upload or npm publication and are not install targets. The
-published `0.1.16` package consumes the audited exact `borgmcp-shared@0.5.0`
-registry release and admits synchronized loopback client bursts under the
-global connection limit while retaining LAN per-address protections. Current
-source is the unpublished `borgmcp-server@0.1.17` release candidate, which pins
-the audited exact `borgmcp-shared@0.6.1` registry release and adds truthful,
-advisory Agent CLI, reported-model, and working-repository seat metadata.
-Version `0.1.16` remains the install target until the candidate passes
-exact-SHA review, immutable tag publication, and bounded registry verification.
+published `0.1.17` package consumes the audited exact `borgmcp-shared@0.6.1`
+registry release and adds truthful advisory Agent CLI, reported-model, and
+working-repository seat metadata. Current source is the unpublished
+`borgmcp-server@0.1.18` release candidate, which pins the audited exact
+`borgmcp-shared@0.6.2` registry release and adds the explicit Queen activation
+timing contract plus structured, safe role-section conflict reasons.
+Version `0.1.17` remains the install target until the candidate passes
+exact-SHA review and immutable tag publication.
 
 Setup prepares local identity and storage, writes owner access to the private
 portable credential file, and prints no credential or invitation; it creates no cube.
 Version `0.1.1` completed the
 documented exact-source, tagged-artifact, and protected-publication gates.
-Version `0.1.16` completed a fresh exact-source, tagged-artifact, tokenless OIDC
+Version `0.1.17` completed a fresh exact-source, tagged-artifact, tokenless OIDC
 publication, provenance, signature, and attestation gate chain.
 
 ## Repository topology

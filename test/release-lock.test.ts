@@ -3,7 +3,7 @@ import { realpath } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { verifyLockfile } from "../scripts/verify-lock-registry.mjs";
 
@@ -11,70 +11,28 @@ const VALID_INTEGRITY = `sha512-${Buffer.alloc(64).toString("base64")}`;
 const OTHER_INTEGRITY = `sha512-${Buffer.alloc(64, 1).toString("base64")}`;
 const execute = promisify(execFile);
 
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
 describe("release source lock", () => {
-  it("binds every canonical entry to official registry metadata", async () => {
+  it("validates every canonical entry without network access", async () => {
     const { manifest, lockfile } = fixture();
-    const fetchImpl = officialFetch("trusted", "1.0.0", VALID_INTEGRITY);
+    const fetchImpl = vi.fn(() => {
+      throw new Error("network access is forbidden during source-lock verification");
+    });
+    vi.stubGlobal("fetch", fetchImpl);
 
-    await expect(verifyLockfile(manifest, lockfile, sourceOptions(fetchImpl))).resolves.toBeUndefined();
-    expect(fetchImpl).toHaveBeenCalledWith(
-      "https://registry.npmjs.org/trusted/1.0.0",
-      expect.objectContaining({ headers: { accept: "application/json" } }),
-    );
+    await expect(verifyLockfile(manifest, lockfile, sourceOptions())).resolves.toBeUndefined();
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 
-  it("retries only bounded transient registry metadata failures", async () => {
-    const { manifest, lockfile } = fixture();
-    const metadata = {
-      dist: {
-        tarball: "https://registry.npmjs.org/trusted/-/trusted-1.0.0.tgz",
-        integrity: VALID_INTEGRITY,
-      },
-    };
-    const response = (status: number) => new Response(
-      status === 200 ? JSON.stringify(metadata) : null,
-      { status },
-    );
-
-    const transientFetch = vi.fn()
-      .mockResolvedValueOnce(response(504))
-      .mockResolvedValueOnce(response(429))
-      .mockResolvedValueOnce(response(200));
-    const transientWait = vi.fn(async () => {});
-    await expect(verifyLockfile(manifest, lockfile, {
-      ...sourceOptions(transientFetch),
-      retryDelaysMs: [1, 2],
-      wait: transientWait,
-    })).resolves.toBeUndefined();
-    expect(transientFetch).toHaveBeenCalledTimes(3);
-    expect(transientWait).toHaveBeenNthCalledWith(1, 1);
-    expect(transientWait).toHaveBeenNthCalledWith(2, 2);
-
-    const terminalFetch = vi.fn().mockResolvedValue(response(404));
-    await expect(verifyLockfile(manifest, lockfile, {
-      ...sourceOptions(terminalFetch),
-      retryDelaysMs: [1, 2],
-      wait: vi.fn(async () => {}),
-    })).rejects.toThrow("HTTP 404");
-    expect(terminalFetch).toHaveBeenCalledTimes(1);
-
-    const exhaustedFetch = vi.fn().mockResolvedValue(response(503));
-    const exhaustedWait = vi.fn(async () => {});
-    await expect(verifyLockfile(manifest, lockfile, {
-      ...sourceOptions(exhaustedFetch),
-      retryDelaysMs: [1, 2],
-      wait: exhaustedWait,
-    })).rejects.toThrow("HTTP 503");
-    expect(exhaustedFetch).toHaveBeenCalledTimes(3);
-    expect(exhaustedWait).toHaveBeenCalledTimes(2);
-  });
-
-  it("rejects a non-registry root dependency before metadata lookup", async () => {
+  it("rejects a non-registry root dependency before lock-entry validation", async () => {
     const { manifest, lockfile } = fixture();
     manifest["devDependencies"] = { tool: "git+ssh://git@github.com/example/tool.git#deadbeef" };
     lockfile.packages[""]!["devDependencies"] = manifest["devDependencies"];
 
-    await expect(verifyLockfile(manifest, lockfile, sourceOptions(vi.fn()))).rejects.toThrow(
+    await expect(verifyLockfile(manifest, lockfile, sourceOptions())).rejects.toThrow(
       "Dependency must be an exact registry version",
     );
   });
@@ -83,7 +41,7 @@ describe("release source lock", () => {
     const { manifest, lockfile } = fixture();
     lockfile.packages[""]!["dependencies"] = { trusted: "2.0.0" };
 
-    await expect(verifyLockfile(manifest, lockfile, sourceOptions(vi.fn()))).rejects.toThrow(
+    await expect(verifyLockfile(manifest, lockfile, sourceOptions())).rejects.toThrow(
       "package-lock.json root dependencies do not match package.json",
     );
   });
@@ -98,7 +56,7 @@ describe("release source lock", () => {
     const { manifest, lockfile } = fixture();
     Object.assign(lockfile.packages["node_modules/trusted"]!, override);
 
-    await expect(verifyLockfile(manifest, lockfile, sourceOptions(vi.fn()))).rejects.toThrow(
+    await expect(verifyLockfile(manifest, lockfile, sourceOptions())).rejects.toThrow(
       "package-lock.json contains an untrusted dependency entry",
     );
   });
@@ -110,7 +68,7 @@ describe("release source lock", () => {
       integrity: OTHER_INTEGRITY,
     };
 
-    await expect(verifyLockfile(manifest, lockfile, sourceOptions(vi.fn()))).rejects.toThrow(
+    await expect(verifyLockfile(manifest, lockfile, sourceOptions())).rejects.toThrow(
       "package-lock.json contains divergent duplicate metadata: trusted@1.0.0",
     );
   });
@@ -135,7 +93,7 @@ describe("release source lock", () => {
       integrity: VALID_INTEGRITY,
     };
 
-    await expect(verifyLockfile(manifest, lockfile, sourceOptions(vi.fn()))).rejects.toThrow(
+    await expect(verifyLockfile(manifest, lockfile, sourceOptions())).rejects.toThrow(
       `Invalid package-lock.json package path: ${path}`,
     );
   });
@@ -145,10 +103,7 @@ describe("release source lock", () => {
     lockfile.packages["node_modules/@scope/parent/node_modules/child/node_modules/trusted"] = {
       ...lockfile.packages["node_modules/trusted"],
     };
-    const fetchImpl = officialFetch("trusted", "1.0.0", VALID_INTEGRITY);
-
-    await expect(verifyLockfile(manifest, lockfile, sourceOptions(fetchImpl))).resolves.toBeUndefined();
-    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    await expect(verifyLockfile(manifest, lockfile, sourceOptions())).resolves.toBeUndefined();
   });
 
   it.each([
@@ -157,9 +112,7 @@ describe("release source lock", () => {
   ])("preserves npm-valid scoped ancestor path %s", async (path) => {
     const { manifest, lockfile } = fixture();
     lockfile.packages[path] = { ...lockfile.packages["node_modules/trusted"] };
-    const fetchImpl = officialFetch("trusted", "1.0.0", VALID_INTEGRITY);
-
-    await expect(verifyLockfile(manifest, lockfile, sourceOptions(fetchImpl))).resolves.toBeUndefined();
+    await expect(verifyLockfile(manifest, lockfile, sourceOptions())).resolves.toBeUndefined();
   });
 
   it("matches the active npm validate-npm-package-name scoped-prefix semantics", async () => {
@@ -174,15 +127,6 @@ describe("release source lock", () => {
     expect(validatorModule.default("@scope/..pkg").validForNewPackages).toBe(false);
     expect(validatorModule.default("@.scope/pkg").validForNewPackages).toBe(true);
     expect(validatorModule.default("@scope/_pkg").validForNewPackages).toBe(true);
-  });
-
-  it("rejects lock metadata that differs from the official registry", async () => {
-    const { manifest, lockfile } = fixture();
-    const fetchImpl = officialFetch("other", "1.0.0", VALID_INTEGRITY);
-
-    await expect(verifyLockfile(manifest, lockfile, sourceOptions(fetchImpl))).rejects.toThrow(
-      "package-lock.json metadata differs from the official registry",
-    );
   });
 });
 
@@ -209,25 +153,14 @@ function fixture(): {
   };
 }
 
-function sourceOptions(fetchImpl: typeof fetch): {
+function sourceOptions(): {
   lockName: string;
   rootFields: string[];
   dependencyFields: string[];
-  fetchImpl: typeof fetch;
 } {
   return {
     lockName: "package-lock.json",
     rootFields: ["dependencies", "optionalDependencies", "peerDependencies", "peerDependenciesMeta", "devDependencies"],
     dependencyFields: ["dependencies", "optionalDependencies", "peerDependencies", "devDependencies"],
-    fetchImpl,
   };
-}
-
-function officialFetch(name: string, version: string, integrity: string): typeof fetch {
-  return vi.fn().mockResolvedValue(new Response(JSON.stringify({
-    dist: {
-      tarball: `https://registry.npmjs.org/${name}/-/${name}-${version}.tgz`,
-      integrity,
-    },
-  }), { status: 200 }));
 }

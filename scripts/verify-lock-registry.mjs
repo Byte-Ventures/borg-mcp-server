@@ -1,7 +1,5 @@
 import { isDeepStrictEqual } from 'node:util';
 
-const DEFAULT_RETRY_DELAYS_MS = [250, 1_000, 3_000];
-
 export function isExactVersion(value) {
   return typeof value === 'string' && /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/u.test(value);
 }
@@ -54,22 +52,6 @@ function isSha512Integrity(value) {
   return digest.byteLength === 64 && digest.toString('base64') === encoded;
 }
 
-async function fetchRegistryMetadata(entry, fetchImpl, retryDelaysMs, wait) {
-  const endpoint = `https://registry.npmjs.org/${encodeURIComponent(entry.name)}/${encodeURIComponent(entry.version)}`;
-  for (let attempt = 0; ; attempt += 1) {
-    const response = await fetchImpl(endpoint, {
-      headers: { accept: 'application/json' },
-      signal: AbortSignal.timeout(15_000),
-    });
-    if (response.ok) return response.json();
-    const retryable = response.status === 429 || (response.status >= 500 && response.status <= 599);
-    if (!retryable || attempt >= retryDelaysMs.length) {
-      throw new Error(`Official registry metadata lookup returned HTTP ${response.status}: ${entry.name}@${entry.version}`);
-    }
-    await wait(retryDelaysMs[attempt]);
-  }
-}
-
 export async function verifyLockfile(manifest, lockfile, options = {}) {
   const lockName = options.lockName ?? 'lockfile';
   const rootFields = options.rootFields ?? [
@@ -78,10 +60,6 @@ export async function verifyLockfile(manifest, lockfile, options = {}) {
   const dependencyFields = options.dependencyFields ?? [
     'dependencies', 'optionalDependencies', 'peerDependencies',
   ];
-  const fetchImpl = options.fetchImpl ?? fetch;
-  const retryDelaysMs = options.retryDelaysMs ?? DEFAULT_RETRY_DELAYS_MS;
-  const wait = options.wait ?? ((delayMs) => new Promise((resolveDelay) => setTimeout(resolveDelay, delayMs)));
-
   for (const field of dependencyFields) {
     const dependencies = manifest[field] ?? {};
     if (dependencies === null || typeof dependencies !== 'object' || Array.isArray(dependencies)) {
@@ -131,15 +109,5 @@ export async function verifyLockfile(manifest, lockfile, options = {}) {
       throw new Error(`${lockName} contains divergent duplicate metadata: ${key}`);
     }
     unique.set(key, entry);
-  }
-
-  const entries = [...unique.values()];
-  for (let index = 0; index < entries.length; index += 8) {
-    await Promise.all(entries.slice(index, index + 8).map(async (entry) => {
-      const metadata = await fetchRegistryMetadata(entry, fetchImpl, retryDelaysMs, wait);
-      if (metadata?.dist?.tarball !== entry.resolved || metadata?.dist?.integrity !== entry.integrity) {
-        throw new Error(`${lockName} metadata differs from the official registry: ${entry.name}@${entry.version}`);
-      }
-    }));
   }
 }

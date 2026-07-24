@@ -128,7 +128,7 @@ describe("runCli", () => {
   it("renders approved exact runtime evidence and bounded non-TTY JSON without guessing", async () => {
     const status = vi.fn().mockResolvedValue({
       status: "running",
-      controllerVersion: "0.1.16",
+      controllerVersion: "0.1.17",
       preparedArtifact: { version: "0.1.8", integrity: `sha512-${"A".repeat(86)}==` },
       runningArtifact: null,
       buildIdentity: null,
@@ -151,7 +151,7 @@ describe("runCli", () => {
     expect(await runCli(["status"], service, machine)).toBe(0);
     expect(JSON.parse(machine.stdout.mock.calls[0]![0])).toEqual({
       status: "running",
-      installed_controller: "borgmcp-server@0.1.16",
+      installed_controller: "borgmcp-server@0.1.17",
       prepared_runtime: "borgmcp-server@0.1.8",
       prepared_integrity: `sha512-${"A".repeat(86)}==`,
       running_runtime: null,
@@ -169,7 +169,7 @@ describe("runCli", () => {
   it("reports the installed controller version and stops managed service idempotently", async () => {
     const versionIo = { ...createIo(), isTTY: true };
     expect(await runCli(["--version"], { start: vi.fn() }, versionIo)).toBe(0);
-    expect(versionIo.stdout).toHaveBeenCalledWith("borgmcp-server@0.1.16");
+    expect(versionIo.stdout).toHaveBeenCalledWith("borgmcp-server@0.1.17");
 
     const stop = vi.fn()
       .mockResolvedValueOnce({ outcome: "stopped" })

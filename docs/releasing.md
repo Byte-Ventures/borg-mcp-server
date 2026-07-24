@@ -111,14 +111,12 @@ any preview.
    or ownership other than the sole reviewed `NPM_EXPECTED_OWNER`. It then publishes the tarball once
    through npm Trusted Publishing with provenance, lifecycle scripts disabled, and no long-lived npm
    token.
-7. A separate read-only job performs one bounded registry integrity comparison with the verifier
-   report, installs the exact registry version with lifecycle scripts disabled, and runs
-   `npm audit signatures` to verify registry signatures and the Trusted Publishing attestation.
-   A successful publish job remains recorded as successful if this later readback fails; such a
-   failure is a release incident and never authorizes a rerun or second publication.
+7. Successful completion of `npm publish` is the terminal release boundary. There is no
+   post-publication registry readback job: registry metadata and install visibility propagate
+   asynchronously and cannot invalidate an immutable publication after npm accepts it.
 8. Useful SBOM or supplemental report generation may run separately, but cannot gate, invalidate, or
    make an otherwise authentic immutable publication ambiguous.
-9. After successful registry verification, update the README and this runbook in a fresh reviewed
+9. After successful publication, update the README and this runbook in a fresh reviewed
    documentation change so public release claims match the shipped package.
 10. Stop immediately on any mismatch before publication. Preserve every run and tag as immutable
     evidence; recovery uses a newly reviewed source fix, a new version, and a newly authorized tag.

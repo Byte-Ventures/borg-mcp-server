@@ -8,10 +8,10 @@ import { describe, expect, it } from "vitest";
 const execute = promisify(execFile);
 
 describe("server release lane", () => {
-  it("uses one package authority, one protected publish, and one read-only registry readback", async () => {
+  it("uses one package authority and one protected publish with no post-publish readback", async () => {
     const workflow = await readFile(".github/workflows/release.yml", "utf8");
     const [verification = "", afterVerify = ""] = workflow.split("\n  publish:\n");
-    const [publication = "", registryVerification = ""] = afterVerify.split("\n  registry-verification:\n");
+    const publication = afterVerify;
 
     expect(workflow).toContain("tags: ['v*.*.*']");
     expect(workflow).not.toContain("workflow_dispatch:");
@@ -20,9 +20,7 @@ describe("server release lane", () => {
     expect(publication).toContain("needs: verify");
     expect(publication).toContain("environment:\n      name: npm-publish");
     expect(publication).toContain("id-token: write");
-    expect(registryVerification).toContain("needs: [verify, publish]");
-    expect(registryVerification).not.toContain("environment:");
-    expect(registryVerification).not.toContain("id-token: write");
+    expect(workflow).not.toContain("\n  registry-verification:\n");
 
     expect(workflow.match(/npm ci --ignore-scripts/g)).toHaveLength(1);
     expect(workflow.match(/npm audit --audit-level=high/g)).toHaveLength(1);
@@ -45,11 +43,8 @@ describe("server release lane", () => {
     expect(publication).toContain('test -n "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}"');
     expect(publication).toContain('test -z "${NODE_AUTH_TOKEN:-}"');
 
-    expect(registryVerification).toContain("verify-registry-release.mjs postpublish release/artifact-report.json");
-    expect(registryVerification).toContain('"borgmcp-server@${{ needs.verify.outputs.version }}"');
-    expect(registryVerification).toContain("npm audit signatures --prefix registry-verification");
-    expect(registryVerification).not.toContain("npm publish");
-    expect(registryVerification).not.toContain("--provenance");
+    expect(workflow).not.toContain("verify-registry-release.mjs postpublish");
+    expect(workflow).not.toContain("npm audit signatures");
 
     for (const removed of [
       "ARTIFACT_SR_SHA512",
@@ -140,8 +135,7 @@ describe("server release lane", () => {
       "one build, test, package, and artifact-verification authority",
       "same-run tarball and verifier report",
       "npm Trusted Publishing with provenance",
-      "bounded registry integrity",
-      "npm audit signatures",
+      "terminal release boundary",
       'GITHUB_TOKEN="$(gh auth token)" node scripts/verify-main-ruleset.mjs',
       "tag authorization record must name the reviewed verifier commit",
       "borgmcp-server@0.1.7",

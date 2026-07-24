@@ -6,6 +6,7 @@ import {
   ProtocolContractError,
   createProtocolEnvelope,
   decodeAttachRequestEnvelope,
+  decodeDroneRuntimeMetadataPatch,
   decodeEvictDroneRequestEnvelope,
   decodeProtocolEnvelope,
   decodeReassignDroneRequestEnvelope,
@@ -116,9 +117,12 @@ export class CoordinationApi {
             roleId: envelope.payload.role_id,
             sessionCredential: envelope.payload.session_credential,
             ...(priorDroneId === undefined ? {} : { priorDroneId }),
+            ...(envelope.payload.runtime_metadata === undefined
+              ? {}
+              : { runtimeMetadata: envelope.payload.runtime_metadata }),
           },
         );
-        return success(attachment.result === "created" ? 201 : 200, envelope.request_id, {
+        return success(200, envelope.request_id, {
           result: attachment.result,
           cube: attachment.cube,
           role: attachment.role,
@@ -212,19 +216,27 @@ export class CoordinationApi {
       .exec(request.path);
     const droneMatch = /^\/api\/cubes\/([0-9a-f-]{36})\/drones\/([0-9a-f-]{36})$/u
       .exec(request.path);
+    const selfMetadataMatch =
+      /^\/api\/cubes\/([0-9a-f-]{36})\/drones\/self\/metadata$/u.exec(request.path);
     const match = /^\/api\/cubes\/([0-9a-f-]{36})(?:\/(roles|drones|logs|acks|decisions|stream|taxonomy-patch))?$/u
       .exec(request.path);
-    if (match === null && roleMatch === null && droneMatch === null) {
+    if (match === null && roleMatch === null && droneMatch === null && selfMetadataMatch === null) {
       return failure(404, "NOT_FOUND", "The requested resource was not found.");
     }
-    const cubeId = (roleMatch?.[1] ?? droneMatch?.[1] ?? match?.[1])!;
+    const cubeId = (roleMatch?.[1] ?? droneMatch?.[1] ?? selfMetadataMatch?.[1] ?? match?.[1])!;
     const roleId = roleMatch?.[2];
     const droneId = droneMatch?.[2];
     if (!uuidPattern.test(cubeId) || (roleId !== undefined && !uuidPattern.test(roleId)) ||
         (droneId !== undefined && !uuidPattern.test(droneId))) {
       return failure(404, "NOT_FOUND", "The requested resource was not found.");
     }
-    const resource = roleMatch !== null ? "role" : droneMatch !== null ? "drone" : match?.[2];
+    const resource = roleMatch !== null
+      ? "role"
+      : droneMatch !== null
+        ? "drone"
+        : selfMetadataMatch !== null
+          ? "self-metadata"
+          : match?.[2];
     const sectionPatch = roleMatch?.[3] !== undefined;
     const store = this.#runtime.forPrincipal(authentication);
 
@@ -384,6 +396,11 @@ export class CoordinationApi {
         }
         const since = decodeSince(request.since);
         return success(200, "drones-read", store.listDronesSince(cubeId, since));
+      }
+      if (resource === "self-metadata" && request.method === "PATCH") {
+        const envelope = decodeProtocolEnvelope(request.body, decodeDroneRuntimeMetadataPatch);
+        const state = store.updateOwnRuntimeMetadata(cubeId, envelope.payload);
+        return success(200, envelope.request_id, state);
       }
       if (resource === "drone" && request.method === "PATCH") {
         const envelope = decodeReassignDroneRequestEnvelope(request.body);

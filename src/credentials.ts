@@ -17,6 +17,7 @@ import type {
   ScopedStore,
   SeatAttachRecord,
 } from "./store.js";
+import type { DroneRuntimeMetadata } from "borgmcp-shared/protocol";
 import { operatorErrors } from "./operator-error.js";
 import { disabledDebugLogger, type DebugLogger } from "./debug-log.js";
 
@@ -310,12 +311,16 @@ export class CredentialAuthority {
       readonly roleId: string;
       readonly sessionCredential: string;
       readonly priorDroneId?: string;
+      readonly runtimeMetadata?: DroneRuntimeMetadata;
     },
   ): SeatAttachResponse {
     const record = store.attachSeat({
       cubeId: request.cubeId,
       roleId: request.roleId,
       ...(request.priorDroneId === undefined ? {} : { priorDroneId: request.priorDroneId }),
+      ...(request.runtimeMetadata === undefined
+        ? {}
+        : { runtimeMetadata: request.runtimeMetadata }),
       droneId: randomUUID(),
       sessionId: randomUUID(),
       credentialId: randomUUID(),

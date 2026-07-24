@@ -8,7 +8,7 @@ import {
   type ConformanceEnvironment,
   type ConformanceHttpResponse,
 } from "borgmcp-shared/conformance";
-import type { LogCursor } from "borgmcp-shared/protocol";
+import { ATTACH_PATH, type LogCursor } from "borgmcp-shared/protocol";
 import { generate } from "selfsigned";
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -43,8 +43,14 @@ describe("borgmcp-shared server adapter", () => {
           error: "expired seat probe did not return AUTH_EXPIRED.",
           observations: {},
         },
+        {
+          id: "security.metadata-own-seat",
+          ok: false,
+          error: "expired metadata session did not return AUTH_EXPIRED.",
+          observations: {},
+        },
       ]);
-      expect(report.results).toHaveLength(19);
+      expect(report.results).toHaveLength(26);
     } finally {
       await fixture.server.close();
       fixture.digester.destroy();
@@ -173,6 +179,8 @@ async function conformanceEnvironment(): Promise<{
         runtime.maintenance.revokeDroneSession(session.sessionId);
       },
       inspectManagedDrone: async (drone) => runtime.maintenance.inspectManagedDrone(drone.id),
+      inspectDroneRuntimeState: async (drone) =>
+        runtime.maintenance.inspectDroneRuntimeState(drone.id),
       inspectCubeManagementState: async (cube) =>
         runtime.maintenance.inspectCubeManagementState(cube.id),
       grantCreateCubeCapability: async (principal) => {
@@ -242,6 +250,14 @@ async function conformanceEnvironment(): Promise<{
     operations: {
       health: async () => transport.request("GET", "/healthz"),
       protocol: async () => transport.request("GET", "/api/protocol"),
+      attach: async (credential, request) =>
+        transport.request("POST", ATTACH_PATH, JSON.stringify(request), credential),
+      selfMetadataUpdate: async (credential, cube, request) => transport.request(
+        "PATCH",
+        `/api/cubes/${cube.id}/drones/self/metadata`,
+        JSON.stringify(request),
+        credential,
+      ),
       enroll: async (request) => {
         const result = await transport.request(
           "POST",

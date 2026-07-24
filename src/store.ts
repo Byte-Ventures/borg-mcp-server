@@ -16,7 +16,12 @@ import {
   assertServerDerivedPrincipal,
   type Principal,
 } from "./principal.js";
-import { patchRoleSectionText, type RoleSectionPatchOp } from "./role-section.js";
+import {
+  RoleSectionPatchConflictError,
+  patchRoleSectionText,
+  type RoleSectionPatchConflictReason,
+  type RoleSectionPatchOp,
+} from "./role-section.js";
 import { validateMessageTaxonomy } from "./message-taxonomy.js";
 import {
   PLATFORM_QUEEN_DETAILED_DESCRIPTION,
@@ -537,9 +542,20 @@ export class DefaultRoleRequiredError extends Error {
 export class RoleSectionConflictError extends Error {
   readonly code = "ROLE_SECTION_CONFLICT";
 
-  constructor() {
-    super("The role section patch conflicts with the current role text.");
+  constructor(readonly reason: RoleSectionPatchConflictReason) {
+    super(roleSectionConflictMessage(reason));
     this.name = "RoleSectionConflictError";
+  }
+}
+
+function roleSectionConflictMessage(reason: RoleSectionPatchConflictReason): string {
+  switch (reason) {
+    case "target_missing":
+      return "The target role section does not exist.";
+    case "target_exists":
+      return "The target role section already exists.";
+    case "insertion_point_missing":
+      return "The role section insertion point does not exist.";
   }
 }
 
@@ -1136,8 +1152,10 @@ class SqliteScopedStore implements ScopedStore {
       try {
         detailedDescription = patchRoleSectionText(existing.detailed_description, input);
       } catch (error) {
-        if (error instanceof TypeError) throw error;
-        throw new RoleSectionConflictError();
+        if (error instanceof RoleSectionPatchConflictError) {
+          throw new RoleSectionConflictError(error.reason);
+        }
+        throw error;
       }
       assertRoleTextWriteAllowed(detailedDescription, existing.detailed_description);
       this.#database.prepare(

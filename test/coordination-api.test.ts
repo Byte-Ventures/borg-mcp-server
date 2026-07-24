@@ -872,7 +872,13 @@ describe("coordination stream setup", () => {
     });
     expect(patched).toMatchObject({
       status: 409,
-      body: { request_id: "role-section-request", error: { code: "ROLE_SECTION_CONFLICT" } },
+      body: {
+        request_id: "role-section-request",
+        error: {
+          code: "ROLE_SECTION_CONFLICT",
+          message: "The target role section does not exist.",
+        },
+      },
     });
     const inserted = await api.handle({
       method: "POST",
@@ -892,6 +898,66 @@ describe("coordination stream setup", () => {
         detailed_description: expect.stringContaining("Release workflow:\nReview exact SHA.\n"),
       } } },
     });
+    const afterInsert = runtime.forPrincipal(manager).listRoles(cubeId)
+      .find((role) => role.id === createdRoleId)!.detailed_description;
+    for (const [requestId, patchPayload, message] of [
+      [
+        "role-section-target-missing",
+        { action: "delete", heading: "Missing" },
+        "The target role section does not exist.",
+      ],
+      [
+        "role-section-target-exists",
+        { action: "insert", heading: "Release workflow", body: "Duplicate." },
+        "The target role section already exists.",
+      ],
+      [
+        "role-section-insertion-point-missing",
+        { action: "insert", heading: "Review gate", body: "Review.", after: "Missing" },
+        "The role section insertion point does not exist.",
+      ],
+    ] as const) {
+      const conflict = await api.handle({
+        method: "POST",
+        path: `/api/cubes/${cubeId}/roles/${createdRoleId}/section-patch`,
+        principal: manager,
+        body: {
+          protocol_version: "3",
+          request_id: requestId,
+          payload: patchPayload,
+        },
+        signal: new AbortController().signal,
+      });
+      expect(conflict).toMatchObject({
+        status: 409,
+        body: {
+          request_id: requestId,
+          error: { code: "ROLE_SECTION_CONFLICT", message },
+        },
+      });
+      expect(runtime.forPrincipal(manager).listRoles(cubeId)
+        .find((role) => role.id === createdRoleId)!.detailed_description).toBe(afterInsert);
+    }
+    const invalidHeading = await api.handle({
+      method: "POST",
+      path: `/api/cubes/${cubeId}/roles/${createdRoleId}/section-patch`,
+      principal: manager,
+      body: {
+        protocol_version: "3",
+        request_id: "role-section-invalid-heading",
+        payload: { action: "delete", heading: "**Markdown**" },
+      },
+      signal: new AbortController().signal,
+    });
+    expect(invalidHeading).toMatchObject({
+      status: 400,
+      body: {
+        request_id: "role-section-invalid-heading",
+        error: { code: "INVALID_INPUT" },
+      },
+    });
+    expect(runtime.forPrincipal(manager).listRoles(cubeId)
+      .find((role) => role.id === createdRoleId)!.detailed_description).toBe(afterInsert);
 
     for (const [principal, status, code] of [
       [clientPrincipal(readerId), 403, "ACCESS_DENIED"],

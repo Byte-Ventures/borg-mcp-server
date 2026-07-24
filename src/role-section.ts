@@ -8,6 +8,18 @@ export type RoleSectionPatchOp =
   }
   | { readonly action: "delete"; readonly heading: string };
 
+export type RoleSectionPatchConflictReason =
+  | "target_missing"
+  | "target_exists"
+  | "insertion_point_missing";
+
+export class RoleSectionPatchConflictError extends Error {
+  constructor(readonly reason: RoleSectionPatchConflictReason) {
+    super(reason);
+    this.name = "RoleSectionPatchConflictError";
+  }
+}
+
 interface RoleSection {
   readonly heading: string | null;
   readonly body: string;
@@ -22,16 +34,16 @@ export function patchRoleSectionText(text: string, operation: RoleSectionPatchOp
   );
 
   if (operation.action === "replace") {
-    if (index === -1) throw new Error("Role section not found.");
+    if (index === -1) throw new RoleSectionPatchConflictError("target_missing");
     sections[index] = renderedSection(operation.heading, operation.body);
     return serializeSections(sections);
   }
   if (operation.action === "delete") {
-    if (index === -1) throw new Error("Role section not found.");
+    if (index === -1) throw new RoleSectionPatchConflictError("target_missing");
     sections.splice(index, 1);
     return serializeSections(sections);
   }
-  if (index !== -1) throw new Error("Role section already exists.");
+  if (index !== -1) throw new RoleSectionPatchConflictError("target_exists");
 
   const section = renderedSection(operation.heading, operation.body);
   if (operation.after == null) {
@@ -44,7 +56,9 @@ export function patchRoleSectionText(text: string, operation: RoleSectionPatchOp
   const afterIndex = sections.findIndex((candidate) =>
     candidate.heading !== null && normalizedHeading(candidate.heading) === after
   );
-  if (afterIndex === -1) throw new Error("Role section insertion point does not exist.");
+  if (afterIndex === -1) {
+    throw new RoleSectionPatchConflictError("insertion_point_missing");
+  }
   ensureTrailingNewline(sections, afterIndex);
   sections.splice(afterIndex + 1, 0, section);
   return serializeSections(sections);

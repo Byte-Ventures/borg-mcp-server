@@ -43,6 +43,14 @@ v1 scope.
   mint path without disclosing why they were ineligible. Permanent per-client retry bindings include
   the complete cube, role, and prior-seat tuple, so later fresh-key reattachment cannot erase or
   repurpose an older retry key.
+- Runtime metadata is an advisory, non-authoritative seat report. The shared protocol decoder accepts
+  only the bounded Agent CLI enum, printable-safe model identifier, and one canonical public repository
+  name/origin pair; it rejects credentials, local/private origins, controls, bidi controls, malformed
+  values, unknown keys, and partial repository patches before persistence. The authenticated self-update
+  route derives cube and drone identity from the immutable drone-session principal, can update only that
+  seat, and makes foreign and unknown cubes indistinguishable. Attach and sparse self-heal updates are
+  atomic, never echo rejected input, and do not modify grants, role, posture, routing, liveness,
+  `last_seen`, activity logs, wake state, timers, or model execution.
 - Role creation, sparse role update, and granular role-section patch routes require the cube's
   `manage` grant. Drone sessions and lesser client grants receive the same `NOT_FOUND` response as
   foreign or missing cube/role tuples. Default promotion and role mutation recheck authority inside

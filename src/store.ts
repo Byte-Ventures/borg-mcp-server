@@ -4,6 +4,10 @@ import { chmod, lstat, mkdir, open } from "node:fs/promises";
 import { dirname, join, parse, relative, resolve, sep } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { MessageTaxonomy } from "borgmcp-shared/domain";
+import type {
+  DroneRuntimeMetadata,
+  DroneRuntimeMetadataPatch,
+} from "borgmcp-shared/protocol";
 
 import { applyMigrations, assertMigrationsCurrent } from "./migrations.js";
 import { operatorErrors } from "./operator-error.js";
@@ -125,6 +129,11 @@ export interface DroneRecord {
   readonly last_seen: string;
   readonly hostname: string | null;
   readonly posture: "observer" | "participant";
+  readonly agent_kind: DroneRuntimeMetadata["agent_kind"];
+  readonly reported_model: string | null;
+  readonly working_repo_name: string | null;
+  readonly working_repo_origin: string | null;
+  readonly runtime_metadata_reported: boolean;
   readonly created_at: string;
   readonly last_log_post_at?: string | null;
   readonly seen_since?: boolean;
@@ -308,6 +317,10 @@ export interface ScopedStore {
     listener: (entry: ActivityStreamRecord) => void,
   ) => (() => void);
   readonly attachSeat: (input: SeatAttachInput) => SeatAttachRecord;
+  readonly updateOwnRuntimeMetadata: (
+    cubeId: string,
+    patch: DroneRuntimeMetadataPatch,
+  ) => RuntimeMetadataState;
 }
 
 export interface CreateRoleInput {
@@ -360,6 +373,12 @@ export interface SeatAttachInput {
   readonly sessionId: string;
   readonly credentialId: string;
   readonly credentialDigest: DigestPair;
+  readonly runtimeMetadata?: DroneRuntimeMetadata;
+}
+
+export interface RuntimeMetadataState {
+  readonly runtime_metadata: DroneRuntimeMetadata;
+  readonly runtime_metadata_reported: boolean;
 }
 
 export interface SeatAttachRecord {
@@ -376,7 +395,7 @@ export interface SeatAttachRecord {
   readonly drone: {
     readonly id: string;
     readonly label: string;
-  };
+  } & RuntimeMetadataState;
   readonly sessionId: string;
   readonly result: "created" | "reused";
 }
@@ -443,6 +462,35 @@ export interface MaintenanceStore {
     readonly role_id: string;
     readonly evicted: boolean;
     readonly session_revoked: boolean;
+  };
+  readonly inspectDroneRuntimeState: (droneId: string) => {
+    readonly metadata: DroneRuntimeMetadata;
+    readonly metadata_reported: boolean;
+    readonly metadata_revision: number;
+    readonly cube_id: string;
+    readonly role_id: string;
+    readonly session_state: "active" | "revoked" | "expired";
+    readonly evicted: boolean;
+    readonly last_seen: string;
+    readonly heartbeat_count: number;
+    readonly wake_count: number;
+    readonly log_count: number;
+    readonly model_turn_count: number;
+    readonly grant_access: CubeAccess | null;
+    readonly server_capabilities: readonly string[];
+    readonly principal_revoked: boolean;
+    readonly session_bound: boolean;
+    readonly last_log_post: string | null;
+    readonly last_regen_at: string | null;
+    readonly last_read_log_at: string | null;
+    readonly last_event_received_at: string | null;
+    readonly wake_path: "live";
+    readonly wake_alert: null;
+    readonly monitor_armed: boolean;
+    readonly sse_connected: boolean;
+    readonly claim_count: number;
+    readonly decision_count: number;
+    readonly routing_eligible: boolean;
   };
   readonly inspectCubeManagementState: (cubeId: string) => {
     readonly directive: string;
@@ -1116,7 +1164,9 @@ class SqliteScopedStore implements ScopedStore {
     const rows = this.#database.prepare(`
       SELECT drone.id, drone.cube_id, drone.role_id, drone.label,
              COALESCE(drone.last_seen, drone.created_at) AS last_seen,
-             drone.hostname, drone.created_at,
+             drone.hostname, drone.agent_kind, drone.reported_model,
+             drone.working_repo_name, drone.working_repo_origin,
+             drone.runtime_metadata_reported, drone.created_at,
              CASE WHEN client.revoked_at IS NULL AND grant_row.access IN ('write', 'manage')
                THEN 'participant' ELSE 'observer' END AS posture
       FROM drones AS drone
@@ -1147,7 +1197,9 @@ class SqliteScopedStore implements ScopedStore {
     const rows = this.#database.prepare(`
       SELECT drone.id, drone.cube_id, drone.role_id, drone.label,
              COALESCE(drone.last_seen, drone.created_at) AS last_seen,
-             drone.hostname, drone.created_at,
+             drone.hostname, drone.agent_kind, drone.reported_model,
+             drone.working_repo_name, drone.working_repo_origin,
+             drone.runtime_metadata_reported, drone.created_at,
              CASE WHEN client.revoked_at IS NULL AND grant_row.access IN ('write', 'manage')
                THEN 'participant' ELSE 'observer' END AS posture,
              (SELECT MAX(post.created_at) FROM activity_log AS post
@@ -1209,7 +1261,9 @@ class SqliteScopedStore implements ScopedStore {
       const row = this.#database.prepare(`
         SELECT drone.id, drone.cube_id, drone.role_id, drone.label,
                COALESCE(drone.last_seen, drone.created_at) AS last_seen,
-               drone.hostname, drone.created_at,
+               drone.hostname, drone.agent_kind, drone.reported_model,
+               drone.working_repo_name, drone.working_repo_origin,
+               drone.runtime_metadata_reported, drone.created_at,
                CASE WHEN client.revoked_at IS NULL AND grant_row.access IN ('write', 'manage')
                  THEN 'participant' ELSE 'observer' END AS posture
         FROM drones AS drone
@@ -1536,7 +1590,19 @@ class SqliteScopedStore implements ScopedStore {
         }
         const droneId = requiredText(bound, "drone_id");
         const sessionId = requiredText(bound, "session_id");
-        this.#database.prepare("UPDATE drones SET last_seen = ? WHERE id = ?").run(now, droneId);
+        if (input.runtimeMetadata !== undefined) {
+          this.#database.prepare(`
+            UPDATE drones SET agent_kind = ?, reported_model = ?,
+              working_repo_name = ?, working_repo_origin = ?, runtime_metadata_reported = 1
+            WHERE id = ?
+          `).run(
+            input.runtimeMetadata.agent_kind,
+            input.runtimeMetadata.reported_model,
+            input.runtimeMetadata.working_repo_name,
+            input.runtimeMetadata.working_repo_origin,
+            droneId,
+          );
+        }
         const attachedRoleRow = this.#database.prepare(`
           SELECT id AS role_id, name AS role_name, role_class, is_human_seat
           FROM roles WHERE id = ? AND cube_id = ?
@@ -1558,7 +1624,11 @@ class SqliteScopedStore implements ScopedStore {
             role_class: roleClass,
             is_human_seat: requiredInteger(attachedRoleRow, "is_human_seat") === 1,
           },
-          drone: { id: droneId, label: requiredText(bound, "label") },
+          drone: {
+            id: droneId,
+            label: requiredText(bound, "label"),
+            ...this.#runtimeMetadataState(droneId),
+          },
           sessionId,
           result: "reused",
         };
@@ -1597,11 +1667,18 @@ class SqliteScopedStore implements ScopedStore {
       } else {
         droneId = input.droneId;
         droneLabel = seatLabel(requiredText(roleRow, "role_name"), droneId);
+        const metadata = input.runtimeMetadata ?? EMPTY_RUNTIME_METADATA;
         this.#database.prepare(`
-          INSERT INTO drones (id, cube_id, role_id, client_id, label, created_at, last_seen)
-          VALUES (?, ?, ?, ?, ?, ?, ?)
+          INSERT INTO drones (
+            id, cube_id, role_id, client_id, label, created_at, last_seen,
+            agent_kind, reported_model, working_repo_name, working_repo_origin,
+            runtime_metadata_reported
+          )
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `).run(
           droneId, input.cubeId, input.roleId, this.#principal.id, droneLabel, now, now,
+          metadata.agent_kind, metadata.reported_model, metadata.working_repo_name,
+          metadata.working_repo_origin, input.runtimeMetadata === undefined ? 0 : 1,
         );
       }
       this.#database.prepare(`
@@ -1647,7 +1724,11 @@ class SqliteScopedStore implements ScopedStore {
           role_class: roleClass,
           is_human_seat: requiredInteger(attachedRoleRow, "is_human_seat") === 1,
         },
-        drone: { id: droneId, label: droneLabel },
+        drone: {
+          id: droneId,
+          label: droneLabel,
+          ...this.#runtimeMetadataState(droneId),
+        },
         sessionId: input.sessionId,
         result: "created",
       };
@@ -1655,6 +1736,38 @@ class SqliteScopedStore implements ScopedStore {
       try { this.#database.exec("ROLLBACK"); } catch { /* Preserve the original failure. */ }
       throw error;
     }
+  }
+
+  updateOwnRuntimeMetadata(
+    cubeId: string,
+    patch: DroneRuntimeMetadataPatch,
+  ): RuntimeMetadataState {
+    if (this.#principal.kind !== "drone-session") throw new AccessDeniedError();
+    assertCanonicalUuid(cubeId, "Cube id");
+    if (cubeId !== this.#principal.cubeId) throw new ScopedStoreError();
+    const assignments: string[] = [];
+    const parameters: Array<string | null | number> = [];
+    for (const [field, value] of Object.entries(patch)) {
+      assignments.push(`${field} = ?`);
+      parameters.push(value);
+    }
+    assignments.push("runtime_metadata_reported = 1");
+    const result = this.#database.prepare(`
+      UPDATE drones SET ${assignments.join(", ")}
+      WHERE id = ? AND cube_id = ? AND evicted_at IS NULL
+    `).run(...parameters, this.#principal.droneId, cubeId);
+    if (result.changes !== 1) throw new ScopedStoreError();
+    return this.#runtimeMetadataState(this.#principal.droneId);
+  }
+
+  #runtimeMetadataState(droneId: string): RuntimeMetadataState {
+    const row = this.#database.prepare(`
+      SELECT agent_kind, reported_model, working_repo_name, working_repo_origin,
+             runtime_metadata_reported
+      FROM drones WHERE id = ?
+    `).get(droneId);
+    if (row === undefined) throw new ScopedStoreError();
+    return runtimeMetadataState(row);
   }
 
   subscribeActivity(cubeId: string, listener: (entry: ActivityStreamRecord) => void): () => void {
@@ -2130,6 +2243,75 @@ class SqliteMaintenanceStore implements MaintenanceStore {
       role_id: requiredText(row, "role_id"),
       evicted: nullableText(row, "evicted_at") !== null,
       session_revoked: requiredInteger(row, "session_revoked") === 1,
+    };
+  }
+
+  inspectDroneRuntimeState(droneId: string) {
+    assertCanonicalUuid(droneId, "Drone id");
+    const row = this.#database.prepare(`
+      SELECT drone.cube_id, drone.role_id, drone.last_seen, drone.created_at,
+             drone.evicted_at, drone.agent_kind, drone.reported_model,
+             drone.working_repo_name, drone.working_repo_origin,
+             drone.runtime_metadata_reported, client.revoked_at AS client_revoked_at,
+             grant_row.access,
+             EXISTS(
+               SELECT 1 FROM drone_sessions AS session
+               WHERE session.drone_id = drone.id
+             ) AS session_bound,
+             EXISTS(
+               SELECT 1 FROM drone_sessions AS session
+               WHERE session.drone_id = drone.id AND session.revoked_at IS NOT NULL
+             ) AS session_revoked,
+             (SELECT COUNT(*) FROM activity_log AS entry
+               WHERE entry.drone_id = drone.id) AS log_count,
+             (SELECT COUNT(*) FROM activity_acks AS ack
+               WHERE ack.claimant_drone_id = drone.id AND ack.kind = 'claim') AS claim_count,
+             (SELECT COUNT(*) FROM decisions AS decision
+               WHERE decision.cube_id = drone.cube_id AND decision.ratified_by = drone.id
+                 AND decision.status = 'active') AS decision_count,
+             (SELECT MAX(entry.created_at) FROM activity_log AS entry
+               WHERE entry.drone_id = drone.id) AS last_log_post
+      FROM drones AS drone
+      JOIN clients AS client ON client.id = drone.client_id
+      LEFT JOIN client_cube_grants AS grant_row
+        ON grant_row.client_id = drone.client_id AND grant_row.cube_id = drone.cube_id
+      WHERE drone.id = ?
+    `).get(droneId);
+    if (row === undefined) throw new ScopedStoreError();
+    const access = nullableText(row, "access");
+    if (access !== null && access !== "read" && access !== "write" && access !== "manage") {
+      throw new Error("Database contains invalid cube access.");
+    }
+    const metadata = runtimeMetadataState(row);
+    return {
+      metadata: metadata.runtime_metadata,
+      metadata_reported: metadata.runtime_metadata_reported,
+      metadata_revision: 0,
+      cube_id: requiredText(row, "cube_id"),
+      role_id: requiredText(row, "role_id"),
+      session_state: requiredInteger(row, "session_revoked") === 1 ? "revoked" as const : "active" as const,
+      evicted: nullableText(row, "evicted_at") !== null,
+      last_seen: nullableText(row, "last_seen") ?? requiredText(row, "created_at"),
+      heartbeat_count: 0,
+      wake_count: 0,
+      log_count: requiredInteger(row, "log_count"),
+      model_turn_count: 0,
+      grant_access: access as CubeAccess | null,
+      server_capabilities: [] as const,
+      principal_revoked: nullableText(row, "client_revoked_at") !== null,
+      session_bound: requiredInteger(row, "session_bound") === 1,
+      last_log_post: nullableText(row, "last_log_post"),
+      last_regen_at: null,
+      last_read_log_at: null,
+      last_event_received_at: null,
+      wake_path: "live" as const,
+      wake_alert: null,
+      monitor_armed: false,
+      sse_connected: false,
+      claim_count: requiredInteger(row, "claim_count"),
+      decision_count: requiredInteger(row, "decision_count"),
+      routing_eligible: nullableText(row, "client_revoked_at") === null &&
+        (access === "write" || access === "manage"),
     };
   }
 
@@ -2901,7 +3083,45 @@ function droneRecord(row: Record<string, unknown>): DroneRecord {
     last_seen: requiredText(row, "last_seen"),
     hostname: nullableText(row, "hostname"),
     posture,
+    ...runtimeMetadataFlat(row),
     created_at: requiredText(row, "created_at"),
+  };
+}
+
+const EMPTY_RUNTIME_METADATA: DroneRuntimeMetadata = Object.freeze({
+  agent_kind: null,
+  reported_model: null,
+  working_repo_name: null,
+  working_repo_origin: null,
+});
+
+function runtimeMetadataFlat(row: Record<string, unknown>): DroneRuntimeMetadata & {
+  readonly runtime_metadata_reported: boolean;
+} {
+  const agentKind = nullableText(row, "agent_kind");
+  if (agentKind !== null && agentKind !== "claude" &&
+      agentKind !== "codex" && agentKind !== "opencode") {
+    throw new Error("Database contains invalid agent_kind.");
+  }
+  return {
+    agent_kind: agentKind as DroneRuntimeMetadata["agent_kind"],
+    reported_model: nullableText(row, "reported_model"),
+    working_repo_name: nullableText(row, "working_repo_name"),
+    working_repo_origin: nullableText(row, "working_repo_origin"),
+    runtime_metadata_reported: requiredInteger(row, "runtime_metadata_reported") === 1,
+  };
+}
+
+function runtimeMetadataState(row: Record<string, unknown>): RuntimeMetadataState {
+  const flat = runtimeMetadataFlat(row);
+  return {
+    runtime_metadata: {
+      agent_kind: flat.agent_kind,
+      reported_model: flat.reported_model,
+      working_repo_name: flat.working_repo_name,
+      working_repo_origin: flat.working_repo_origin,
+    },
+    runtime_metadata_reported: flat.runtime_metadata_reported,
   };
 }
 

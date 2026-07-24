@@ -34,7 +34,7 @@ describe("SQLite migrations", () => {
     expect(first.diagnostics()).toEqual({
       journalMode: "wal",
       foreignKeys: true,
-      schemaVersions: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13],
+      schemaVersions: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
     });
     expect((await stat(join(directory, "data"))).mode & 0o777).toBe(0o700);
     expect((await stat(databasePath)).mode & 0o777).toBe(0o600);
@@ -43,7 +43,8 @@ describe("SQLite migrations", () => {
     first.close();
 
     const second = await openStore({ path: databasePath });
-    expect(second.diagnostics().schemaVersions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
+    expect(second.diagnostics().schemaVersions)
+      .toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
     second.close();
     await expect(access(databasePath)).resolves.toBeUndefined();
   });
@@ -195,7 +196,7 @@ describe("SQLite migrations", () => {
 
   it("persists existing drone-session supersession independently of successor liveness", () => {
     const database = new DatabaseSync(":memory:");
-    applyMigrations(database, STORE_MIGRATIONS.slice(0, -2));
+    applyMigrations(database, STORE_MIGRATIONS.slice(0, -3));
     const clientId = "00000000-0000-4000-8000-000000000031";
     const cubeId = "00000000-0000-4000-8000-000000000032";
     const roleId = "00000000-0000-4000-8000-000000000033";
@@ -249,6 +250,51 @@ describe("SQLite migrations", () => {
     ]);
     expect(database.prepare("PRAGMA table_info(drone_sessions)").all()
       .map((row) => (row as { name: string }).name)).not.toContain("expires_at");
+    database.close();
+  });
+
+  it("adds explicit-null runtime metadata without synthesizing a report", () => {
+    const database = new DatabaseSync(":memory:");
+    applyMigrations(database, STORE_MIGRATIONS.slice(0, 13));
+    const clientId = "00000000-0000-4000-8000-000000000041";
+    const cubeId = "00000000-0000-4000-8000-000000000042";
+    const roleId = "00000000-0000-4000-8000-000000000043";
+    const droneId = "00000000-0000-4000-8000-000000000044";
+    const createdAt = "2026-07-24T00:00:00.000Z";
+    database.prepare("INSERT INTO clients (id, name, created_at) VALUES (?, 'client', ?)")
+      .run(clientId, createdAt);
+    database.prepare(`
+      INSERT INTO cubes (id, name, directive, created_at, updated_at, owner_id)
+      VALUES (?, 'cube', '', ?, ?, ?)
+    `).run(cubeId, createdAt, createdAt, clientId);
+    database.prepare(`
+      INSERT INTO roles (id, cube_id, name, created_at, role_class)
+      VALUES (?, ?, 'Builder', ?, 'worker')
+    `).run(roleId, cubeId, createdAt);
+    database.prepare(`
+      INSERT INTO drones (id, cube_id, role_id, client_id, label, created_at, last_seen)
+      VALUES (?, ?, ?, ?, 'builder-seat', ?, ?)
+    `).run(droneId, cubeId, roleId, clientId, createdAt, createdAt);
+
+    applyMigrations(database, STORE_MIGRATIONS);
+
+    expect(database.prepare(`
+      SELECT agent_kind, reported_model, working_repo_name, working_repo_origin,
+             runtime_metadata_reported
+      FROM drones WHERE id = ?
+    `).get(droneId)).toEqual({
+      agent_kind: null,
+      reported_model: null,
+      working_repo_name: null,
+      working_repo_origin: null,
+      runtime_metadata_reported: 0,
+    });
+    expect(() => database.prepare(`
+      UPDATE drones SET working_repo_name = 'owner/repo' WHERE id = ?
+    `).run(droneId)).toThrow("invalid drone runtime metadata");
+    expect(() => database.prepare(`
+      UPDATE drones SET agent_kind = 'codex' WHERE id = ?
+    `).run(droneId)).toThrow("invalid drone runtime metadata");
     database.close();
   });
 

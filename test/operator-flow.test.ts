@@ -385,7 +385,7 @@ describe("offline operator flow", () => {
         }),
         `Bearer ${clientCredential}`,
       );
-      expect(attachment.status).toBe(201);
+      expect(attachment.status).toBe(200);
       const attached = (JSON.parse(attachment.body) as {
         payload: { result: "created"; session: { id: string } };
       }).payload;

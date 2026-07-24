@@ -149,11 +149,11 @@ describe("coordination stream setup", () => {
       participantSessionCredential,
     );
     expect(observerAttach).toMatchObject({
-      status: 201,
+      status: 200,
       body: { payload: { result: "created", session: { id: expect.any(String) } } },
     });
     expect(participantAttach).toMatchObject({
-      status: 201,
+      status: 200,
       body: { payload: { result: "created", session: { id: expect.any(String) } } },
     });
     const observerPayload = (observerAttach.body as any).payload;

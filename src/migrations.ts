@@ -412,6 +412,45 @@ export const STORE_MIGRATIONS: readonly Migration[] = Object.freeze([
         WHERE revoked_at IS NULL;
     `,
   },
+  {
+    version: 14,
+    name: "drone_runtime_metadata",
+    sql: `
+      ALTER TABLE drones ADD COLUMN agent_kind TEXT
+        CHECK (agent_kind IS NULL OR agent_kind IN ('claude', 'codex', 'opencode'));
+      ALTER TABLE drones ADD COLUMN reported_model TEXT
+        CHECK (reported_model IS NULL OR length(CAST(reported_model AS BLOB)) BETWEEN 1 AND 160);
+      ALTER TABLE drones ADD COLUMN working_repo_name TEXT
+        CHECK (working_repo_name IS NULL OR length(CAST(working_repo_name AS BLOB)) <= 201);
+      ALTER TABLE drones ADD COLUMN working_repo_origin TEXT
+        CHECK (working_repo_origin IS NULL OR length(CAST(working_repo_origin AS BLOB)) <= 512);
+      ALTER TABLE drones ADD COLUMN runtime_metadata_reported INTEGER NOT NULL DEFAULT 0
+        CHECK (runtime_metadata_reported IN (0, 1));
+
+      CREATE TRIGGER drones_runtime_metadata_insert
+      BEFORE INSERT ON drones
+      WHEN (NEW.working_repo_name IS NULL) <> (NEW.working_repo_origin IS NULL)
+        OR (NEW.runtime_metadata_reported = 0 AND (
+          NEW.agent_kind IS NOT NULL OR NEW.reported_model IS NOT NULL
+          OR NEW.working_repo_name IS NOT NULL OR NEW.working_repo_origin IS NOT NULL
+        ))
+      BEGIN
+        SELECT RAISE(ABORT, 'invalid drone runtime metadata');
+      END;
+
+      CREATE TRIGGER drones_runtime_metadata_update
+      BEFORE UPDATE OF agent_kind, reported_model, working_repo_name,
+        working_repo_origin, runtime_metadata_reported ON drones
+      WHEN (NEW.working_repo_name IS NULL) <> (NEW.working_repo_origin IS NULL)
+        OR (NEW.runtime_metadata_reported = 0 AND (
+          NEW.agent_kind IS NOT NULL OR NEW.reported_model IS NOT NULL
+          OR NEW.working_repo_name IS NOT NULL OR NEW.working_repo_origin IS NOT NULL
+        ))
+      BEGIN
+        SELECT RAISE(ABORT, 'invalid drone runtime metadata');
+      END;
+    `,
+  },
 ]);
 
 interface AppliedMigrationRow {

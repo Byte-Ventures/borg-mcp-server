@@ -59,7 +59,7 @@ describe("client seat attach", () => {
     const created = await attach(clientA.credential, ids.cubeA, ids.roleA, sessionCredential, "attach-created");
 
     expect(created).toMatchObject({
-      status: 201,
+      status: 200,
       payload: {
         result: "created",
         cube: { id: ids.cubeA },

@@ -100,7 +100,8 @@ any preview.
    commit to `GITHUB_SHA`, requires that commit on protected `main`, and rejects repository npm
    configuration before running dependency code.
 4. The unprivileged `verify` job is the one build, test, package, and artifact-verification authority.
-   It verifies the source lock, installs with lifecycle scripts disabled, audits, runs the complete
+   It verifies the source lock entirely offline, installs with lifecycle scripts disabled, audits,
+   runs the complete
    check/test/build gate, packs once, verifies once, and installs/imports/runs that exact server
    tarball once in clean consumer prefixes.
 5. The verify job uploads only the same-run tarball and verifier report. The report contains the
@@ -139,7 +140,7 @@ The server repository is public; visibility is complete, and `borgmcp-server@0.1
 `borgmcp-server@0.1.18` are live on npm
 under the sole expected maintainer.
 The `latest` tag resolves to `0.1.18`.
-Versions `0.1.2`, `0.1.3`, and `0.1.13` are
+Versions `0.1.2`, `0.1.3`, `0.1.13`, and `0.1.19` are
 unpublished immutable failure evidence and must never be customer, install, or dogfood targets.
 Version `0.1.18` completed the full exact-source, tagged-artifact, tokenless OIDC publication,
 provenance, signature, and attestation gate chain recorded below.
@@ -372,6 +373,16 @@ and `latest` resolves to `0.1.18`. Publication completed at the terminal
 `npm publish` boundary with no postpublication registry read. Never move,
 delete, reuse, or rerun that tag or workflow.
 
+The immutable annotated `v0.1.19` tag object
+`8f0fd01a4b5b8d03525282d72f025028e59c298c` peels to protected-main commit
+`07f2abead5c9e196326da13183514f17cc43810b`. Workflow run `30106996572`,
+attempt 1, failed before dependency installation in verify job `89526733696` because the
+source-lock verifier's redundant live npm metadata request exceeded its 15-second timeout.
+The protected publish job `89526869244` was skipped; npm received no publication and
+`borgmcp-server@0.1.19` is not an install target. Never rerun, move, delete, reuse, or
+republish this tag or version. Recovery removes live registry metadata reads from the
+publication-critical source-lock path and uses fresh version `0.1.20`.
+
 The immutable annotated `v0.1.4` tag object
 `1604077e6249c7c0f7ce17b3f2848caad2bc773e` peels to protected-main merge
 `1f7e60a695f27d92b2d46233b0e3cad5aa43bd0d`, whose tree is byte-identical to reviewed source
@@ -405,10 +416,11 @@ move, delete, or reuse that tag. Recovery uses separately authorized version `0.
 source and merge commit, pre-tag repository-variable evidence, and a never-before-used annotated tag.
 
 The live `borgmcp-server@0.1.18` package consumes the audited exact
-`borgmcp-shared@0.6.2` registry release. Immutable `v0.1.6`, `v0.1.10`, and `v0.1.13` are failed
+`borgmcp-shared@0.6.2` registry release. Immutable `v0.1.6`, `v0.1.10`, `v0.1.13`,
+and `v0.1.19` are failed
 prepublication evidence and are not install targets. Current post-`v0.1.18` source pins the audited
 exact `borgmcp-shared@0.6.3` registry release for the unpublished
-`borgmcp-server@0.1.19` candidate; the shrinkwrap must resolve that registry tarball with the
+`borgmcp-server@0.1.20` recovery candidate; the shrinkwrap must resolve that registry tarball with the
 matching SRI. The live package persists truthful advisory Agent CLI, reported-model, and
 working-repository seat metadata, the explicit Queen activation timing contract, and
 structured, safe role-section conflict reasons without changing authority, routes, or rollback
@@ -420,5 +432,6 @@ credential.
 Version `0.1.18` remains the install target until that candidate passes exact-SHA review and an
 authorized immutable tag publication. The source-lock, artifact, audit, and consumer gates must pass
 without Git dependencies; SBOM generation is supplemental and outside the publication-critical path.
-Canonical lock metadata reads retry only bounded HTTP 429 and 5xx responses;
-terminal HTTP statuses and metadata mismatches fail immediately.
+Source-lock verification performs no network access. It validates exact dependency versions,
+canonical npm tarball URLs, SHA-512 integrity, root identity, duplicate consistency, and
+install-script boundaries directly from the reviewed manifest and shrinkwrap.

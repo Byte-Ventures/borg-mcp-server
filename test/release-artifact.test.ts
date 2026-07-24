@@ -258,7 +258,7 @@ describe("packed release artifact", () => {
     await expect(verifyPackedArtifact(await pack(fixture))).rejects.toThrow("untrusted dependency entry");
   });
 
-  it("binds a canonical lock entry to official registry metadata", async () => {
+  it("verifies canonical packed lock entries without network access", async () => {
     const fixture = await packageFixture({ dependencies: { trusted: "1.0.0" } });
     await mutateShrinkwrapRoot(fixture, (root, shrinkwrap) => {
       root["dependencies"] = { trusted: "1.0.0" };
@@ -266,14 +266,22 @@ describe("packed release artifact", () => {
         version: "1.0.0",
         resolved: "https://registry.npmjs.org/trusted/-/trusted-1.0.0.tgz",
         integrity: VALID_INTEGRITY,
+        license: "MIT",
       };
     });
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
-      dist: { tarball: "https://registry.npmjs.org/other/-/other-1.0.0.tgz", integrity: VALID_INTEGRITY },
-    }), { status: 200 })));
-    await expect(verifyPackedArtifact(await pack(fixture))).rejects.toThrow(
-      "metadata differs from the official registry",
+    await writeFile(
+      join(fixture, "THIRD_PARTY_NOTICES.md"),
+      "# Fixture notices\n\n| Package | Version | License |\n| --- | --- | --- |\n| `trusted` | 1.0.0 | MIT |\n",
     );
+    const fetchImpl = vi.fn(() => {
+      throw new Error("network access is forbidden during packed-artifact verification");
+    });
+    vi.stubGlobal("fetch", fetchImpl);
+    await expect(verifyPackedArtifact(await pack(fixture))).resolves.toMatchObject({
+      name: "borgmcp-server",
+      version: "1.2.3",
+    });
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 
   it("rejects divergent integrity for duplicate package identities", async () => {

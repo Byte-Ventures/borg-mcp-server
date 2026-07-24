@@ -15,12 +15,14 @@ import {
   CursorExpiredError,
   DefaultRoleRequiredError,
   RoleConflictError,
+  RoleSectionConflictError,
   ScopedStoreError,
   StorageCapacityError,
   type ActivityStreamRecord,
   type StoreRuntime,
   openStore,
 } from "../src/store.js";
+import { PLATFORM_QUEEN_DETAILED_DESCRIPTION } from "../src/platform-queen.js";
 
 const ids = {
   clientA: "00000000-0000-4000-8000-000000000001",
@@ -93,6 +95,33 @@ afterEach(async () => {
 });
 
 describe("Principal to ScopedStore isolation", () => {
+  it("gives the delegated Queen the complete activation timing contract", () => {
+    expect(PLATFORM_QUEEN_DETAILED_DESCRIPTION).toContain(
+      "Use START NOW, RESUME NOW, REVIEW NOW, or HOLD",
+    );
+    expect(PLATFORM_QUEEN_DETAILED_DESCRIPTION).toContain(
+      "ACK and claim are receipt only",
+    );
+    expect(PLATFORM_QUEEN_DETAILED_DESCRIPTION).toContain(
+      "within 2 minutes",
+    );
+    expect(PLATFORM_QUEEN_DETAILED_DESCRIPTION).toContain(
+      "send the named drone a direct activation reminder (a kick)",
+    );
+    expect(PLATFORM_QUEEN_DETAILED_DESCRIPTION).toContain(
+      "after a further 5 minutes",
+    );
+    expect(PLATFORM_QUEEN_DETAILED_DESCRIPTION).toContain(
+      "eligible and authorized",
+    );
+    expect(PLATFORM_QUEEN_DETAILED_DESCRIPTION).toContain(
+      "substantive PROGRESS at least every 10 minutes",
+    );
+    expect(PLATFORM_QUEEN_DETAILED_DESCRIPTION).toContain(
+      "BLOCKED immediately",
+    );
+  });
+
   it("gives the offline operator authority independently of product role labels", () => {
     const operator = runtime.forPrincipal(operatorPrincipal(
       "00000000-0000-4000-8000-000000000009",
@@ -383,9 +412,35 @@ describe("Principal to ScopedStore isolation", () => {
     expect(client.patchRoleSection(ids.cubeA, role.id, {
       action: "delete", heading: "Review",
     }).detailed_description).toBe(replaced.detailed_description);
-    expect(() => client.patchRoleSection(ids.cubeA, role.id, {
-      action: "delete", heading: "Missing",
-    })).toThrowError(expect.objectContaining({ code: "ROLE_SECTION_CONFLICT" }));
+    const afterSuccess = client.listRoles(ids.cubeA)
+      .find((candidate) => candidate.id === role.id)!.detailed_description;
+    for (const [operation, reason, message] of [
+      [
+        { action: "delete", heading: "Missing" },
+        "target_missing",
+        "The target role section does not exist.",
+      ],
+      [
+        { action: "insert", heading: "Workflow", body: "duplicate" },
+        "target_exists",
+        "The target role section already exists.",
+      ],
+      [
+        { action: "insert", heading: "Review", body: "new", after: "Missing" },
+        "insertion_point_missing",
+        "The role section insertion point does not exist.",
+      ],
+    ] as const) {
+      expect(() => client.patchRoleSection(ids.cubeA, role.id, operation))
+        .toThrowError(expect.objectContaining({
+          name: "RoleSectionConflictError",
+          code: "ROLE_SECTION_CONFLICT",
+          reason,
+          message,
+        } satisfies Partial<RoleSectionConflictError>));
+      expect(client.listRoles(ids.cubeA)
+        .find((candidate) => candidate.id === role.id)!.detailed_description).toBe(afterSuccess);
+    }
   });
 
   it("exposes named stores without a raw database or generic admin escape hatch", () => {

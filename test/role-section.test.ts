@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { patchRoleSectionText } from "../src/role-section.js";
+import {
+  RoleSectionPatchConflictError,
+  patchRoleSectionText,
+} from "../src/role-section.js";
 
 const roleText =
   "Preamble line.\n\n" +
@@ -38,21 +41,34 @@ describe("patchRoleSectionText", () => {
     })).toBe("Preamble without newline\nWorkflow:\nAct.\n");
   });
 
-  it("deletes one section and rejects missing, duplicate, or invalid headings", () => {
+  it("deletes one section and classifies conflicts without treating invalid headings as conflicts", () => {
     expect(patchRoleSectionText(roleText, { action: "delete", heading: "Workflow" })).toBe(
       "Preamble line.\n\nProject conventions:\n- TDD.\n",
     );
     expect(() => patchRoleSectionText(roleText, {
       action: "replace", heading: "Missing", body: "x",
-    })).toThrow(/not found/u);
+    })).toThrowError(expect.objectContaining({
+      name: "RoleSectionPatchConflictError",
+      reason: "target_missing",
+    }));
     expect(() => patchRoleSectionText(roleText, {
       action: "insert", heading: "workflow", body: "x",
-    })).toThrow(/already exists/u);
+    })).toThrowError(expect.objectContaining({
+      name: "RoleSectionPatchConflictError",
+      reason: "target_exists",
+    }));
+    expect(() => patchRoleSectionText(roleText, {
+      action: "insert", heading: "Review", body: "x", after: "Missing",
+    })).toThrowError(expect.objectContaining({
+      name: "RoleSectionPatchConflictError",
+      reason: "insertion_point_missing",
+    }));
     expect(() => patchRoleSectionText(roleText, {
       action: "insert", heading: "**Markdown**", body: "x",
-    })).toThrow(/invalid/u);
+    })).toThrowError(TypeError);
     expect(() => patchRoleSectionText(roleText, {
       action: "insert", heading: "Injected\nHeading", body: "x",
-    })).toThrow(/invalid/u);
+    })).toThrowError(TypeError);
+    expect(RoleSectionPatchConflictError).toBeTypeOf("function");
   });
 });

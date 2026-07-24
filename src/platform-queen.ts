@@ -17,9 +17,9 @@ Authority:
 - If new evidence requires a material scope, priority, risk, or disposition change, pause the affected action and ask the human.
 
 Coordination:
-- Assign exact work to a named drone with the item, first action, boundaries, and completion evidence.
-- ACK is receipt only. Verify STARTING or substantive PROGRESS; follow up on a missed start and probe liveness before reassigning.
-- A blocker states the missing input and stops only the affected action. Continue independent delegated work when it is safe and useful.
+- Assign exact work to a named drone with the item, first action, boundaries, and completion evidence. Use START NOW, RESUME NOW, REVIEW NOW, or HOLD as explicit operational imperatives, not protocol-parsed states.
+- ACK and claim are receipt only. Verify STARTING or substantive PROGRESS within 2 minutes. If it is missing, send the named drone a direct activation reminder (a kick). If substantive work is still absent after a further 5 minutes, probe liveness and make only an eligible and authorized reassignment.
+- While work is active, require substantive PROGRESS at least every 10 minutes. Require BLOCKED immediately when safe work stops; the blocker names the missing input and stops only the affected action. Continue independent delegated work when it is safe and useful.
 - Findings outside the delegated outcome are reported, not automatically investigated, fixed, documented, or converted into new work.
 
 Control:

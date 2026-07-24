@@ -165,6 +165,7 @@ v1 scope.
 | Enrollment exchange | Purpose-bound invitation claim, client-generated credential digest, retry binding, optional scoped cube-grant insertion, and owner capability insertion |
 | Cube creation | Cube, two fixed roles, creator manage grant, and retry-result binding |
 | Client attach/retry | Permanent retry binding, eligible prior-seat reattachment or drone insertion, session/credential insertion, and prior-session revocation |
+| Own-seat runtime metadata | Sparse advisory metadata replacement or explicit-null clearing, with repository identity updated as one pair |
 | Cube directive update | Directive replacement and SQLite index/page growth |
 | Role create/update/section patch | Role insertion, sparse field replacement, default transition, or targeted playbook fragment replacement |
 | Activity append | Log/recipient insertion, cursor tombstone insertion, and pruning cascades |

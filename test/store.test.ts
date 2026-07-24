@@ -701,6 +701,12 @@ describe("Principal to ScopedStore isolation", () => {
     const client = runtime.forPrincipal(clientPrincipal(ids.clientA));
     const baseline = client.appendLog(ids.cubeA, { message: "baseline" });
     const beforeDrones = client.listDrones(ids.cubeA);
+    const drone = runtime.forPrincipal(droneSessionPrincipal({
+      id: ids.sessionA,
+      clientId: ids.clientA,
+      cubeId: ids.cubeA,
+      droneId: ids.droneA,
+    }));
     const mutableRole = client.createRole(ids.cubeA, {
       name: "Mutable role",
       detailedDescription: "Workflow:\n- retained\n",
@@ -728,6 +734,7 @@ describe("Principal to ScopedStore isolation", () => {
         credentialId: "00000000-0000-4000-8000-000000000034",
         credentialDigest: { lookup: Buffer.alloc(16), verifier: Buffer.alloc(32) },
       }),
+      () => drone.updateOwnRuntimeMetadata(ids.cubeA, { reported_model: "blocked-model" }),
       () => authority.exchangeInvitation({
         invitation,
         retryKey: randomUUID(),
@@ -751,6 +758,62 @@ describe("Principal to ScopedStore isolation", () => {
       clientName: "allowed enrollment",
     })).not.toBeNull();
     digester.destroy();
+  });
+
+  it("capacity-gates own metadata after scope checks without mutating report state", async () => {
+    const path = join(directory, "borg.db");
+    runtime.close();
+    let capacity = { databaseBytes: 0, freeDiskBytes: 2_000_000 };
+    runtime = await openStore({
+      path,
+      storageLimits: {
+        maxActivityEntriesPerCube: 10,
+        maxDatabaseBytes: 1_000_000,
+        minFreeDiskBytes: 10_000,
+      },
+      capacityProbe: () => capacity,
+    });
+    const manager = runtime.forPrincipal(clientPrincipal(ids.clientA));
+    const drone = runtime.forPrincipal(droneSessionPrincipal({
+      id: ids.sessionA,
+      clientId: ids.clientA,
+      cubeId: ids.cubeA,
+      droneId: ids.droneA,
+    }));
+    const before = manager.listDrones(ids.cubeA).find(({ id }) => id === ids.droneA);
+
+    capacity = { databaseBytes: 1_000_000, freeDiskBytes: 2_000_000 };
+    expect(() => drone.updateOwnRuntimeMetadata(
+      ids.cubeA,
+      { reported_model: "database-pressure-secret" },
+    )).toThrow(StorageCapacityError);
+    capacity = { databaseBytes: 0, freeDiskBytes: 0 };
+    expect(() => drone.updateOwnRuntimeMetadata(
+      ids.cubeA,
+      { reported_model: "disk-pressure-secret" },
+    )).toThrow(StorageCapacityError);
+
+    const crossCube = () => drone.updateOwnRuntimeMetadata(
+      ids.cubeB,
+      { reported_model: "foreign-probe" },
+    );
+    const unknownCube = () => drone.updateOwnRuntimeMetadata(
+      "00000000-0000-4000-8000-000000000099",
+      { reported_model: "unknown-probe" },
+    );
+    expect(crossCube).toThrow(ScopedStoreError);
+    expect(unknownCube).toThrow(ScopedStoreError);
+    try {
+      crossCube();
+    } catch (crossError) {
+      try {
+        unknownCube();
+      } catch (unknownError) {
+        expect({ name: (crossError as Error).name, message: (crossError as Error).message })
+          .toEqual({ name: (unknownError as Error).name, message: (unknownError as Error).message });
+      }
+    }
+    expect(manager.listDrones(ids.cubeA).find(({ id }) => id === ids.droneA)).toEqual(before);
   });
 
   it("normalizes invalid and throwing capacity probes without mutation", async () => {

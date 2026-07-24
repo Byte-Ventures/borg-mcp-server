@@ -505,6 +505,91 @@ describe("coordination stream setup", () => {
     expect(runtime.forPrincipal(principal).listRoles(cubeId)).toEqual([]);
   });
 
+  it("capacity-gates own metadata after non-disclosing scope checks", async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-api-metadata-capacity-")));
+    directories.push(directory);
+    let capacity = { databaseBytes: 0, freeDiskBytes: 2_000_000 };
+    runtime = await openStore({
+      path: join(directory, "borg.db"),
+      storageLimits: {
+        maxActivityEntriesPerCube: 10,
+        maxDatabaseBytes: 1_000_000,
+        minFreeDiskBytes: 10_000,
+      },
+      capacityProbe: () => capacity,
+    });
+    digester = new CredentialDigester(Buffer.alloc(32, 6));
+    const authority = new CredentialAuthority(runtime.credentials, digester);
+    const clientId = "00000000-0000-4000-8000-000000000035";
+    const cubeId = "00000000-0000-4000-8000-000000000036";
+    const foreignCubeId = "00000000-0000-4000-8000-000000000037";
+    const roleId = "00000000-0000-4000-8000-000000000038";
+    const droneId = "00000000-0000-4000-8000-000000000039";
+    const sessionId = "00000000-0000-4000-8000-000000000040";
+    runtime.maintenance.createClient({ id: clientId, name: "Metadata client" });
+    runtime.maintenance.createCube({ id: cubeId, name: "Metadata", directive: "" });
+    runtime.maintenance.createCube({ id: foreignCubeId, name: "Foreign", directive: "" });
+    runtime.maintenance.grantClientCube({ clientId, cubeId, access: "manage" });
+    runtime.maintenance.createRole({ id: roleId, cubeId, name: "Builder" });
+    runtime.maintenance.createDrone({
+      id: droneId,
+      cubeId,
+      roleId,
+      clientId,
+      label: "builder-capacity",
+    });
+    runtime.maintenance.createDroneSession({ id: sessionId, clientId, cubeId, droneId });
+    const principal = droneSessionPrincipal({ id: sessionId, clientId, cubeId, droneId });
+    const manager = runtime.forPrincipal(clientPrincipal(clientId));
+    const before = manager.listDrones(cubeId).find(({ id }) => id === droneId);
+    const api = new CoordinationApi(runtime, authority);
+    const update = (targetCubeId: string, requestId: string, marker: string) => api.handle({
+      method: "PATCH",
+      path: `/api/cubes/${targetCubeId}/drones/self/metadata`,
+      principal,
+      body: {
+        protocol_version: "3",
+        request_id: requestId,
+        payload: { reported_model: marker },
+      },
+      signal: new AbortController().signal,
+    });
+
+    capacity = { databaseBytes: 1_000_000, freeDiskBytes: 2_000_000 };
+    const databasePressure = await update(cubeId, "metadata-capacity-db", "database-pressure-secret");
+    expect(databasePressure).toMatchObject({
+      status: 507,
+      body: {
+        request_id: "metadata-capacity-db",
+        error: { code: "CAPACITY_EXCEEDED", message: "Storage capacity is unavailable." },
+      },
+    });
+    expect(JSON.stringify(databasePressure.body)).not.toContain("database-pressure-secret");
+
+    capacity = { databaseBytes: 0, freeDiskBytes: 0 };
+    const diskPressure = await update(cubeId, "metadata-capacity-disk", "disk-pressure-secret");
+    expect(diskPressure).toMatchObject({
+      status: 507,
+      body: {
+        request_id: "metadata-capacity-disk",
+        error: { code: "CAPACITY_EXCEEDED", message: "Storage capacity is unavailable." },
+      },
+    });
+    expect(JSON.stringify(diskPressure.body)).not.toContain("disk-pressure-secret");
+    expect(manager.listDrones(cubeId).find(({ id }) => id === droneId)).toEqual(before);
+
+    const foreign = await update(foreignCubeId, "metadata-scope-probe", "foreign-secret");
+    const unknown = await update(
+      "00000000-0000-4000-8000-000000000099",
+      "metadata-scope-probe",
+      "unknown-secret",
+    );
+    expect(foreign).toMatchObject({ status: 404, body: { error: { code: "NOT_FOUND" } } });
+    expect(unknown).toEqual(foreign);
+    expect(JSON.stringify([foreign.body, unknown.body]))
+      .not.toMatch(/foreign-secret|unknown-secret/u);
+  });
+
   it("updates migrated cube context and routes activity through its taxonomy", async () => {
     const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-api-context-")));
     directories.push(directory);

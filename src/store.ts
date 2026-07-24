@@ -1745,6 +1745,11 @@ class SqliteScopedStore implements ScopedStore {
     if (this.#principal.kind !== "drone-session") throw new AccessDeniedError();
     assertCanonicalUuid(cubeId, "Cube id");
     if (cubeId !== this.#principal.cubeId) throw new ScopedStoreError();
+    const ownSeat = this.#database.prepare(`
+      SELECT 1 FROM drones WHERE id = ? AND cube_id = ? AND evicted_at IS NULL
+    `).get(this.#principal.droneId, cubeId);
+    if (ownSeat === undefined) throw new ScopedStoreError();
+    this.#capacityGuard.assertCanGrow(runtimeMetadataGrowthBytes(patch));
     const assignments: string[] = [];
     const parameters: Array<string | null | number> = [];
     for (const [field, value] of Object.entries(patch)) {
@@ -3123,6 +3128,15 @@ function runtimeMetadataState(row: Record<string, unknown>): RuntimeMetadataStat
     },
     runtime_metadata_reported: flat.runtime_metadata_reported,
   };
+}
+
+function runtimeMetadataGrowthBytes(patch: DroneRuntimeMetadataPatch): number {
+  let bytes = 4_096;
+  for (const [field, value] of Object.entries(patch)) {
+    bytes += Buffer.byteLength(field) + 128;
+    if (typeof value === "string") bytes += Buffer.byteLength(value);
+  }
+  return bytes;
 }
 
 function nullableText(row: Record<string, unknown>, key: string): string | null {

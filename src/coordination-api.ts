@@ -6,6 +6,7 @@ import {
   ProtocolContractError,
   createProtocolEnvelope,
   decodeAttachRequestEnvelope,
+  decodeCreateCubeRequestEnvelope,
   decodeDroneRuntimeMetadataPatch,
   decodeEvictDroneRequestEnvelope,
   decodeProtocolEnvelope,
@@ -175,17 +176,21 @@ export class CoordinationApi {
     if (request.path === "/api/cubes" && request.method === "POST") {
       const requestId = safeRequestId(request.body);
       try {
-        const envelope = decodeEnvelope(request.body);
-        exactKeys(envelope.payload, ["retry_key", "name", "template"]);
-        const template = envelope.payload["template"];
-        if (template !== "default") throw new InputError();
+        const envelope = decodeCreateCubeRequestEnvelope(request.body);
         const created = this.#runtime.forPrincipal(authentication).createCube({
-          retryKey: requiredUuid(envelope.payload, "retry_key"),
-          name: requiredPresentationName(envelope.payload, "name"),
-          template,
+          retryKey: envelope.payload.retry_key,
+          name: envelope.payload.name,
+          workingRepoName: envelope.payload.working_repo_name,
+          repository: envelope.payload.repository,
+          template: envelope.payload.template,
         });
-        return success(201, envelope.requestId, {
+        return success(201, envelope.request_id, {
+          result: created.result,
           cube_id: created.cubeId,
+          name: created.name,
+          working_repo_name: created.workingRepoName,
+          repository: created.repository,
+          template: created.template,
           human_seat_role_id: created.humanSeatRoleId,
           default_worker_role_id: created.defaultWorkerRoleId,
           access: created.access,
@@ -778,12 +783,6 @@ function requiredString(record: Record<string, unknown>, key: string, maxBytes: 
   if (typeof value !== "string" || value.length === 0 || Buffer.byteLength(value) > maxBytes) {
     throw new InputError();
   }
-  return value;
-}
-
-function requiredPresentationName(record: Record<string, unknown>, key: string): string {
-  const value = requiredString(record, key, 120);
-  if (!/^[A-Za-z0-9][A-Za-z0-9 ._-]*$/u.test(value)) throw new InputError();
   return value;
 }
 

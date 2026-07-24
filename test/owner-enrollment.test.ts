@@ -3,12 +3,14 @@ import { mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { getTemplate } from "borgmcp-shared/templates";
 
 import { CredentialAuthority, CredentialDigester, generateSecret } from "../src/credentials.js";
 import {
   PLATFORM_QUEEN_DETAILED_DESCRIPTION,
   PLATFORM_QUEEN_SHORT_DESCRIPTION,
 } from "../src/platform-queen.js";
+import { clientPrincipal } from "../src/principal.js";
 import { StorageCapacityError, openStore, type StoreRuntime } from "../src/store.js";
 
 const directories: string[] = [];
@@ -31,10 +33,12 @@ const scopedEnrollmentPhases = [
 ] as const;
 const cubePhases = [
   "cube.insert-cube",
+  "cube.insert-role",
   "cube.insert-human-role",
   "cube.insert-worker-role",
   "cube.insert-grant",
   "cube.insert-binding",
+  "cube.insert-association",
   "cube.after-commit",
 ] as const;
 
@@ -149,6 +153,8 @@ describe("owner enrollment and multi-cube creation", () => {
     expect(() => runtime.forPrincipal(principal).createCube({
       retryKey: randomUUID(),
       name: "Repository",
+      workingRepoName: "repository",
+      repository: { kind: "local", value: randomUUID() },
       template: "default",
     })).toThrow(`fault:${phase}`);
     runtime.close();
@@ -157,9 +163,27 @@ describe("owner enrollment and multi-cube creation", () => {
     const reopened = await openStore({ path: fixture.path });
     const state = reopened.maintenance.observeAuthorityState();
     if (phase === "cube.after-commit") {
-      expect(state).toMatchObject({ cubes: 1, roles: 2, grants: 1, cube_create_bindings: 1 });
+      expect(state).toMatchObject({
+        cubes: 1,
+        roles: 2,
+        grants: 1,
+        cube_create_bindings: 1,
+        repository_associations: 1,
+        drones: 0,
+        drone_sessions: 0,
+        drone_session_credentials: 0,
+      });
     } else {
-      expect(state).toMatchObject({ cubes: 0, roles: 0, grants: 0, cube_create_bindings: 0 });
+      expect(state).toMatchObject({
+        cubes: 0,
+        roles: 0,
+        grants: 0,
+        cube_create_bindings: 0,
+        repository_associations: 0,
+        drones: 0,
+        drone_sessions: 0,
+        drone_session_credentials: 0,
+      });
     }
     reopened.close();
   });
@@ -176,13 +200,81 @@ describe("owner enrollment and multi-cube creation", () => {
     const principal = fixture.authority.authenticate(`Bearer ${credential}`);
     if (principal === null) throw new Error("Owner authentication failed.");
     const store = fixture.runtime.forPrincipal(principal);
-    const request = { retryKey: randomUUID(), name: "One", template: "default" as const };
+    const request = {
+      retryKey: randomUUID(),
+      name: "One",
+      workingRepoName: "one",
+      repository: { kind: "local" as const, value: randomUUID() },
+      template: "default" as const,
+    };
     const first = store.createCube(request);
-    expect(store.createCube(request)).toEqual(first);
-    expect(() => store.createCube({ ...request, retryKey: randomUUID(), name: "Two" }))
+    expect(store.createCube(request)).toEqual({ ...first, result: "resolved" });
+    expect(store.createCube({
+      ...request,
+      retryKey: randomUUID(),
+      name: "Ignored",
+      workingRepoName: "ignored",
+      template: "starter",
+    })).toEqual({ ...first, result: "resolved" });
+    expect(() => store.createCube({
+      ...request,
+      retryKey: randomUUID(),
+      name: "Two",
+      workingRepoName: "two",
+      repository: { kind: "local", value: randomUUID() },
+    }))
       .toThrow(StorageCapacityError);
     expect(fixture.runtime.maintenance.observeAuthorityState()).toMatchObject({
-      cubes: 1, roles: 2, grants: 1, cube_create_bindings: 1,
+      cubes: 1, roles: 2, grants: 1, cube_create_bindings: 1, repository_associations: 1,
+    });
+    fixture.runtime.close();
+    fixture.digester.destroy();
+  });
+
+  it("serializes simultaneous association requests and isolates the identity by client", async () => {
+    const fixture = await authorityFixture();
+    const credential = generateSecret();
+    const enrolled = fixture.authority.exchangeInvitation({
+      invitation: fixture.authority.createBootstrapInvitation(60_000),
+      retryKey: randomUUID(),
+      clientCredential: credential,
+    });
+    if (enrolled === null) throw new Error("Owner enrollment failed.");
+    const principal = fixture.authority.authenticate(`Bearer ${credential}`);
+    if (principal === null) throw new Error("Owner authentication failed.");
+    const repository = { kind: "local" as const, value: randomUUID() };
+    const store = fixture.runtime.forPrincipal(principal);
+    const request = {
+      name: "Concurrent repository",
+      workingRepoName: "concurrent-repository",
+      repository,
+      template: "default" as const,
+    };
+    const responses = await Promise.all([
+      Promise.resolve().then(() => store.createCube({ ...request, retryKey: randomUUID() })),
+      Promise.resolve().then(() => store.createCube({ ...request, retryKey: randomUUID() })),
+    ]);
+    expect(responses.map((response) => response.result).sort()).toEqual(["created", "resolved"]);
+    expect(responses[0]!.cubeId).toBe(responses[1]!.cubeId);
+    expect(fixture.runtime.maintenance.observeAuthorityState()).toMatchObject({
+      cubes: 1,
+      cube_create_bindings: 1,
+      repository_associations: 1,
+    });
+
+    const otherClientId = randomUUID();
+    fixture.runtime.maintenance.createClient({ id: otherClientId, name: "other client" });
+    fixture.runtime.maintenance.grantCreateCubeCapability(otherClientId);
+    const other = fixture.runtime.forPrincipal(clientPrincipal(otherClientId)).createCube({
+      ...request,
+      retryKey: randomUUID(),
+    });
+    expect(other.result).toBe("created");
+    expect(other.cubeId).not.toBe(responses[0]!.cubeId);
+    expect(fixture.runtime.maintenance.observeAuthorityState()).toMatchObject({
+      cubes: 2,
+      cube_create_bindings: 2,
+      repository_associations: 2,
     });
     fixture.runtime.close();
     fixture.digester.destroy();
@@ -204,6 +296,8 @@ describe("owner enrollment and multi-cube creation", () => {
     const created = store.createCube({
       retryKey: randomUUID(),
       name: "Any kind of work",
+      workingRepoName: "any-kind-of-work",
+      repository: { kind: "local", value: randomUUID() },
       template: "default",
     });
     const queen = store.listRoles(created.cubeId).find((role) => role.id === created.humanSeatRoleId);
@@ -223,6 +317,72 @@ describe("owner enrollment and multi-cube creation", () => {
     fixture.runtime.close();
     fixture.digester.destroy();
   });
+
+  it.each(["software-dev", "starter"] as const)(
+    "seeds every shared %s template surface atomically without creating a seat",
+    async (templateName) => {
+      const fixture = await authorityFixture();
+      const credential = generateSecret();
+      const enrolled = fixture.authority.exchangeInvitation({
+        invitation: fixture.authority.createBootstrapInvitation(60_000),
+        retryKey: randomUUID(),
+        clientCredential: credential,
+      });
+      if (enrolled === null) throw new Error("Owner enrollment failed.");
+      const principal = fixture.authority.authenticate(`Bearer ${credential}`);
+      if (principal === null) throw new Error("Owner authentication failed.");
+      const store = fixture.runtime.forPrincipal(principal);
+      const template = getTemplate(templateName);
+      if (template === null) throw new Error("Shared template is unavailable.");
+
+      const created = store.createCube({
+        retryKey: randomUUID(),
+        name: `${template.label} cube`,
+        workingRepoName: `${templateName}-repository`,
+        repository: { kind: "local", value: randomUUID() },
+        template: templateName,
+      });
+
+      expect(created).toMatchObject({
+        result: "created",
+        name: `${template.label} cube`,
+        workingRepoName: `${templateName}-repository`,
+        template: templateName,
+        access: "manage",
+      });
+      expect(store.getCube(created.cubeId)).toMatchObject({
+        directive: template.cube_directive,
+        messageTaxonomy: template.message_taxonomy,
+      });
+      const roles = store.listRoles(created.cubeId);
+      expect(roles).toHaveLength(template.roles.length);
+      for (const expected of template.roles) {
+        expect(roles.find((role) => role.name === expected.name)).toMatchObject({
+          short_description: expected.short_description,
+          detailed_description: expected.detailed_description,
+          is_default: expected.is_default ?? false,
+          is_mandatory: expected.is_mandatory ?? false,
+          is_human_seat: expected.is_human_seat ?? false,
+          can_broadcast: expected.can_broadcast ?? false,
+          receives_all_direct: expected.receives_all_direct ?? false,
+          role_class: expected.is_human_seat ? "queen" : "worker",
+        });
+      }
+      expect(store.listDrones(created.cubeId)).toEqual([]);
+      expect(fixture.runtime.maintenance.observeAuthorityState()).toMatchObject({
+        cubes: 1,
+        roles: template.roles.length,
+        grants: 1,
+        cube_create_bindings: 1,
+        repository_associations: 1,
+        drones: 0,
+        drone_sessions: 0,
+        drone_session_credentials: 0,
+      });
+      fixture.runtime.close();
+      fixture.digester.destroy();
+    },
+  );
 
   it("recovers an ambiguous enrollment response after reopen without storing plaintext secrets", async () => {
     const fixture = await authorityFixture();

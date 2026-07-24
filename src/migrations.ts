@@ -451,6 +451,88 @@ export const STORE_MIGRATIONS: readonly Migration[] = Object.freeze([
       END;
     `,
   },
+  {
+    version: 15,
+    name: "repository_associated_cube_creation",
+    sql: `
+      ALTER TABLE cubes ADD COLUMN selected_template TEXT NOT NULL DEFAULT 'default'
+        CHECK (selected_template IN ('default', 'software-dev', 'starter'));
+
+      ALTER TABLE cube_create_bindings RENAME TO legacy_cube_create_bindings;
+      DROP INDEX cube_create_bindings_cube_idx;
+
+      CREATE TABLE cube_create_bindings (
+        client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+        retry_key TEXT NOT NULL,
+        name TEXT NOT NULL CHECK (length(name) BETWEEN 1 AND 120),
+        template TEXT NOT NULL CHECK (template IN ('default', 'software-dev', 'starter')),
+        cube_id TEXT NOT NULL UNIQUE REFERENCES cubes(id) ON DELETE CASCADE,
+        human_seat_role_id TEXT NOT NULL UNIQUE,
+        default_worker_role_id TEXT NOT NULL UNIQUE,
+        created_at TEXT NOT NULL,
+        working_repo_name TEXT
+          CHECK (
+            working_repo_name IS NULL
+            OR length(CAST(working_repo_name AS BLOB)) BETWEEN 1 AND 201
+          ),
+        repository_kind TEXT
+          CHECK (repository_kind IS NULL OR repository_kind IN ('origin', 'local')),
+        repository_value TEXT
+          CHECK (
+            repository_value IS NULL
+            OR length(CAST(repository_value AS BLOB)) BETWEEN 1 AND 512
+          ),
+        PRIMARY KEY (client_id, retry_key),
+        FOREIGN KEY (human_seat_role_id, cube_id) REFERENCES roles(id, cube_id),
+        FOREIGN KEY (default_worker_role_id, cube_id) REFERENCES roles(id, cube_id)
+      ) STRICT, WITHOUT ROWID;
+
+      INSERT INTO cube_create_bindings (
+        client_id, retry_key, name, template, cube_id,
+        human_seat_role_id, default_worker_role_id, created_at
+      )
+      SELECT client_id, retry_key, name, template, cube_id,
+             human_seat_role_id, default_worker_role_id, created_at
+      FROM legacy_cube_create_bindings;
+
+      DROP TABLE legacy_cube_create_bindings;
+      CREATE INDEX cube_create_bindings_cube_idx ON cube_create_bindings (cube_id);
+
+      CREATE TRIGGER cube_create_bindings_repository_insert
+      BEFORE INSERT ON cube_create_bindings
+      WHEN NEW.working_repo_name IS NULL
+        OR NEW.repository_kind IS NULL
+        OR NEW.repository_value IS NULL
+      BEGIN
+        SELECT RAISE(ABORT, 'cube creation repository identity is required');
+      END;
+
+      CREATE TRIGGER cube_create_bindings_repository_update
+      BEFORE UPDATE OF working_repo_name, repository_kind, repository_value
+      ON cube_create_bindings
+      WHEN NEW.working_repo_name IS NULL
+        OR NEW.repository_kind IS NULL
+        OR NEW.repository_value IS NULL
+      BEGIN
+        SELECT RAISE(ABORT, 'cube creation repository identity is required');
+      END;
+
+      CREATE TABLE repository_associations (
+        client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+        repository_kind TEXT NOT NULL CHECK (repository_kind IN ('origin', 'local')),
+        repository_value TEXT NOT NULL
+          CHECK (length(CAST(repository_value AS BLOB)) BETWEEN 1 AND 512),
+        cube_id TEXT NOT NULL UNIQUE REFERENCES cubes(id) ON DELETE CASCADE,
+        working_repo_name TEXT NOT NULL
+          CHECK (length(CAST(working_repo_name AS BLOB)) BETWEEN 1 AND 201),
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (client_id, repository_kind, repository_value)
+      ) STRICT, WITHOUT ROWID;
+
+      CREATE INDEX repository_associations_cube_idx
+        ON repository_associations (cube_id);
+    `,
+  },
 ]);
 
 interface AppliedMigrationRow {

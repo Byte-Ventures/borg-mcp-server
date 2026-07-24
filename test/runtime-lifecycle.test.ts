@@ -495,7 +495,7 @@ function identity(version: string, integrity: string, sha: string): RuntimeBuild
     package_version: version,
     artifact_integrity: integrity,
     source_sha: sha,
-    protocol_version: "3",
+    protocol_version: "4",
     started_at: "2026-07-21T12:00:00.000Z",
   };
 }

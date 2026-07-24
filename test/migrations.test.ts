@@ -34,7 +34,7 @@ describe("SQLite migrations", () => {
     expect(first.diagnostics()).toEqual({
       journalMode: "wal",
       foreignKeys: true,
-      schemaVersions: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
+      schemaVersions: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
     });
     expect((await stat(join(directory, "data"))).mode & 0o777).toBe(0o700);
     expect((await stat(databasePath)).mode & 0o777).toBe(0o600);
@@ -44,7 +44,7 @@ describe("SQLite migrations", () => {
 
     const second = await openStore({ path: databasePath });
     expect(second.diagnostics().schemaVersions)
-      .toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
+      .toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
     second.close();
     await expect(access(databasePath)).resolves.toBeUndefined();
   });
@@ -196,7 +196,7 @@ describe("SQLite migrations", () => {
 
   it("persists existing drone-session supersession independently of successor liveness", () => {
     const database = new DatabaseSync(":memory:");
-    applyMigrations(database, STORE_MIGRATIONS.slice(0, -3));
+    applyMigrations(database, STORE_MIGRATIONS.slice(0, 11));
     const clientId = "00000000-0000-4000-8000-000000000031";
     const cubeId = "00000000-0000-4000-8000-000000000032";
     const roleId = "00000000-0000-4000-8000-000000000033";
@@ -295,6 +295,101 @@ describe("SQLite migrations", () => {
     expect(() => database.prepare(`
       UPDATE drones SET agent_kind = 'codex' WHERE id = ?
     `).run(droneId)).toThrow("invalid drone runtime metadata");
+    database.close();
+  });
+
+  it("adds repository associations and selected templates without fabricating legacy identity", () => {
+    const database = new DatabaseSync(":memory:");
+    applyMigrations(database, STORE_MIGRATIONS.slice(0, 14));
+    const clientId = "00000000-0000-4000-8000-000000000051";
+    const otherClientId = "00000000-0000-4000-8000-000000000052";
+    const cubeId = "00000000-0000-4000-8000-000000000053";
+    const otherCubeId = "00000000-0000-4000-8000-000000000058";
+    const humanRoleId = "00000000-0000-4000-8000-000000000054";
+    const workerRoleId = "00000000-0000-4000-8000-000000000055";
+    const createdAt = "2026-07-24T01:00:00.000Z";
+    const insertClient = database.prepare(
+      "INSERT INTO clients (id, name, created_at) VALUES (?, ?, ?)",
+    );
+    insertClient.run(clientId, "client", createdAt);
+    insertClient.run(otherClientId, "other", createdAt);
+    database.prepare(`
+      INSERT INTO cubes (id, name, directive, created_at, updated_at, owner_id)
+      VALUES (?, 'legacy cube', '', ?, ?, ?)
+    `).run(cubeId, createdAt, createdAt, clientId);
+    database.prepare(`
+      INSERT INTO cubes (id, name, directive, created_at, updated_at, owner_id)
+      VALUES (?, 'other cube', '', ?, ?, ?)
+    `).run(otherCubeId, createdAt, createdAt, otherClientId);
+    database.prepare(`
+      INSERT INTO roles (
+        id, cube_id, name, created_at, is_human_seat, is_default, role_class
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(humanRoleId, cubeId, "Coordinator", createdAt, 1, 0, "queen");
+    database.prepare(`
+      INSERT INTO roles (
+        id, cube_id, name, created_at, is_human_seat, is_default, role_class
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(workerRoleId, cubeId, "Builder", createdAt, 0, 1, "worker");
+    database.prepare(`
+      INSERT INTO cube_create_bindings (
+        client_id, retry_key, name, template, cube_id,
+        human_seat_role_id, default_worker_role_id, created_at
+      ) VALUES (?, ?, 'legacy cube', 'default', ?, ?, ?, ?)
+    `).run(
+      clientId,
+      "00000000-0000-4000-8000-000000000056",
+      cubeId,
+      humanRoleId,
+      workerRoleId,
+      createdAt,
+    );
+
+    applyMigrations(database, STORE_MIGRATIONS);
+
+    expect(database.prepare(`
+      SELECT selected_template FROM cubes WHERE id = ?
+    `).get(cubeId)).toEqual({ selected_template: "default" });
+    expect(database.prepare(`
+      SELECT working_repo_name, repository_kind, repository_value
+      FROM cube_create_bindings WHERE cube_id = ?
+    `).get(cubeId)).toEqual({
+      working_repo_name: null,
+      repository_kind: null,
+      repository_value: null,
+    });
+    expect(database.prepare("SELECT COUNT(*) AS count FROM repository_associations").get())
+      .toEqual({ count: 0 });
+
+    const insertAssociation = database.prepare(`
+      INSERT INTO repository_associations (
+        client_id, repository_kind, repository_value, cube_id, working_repo_name, created_at
+      ) VALUES (?, 'local', ?, ?, 'legacy-repository', ?)
+    `);
+    insertAssociation.run(
+      clientId,
+      "00000000-0000-4000-8000-000000000057",
+      cubeId,
+      createdAt,
+    );
+    expect(() => insertAssociation.run(
+      clientId,
+      "00000000-0000-4000-8000-000000000057",
+      otherCubeId,
+      createdAt,
+    )).toThrow();
+    expect(() => insertAssociation.run(
+      otherClientId,
+      "00000000-0000-4000-8000-000000000057",
+      cubeId,
+      createdAt,
+    )).toThrow();
+    expect(() => insertAssociation.run(
+      otherClientId,
+      "00000000-0000-4000-8000-000000000057",
+      otherCubeId,
+      createdAt,
+    )).not.toThrow();
     database.close();
   });
 

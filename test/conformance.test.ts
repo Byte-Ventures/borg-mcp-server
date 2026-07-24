@@ -8,7 +8,11 @@ import {
   type ConformanceEnvironment,
   type ConformanceHttpResponse,
 } from "borgmcp-shared/conformance";
-import { ATTACH_PATH, type LogCursor } from "borgmcp-shared/protocol";
+import {
+  ATTACH_PATH,
+  type CreateCubeResponse,
+  type LogCursor,
+} from "borgmcp-shared/protocol";
 import { generate } from "selfsigned";
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -76,12 +80,7 @@ async function conformanceEnvironment(): Promise<{
   const invitations = new Map<string, string>();
   const enrolledClients = new Map<string, string>();
   const principalCredentials = new Map<string, string>();
-  const createdByPrincipal = new Map<string, {
-    cube_id: string;
-    human_seat_role_id: string;
-    default_worker_role_id: string;
-    access: "manage";
-  }>();
+  const createdByPrincipal = new Map<string, CreateCubeResponse>();
   const pendingCreateCapability = new Set<string>();
   const managedSessions = new Map<string, { sessionId: string; credential: string }>();
   const recovery = authority.createRecoveryCredential();
@@ -220,6 +219,11 @@ async function conformanceEnvironment(): Promise<{
         if (clientId === undefined) throw new Error("Creator is not enrolled.");
         return runtime.maintenance.inspectCreatedCube(clientId, {
           cubeId: response.cube_id,
+          result: response.result,
+          name: response.name,
+          workingRepoName: response.working_repo_name,
+          repository: response.repository,
+          template: response.template,
           humanSeatRoleId: response.human_seat_role_id,
           defaultWorkerRoleId: response.default_worker_role_id,
           access: response.access,
@@ -292,12 +296,10 @@ async function conformanceEnvironment(): Promise<{
           const principalId = [...principalCredentials.entries()]
             .find(([, candidate]) => candidate === credential)?.[0];
           if (principalId !== undefined) {
-            createdByPrincipal.set(principalId, (result.body as { payload: {
-              cube_id: string;
-              human_seat_role_id: string;
-              default_worker_role_id: string;
-              access: "manage";
-            } }).payload);
+            createdByPrincipal.set(
+              principalId,
+              (result.body as { payload: CreateCubeResponse }).payload,
+            );
           }
         }
         return result;

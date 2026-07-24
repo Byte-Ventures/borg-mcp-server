@@ -6,7 +6,9 @@ HTTPS.
 
 ## Release status
 
-The current public preview is `borgmcp-server@0.1.17`, published on npm.
+The current public preview is immutable `borgmcp-server@0.1.18`, published on
+npm with integrity
+`sha512-hr5lU8hNQ+ZTL1C9td/lhuCLY9X8pSEzZIo3tJ7UheS7Tun0y1J+XPQGW35UDhpgIIYJdjcT9iyGpzPF/CVRug==`.
 Versions `0.1.2`, `0.1.3`, and `0.1.13` were not published; their immutable tags are
 preserved failed-release evidence and are not installation or dogfood targets.
 Version `0.1.5` includes the reviewed owner-enrollment, idempotent multi-cube
@@ -17,20 +19,22 @@ taxonomy routing, durable SSE replay and heartbeat delivery, fleet liveness
 signals, typed terminal drone eviction, and explicit manage-access denials for
 visible non-managing principals. Immutable `v0.1.6` and `v0.1.10` failed safely
 before artifact upload or npm publication and are not install targets. The
-published `0.1.17` package consumes the audited exact `borgmcp-shared@0.6.1`
-registry release and adds truthful advisory Agent CLI, reported-model, and
-working-repository seat metadata. Current source is the unpublished
-`borgmcp-server@0.1.18` release candidate, which pins the audited exact
-`borgmcp-shared@0.6.2` registry release and adds the explicit Queen activation
-timing contract plus structured, safe role-section conflict reasons.
-Version `0.1.17` remains the install target until the candidate passes
-exact-SHA review and immutable tag publication.
+published `0.1.18` package consumes the audited exact `borgmcp-shared@0.6.2`
+registry release and includes truthful advisory Agent CLI, reported-model, and
+working-repository seat metadata, the explicit Queen activation timing
+contract, and structured, safe role-section conflict reasons. Current source
+is the unpublished `borgmcp-server@0.1.19` protocol-v4 release candidate,
+which pins the audited exact `borgmcp-shared@0.6.3` registry release and
+atomically creates or resolves one repository-associated cube with the
+selected Default (legacy), Software Development, or Starter template surfaces.
+Version `0.1.18` remains the install target until the candidate passes
+exact-SHA review and authorized immutable tag publication.
 
 Setup prepares local identity and storage, writes owner access to the private
 portable credential file, and prints no credential or invitation; it creates no cube.
 Version `0.1.1` completed the
 documented exact-source, tagged-artifact, and protected-publication gates.
-Version `0.1.17` completed a fresh exact-source, tagged-artifact, tokenless OIDC
+Version `0.1.18` completed a fresh exact-source, tagged-artifact, tokenless OIDC
 publication, provenance, signature, and attestation gate chain.
 
 ## Repository topology
@@ -50,7 +54,7 @@ reviewed registry release. Neither consumer uses Git or SSH dependencies.
 
 ## Advisory runtime metadata
 
-Protocol v3 attach requests may include the complete shared
+Protocol v4 attach requests may include the complete shared
 `runtime_metadata` report: Agent CLI kind, reported model, canonical public
 repository name, and canonical HTTPS origin. An omitted first report is stored
 as not reported; an explicit all-null report is stored as reported unknown.

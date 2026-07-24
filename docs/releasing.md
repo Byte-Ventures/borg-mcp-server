@@ -134,13 +134,14 @@ never a Git or SSH dependency. Client releases follow their own repository gates
 The server repository is public; visibility is complete, and `borgmcp-server@0.1.1`,
 `borgmcp-server@0.1.4`, `borgmcp-server@0.1.5`, `borgmcp-server@0.1.7`,
 `borgmcp-server@0.1.8`, `borgmcp-server@0.1.9`, `borgmcp-server@0.1.11`, and
-`borgmcp-server@0.1.12`, `borgmcp-server@0.1.14`, `borgmcp-server@0.1.15`, and
-`borgmcp-server@0.1.16`, and `borgmcp-server@0.1.17` are live on npm
+`borgmcp-server@0.1.12`, `borgmcp-server@0.1.14`, `borgmcp-server@0.1.15`,
+`borgmcp-server@0.1.16`, `borgmcp-server@0.1.17`, and
+`borgmcp-server@0.1.18` are live on npm
 under the sole expected maintainer.
-The `latest` tag resolves to `0.1.17`.
+The `latest` tag resolves to `0.1.18`.
 Versions `0.1.2`, `0.1.3`, and `0.1.13` are
 unpublished immutable failure evidence and must never be customer, install, or dogfood targets.
-Version `0.1.17` completed the full exact-source, tagged-artifact, tokenless OIDC publication,
+Version `0.1.18` completed the full exact-source, tagged-artifact, tokenless OIDC publication,
 provenance, signature, and attestation gate chain recorded below.
 
 The immutable annotated `v0.1.1` tag object
@@ -361,6 +362,16 @@ postpublication checks verified registry integrity and ownership, provenance, si
 Trusted Publishing attestation. Those registry readbacks are immutable historical evidence; current
 releases terminate when npm accepts the single publish operation.
 
+The immutable annotated `v0.1.18` tag object
+`e676d7524d622aa931727e9522f01ac7c27330b4` peels to protected-main commit
+`0b5e1fc94314aa76e85daf5b4d24915523a963e5`. Workflow run `30073844139`,
+attempt 1, built, tested, packed, verified, and published the exact reviewed
+artifact with tokenless OIDC provenance. npm reports integrity
+`sha512-hr5lU8hNQ+ZTL1C9td/lhuCLY9X8pSEzZIo3tJ7UheS7Tun0y1J+XPQGW35UDhpgIIYJdjcT9iyGpzPF/CVRug==`
+and `latest` resolves to `0.1.18`. Publication completed at the terminal
+`npm publish` boundary with no postpublication registry read. Never move,
+delete, reuse, or rerun that tag or workflow.
+
 The immutable annotated `v0.1.4` tag object
 `1604077e6249c7c0f7ce17b3f2848caad2bc773e` peels to protected-main merge
 `1f7e60a695f27d92b2d46233b0e3cad5aa43bd0d`, whose tree is byte-identical to reviewed source
@@ -393,16 +404,20 @@ artifacts were produced, and `borgmcp-server` remained unclaimed in the npm regi
 move, delete, or reuse that tag. Recovery uses separately authorized version `0.1.1`, a fresh reviewed
 source and merge commit, pre-tag repository-variable evidence, and a never-before-used annotated tag.
 
-The live `borgmcp-server@0.1.17` package consumes the audited exact
-`borgmcp-shared@0.6.1` registry release. Immutable `v0.1.6`, `v0.1.10`, and `v0.1.13` are failed
-prepublication evidence and are not install targets. Current post-`v0.1.17` source pins the audited
-exact `borgmcp-shared@0.6.2` registry release for the unpublished
-`borgmcp-server@0.1.18` candidate; the shrinkwrap must resolve that registry tarball with the
+The live `borgmcp-server@0.1.18` package consumes the audited exact
+`borgmcp-shared@0.6.2` registry release. Immutable `v0.1.6`, `v0.1.10`, and `v0.1.13` are failed
+prepublication evidence and are not install targets. Current post-`v0.1.18` source pins the audited
+exact `borgmcp-shared@0.6.3` registry release for the unpublished
+`borgmcp-server@0.1.19` candidate; the shrinkwrap must resolve that registry tarball with the
 matching SRI. The live package persists truthful advisory Agent CLI, reported-model, and
-working-repository seat metadata without changing authority or liveness. The candidate additionally
-adds the explicit Queen activation timing contract and structured, safe role-section conflict
-reasons without changing authority, routes, or rollback behavior.
-Version `0.1.17` remains the install target until that candidate passes exact-SHA review and an
+working-repository seat metadata, the explicit Queen activation timing contract, and
+structured, safe role-section conflict reasons without changing authority, routes, or rollback
+behavior. The protocol-v4 candidate atomically creates or resolves a creator-scoped
+repository-associated cube,
+seeding the selected Default (legacy), Software Development, or Starter directive, roles, flags,
+taxonomy, manage grant, retry binding, and association without creating a drone, seat, session, or
+credential.
+Version `0.1.18` remains the install target until that candidate passes exact-SHA review and an
 authorized immutable tag publication. The source-lock, artifact, audit, and consumer gates must pass
 without Git dependencies; SBOM generation is supplemental and outside the publication-critical path.
 Canonical lock metadata reads retry only bounded HTTP 429 and 5xx responses;

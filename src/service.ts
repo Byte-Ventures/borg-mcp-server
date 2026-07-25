@@ -74,7 +74,10 @@ import {
   type DashboardSnapshotSource,
   type ForegroundDashboard,
 } from "./dashboard.js";
-import { openReadonlyDashboardSnapshotSource } from "./dashboard-source.js";
+import {
+  assertReadonlyDashboardInstallation,
+  openReadonlyDashboardSnapshotSource,
+} from "./dashboard-source.js";
 
 export interface ServerService {
   readonly start: (args: readonly string[]) => Promise<void>;
@@ -612,10 +615,18 @@ async function runNodeDashboardViewer(
   runtimeDataDirectory: string,
   options: DashboardCommandOptions,
 ): Promise<void> {
-  let expectedRuntime: Extract<RuntimeLockStatus, { running: true }> | undefined;
+  // Preserve the installation/symlink diagnostics before consulting the
+  // runtime lock; the source performs the same checks again when it pins.
+  assertReadonlyDashboardInstallation(runtimeDataDirectory);
+  const runtime = await inspectRuntimeLock(runtimeDataDirectory);
+  if (!runtime.running) throw operatorErrors.DASHBOARD_SERVER_STOPPED;
+  if (runtime.identity === null || runtime.endpoint === null) {
+    throw operatorErrors.DASHBOARD_DATA_UNAVAILABLE;
+  }
+  const expectedRuntime = runtime;
   const validateRuntime = async (): Promise<void> => {
     const current = await inspectRuntimeLock(runtimeDataDirectory);
-    if (!current.running || expectedRuntime === undefined ||
+    if (!current.running ||
         current.pid !== expectedRuntime.pid ||
         current.endpoint !== expectedRuntime.endpoint ||
         current.identity?.started_at !== expectedRuntime.identity?.started_at) {
@@ -627,12 +638,6 @@ async function runNodeDashboardViewer(
     validate: validateRuntime,
   });
   try {
-    const runtime = await inspectRuntimeLock(runtimeDataDirectory);
-    if (!runtime.running) throw operatorErrors.DASHBOARD_SERVER_STOPPED;
-    if (runtime.identity === null || runtime.endpoint === null) {
-      throw operatorErrors.DASHBOARD_DATA_UNAVAILABLE;
-    }
-    expectedRuntime = runtime;
     const server: DashboardServerIdentity = Object.freeze({
       name: "borgmcp-server",
       version: runtime.identity.package_version,

@@ -235,6 +235,36 @@ describe("read-only dashboard snapshot source", () => {
       }
     }
   });
+
+  it("restores cwd when a substitution is rejected before the open", async () => {
+    directory = await realpath(await mkdtemp(join(tmpdir(), "borg-dashboard-restore-")));
+    const installation = join(directory, "server");
+    const heldInstallation = join(directory, "server-held");
+    const replacement = join(directory, "replacement");
+    await mkdir(installation, { mode: 0o700 });
+    await mkdir(replacement, { mode: 0o700 });
+    await bootstrapServer(installation);
+    await bootstrapServer(replacement);
+
+    const originalWorkingDirectory = process.cwd();
+    const realChdir = process.chdir.bind(process);
+    const chdir = vi.spyOn(process, "chdir").mockImplementationOnce((path) => {
+      renameSync(installation, heldInstallation);
+      symlinkSync(replacement, installation, "dir");
+      realChdir(path);
+    });
+    try {
+      await expect(openReadonlyDashboardSnapshotSource({
+        dataDirectory: installation,
+      })).rejects.toBe(operatorErrors.DASHBOARD_DATA_UNAVAILABLE);
+      expect(chdir).toHaveBeenCalledTimes(2);
+      expect(process.cwd()).toBe(originalWorkingDirectory);
+    } finally {
+      chdir.mockRestore();
+      await rm(installation, { force: true });
+      await rename(heldInstallation, installation);
+    }
+  });
 });
 
 function seed(runtime: StoreRuntime): void {

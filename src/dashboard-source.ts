@@ -17,6 +17,10 @@ export interface CloseableDashboardSnapshotSource extends DashboardSnapshotSourc
   readonly close: () => void;
 }
 
+export function assertReadonlyDashboardInstallation(dataDirectory: string): void {
+  resolveReadonlyDashboardDatabase(dataDirectory);
+}
+
 export function createDashboardSnapshotReader(
   database: DatabaseSync,
   clock: () => Date,
@@ -271,7 +275,14 @@ function openPinnedReadonlyDatabase(
     database?.close();
     throw error;
   } finally {
-    if (changedDirectory) process.chdir(originalWorkingDirectory);
+    if (changedDirectory) {
+      try {
+        process.chdir(originalWorkingDirectory);
+      } catch (error) {
+        database?.close();
+        throw error;
+      }
+    }
   }
 }
 

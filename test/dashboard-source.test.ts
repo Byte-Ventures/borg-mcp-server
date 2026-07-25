@@ -159,6 +159,29 @@ describe("read-only dashboard snapshot source", () => {
       dataDirectory: directory,
     })).rejects.toBe(operatorErrors.DASHBOARD_DATA_UNAVAILABLE);
     await chmod(directory, 0o700);
+
+    await chmod(join(directory, "borg.db"), 0o640);
+    await expect(openReadonlyDashboardSnapshotSource({
+      dataDirectory: directory,
+    })).rejects.toBe(operatorErrors.DASHBOARD_DATA_UNAVAILABLE);
+    await chmod(join(directory, "borg.db"), 0o600);
+  });
+
+  it("requires the viewer identity to own the directory and database", async () => {
+    if (process.geteuid === undefined) return;
+    directory = await realpath(await mkdtemp(join(tmpdir(), "borg-dashboard-owner-")));
+    await bootstrapServer(directory);
+    const differentUserId = process.geteuid() + 1;
+    const getEffectiveUserId = vi.spyOn(process, "geteuid").mockReturnValue(
+      differentUserId,
+    );
+    try {
+      await expect(openReadonlyDashboardSnapshotSource({
+        dataDirectory: directory,
+      })).rejects.toBe(operatorErrors.DASHBOARD_DATA_UNAVAILABLE);
+    } finally {
+      getEffectiveUserId.mockRestore();
+    }
   });
 
   it("rejects a private installation beneath an untrusted writable ancestor", async () => {

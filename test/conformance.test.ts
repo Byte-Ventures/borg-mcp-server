@@ -10,6 +10,8 @@ import {
 } from "borgmcp-shared/conformance";
 import {
   ATTACH_PATH,
+  REPOSITORY_CUBE_ASSOCIATION_PATH,
+  REPOSITORY_CUBE_RESOLVE_PATH,
   type CreateCubeResponse,
   type LogCursor,
 } from "borgmcp-shared/protocol";
@@ -54,7 +56,7 @@ describe("borgmcp-shared server adapter", () => {
           observations: {},
         },
       ]);
-      expect(report.results).toHaveLength(26);
+      expect(report.results).toHaveLength(27);
     } finally {
       await fixture.server.close();
       fixture.digester.destroy();
@@ -133,6 +135,11 @@ async function conformanceEnvironment(): Promise<{
         if (clientId !== undefined) {
           runtime.maintenance.grantClientCube({ clientId, cubeId: cube.id, access });
         }
+      },
+      revokeCubeGrant: async (principal, cube) => {
+        principalCubes.get(principal.id)?.delete(cube.id);
+        const clientId = enrolledClients.get(principal.id);
+        if (clientId !== undefined) runtime.maintenance.removeClientCubeGrant(clientId, cube.id);
       },
       createRole: async (cube, input) => {
         const id = randomUUID();
@@ -229,6 +236,21 @@ async function conformanceEnvironment(): Promise<{
           access: response.access,
         });
       },
+      prepareRepositoryCube: async (cube, input) => {
+        const prepared = runtime.maintenance.prepareRepositoryCube({
+          cubeId: cube.id,
+          name: input.name,
+          template: input.template,
+        });
+        return {
+          cube_id: prepared.cubeId,
+          name: prepared.name,
+          template: prepared.template,
+          human_seat_role_id: prepared.humanSeatRoleId,
+          default_worker_role_id: prepared.defaultWorkerRoleId,
+          access: prepared.access,
+        };
+      },
       inspectEnrollmentPrincipal: async (principal, responseClientId) => {
         const credential = principalCredentials.get(principal.id);
         const authenticated = credential === undefined
@@ -304,6 +326,18 @@ async function conformanceEnvironment(): Promise<{
         }
         return result;
       },
+      resolveRepositoryCube: async (credential, request) => transport.request(
+        "POST",
+        REPOSITORY_CUBE_RESOLVE_PATH,
+        JSON.stringify(request),
+        credential,
+      ),
+      associateRepositoryCube: async (credential, request) => transport.request(
+        "PUT",
+        REPOSITORY_CUBE_ASSOCIATION_PATH,
+        JSON.stringify(request),
+        credential,
+      ),
       append: async (credential, cube, request) =>
         transport.request("POST", `/api/cubes/${cube.id}/logs`, JSON.stringify(request), credential),
       appendRaw: async (credential, cube, body) =>

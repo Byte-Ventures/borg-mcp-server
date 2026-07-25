@@ -10,7 +10,11 @@ import type {
   DroneRuntimeMetadata,
   DroneRuntimeMetadataPatch,
 } from "borgmcp-shared/protocol";
-import { decodeCreateCubeRequest } from "borgmcp-shared/protocol";
+import {
+  decodeAssociateRepositoryCubeRequest,
+  decodeCreateCubeRequest,
+  decodeResolveRepositoryCubeRequest,
+} from "borgmcp-shared/protocol";
 import { getTemplate, type TemplateRole } from "borgmcp-shared/templates";
 
 import { applyMigrations, assertMigrationsCurrent } from "./migrations.js";
@@ -291,6 +295,12 @@ export interface CredentialStore {
 
 export interface ScopedStore {
   readonly createCube: (input: CreateCubeInput) => CreateCubeRecord;
+  readonly resolveRepositoryCube: (
+    input: ResolveRepositoryCubeInput,
+  ) => RepositoryCubeRecord | null;
+  readonly associateRepositoryCube: (
+    input: AssociateRepositoryCubeInput,
+  ) => RepositoryCubeRecord;
   readonly listCubes: () => CubeRecord[];
   readonly getCube: (cubeId: string) => CubeRecord | null;
   readonly updateCube: (cubeId: string, input: UpdateCubeInput) => CubeRecord;
@@ -369,8 +379,17 @@ export interface CreateCubeInput {
   readonly template: CubeTemplate;
 }
 
-export interface CreateCubeRecord {
-  readonly result: "created" | "resolved";
+export interface ResolveRepositoryCubeInput {
+  readonly workingRepoName: string;
+  readonly repository: CreateCubeRepository;
+}
+
+export interface AssociateRepositoryCubeInput extends ResolveRepositoryCubeInput {
+  readonly cubeId: string;
+  readonly workingRepoName: string;
+}
+
+export interface RepositoryCubeRecord {
   readonly cubeId: string;
   readonly name: string;
   readonly workingRepoName: string;
@@ -379,6 +398,10 @@ export interface CreateCubeRecord {
   readonly humanSeatRoleId: string;
   readonly defaultWorkerRoleId: string;
   readonly access: "manage";
+}
+
+export interface CreateCubeRecord extends RepositoryCubeRecord {
+  readonly result: "created" | "resolved";
 }
 
 export interface SeatAttachInput {
@@ -430,6 +453,18 @@ export interface MaintenanceStore {
     readonly access: CubeAccess;
   }) => void;
   readonly removeClientCubeGrant: (clientId: string, cubeId: string) => boolean;
+  readonly prepareRepositoryCube: (input: {
+    readonly cubeId: string;
+    readonly name: string;
+    readonly template: CubeTemplate;
+  }) => {
+    readonly cubeId: string;
+    readonly name: string;
+    readonly template: CubeTemplate;
+    readonly humanSeatRoleId: string;
+    readonly defaultWorkerRoleId: string;
+    readonly access: "manage";
+  };
   readonly grantCreateCubeCapability: (clientId: string) => void;
   readonly resetAuthorityState: () => void;
   readonly observeAuthorityState: () => {
@@ -645,6 +680,48 @@ export class CreateCubeConflictError extends Error {
   constructor() { super("The cube creation request conflicts with an existing retry."); this.name = "CreateCubeConflictError"; }
 }
 
+export type RepositoryAssociationConflictReason =
+  | "repository_conflict"
+  | "cube_conflict"
+  | "roles_invalid";
+
+export class RepositoryAssociationConflictError extends Error {
+  readonly code:
+    | "REPOSITORY_ALREADY_ASSOCIATED"
+    | "CUBE_ALREADY_ASSOCIATED"
+    | "INVALID_INPUT";
+
+  constructor(readonly reason: RepositoryAssociationConflictReason) {
+    super(repositoryAssociationConflictMessage(reason));
+    this.name = "RepositoryAssociationConflictError";
+    this.code = repositoryAssociationConflictCode(reason);
+  }
+}
+
+function repositoryAssociationConflictCode(
+  reason: RepositoryAssociationConflictReason,
+): RepositoryAssociationConflictError["code"] {
+  switch (reason) {
+    case "repository_conflict":
+      return "REPOSITORY_ALREADY_ASSOCIATED";
+    case "cube_conflict":
+      return "CUBE_ALREADY_ASSOCIATED";
+    case "roles_invalid":
+      return "INVALID_INPUT";
+  }
+}
+
+function repositoryAssociationConflictMessage(reason: RepositoryAssociationConflictReason): string {
+  switch (reason) {
+    case "repository_conflict":
+      return "The repository is already associated with another cube.";
+    case "cube_conflict":
+      return "The cube is already associated with another repository.";
+    case "roles_invalid":
+      return "The cube does not have one valid human seat and one valid default worker role.";
+  }
+}
+
 interface CubeRow {
   readonly id: string;
   readonly owner_id: string;
@@ -844,25 +921,15 @@ class SqliteScopedStore implements ScopedStore {
       }
 
       const associated = this.#database.prepare(`
-        SELECT cube.name, association.working_repo_name,
-               association.repository_kind, association.repository_value,
-               cube.selected_template AS template, association.cube_id,
-               binding.human_seat_role_id, binding.default_worker_role_id
-        FROM repository_associations AS association
-        JOIN cubes AS cube ON cube.id = association.cube_id
-        JOIN cube_create_bindings AS binding ON binding.cube_id = association.cube_id
-        WHERE association.client_id = ?
-          AND association.repository_kind = ?
-          AND association.repository_value = ?
-      `).get(
-        this.#principal.id,
-        request.repository.kind,
-        request.repository.value,
-      );
+        SELECT 1 AS present
+        FROM repository_associations
+        WHERE client_id = ? AND repository_kind = ? AND repository_value = ?
+      `).get(this.#principal.id, request.repository.kind, request.repository.value);
       if (associated !== undefined) {
-        const result = createCubeRecord(associated, "resolved");
+        const result = this.#resolveRepositoryCube(request.repository);
+        if (result === null) throw new AccessDeniedError();
         this.#database.exec("COMMIT");
-        return result;
+        return { result: "resolved", ...result };
       }
 
       const clientCount = requiredInteger(this.#database.prepare(
@@ -1006,6 +1073,135 @@ class SqliteScopedStore implements ScopedStore {
         defaultWorkerRoleId,
         access: "manage",
       };
+    } catch (error) {
+      try { this.#database.exec("ROLLBACK"); } catch { /* Preserve the original failure. */ }
+      throw error;
+    }
+  }
+
+  resolveRepositoryCube(input: ResolveRepositoryCubeInput): RepositoryCubeRecord | null {
+    if (this.#principal.kind !== "client") throw new AccessDeniedError();
+    const validated = validateRepositoryAssociationInput({
+      workingRepoName: input.workingRepoName,
+      repository: input.repository,
+    });
+    return this.#resolveRepositoryCube(validated.repository);
+  }
+
+  associateRepositoryCube(input: AssociateRepositoryCubeInput): RepositoryCubeRecord {
+    if (this.#principal.kind !== "client") throw new AccessDeniedError();
+    assertCanonicalUuid(input.cubeId, "Cube id");
+    const validated = validateRepositoryAssociationInput(input);
+    this.#database.exec("BEGIN IMMEDIATE");
+    try {
+      const manageScope = this.#scope("manage");
+      const target = this.#database.prepare(`
+        SELECT 1 AS present
+        FROM cubes AS c
+        WHERE c.id = ? AND ${manageScope.sql}
+      `).get(input.cubeId, ...manageScope.parameters);
+      if (target === undefined) throw new AccessDeniedError();
+
+      const repositoryBinding = this.#database.prepare(`
+        SELECT association.cube_id,
+               EXISTS(
+                 SELECT 1
+                 FROM client_cube_grants AS grant_row
+                 JOIN clients AS client ON client.id = grant_row.client_id
+                 WHERE grant_row.client_id = association.client_id
+                   AND grant_row.cube_id = association.cube_id
+                   AND grant_row.access = 'manage'
+                   AND client.revoked_at IS NULL
+               ) AS has_manage
+        FROM repository_associations AS association
+        WHERE association.client_id = ?
+          AND association.repository_kind = ?
+          AND association.repository_value = ?
+      `).get(
+        this.#principal.id,
+        validated.repository.kind,
+        validated.repository.value,
+      );
+      if (repositoryBinding !== undefined &&
+          requiredText(repositoryBinding, "cube_id") !== input.cubeId) {
+        if (requiredInteger(repositoryBinding, "has_manage") !== 1) {
+          throw new AccessDeniedError();
+        }
+        throw new RepositoryAssociationConflictError("repository_conflict");
+      }
+
+      const cubeBinding = this.#database.prepare(`
+        SELECT client_id, repository_kind, repository_value
+        FROM repository_associations
+        WHERE cube_id = ?
+      `).get(input.cubeId);
+      if (cubeBinding !== undefined) {
+        if (requiredText(cubeBinding, "client_id") !== this.#principal.id) {
+          throw new AccessDeniedError();
+        }
+        if (
+          requiredRepositoryKind(cubeBinding, "repository_kind") !== validated.repository.kind
+          || requiredText(cubeBinding, "repository_value") !== validated.repository.value
+        ) {
+          throw new RepositoryAssociationConflictError("cube_conflict");
+        }
+      }
+
+      const cubeState = this.#database.prepare(`
+        SELECT cube.id AS cube_id, cube.name, cube.selected_template AS template,
+               SUM(CASE
+                 WHEN role.is_human_seat = 1 THEN 1
+                 ELSE 0
+               END) AS human_role_count,
+               MAX(CASE
+                 WHEN role.is_human_seat = 1 AND role.role_class = 'queen' THEN role.id
+                 ELSE NULL
+               END) AS human_seat_role_id,
+               SUM(CASE
+                 WHEN role.is_default = 1 THEN 1
+                 ELSE 0
+               END) AS worker_role_count,
+               MAX(CASE
+                 WHEN role.is_default = 1 AND role.role_class = 'worker' THEN role.id
+                 ELSE NULL
+               END) AS default_worker_role_id
+        FROM cubes AS cube
+        LEFT JOIN roles AS role ON role.cube_id = cube.id
+        WHERE cube.id = ?
+        GROUP BY cube.id
+      `).get(input.cubeId);
+      if (cubeState === undefined) throw new AccessDeniedError();
+      assertRepositoryCubeRoles(cubeState);
+
+      if (cubeBinding !== undefined) {
+        const existing = this.#resolveRepositoryCube(validated.repository);
+        if (existing === null) throw new AccessDeniedError();
+        this.#database.exec("COMMIT");
+        return existing;
+      }
+
+      this.#capacityGuard.assertCanGrow(
+        Buffer.byteLength(validated.workingRepoName)
+        + Buffer.byteLength(validated.repository.value)
+        + 4_096,
+      );
+      this.#database.prepare(`
+        INSERT INTO repository_associations (
+          client_id, repository_kind, repository_value, cube_id, working_repo_name, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?)
+      `).run(
+        this.#principal.id,
+        validated.repository.kind,
+        validated.repository.value,
+        input.cubeId,
+        validated.workingRepoName,
+        this.#now(),
+      );
+      this.#mutationHook?.("repository-association.insert");
+      const associated = this.#resolveRepositoryCube(validated.repository);
+      if (associated === null) throw new AccessDeniedError();
+      this.#database.exec("COMMIT");
+      return associated;
     } catch (error) {
       try { this.#database.exec("ROLLBACK"); } catch { /* Preserve the original failure. */ }
       throw error;
@@ -1986,6 +2182,44 @@ class SqliteScopedStore implements ScopedStore {
     `).get(cubeId, ...scope.parameters) !== undefined;
   }
 
+  #resolveRepositoryCube(repository: CreateCubeRepository): RepositoryCubeRecord | null {
+    if (this.#principal.kind !== "client") throw new AccessDeniedError();
+    const row = this.#database.prepare(`
+      SELECT association.cube_id, cube.name, association.working_repo_name,
+             association.repository_kind, association.repository_value,
+             cube.selected_template AS template,
+             SUM(CASE
+               WHEN role.is_human_seat = 1 THEN 1
+               ELSE 0
+             END) AS human_role_count,
+             MAX(CASE
+               WHEN role.is_human_seat = 1 AND role.role_class = 'queen' THEN role.id
+               ELSE NULL
+             END) AS human_seat_role_id,
+             SUM(CASE
+               WHEN role.is_default = 1 THEN 1
+               ELSE 0
+             END) AS worker_role_count,
+             MAX(CASE
+               WHEN role.is_default = 1 AND role.role_class = 'worker' THEN role.id
+               ELSE NULL
+             END) AS default_worker_role_id
+      FROM repository_associations AS association
+      JOIN cubes AS cube ON cube.id = association.cube_id
+      JOIN client_cube_grants AS grant_row
+        ON grant_row.client_id = association.client_id
+       AND grant_row.cube_id = association.cube_id
+       AND grant_row.access = 'manage'
+      LEFT JOIN roles AS role ON role.cube_id = cube.id
+      WHERE association.client_id = ?
+        AND association.repository_kind = ?
+        AND association.repository_value = ?
+      GROUP BY association.client_id, association.repository_kind,
+               association.repository_value, association.cube_id
+    `).get(this.#principal.id, repository.kind, repository.value);
+    return row === undefined ? null : repositoryCubeRecord(row);
+  }
+
   #requireCube(cubeId: string, access: CubeAccess): void {
     assertCanonicalUuid(cubeId, "Cube id");
     const scope = this.#scope(access);
@@ -2370,6 +2604,70 @@ class SqliteMaintenanceStore implements MaintenanceStore {
       input.name,
       input.isHumanSeat === true ? 1 : 0,
       roleClass,
+      this.#now(),
+    );
+  }
+
+  prepareRepositoryCube(input: {
+    readonly cubeId: string;
+    readonly name: string;
+    readonly template: CubeTemplate;
+  }) {
+    assertCanonicalUuid(input.cubeId, "Cube id");
+    validatePresentationName(input.name);
+    const template = getTemplate(input.template);
+    if (template === null) throw new Error("Unknown repository cube template.");
+    const humanRole = template.roles.find((role) => role.is_human_seat);
+    const defaultWorkerRole = template.roles.find(
+      (role) => role.is_default && !role.is_human_seat,
+    );
+    if (humanRole === undefined || defaultWorkerRole === undefined) {
+      throw new Error("Template does not define repository adoption roles.");
+    }
+    const humanSeatRoleId = randomUUID();
+    const defaultWorkerRoleId = randomUUID();
+    this.#database.exec("BEGIN IMMEDIATE");
+    try {
+      const updated = this.#database.prepare(`
+        UPDATE cubes SET name = ?, selected_template = ?, updated_at = ? WHERE id = ?
+      `).run(input.name, input.template, this.#now(), input.cubeId);
+      if (updated.changes !== 1) throw new ScopedStoreError();
+      this.#insertPreparedRole(input.cubeId, humanSeatRoleId, humanRole);
+      this.#insertPreparedRole(input.cubeId, defaultWorkerRoleId, defaultWorkerRole);
+      this.#database.exec("COMMIT");
+    } catch (error) {
+      try { this.#database.exec("ROLLBACK"); } catch { /* Preserve the original failure. */ }
+      throw error;
+    }
+    return {
+      cubeId: input.cubeId,
+      name: input.name,
+      template: input.template,
+      humanSeatRoleId,
+      defaultWorkerRoleId,
+      access: "manage" as const,
+    };
+  }
+
+  #insertPreparedRole(cubeId: string, roleId: string, role: TemplateRole): void {
+    this.#database.prepare(`
+      INSERT INTO roles (
+        id, cube_id, name, short_description, detailed_description,
+        is_default, is_mandatory, is_human_seat, can_broadcast, receives_all_direct,
+        role_class, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      roleId,
+      cubeId,
+      role.name,
+      role.short_description,
+      role.detailed_description,
+      role.is_default ? 1 : 0,
+      role.is_mandatory ? 1 : 0,
+      role.is_human_seat ? 1 : 0,
+      role.can_broadcast ? 1 : 0,
+      role.receives_all_direct ? 1 : 0,
+      role.is_human_seat ? "queen" : "worker",
       this.#now(),
     );
   }
@@ -3280,6 +3578,34 @@ function createCubeRecord(
   };
 }
 
+function repositoryCubeRecord(row: Record<string, unknown>): RepositoryCubeRecord {
+  assertRepositoryCubeRoles(row);
+  return {
+    cubeId: requiredText(row, "cube_id"),
+    name: requiredText(row, "name"),
+    workingRepoName: requiredText(row, "working_repo_name"),
+    repository: {
+      kind: requiredRepositoryKind(row, "repository_kind"),
+      value: requiredText(row, "repository_value"),
+    },
+    template: requiredCubeTemplate(row, "template"),
+    humanSeatRoleId: requiredText(row, "human_seat_role_id"),
+    defaultWorkerRoleId: requiredText(row, "default_worker_role_id"),
+    access: "manage",
+  };
+}
+
+function assertRepositoryCubeRoles(row: Record<string, unknown>): void {
+  if (
+    requiredInteger(row, "human_role_count") !== 1
+    || requiredInteger(row, "worker_role_count") !== 1
+    || nullableText(row, "human_seat_role_id") === null
+    || nullableText(row, "default_worker_role_id") === null
+  ) {
+    throw new RepositoryAssociationConflictError("roles_invalid");
+  }
+}
+
 function requiredRepositoryKind(
   row: Record<string, unknown>,
   key: string,
@@ -3496,6 +3822,30 @@ function validateName(value: string): void {
   if (value.length < 1 || value.length > 120) {
     throw new Error("Name must contain 1 to 120 characters.");
   }
+}
+
+function validateRepositoryAssociationInput(input: {
+  readonly cubeId?: string;
+  readonly workingRepoName: string;
+  readonly repository: CreateCubeRepository;
+}): {
+  readonly workingRepoName: string;
+  readonly repository: CreateCubeRepository;
+} {
+  const decoded = input.cubeId === undefined
+    ? decodeResolveRepositoryCubeRequest({
+      working_repo_name: input.workingRepoName,
+      repository: input.repository,
+    })
+    : decodeAssociateRepositoryCubeRequest({
+      cube_id: input.cubeId,
+      working_repo_name: input.workingRepoName,
+      repository: input.repository,
+    });
+  return {
+    workingRepoName: decoded.working_repo_name,
+    repository: decoded.repository,
+  };
 }
 
 function validatePresentationName(value: string): void {

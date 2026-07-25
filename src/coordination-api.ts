@@ -4,13 +4,17 @@ import {
   ErrorCode,
   PROTOCOL_VERSION,
   ProtocolContractError,
+  REPOSITORY_CUBE_ASSOCIATION_PATH,
+  REPOSITORY_CUBE_RESOLVE_PATH,
   createProtocolEnvelope,
+  decodeAssociateRepositoryCubeRequestEnvelope,
   decodeAttachRequestEnvelope,
   decodeCreateCubeRequestEnvelope,
   decodeDroneRuntimeMetadataPatch,
   decodeEvictDroneRequestEnvelope,
   decodeProtocolEnvelope,
   decodeReassignDroneRequestEnvelope,
+  decodeResolveRepositoryCubeRequestEnvelope,
 } from "borgmcp-shared/protocol";
 import type { Principal } from "./principal.js";
 import { assertServerDerivedPrincipal } from "./principal.js";
@@ -28,6 +32,7 @@ import {
   AttachSessionRevokedError,
   AccessDeniedError,
   CreateCubeConflictError,
+  RepositoryAssociationConflictError,
   DefaultRoleRequiredError,
   RoleConflictError,
   RoleInUseError,
@@ -39,6 +44,7 @@ import {
   type ActivityStreamRecord,
   type CubeRecord,
   type LogCursor,
+  type RepositoryCubeRecord,
   type StoreRuntime,
 } from "./store.js";
 
@@ -160,6 +166,40 @@ export class CoordinationApi {
       }
     }
 
+    if (request.path === REPOSITORY_CUBE_RESOLVE_PATH && request.method === "POST") {
+      const requestId = safeRequestId(request.body);
+      try {
+        const envelope = decodeResolveRepositoryCubeRequestEnvelope(request.body);
+        const resolved = this.#runtime.forPrincipal(authentication).resolveRepositoryCube({
+          workingRepoName: envelope.payload.working_repo_name,
+          repository: envelope.payload.repository,
+        });
+        return success(200, envelope.request_id, resolved === null
+          ? { result: "none" }
+          : { result: "resolved", ...repositoryCubePayload(resolved) });
+      } catch (error) {
+        return repositoryCubeFailure(error, requestId);
+      }
+    }
+
+    if (request.path === REPOSITORY_CUBE_ASSOCIATION_PATH && request.method === "PUT") {
+      const requestId = safeRequestId(request.body);
+      try {
+        const envelope = decodeAssociateRepositoryCubeRequestEnvelope(request.body);
+        const associated = this.#runtime.forPrincipal(authentication).associateRepositoryCube({
+          cubeId: envelope.payload.cube_id,
+          workingRepoName: envelope.payload.working_repo_name,
+          repository: envelope.payload.repository,
+        });
+        return success(200, envelope.request_id, {
+          result: "resolved",
+          ...repositoryCubePayload(associated),
+        });
+      } catch (error) {
+        return repositoryCubeFailure(error, requestId);
+      }
+    }
+
     if (request.path === "/api/cubes" && request.method === "GET") {
       const cubes = this.#runtime.forPrincipal(authentication).listCubes().map((cube) => ({
         id: cube.id,
@@ -201,6 +241,9 @@ export class CoordinationApi {
         }
         if (error instanceof CreateCubeConflictError) {
           return failure(409, "INVALID_INPUT", "The cube creation request conflicts.", requestId);
+        }
+        if (error instanceof RepositoryAssociationConflictError) {
+          return failure(409, error.code, error.message, requestId);
         }
         if (error instanceof StorageCapacityError) {
           return failure(507, "CAPACITY_EXCEEDED", error.message, requestId);
@@ -964,6 +1007,43 @@ function cubePayload(cube: CubeRecord) {
     created_at: cube.createdAt,
     updated_at: cube.updatedAt,
   };
+}
+
+function repositoryCubePayload(cube: RepositoryCubeRecord) {
+  return {
+    cube_id: cube.cubeId,
+    name: cube.name,
+    working_repo_name: cube.workingRepoName,
+    repository: cube.repository,
+    template: cube.template,
+    human_seat_role_id: cube.humanSeatRoleId,
+    default_worker_role_id: cube.defaultWorkerRoleId,
+    access: cube.access,
+  };
+}
+
+function repositoryCubeFailure(error: unknown, requestId?: string): CoordinationResponse {
+  if (error instanceof AccessDeniedError) {
+    return failure(403, error.code, error.message, requestId);
+  }
+  if (error instanceof ScopedStoreError) {
+    return failure(404, error.code, error.message, requestId);
+  }
+  if (error instanceof RepositoryAssociationConflictError) {
+    return failure(409, error.code, error.message, requestId);
+  }
+  if (error instanceof StorageCapacityError) {
+    return failure(507, error.code, error.message, requestId);
+  }
+  if (error instanceof ProtocolContractError) {
+    return error.code === ErrorCode.UNSUPPORTED_PROTOCOL_VERSION
+      ? failure(426, error.code, "Unsupported protocol version.", requestId)
+      : failure(400, "INVALID_INPUT", "Invalid protocol request.", requestId);
+  }
+  if (error instanceof InputError || error instanceof TypeError || error instanceof RangeError) {
+    return failure(400, "INVALID_INPUT", "Invalid protocol request.", requestId);
+  }
+  throw error;
 }
 
 function managedDronePayload(drone: DroneRecord) {

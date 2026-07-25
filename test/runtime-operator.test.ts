@@ -116,7 +116,7 @@ function createFixture(running: boolean) {
       package_version: artifact.version,
       artifact_integrity: artifact.integrity,
       source_sha: artifact.sourceSha,
-      protocol_version: "4",
+      protocol_version: "5",
       started_at: "2026-07-21T12:00:00.000Z",
     })),
   } satisfies RuntimeLifecycle;

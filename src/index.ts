@@ -34,6 +34,25 @@ export {
 } from "./runtime-lifecycle.js";
 export { createRegistryArtifactSource } from "./registry-artifact.js";
 export type { RegistryArtifactSource, RegistryRuntimeArtifact } from "./registry-artifact.js";
+export {
+  createDashboardRenderer,
+  dashboardColorEnabled,
+  rankDashboardSnapshot,
+  renderPlainDashboard,
+  sanitizeTerminalText,
+  selectDashboardGlyphMode,
+} from "./dashboard.js";
+export type {
+  DashboardCubeData,
+  DashboardCubeSnapshot,
+  DashboardDataSnapshot,
+  DashboardGlyphMode,
+  DashboardRenderOptions,
+  DashboardRenderer,
+  DashboardServerIdentity,
+  DashboardSnapshot,
+  DashboardSnapshotSource,
+} from "./dashboard.js";
 export { createRuntimeOperator } from "./runtime-operator.js";
 export { RuntimeUpdateFailure } from "./runtime-operator.js";
 export type { RuntimeOperator, RuntimeUpdateResult } from "./runtime-operator.js";

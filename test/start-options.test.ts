@@ -10,6 +10,7 @@ describe("parseStartOptions", () => {
         port: 8_123,
         lanConsent: true,
       },
+      ascii: false,
     });
   });
 
@@ -17,6 +18,14 @@ describe("parseStartOptions", () => {
     expect(parseStartOptions(["--log-level", "debug"])).toEqual({
       bind: {},
       logLevel: "debug",
+      ascii: false,
+    });
+  });
+
+  it("selects strict ASCII dashboard glyphs without changing bind options", () => {
+    expect(parseStartOptions(["--ascii"])).toEqual({
+      bind: {},
+      ascii: true,
     });
   });
 
@@ -25,6 +34,7 @@ describe("parseStartOptions", () => {
     ["--port"],
     ["--port", "secret"],
     ["--lan", "--lan"],
+    ["--ascii", "--ascii"],
     ["--log-level"],
     ["--log-level", "secret"],
     ["--log-level", "debug", "--log-level", "debug"],

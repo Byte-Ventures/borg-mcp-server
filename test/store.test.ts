@@ -447,11 +447,13 @@ describe("Principal to ScopedStore isolation", () => {
     expect(Object.keys(runtime).sort()).toEqual([
       "close",
       "credentials",
+      "dashboard",
       "diagnostics",
       "forPrincipal",
       "liveness",
       "maintenance",
     ]);
+    expect(Object.keys(runtime.dashboard).sort()).toEqual(["read", "subscribe"]);
     expect("database" in runtime).toBe(false);
     expect("admin" in runtime).toBe(false);
     expect("execute" in runtime).toBe(false);

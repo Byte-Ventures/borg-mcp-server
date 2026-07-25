@@ -6,9 +6,9 @@ HTTPS.
 
 ## Release status
 
-The current public preview is immutable `borgmcp-server@0.1.18`, published on
+The current public preview is immutable `borgmcp-server@0.1.20`, published on
 npm with integrity
-`sha512-hr5lU8hNQ+ZTL1C9td/lhuCLY9X8pSEzZIo3tJ7UheS7Tun0y1J+XPQGW35UDhpgIIYJdjcT9iyGpzPF/CVRug==`.
+`sha512-ycI02wlgG3dV9OsDDR9nXsqOppiYv4qFhTBMR6Nmdsc3lrt/1tHgU0JCPnfReriIs7CaSen8XHb8jigfnpE3dg==`.
 Versions `0.1.2`, `0.1.3`, `0.1.13`, and `0.1.19` were not published; their immutable tags are
 preserved failed-release evidence and are not installation or dogfood targets.
 Version `0.1.5` includes the reviewed owner-enrollment, idempotent multi-cube
@@ -19,28 +19,32 @@ taxonomy routing, durable SSE replay and heartbeat delivery, fleet liveness
 signals, typed terminal drone eviction, and explicit manage-access denials for
 visible non-managing principals. Immutable `v0.1.6` and `v0.1.10` failed safely
 before artifact upload or npm publication and are not install targets. The
-published `0.1.18` package consumes the audited exact `borgmcp-shared@0.6.2`
+published `0.1.18` package consumed the audited exact `borgmcp-shared@0.6.2`
 registry release and includes truthful advisory Agent CLI, reported-model, and
 working-repository seat metadata, the explicit Queen activation timing
 contract, and structured, safe role-section conflict reasons. Immutable
 `v0.1.19` failed before dependency installation when a redundant live npm
-metadata request timed out; its publish job was skipped. Current source is the
-unpublished `borgmcp-server@0.1.20` protocol-v4 recovery candidate,
-which pins the audited exact `borgmcp-shared@0.6.3` registry release and
-atomically creates or resolves one repository-associated cube with the
-selected Default (legacy), Software Development, or Starter template surfaces.
+metadata request timed out; its publish job was skipped. Published `0.1.20`
+pins audited exact `borgmcp-shared@0.6.3` and atomically creates or resolves one
+repository-associated cube with the selected Default (legacy), Software
+Development, or Starter template surfaces. Current source is the unpublished
+`borgmcp-server@0.1.21` protocol-v5 adoption hotfix candidate. It pins exact
+`borgmcp-shared@0.6.4` and adds a mutation-free repository-association resolve
+operation plus an explicit, manage-authorized atomic association operation for
+adopting legacy cubes after client confirmation.
 Its lock verification is entirely offline: exact versions, canonical npm
 tarball URLs, SHA-512 integrity, root identity, duplicate consistency, and
 install-script boundaries are checked without querying registry metadata.
-Version `0.1.18` remains the install target until the candidate passes
+Version `0.1.20` remains the install target until the candidate passes
 exact-SHA review and authorized immutable tag publication.
 
 Setup prepares local identity and storage, writes owner access to the private
 portable credential file, and prints no credential or invitation; it creates no cube.
 Version `0.1.1` completed the
 documented exact-source, tagged-artifact, and protected-publication gates.
-Version `0.1.18` completed a fresh exact-source, tagged-artifact, tokenless OIDC
-publication, provenance, signature, and attestation gate chain.
+Versions `0.1.18` and `0.1.20` completed fresh exact-source, tagged-artifact,
+tokenless OIDC publication and provenance gates; `0.1.20` ended at accepted
+publication without a postpublication registry read.
 
 ## Repository topology
 
@@ -59,7 +63,7 @@ reviewed registry release. Neither consumer uses Git or SSH dependencies.
 
 ## Advisory runtime metadata
 
-Protocol v4 attach requests may include the complete shared
+Protocol v5 attach requests may include the complete shared
 `runtime_metadata` report: Agent CLI kind, reported model, canonical public
 repository name, and canonical HTTPS origin. An omitted first report is stored
 as not reported; an explicit all-null report is stored as reported unknown.

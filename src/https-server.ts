@@ -10,6 +10,8 @@ import {
   HEALTH_PATH,
   PROTOCOL_INFO_PATH,
   PROTOCOL_VERSION,
+  REPOSITORY_CUBE_ASSOCIATION_PATH,
+  REPOSITORY_CUBE_RESOLVE_PATH,
   createProtocolTagPreflight,
 } from "borgmcp-shared/protocol";
 
@@ -449,6 +451,8 @@ function debugRoute(rawUrl: string | undefined): DebugRoute {
   if (path === RUNTIME_INFO_PATH) return "runtime";
   if (path === ENROLLMENT_EXCHANGE_PATH) return "enrollment_exchange";
   if (path === ATTACH_PATH) return "client_attach";
+  if (path === REPOSITORY_CUBE_RESOLVE_PATH) return "repository_cube_resolve";
+  if (path === REPOSITORY_CUBE_ASSOCIATION_PATH) return "repository_cube_association";
   if (path === "/api/cubes") return "cubes";
   if (/^\/api\/cubes\/[0-9a-f-]{36}$/iu.test(path)) return "cube";
   if (/^\/api\/cubes\/[0-9a-f-]{36}\/roles$/iu.test(path)) return "cube_roles";
@@ -632,6 +636,8 @@ function parseCoordinationQuery(
 
 function isCoordinationPath(path: string | null): path is string {
   return path === ATTACH_PATH || path === CUBES_PATH ||
+    path === REPOSITORY_CUBE_RESOLVE_PATH ||
+    path === REPOSITORY_CUBE_ASSOCIATION_PATH ||
     path?.startsWith("/api/cubes/") === true;
 }
 

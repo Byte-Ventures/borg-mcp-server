@@ -33,6 +33,14 @@ v1 scope.
   creates one cube, fixed human/default-worker roles, the creator's `manage` grant, and an idempotency
   binding. Exact retries are non-mutating; ordinary clients and drone sessions are denied. Per-client
   and server cube quotas bound growth.
+- Repository-cube adoption is an explicit client-confirmed operation, never a name-based lookup or
+  migration backfill. Resolution returns an authoritative association only while that same client
+  currently has `manage` access; stale, foreign, and inaccessible bindings are indistinguishable from
+  no association. Association requires current `manage` access to the selected cube, derives the
+  cube name, template, human role, and default worker role from server state, and atomically inserts
+  only the canonical repository binding. Same bindings are idempotent. Conflicts and invalid legacy
+  role layouts use static messages that disclose no cube or repository identity, and authorization,
+  validation, capacity, mutation-hook, or SQLite contention failures roll back without partial state.
 - Persisted credentials are keyed lookup and verifier digests, never plaintext. Recovery, invitation,
   client, and drone-session digests use separate HMAC domains. Rotation revokes prior client
   credentials; revocation also invalidates child sessions. Unknown, expired, revoked, and
@@ -164,6 +172,7 @@ v1 scope.
 | --- | --- |
 | Enrollment exchange | Purpose-bound invitation claim, client-generated credential digest, retry binding, optional scoped cube-grant insertion, and owner capability insertion |
 | Cube creation | Cube, two fixed roles, creator manage grant, and retry-result binding |
+| Repository-cube adoption | One explicit canonical repository binding to an existing manage-accessible cube |
 | Client attach/retry | Permanent retry binding, eligible prior-seat reattachment or drone insertion, session/credential insertion, and prior-session revocation |
 | Own-seat runtime metadata | Sparse advisory metadata replacement or explicit-null clearing, with repository identity updated as one pair |
 | Cube directive update | Directive replacement and SQLite index/page growth |

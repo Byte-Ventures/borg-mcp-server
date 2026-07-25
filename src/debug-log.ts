@@ -6,6 +6,8 @@ export type DebugRoute =
   | "runtime"
   | "enrollment_exchange"
   | "client_attach"
+  | "repository_cube_resolve"
+  | "repository_cube_association"
   | "cubes"
   | "cube"
   | "cube_roles"
@@ -160,7 +162,7 @@ function enumValue<const T extends string>(value: unknown, allowed: readonly T[]
 }
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
-const DEBUG_ROUTES: readonly DebugRoute[] = ["health", "protocol", "runtime", "enrollment_exchange", "client_attach", "cubes", "cube", "cube_roles", "cube_role", "cube_role_section_patch", "cube_taxonomy_patch", "cube_drones", "cube_drone_self_metadata", "cube_logs", "cube_acks", "cube_decisions", "cube_stream", "unknown"];
+const DEBUG_ROUTES: readonly DebugRoute[] = ["health", "protocol", "runtime", "enrollment_exchange", "client_attach", "repository_cube_resolve", "repository_cube_association", "cubes", "cube", "cube_roles", "cube_role", "cube_role_section_patch", "cube_taxonomy_patch", "cube_drones", "cube_drone_self_metadata", "cube_logs", "cube_acks", "cube_decisions", "cube_stream", "unknown"];
 const HTTP_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "OTHER"] as const;
 const AUTH_RESULTS = ["not_required", "missing", "invalid", "revoked", "evicted", "rejected", "accepted"] as const;
 const AUTHZ_RESULTS = ["not_checked", "accepted", "denied_or_not_found"] as const;

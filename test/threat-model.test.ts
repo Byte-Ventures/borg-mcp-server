@@ -22,6 +22,9 @@ describe("server threat model", () => {
       "Negative bind/auth/CORS/log-secret tests",
       "secret-output exceptions",
       "move `ca.key` to offline storage",
+      "Repository-cube adoption is an explicit client-confirmed operation",
+      "stale, foreign, and inaccessible bindings are indistinguishable",
+      "role layouts use static messages",
     ]) {
       expect(threatModel).toContain(boundary);
     }
@@ -32,7 +35,7 @@ describe("server threat model", () => {
     );
     expect(manifest).toMatchObject({
       private: false,
-      version: "0.1.20",
+      version: "0.1.21",
       license: "SEE LICENSE IN LICENSE",
     });
   });

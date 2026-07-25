@@ -65,15 +65,19 @@ import { createManagedServiceDefinition } from "./managed-service.js";
 import {
   createDashboardRenderer,
   dashboardColorEnabled,
+  rankDashboardSnapshot,
+  renderPlainDashboard,
   selectDashboardGlyphMode,
   startForegroundDashboard,
   type DashboardServerIdentity,
   type DashboardSnapshotSource,
   type ForegroundDashboard,
 } from "./dashboard.js";
+import { openReadonlyDashboardSnapshotSource } from "./dashboard-source.js";
 
 export interface ServerService {
   readonly start: (args: readonly string[]) => Promise<void>;
+  readonly dashboard?: (options: DashboardCommandOptions) => Promise<void>;
   readonly setup?: (options: SetupOptions) => Promise<ServerSetupResult>;
   readonly status?: () => Promise<ServerRuntimeStatus>;
   readonly stop?: () => Promise<ServerStopResult>;
@@ -89,6 +93,10 @@ export interface ServerService {
   ) => Promise<string | CubeInvitationResult>;
   readonly replaceOwnerInvitation?: (recoveryCredential: string) => Promise<string>;
   readonly invite?: () => Promise<string>;
+}
+
+export interface DashboardCommandOptions {
+  readonly ascii: boolean;
 }
 
 export interface SetupOptions {
@@ -562,6 +570,7 @@ const startOnlyService = createNodeServerService({
 });
 export const nodeServerService: ServerService = {
   start: startOnlyService.start,
+  dashboard: (options) => runNodeDashboardViewer(dataDirectory, options),
   setup: async (options) => {
     const bindHost = resolveSetupBindHost(serverEnvironment);
     if ((await inspectRuntimeLock(dataDirectory)).running) throw operatorErrors.RUNTIME_ACTIVE;
@@ -597,6 +606,82 @@ export const nodeServerService: ServerService = {
   stop: () => nodeRuntimeController.stopRuntime(20_000),
   ...createOfflineCredentialService(dataDirectory, credentialFile),
 };
+
+async function runNodeDashboardViewer(
+  runtimeDataDirectory: string,
+  options: DashboardCommandOptions,
+): Promise<void> {
+  let expectedRuntime: Extract<RuntimeLockStatus, { running: true }> | undefined;
+  const validateRuntime = async (): Promise<void> => {
+    const current = await inspectRuntimeLock(runtimeDataDirectory);
+    if (!current.running || expectedRuntime === undefined ||
+        current.pid !== expectedRuntime.pid ||
+        current.endpoint !== expectedRuntime.endpoint ||
+        current.identity?.started_at !== expectedRuntime.identity?.started_at) {
+      throw operatorErrors.DASHBOARD_SERVER_STOPPED;
+    }
+  };
+  const source = await openReadonlyDashboardSnapshotSource({
+    dataDirectory: runtimeDataDirectory,
+    validate: validateRuntime,
+  });
+  try {
+    const runtime = await inspectRuntimeLock(runtimeDataDirectory);
+    if (!runtime.running) throw operatorErrors.DASHBOARD_SERVER_STOPPED;
+    if (runtime.identity === null || runtime.endpoint === null) {
+      throw operatorErrors.DASHBOARD_DATA_UNAVAILABLE;
+    }
+    expectedRuntime = runtime;
+    const server: DashboardServerIdentity = Object.freeze({
+      name: "borgmcp-server",
+      version: runtime.identity.package_version,
+      endpoint: runtime.endpoint,
+      state: "online",
+      started_at: runtime.identity.started_at,
+    });
+    await validateRuntime();
+    if (!supportsStandaloneDashboard()) {
+      process.stdout.write(`${renderPlainDashboard(
+        rankDashboardSnapshot(source.read(), server),
+        80,
+        20,
+      )}\n`);
+      return;
+    }
+    const shutdown = installProcessShutdownHandlers();
+    const dashboard = startForegroundDashboard({
+      source,
+      server,
+      terminal: {
+        write: (value) => { process.stdout.write(value); },
+        dimensions: () => ({
+          columns: process.stdout.columns ?? 80,
+          rows: process.stdout.rows ?? 24,
+        }),
+        onResize: (listener) => {
+          process.stdout.on("resize", listener);
+          return () => process.stdout.off("resize", listener);
+        },
+      },
+      renderer: createDashboardRenderer({
+        glyphMode: selectDashboardGlyphMode({
+          asciiRequested: options.ascii,
+          environment: process.env,
+        }),
+        color: dashboardColorEnabled(process.env),
+        footer: "^C close viewer  |  read-only",
+      }),
+    });
+    try {
+      await Promise.race([dashboard.failure, waitForAbort(shutdown.signal)]);
+    } finally {
+      dashboard.close();
+      shutdown.dispose();
+    }
+  } finally {
+    source.close();
+  }
+}
 
 function createNodeRuntimeOperator(managedRuntimeDirectory: string, runtimeDataDirectory: string) {
   const platform = process.platform === "darwin" ? "launchd" : "systemd";
@@ -1017,6 +1102,17 @@ function supportsForegroundDashboard(): boolean {
   return process.stdout.isTTY === true &&
     serverEnvironment.BORG_SERVER_PROCESS_MODE !== "managed" &&
     process.env["TERM"] !== "dumb";
+}
+
+function supportsStandaloneDashboard(): boolean {
+  return process.stdout.isTTY === true && process.env["TERM"] !== "dumb";
+}
+
+function waitForAbort(signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.resolve();
+  return new Promise((resolve) => signal.addEventListener("abort", () => resolve(), {
+    once: true,
+  }));
 }
 
 function startLivenessScheduler(liveness: { readonly scan: () => unknown }): { readonly stop: () => void } {

@@ -3,6 +3,7 @@ export type { CliIo } from "./cli.js";
 export { inspectRuntimeLock } from "./service.js";
 export { inspectNodeRuntime } from "./service.js";
 export type {
+  DashboardCommandOptions,
   RuntimeLockStatus,
   ServerRuntimeStatus,
   ServerSetupResult,

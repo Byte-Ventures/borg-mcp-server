@@ -185,6 +185,26 @@ describe("dashboard renderer", () => {
     expect(tiny).not.toContain("┌");
   });
 
+  it("keeps the embedded footer by default and accepts a sanitized caller footer", () => {
+    const snapshot = rankDashboardSnapshot(snapshotData(1), server);
+    const defaultFrame = createDashboardRenderer({ glyphMode: "ascii", color: false })(
+      snapshot,
+      80,
+      24,
+    );
+    expect(defaultFrame).toContain("^C stop server  |  read-only");
+
+    const viewerFrame = createDashboardRenderer({
+      glyphMode: "ascii",
+      color: false,
+      footer: "^C close viewer\u001b]0;unsafe\u0007  |  read-only",
+    })(snapshot, 80, 24);
+    expect(viewerFrame).toContain("^C close viewer  |  read-only");
+    expect(viewerFrame).not.toContain("stop server");
+    expect(viewerFrame).not.toContain("\u001b");
+    expect(viewerFrame).not.toContain("unsafe");
+  });
+
   it("keeps representative terminal widths and a thousand-cube snapshot bounded", () => {
     const renderer = createDashboardRenderer({ glyphMode: "ascii", color: false });
     const snapshot = rankDashboardSnapshot(snapshotData(1_000), server);

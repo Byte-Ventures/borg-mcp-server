@@ -14,6 +14,7 @@ const usage = `Usage: borg-mcp-server <command> [options]
 Commands:
   setup [--reinitialize]  Prepare an offline server installation
   start    Start the server process
+  dashboard [--ascii]  View the running local server without stopping it
   status [--json]  Report exact local runtime evidence
   version [--json]  Report the installed controller version
   update [--json]  Verify and activate the latest server artifact
@@ -34,6 +35,9 @@ Start options:
   --lan            Consent to this start on a private LAN address
   --ascii          Use strict 7-bit dashboard glyphs
   --log-level debug  Emit centrally redacted structured diagnostics to stderr
+
+Dashboard options:
+  --ascii          Use strict 7-bit dashboard glyphs
 
 Setup options:
   --reinitialize   Destroy and recreate the existing server identity and database
@@ -118,6 +122,14 @@ export async function runCli(
     case "start":
       await service.start(extraArgs);
       return 0;
+    case "dashboard": {
+      if (service.dashboard === undefined || extraArgs.length > 1 ||
+          (extraArgs.length === 1 && extraArgs[0] !== "--ascii")) {
+        return invalidArguments(io);
+      }
+      await service.dashboard({ ascii: extraArgs[0] === "--ascii" });
+      return 0;
+    }
     case "status": {
       if (extraArgs.length > 1 || (extraArgs.length === 1 && extraArgs[0] !== "--json") ||
           service.status === undefined) return invalidArguments(io);

@@ -125,6 +125,19 @@ describe("runCli", () => {
     expect(service.start).toHaveBeenCalledWith(["--lan"]);
   });
 
+  it("delegates the local dashboard with only the strict ASCII option", async () => {
+    const dashboard = vi.fn().mockResolvedValue(undefined);
+    const service: ServerService = { start: vi.fn(), dashboard };
+
+    expect(await runCli(["dashboard"], service, createIo())).toBe(0);
+    expect(dashboard).toHaveBeenLastCalledWith({ ascii: false });
+    expect(await runCli(["dashboard", "--ascii"], service, createIo())).toBe(0);
+    expect(dashboard).toHaveBeenLastCalledWith({ ascii: true });
+    expect(await runCli(["dashboard", "--ascii", "--ascii"], service, createIo())).toBe(1);
+    expect(await runCli(["dashboard", "--host", "127.0.0.1"], service, createIo())).toBe(1);
+    expect(dashboard).toHaveBeenCalledTimes(2);
+  });
+
   it("renders approved exact runtime evidence and bounded non-TTY JSON without guessing", async () => {
     const status = vi.fn().mockResolvedValue({
       status: "running",

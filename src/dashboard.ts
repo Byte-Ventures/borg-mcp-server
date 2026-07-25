@@ -47,6 +47,7 @@ export type DashboardGlyphMode = "box" | "ascii";
 export interface DashboardRenderOptions {
   readonly glyphMode: DashboardGlyphMode;
   readonly color: boolean;
+  readonly footer?: string;
 }
 
 export type DashboardRenderer = (
@@ -137,6 +138,7 @@ export function rankDashboardSnapshot(
 
 export function createDashboardRenderer(options: DashboardRenderOptions): DashboardRenderer {
   const glyphs = options.glyphMode === "ascii" ? ASCII_GLYPHS : BOX_GLYPHS;
+  const footer = sanitizeTerminalLabel(options.footer ?? "^C stop server  |  read-only");
   return (snapshot, columns, rows) => {
     const width = boundedDimension(columns, 20, 500);
     const height = boundedDimension(rows, 4, 200);
@@ -173,7 +175,7 @@ export function createDashboardRenderer(options: DashboardRenderOptions): Dashbo
     if (overflow) {
       lines.push(...renderAllCubesStrip(snapshot, width, stripRows, glyphs));
     }
-    lines.push(fitCell("^C stop server  |  read-only", width));
+    lines.push(fitCell(footer, width));
     return lines.slice(0, height)
       .map((line) => fitCell(line, width, " ", glyphs.ellipsis))
       .join("\n");
@@ -239,6 +241,16 @@ export function sanitizeTerminalText(value: string): string {
     .replace(/\u001b\[[0-?]*[ -/]*[@-~]/gu, "")
     .replace(/[\p{Cc}\p{Cf}\p{Cs}]+/gu, " ")
     .replace(/\s+/gu, " ")
+    .trim();
+}
+
+function sanitizeTerminalLabel(value: string): string {
+  return value
+    .normalize("NFC")
+    .replace(/\u001B\][^\u0007\u001B]*(?:\u0007|\u001B\\)/gu, "")
+    .replace(/\u001B(?:P|X|\^|_)[\s\S]*?\u001B\\/gu, "")
+    .replace(/\u001B\[[0-?]*[ -/]*[@-~]/gu, "")
+    .replace(/[\p{Cc}\p{Cf}\p{Cs}]+/gu, " ")
     .trim();
 }
 

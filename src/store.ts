@@ -35,11 +35,8 @@ import {
   PLATFORM_QUEEN_DETAILED_DESCRIPTION,
   PLATFORM_QUEEN_SHORT_DESCRIPTION,
 } from "./platform-queen.js";
-import {
-  DASHBOARD_ACTIVITY_WINDOW_MS,
-  type DashboardDataSnapshot,
-  type DashboardSnapshotSource,
-} from "./dashboard.js";
+import type { DashboardSnapshotSource } from "./dashboard.js";
+import { createDashboardSnapshotReader } from "./dashboard-source.js";
 
 export type CubeAccess = "read" | "write" | "manage";
 
@@ -858,44 +855,13 @@ function createDashboardSnapshotSource(
   clock: () => Date,
   activityHub: ActivityHub,
 ): DashboardSnapshotSource {
+  const read = createDashboardSnapshotReader(
+    database,
+    clock,
+    DEFAULT_CUBE_LIMITS.maxCubesTotal,
+  );
   return Object.freeze({
-    read: (): DashboardDataSnapshot => {
-      const capturedAt = clock();
-      const cutoff = new Date(capturedAt.getTime() - DASHBOARD_ACTIVITY_WINDOW_MS).toISOString();
-      const rows = database.prepare(`
-        SELECT cube.id, cube.name,
-               (SELECT COUNT(*) FROM activity_log AS entry
-                WHERE entry.cube_id = cube.id AND entry.created_at >= ?) AS posts_15m,
-               (SELECT COUNT(DISTINCT entry.drone_id) FROM activity_log AS entry
-                WHERE entry.cube_id = cube.id AND entry.created_at >= ?
-                  AND entry.drone_id IS NOT NULL) AS distinct_posting_drones_15m,
-               (SELECT COUNT(*) FROM drones AS drone
-                WHERE drone.cube_id = cube.id AND drone.evicted_at IS NULL) AS drones_total,
-               (SELECT COUNT(*) FROM drones AS drone
-                WHERE drone.cube_id = cube.id AND drone.evicted_at IS NULL
-                  AND COALESCE(drone.last_seen, drone.created_at) >= ?) AS drones_seen_15m,
-               (SELECT MAX(entry.created_at) FROM activity_log AS entry
-                WHERE entry.cube_id = cube.id) AS last_post_at
-        FROM cubes AS cube
-        ORDER BY cube.id
-        LIMIT ?
-      `).all(cutoff, cutoff, cutoff, DEFAULT_CUBE_LIMITS.maxCubesTotal);
-      return Object.freeze({
-        captured_at: capturedAt.toISOString(),
-        cubes: Object.freeze(rows.map((row) => Object.freeze({
-          id: requiredText(row, "id"),
-          name: requiredText(row, "name"),
-          posts_15m: requiredInteger(row, "posts_15m"),
-          distinct_posting_drones_15m: requiredInteger(
-            row,
-            "distinct_posting_drones_15m",
-          ),
-          drones_total: requiredInteger(row, "drones_total"),
-          drones_seen_15m: requiredInteger(row, "drones_seen_15m"),
-          last_post_at: nullableText(row, "last_post_at"),
-        }))),
-      });
-    },
+    read,
     subscribe: (listener: () => void) => activityHub.subscribeAll(listener),
   });
 }

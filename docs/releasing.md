@@ -432,10 +432,13 @@ The live `borgmcp-server@0.1.20` package consumes the audited exact
 `borgmcp-shared@0.6.3` registry release. Immutable `v0.1.6`, `v0.1.10`, `v0.1.13`,
 and `v0.1.19` are failed
 prepublication evidence and are not install targets. Current post-`v0.1.20`
-source pins the reviewed exact `borgmcp-shared@0.6.4` candidate artifact for
-the unpublished `borgmcp-server@0.1.21` adoption hotfix candidate; the
-shrinkwrap binds its future canonical registry tarball URL and matching
-reviewed SRI. Shared must publish first in the authorized release sequence.
+source is wired and author-verified against the reviewed exact
+`borgmcp-shared@0.6.4` candidate artifact for the unpublished
+`borgmcp-server@0.1.21` adoption hotfix candidate. The manifest and shrinkwrap
+intentionally retain published `borgmcp-shared@0.6.3`; shared must publish first
+in the authorized release sequence, after which the exact canonical 0.6.4
+registry URL and reviewed SRI are applied as a separately verified release
+input. This intermediate source is not package- or release-ready.
 The live package persists truthful advisory Agent CLI, reported-model, and
 working-repository seat metadata, the explicit Queen activation timing contract, and
 structured, safe role-section conflict reasons without changing authority, routes, or rollback

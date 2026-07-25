@@ -28,13 +28,11 @@ metadata request timed out; its publish job was skipped. Published `0.1.20`
 pins audited exact `borgmcp-shared@0.6.3` and atomically creates or resolves one
 repository-associated cube with the selected Default (legacy), Software
 Development, or Starter template surfaces. Current source is the unpublished
-`borgmcp-server@0.1.21` protocol-v5 adoption hotfix candidate. Its implementation
-is wired and author-verified against reviewed exact `borgmcp-shared@0.6.4`, and
-adds a mutation-free repository-association resolve operation plus an explicit,
-manage-authorized atomic association operation for adopting legacy cubes after
-client confirmation. The manifest and shrinkwrap intentionally retain the
-published `borgmcp-shared@0.6.3` release input until protected 0.6.4 publication;
-this intermediate source is not a release-ready package input.
+`borgmcp-server@0.1.21` protocol-v5 adoption hotfix candidate. It pins exact
+published `borgmcp-shared@0.6.4` and adds a mutation-free
+repository-association resolve operation plus an explicit, manage-authorized
+atomic association operation for adopting legacy cubes after client
+confirmation.
 Its lock verification is entirely offline: exact versions, canonical npm
 tarball URLs, SHA-512 integrity, root identity, duplicate consistency, and
 install-script boundaries are checked without querying registry metadata.

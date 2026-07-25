@@ -1,4 +1,16 @@
-import { chmod, mkdtemp, realpath, rm } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import {
+  renameSync,
+  symlinkSync,
+} from "node:fs";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  realpath,
+  rename,
+  rm,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -148,6 +160,58 @@ describe("read-only dashboard snapshot source", () => {
     })).rejects.toBe(operatorErrors.DASHBOARD_DATA_UNAVAILABLE);
     await chmod(directory, 0o700);
   });
+
+  it("rejects a private installation beneath an untrusted writable ancestor", async () => {
+    directory = await realpath(await mkdtemp(join(tmpdir(), "borg-dashboard-ancestor-")));
+    const writableParent = join(directory, "writable-parent");
+    const installation = join(writableParent, "server");
+    await mkdir(writableParent, { mode: 0o777 });
+    await chmod(writableParent, 0o777);
+    await mkdir(installation, { mode: 0o700 });
+    await bootstrapServer(installation);
+
+    await expect(openReadonlyDashboardSnapshotSource({
+      dataDirectory: installation,
+    })).rejects.toBe(operatorErrors.DASHBOARD_DATA_UNAVAILABLE);
+  });
+
+  it("cannot be redirected by a directory substitution after pinning", async () => {
+    directory = await realpath(await mkdtemp(join(tmpdir(), "borg-dashboard-swap-")));
+    const installation = join(directory, "server");
+    const heldInstallation = join(directory, "server-held");
+    const replacement = join(directory, "replacement");
+    await mkdir(installation, { mode: 0o700 });
+    await mkdir(replacement, { mode: 0o700 });
+    await bootstrapServer(installation);
+    await bootstrapServer(replacement);
+    insertCube(join(installation, "borg.db"), "Original cube");
+    insertCube(join(replacement, "borg.db"), "RACE_TARGET");
+
+    const realChdir = process.chdir.bind(process);
+    const chdir = vi.spyOn(process, "chdir").mockImplementationOnce((path) => {
+      realChdir(path);
+      renameSync(installation, heldInstallation);
+      symlinkSync(replacement, installation, "dir");
+    });
+    let source: Awaited<ReturnType<typeof openReadonlyDashboardSnapshotSource>> | undefined;
+    try {
+      source = await openReadonlyDashboardSnapshotSource({
+        dataDirectory: installation,
+      });
+      expect(source.read().cubes.map((cube) => cube.name)).toEqual(["Original cube"]);
+      expect(JSON.stringify(source.read())).not.toContain("RACE_TARGET");
+      expect(chdir).toHaveBeenCalledTimes(2);
+      expect(chdir).toHaveBeenNthCalledWith(1, installation);
+    } finally {
+      source?.close();
+      const directoryWasSubstituted = chdir.mock.calls.length > 0;
+      chdir.mockRestore();
+      if (directoryWasSubstituted) {
+        await rm(installation, { force: true });
+        await rename(heldInstallation, installation);
+      }
+    }
+  });
 });
 
 function seed(runtime: StoreRuntime): void {
@@ -180,4 +244,17 @@ function seed(runtime: StoreRuntime): void {
     cubeId: ids.cube,
     droneId: ids.drone,
   });
+}
+
+function insertCube(databasePath: string, name: string): void {
+  const database = new DatabaseSync(databasePath);
+  try {
+    const now = "2026-07-25T12:00:00.000Z";
+    database.prepare(`
+      INSERT INTO cubes (id, name, directive, created_at, updated_at)
+      VALUES (?, ?, '', ?, ?)
+    `).run(randomUUID(), name, now, now);
+  } finally {
+    database.close();
+  }
 }

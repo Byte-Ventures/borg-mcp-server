@@ -1,5 +1,5 @@
-import { lstat, realpath } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { lstatSync, realpathSync, type Stats } from "node:fs";
+import { join, parse, resolve, sep } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
 import { assertMigrationsCurrent, MigrationCompatibilityError } from "./migrations.js";
@@ -74,18 +74,14 @@ export async function openReadonlyDashboardSnapshotSource(input: {
   readonly maxCubes?: number;
   readonly validate?: () => void | Promise<void>;
 }): Promise<CloseableDashboardSnapshotSource> {
-  const databasePath = await resolveReadonlyDashboardDatabase(input.dataDirectory);
+  const databasePath = resolveReadonlyDashboardDatabase(input.dataDirectory);
   const pollIntervalMs = input.pollIntervalMs ?? DASHBOARD_POLL_INTERVAL_MS;
   if (!Number.isSafeInteger(pollIntervalMs) || pollIntervalMs < 100) {
     throw new Error("Dashboard poll interval is invalid.");
   }
   let database: DatabaseSync | undefined;
   try {
-    database = new DatabaseSync(databasePath, {
-      readOnly: true,
-      enableForeignKeyConstraints: true,
-      enableDoubleQuotedStringLiterals: false,
-    });
+    database = openPinnedReadonlyDatabase(databasePath);
     database.exec(`
       PRAGMA query_only = ON;
       PRAGMA trusted_schema = OFF;
@@ -172,14 +168,28 @@ export async function openReadonlyDashboardSnapshotSource(input: {
   }
 }
 
-async function resolveReadonlyDashboardDatabase(dataDirectory: string): Promise<string> {
+interface ValidatedDashboardDatabase {
+  readonly directory: string;
+  readonly directoryIdentity: FileIdentity;
+  readonly databaseIdentity: FileIdentity;
+}
+
+interface FileIdentity {
+  readonly device: number;
+  readonly inode: number;
+}
+
+function resolveReadonlyDashboardDatabase(
+  dataDirectory: string,
+): ValidatedDashboardDatabase {
   const directory = resolve(dataDirectory);
-  let directoryMetadata;
-  let databaseMetadata;
+  let directoryMetadata: Stats;
+  let databaseMetadata: Stats;
   try {
-    if (await realpath(directory) !== directory) throw operatorErrors.DATA_PATH_SYMLINK;
-    directoryMetadata = await lstat(directory);
-    databaseMetadata = await lstat(join(directory, "borg.db"));
+    if (realpathSync(directory) !== directory) throw operatorErrors.DATA_PATH_SYMLINK;
+    validateTrustedDirectoryAncestry(directory);
+    directoryMetadata = lstatSync(directory);
+    databaseMetadata = lstatSync(join(directory, "borg.db"));
   } catch (error) {
     if (isOperatorError(error)) throw error;
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
@@ -194,7 +204,85 @@ async function resolveReadonlyDashboardDatabase(dataDirectory: string): Promise<
       (directoryMetadata.mode & 0o077) !== 0 || (databaseMetadata.mode & 0o077) !== 0) {
     throw operatorErrors.DASHBOARD_DATA_UNAVAILABLE;
   }
-  return join(directory, "borg.db");
+  const effectiveUserId = process.geteuid?.();
+  if (effectiveUserId !== undefined &&
+      (directoryMetadata.uid !== effectiveUserId ||
+       databaseMetadata.uid !== effectiveUserId)) {
+    throw operatorErrors.DASHBOARD_DATA_UNAVAILABLE;
+  }
+  return {
+    directory,
+    directoryIdentity: fileIdentity(directoryMetadata),
+    databaseIdentity: fileIdentity(databaseMetadata),
+  };
+}
+
+function validateTrustedDirectoryAncestry(directory: string): void {
+  const root = parse(directory).root;
+  const effectiveUserId = process.geteuid?.();
+  const components = directory.slice(root.length).split(sep).filter(Boolean);
+  let current = root;
+  for (const component of components.slice(0, -1)) {
+    current = join(current, component);
+    const metadata = lstatSync(current);
+    if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
+      throw operatorErrors.DATA_PATH_SYMLINK;
+    }
+    if (effectiveUserId !== undefined &&
+        metadata.uid !== 0 && metadata.uid !== effectiveUserId) {
+      throw operatorErrors.DASHBOARD_DATA_UNAVAILABLE;
+    }
+    const writableByOtherIdentity = (metadata.mode & 0o022) !== 0;
+    const rootOwnedStickyDirectory =
+      metadata.uid === 0 && (metadata.mode & 0o1000) !== 0;
+    if (writableByOtherIdentity && !rootOwnedStickyDirectory) {
+      throw operatorErrors.DASHBOARD_DATA_UNAVAILABLE;
+    }
+  }
+}
+
+function openPinnedReadonlyDatabase(
+  validated: ValidatedDashboardDatabase,
+): DatabaseSync {
+  const originalWorkingDirectory = process.cwd();
+  let changedDirectory = false;
+  let database: DatabaseSync | undefined;
+  try {
+    // chdir pins the validated directory inode in the kernel. The synchronous
+    // critical section then opens borg.db relative to that inode, so replacing
+    // the configured pathname after validation cannot redirect SQLite.
+    process.chdir(validated.directory);
+    changedDirectory = true;
+    assertFileIdentity(lstatSync("."), validated.directoryIdentity);
+    const databaseMetadata = lstatSync("borg.db");
+    assertFileIdentity(databaseMetadata, validated.databaseIdentity);
+    if (databaseMetadata.isSymbolicLink() || !databaseMetadata.isFile()) {
+      throw operatorErrors.DATA_PATH_SYMLINK;
+    }
+    database = new DatabaseSync("borg.db", {
+      readOnly: true,
+      enableForeignKeyConstraints: true,
+      enableDoubleQuotedStringLiterals: false,
+    });
+    assertFileIdentity(lstatSync("."), validated.directoryIdentity);
+    assertFileIdentity(lstatSync("borg.db"), validated.databaseIdentity);
+    return database;
+  } catch (error) {
+    database?.close();
+    throw error;
+  } finally {
+    if (changedDirectory) process.chdir(originalWorkingDirectory);
+  }
+}
+
+function fileIdentity(metadata: Stats): FileIdentity {
+  return { device: metadata.dev, inode: metadata.ino };
+}
+
+function assertFileIdentity(metadata: Stats, expected: FileIdentity): void {
+  if (metadata.dev !== expected.device || metadata.ino !== expected.inode) {
+    throw operatorErrors.DASHBOARD_DATA_UNAVAILABLE;
+  }
 }
 
 function isOperatorError(error: unknown): boolean {

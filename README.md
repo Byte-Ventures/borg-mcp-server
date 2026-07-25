@@ -151,11 +151,12 @@ Ctrl-C closes only the viewer; the server keeps running. Redirected or non-TTY
 viewer output is one bounded non-ANSI snapshot and then exits.
 
 The standalone viewer is an operator-local, all-cubes view. Authorization is
-the filesystem permissions on `BORG_SERVER_DATA_DIR` (default
-`~/.borg/server`): whoever can read that private directory can read the
-dashboard aggregates. It is not a per-client, per-principal, tenant-scoped, or
-remote dashboard. The command refuses missing, non-private, incompatible, or
-stopped installations and never displays activity message bodies.
+the ownership and private filesystem permissions on `BORG_SERVER_DATA_DIR`
+(default `~/.borg/server`): the viewer requires the current operating-system
+user to own the private directory and database, and rejects untrusted writable
+path ancestors. It is not a per-client, per-principal, tenant-scoped, or remote
+dashboard. The command refuses missing, non-private, incompatible, or stopped
+installations and never displays activity message bodies.
 
 ```sh
 borg-mcp-server status

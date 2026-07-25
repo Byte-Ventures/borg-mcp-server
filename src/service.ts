@@ -62,6 +62,15 @@ import {
 import { createRegistryArtifactSource } from "./registry-artifact.js";
 import { createRuntimeOperator, type RuntimeUpdateResult } from "./runtime-operator.js";
 import { createManagedServiceDefinition } from "./managed-service.js";
+import {
+  createDashboardRenderer,
+  dashboardColorEnabled,
+  selectDashboardGlyphMode,
+  startForegroundDashboard,
+  type DashboardServerIdentity,
+  type DashboardSnapshotSource,
+  type ForegroundDashboard,
+} from "./dashboard.js";
 
 export interface ServerService {
   readonly start: (args: readonly string[]) => Promise<void>;
@@ -133,6 +142,11 @@ interface ServiceDependencies {
   readonly readPrivateKey: (path: string) => Promise<Buffer>;
   readonly startServer: (options: HttpsServerOptions) => Promise<RunningServer>;
   readonly onStarted: (origin: string, identity: RuntimeBuildIdentity) => void;
+  readonly startForegroundDashboard?: (input: {
+    readonly source: DashboardSnapshotSource;
+    readonly server: DashboardServerIdentity;
+    readonly asciiRequested: boolean;
+  }) => ForegroundDashboard | undefined;
   readonly waitForShutdown: (server: RunningServer, signal?: AbortSignal) => Promise<void>;
   readonly debugOutput?: (line: string) => void;
   readonly installShutdownHandlers?: () => { readonly signal: AbortSignal; readonly dispose: () => void };
@@ -151,6 +165,7 @@ interface RuntimeResources {
   readonly digester: CredentialDigester | undefined;
   readonly runtimeLock: RuntimeLock | undefined;
   readonly livenessScheduler: { readonly stop: () => void } | undefined;
+  readonly dashboard: ForegroundDashboard | undefined;
 }
 
 export type RuntimeLockStatus =
@@ -190,12 +205,14 @@ export function createNodeServerService(dependencies: ServiceDependencies): Serv
       let debugLogger = disabledDebugLogger;
       let dataDirectory: string | undefined;
       let storageLimits: StorageLimits;
+      let asciiRequested = false;
       try {
         throwIfShutdown(shutdown?.signal);
         await dependencies.onStartupPhase?.("pre-lock");
         throwIfShutdown(shutdown?.signal);
         const parsed = parseStartOptions(args);
         bind = parsed.bind;
+        asciiRequested = parsed.ascii;
         debugLogger = createDebugLogger(parsed.logLevel === "debug" ? dependencies.debugOutput : undefined);
         const resolvedBind = resolveBindOptions(bind);
         const bindMode = resolvedBind.mode;
@@ -257,6 +274,7 @@ export function createNodeServerService(dependencies: ServiceDependencies): Serv
       }
       let running: RunningServer | undefined;
       let livenessScheduler: { readonly stop: () => void } | undefined;
+      let dashboard: ForegroundDashboard | undefined;
       let key: Buffer | undefined;
       try {
         throwIfShutdown(shutdown?.signal);
@@ -331,7 +349,14 @@ export function createNodeServerService(dependencies: ServiceDependencies): Serv
         }
       } catch (error) {
         try {
-          await teardownRuntime({ running, authRuntime, digester, runtimeLock, livenessScheduler });
+          await teardownRuntime({
+            running,
+            authRuntime,
+            digester,
+            runtimeLock,
+            livenessScheduler,
+            dashboard,
+          });
         } catch (cleanupError) {
           shutdown?.dispose();
           throw fatalTeardownError(error, cleanupError);
@@ -348,14 +373,36 @@ export function createNodeServerService(dependencies: ServiceDependencies): Serv
         throwIfShutdown(shutdown?.signal);
         await runtimeLock?.updateOrigin?.(running.origin);
         dependencies.onStarted(running.origin, runtimeIdentity);
+        if (authRuntime !== undefined) {
+          dashboard = dependencies.startForegroundDashboard?.({
+            source: authRuntime.dashboard,
+            server: Object.freeze({
+              name: "borgmcp-server",
+              version: runtimeIdentity.package_version,
+              endpoint: running.origin,
+              state: "online",
+              started_at: new Date().toISOString(),
+            }),
+            asciiRequested,
+          });
+        }
         debugLogger.emit({ event: "lifecycle", action: "listening" });
-        await dependencies.waitForShutdown(running, shutdown?.signal);
+        const shutdownWait = dependencies.waitForShutdown(running, shutdown?.signal);
+        if (dashboard === undefined) await shutdownWait;
+        else await Promise.race([shutdownWait, dashboard.failure]);
       } catch (error) {
         failed = true;
         failure = error;
       }
       try {
-        await teardownRuntime({ running, authRuntime, digester, runtimeLock, livenessScheduler });
+        await teardownRuntime({
+          running,
+          authRuntime,
+          digester,
+          runtimeLock,
+          livenessScheduler,
+          dashboard,
+        });
         debugLogger.emit({ event: "lifecycle", action: "stopped" });
       } catch (cleanupError) {
         shutdown?.dispose();
@@ -464,7 +511,7 @@ const startOnlyService = createNodeServerService({
     return nodeServerTestHooks?.wrapRunningServer?.(running) ?? running;
   },
   onStarted: (origin, identity) => {
-    if (process.stderr.isTTY !== true || serverEnvironment.BORG_SERVER_PROCESS_MODE === "managed") {
+    if (!supportsForegroundDashboard()) {
       console.error(JSON.stringify({
         status: "running",
         artifact: `borgmcp-server@${identity.package_version}`,
@@ -474,18 +521,33 @@ const startOnlyService = createNodeServerService({
         mode: serverEnvironment.BORG_SERVER_PROCESS_MODE ?? "foreground",
         data_identity: "available",
       }));
-    } else {
-      console.error([
-        "Starting verified local server in the foreground.",
-        `Artifact: borgmcp-server@${identity.package_version} (${identity.artifact_integrity ?? "unavailable"})`,
-        `Build identity: ${identity.source_sha ?? "unavailable"}`,
-        `Endpoint: ${origin}`,
-        "Data and identity: preserved",
-        "Ctrl-C stops the foreground process.",
-        "Foreground mode does not manage persistence.",
-      ].join("\n"));
     }
     nodeServerTestHooks?.onListening?.(origin);
+  },
+  startForegroundDashboard: ({ source, server, asciiRequested }) => {
+    if (!supportsForegroundDashboard()) return undefined;
+    return startForegroundDashboard({
+      source,
+      server,
+      terminal: {
+        write: (value) => { process.stdout.write(value); },
+        dimensions: () => ({
+          columns: process.stdout.columns ?? 80,
+          rows: process.stdout.rows ?? 24,
+        }),
+        onResize: (listener) => {
+          process.stdout.on("resize", listener);
+          return () => process.stdout.off("resize", listener);
+        },
+      },
+      renderer: createDashboardRenderer({
+        glyphMode: selectDashboardGlyphMode({
+          asciiRequested,
+          environment: process.env,
+        }),
+        color: dashboardColorEnabled(process.env),
+      }),
+    });
   },
   onStartupPhase: (phase) => nodeServerTestHooks?.onStartupPhase?.(phase) ?? Promise.resolve(),
   installShutdownHandlers: () => {
@@ -927,6 +989,12 @@ interface RuntimeLock {
 }
 
 async function teardownRuntime(resources: RuntimeResources): Promise<void> {
+  let dashboardFailure: unknown;
+  try {
+    resources.dashboard?.close();
+  } catch (error) {
+    dashboardFailure = error;
+  }
   resources.livenessScheduler?.stop();
   try {
     await resources.running?.close();
@@ -942,6 +1010,13 @@ async function teardownRuntime(resources: RuntimeResources): Promise<void> {
     throw error;
   }
   await resources.runtimeLock?.release();
+  if (dashboardFailure !== undefined) throw dashboardFailure;
+}
+
+function supportsForegroundDashboard(): boolean {
+  return process.stdout.isTTY === true &&
+    serverEnvironment.BORG_SERVER_PROCESS_MODE !== "managed" &&
+    process.env["TERM"] !== "dumb";
 }
 
 function startLivenessScheduler(liveness: { readonly scan: () => unknown }): { readonly stop: () => void } {

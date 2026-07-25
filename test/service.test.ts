@@ -26,6 +26,7 @@ import {
 } from "../src/service.js";
 import { createRuntimeBuildIdentity } from "../src/runtime-identity.js";
 import { writePortableServerCredential } from "../src/portable-credential-store.js";
+import type { ForegroundDashboard } from "../src/dashboard.js";
 
 function requireFreshSetup(
   result: Awaited<ReturnType<typeof setupNodeServerInstallation>>,
@@ -117,6 +118,86 @@ describe("node server service", () => {
       expect(startLivenessScheduler).toHaveBeenCalledOnce();
       expect(startLivenessScheduler.mock.calls[0]![0]).toMatchObject({ scan: expect.any(Function) });
       expect(stop).toHaveBeenCalledOnce();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("owns the foreground dashboard for the authenticated server lifetime", async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-dashboard-service-")));
+    try {
+      await bootstrapServer(directory);
+      const closeDashboard = vi.fn();
+      const dashboard: ForegroundDashboard = {
+        failure: new Promise<never>(() => undefined),
+        close: closeDashboard,
+      };
+      const startForegroundDashboard = vi.fn(() => dashboard);
+      const closeServer = vi.fn().mockResolvedValue(undefined);
+      const service = createNodeServerService({
+        environment: { BORG_SERVER_DATA_DIR: directory },
+        readFile: vi.fn().mockResolvedValue(Buffer.from("certificate")),
+        readPrivateKey: vi.fn().mockResolvedValue(Buffer.from("private-key")),
+        startServer: vi.fn().mockResolvedValue({
+          origin: "https://127.0.0.1:7091",
+          limits: {} as never,
+          close: closeServer,
+        }),
+        onStarted: vi.fn(),
+        startForegroundDashboard,
+        waitForShutdown: vi.fn().mockResolvedValue(undefined),
+      });
+
+      await service.start(["--ascii"]);
+
+      expect(startForegroundDashboard).toHaveBeenCalledWith(expect.objectContaining({
+        source: expect.objectContaining({
+          read: expect.any(Function),
+          subscribe: expect.any(Function),
+        }),
+        server: expect.objectContaining({
+          name: "borgmcp-server",
+          version: "0.1.21",
+          endpoint: "https://127.0.0.1:7091",
+          state: "online",
+        }),
+        asciiRequested: true,
+      }));
+      expect(closeDashboard).toHaveBeenCalledOnce();
+      expect(closeServer).toHaveBeenCalledOnce();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("shuts down the server when foreground dashboard rendering fails", async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-dashboard-failure-")));
+    try {
+      await bootstrapServer(directory);
+      const failure = new Error("dashboard render failure");
+      const closeDashboard = vi.fn();
+      const closeServer = vi.fn().mockResolvedValue(undefined);
+      const service = createNodeServerService({
+        environment: { BORG_SERVER_DATA_DIR: directory },
+        readFile: vi.fn().mockResolvedValue(Buffer.from("certificate")),
+        readPrivateKey: vi.fn().mockResolvedValue(Buffer.from("private-key")),
+        startServer: vi.fn().mockResolvedValue({
+          origin: "https://127.0.0.1:7091",
+          limits: {} as never,
+          close: closeServer,
+        }),
+        onStarted: vi.fn(),
+        startForegroundDashboard: () => ({
+          failure: Promise.reject(failure),
+          close: closeDashboard,
+        }),
+        waitForShutdown: vi.fn(() => new Promise<void>(() => undefined)),
+      });
+
+      await expect(service.start([])).rejects.toBe(failure);
+      expect(closeDashboard).toHaveBeenCalledOnce();
+      expect(closeServer).toHaveBeenCalledOnce();
+      await expect(access(join(directory, "runtime.lock"))).rejects.toMatchObject({ code: "ENOENT" });
     } finally {
       await rm(directory, { recursive: true, force: true });
     }

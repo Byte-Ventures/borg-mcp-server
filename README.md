@@ -124,9 +124,25 @@ the existing data and identity and never repeats credentials. After stopping the
 server, `borg-mcp-server setup --reinitialize` explicitly destroys and recreates
 the server identity and database; use it only when prior state may be discarded.
 
-`borg-mcp-server start` remains a foreground command. Ctrl-C stops it, and it
-does not install or enable persistence. Inspect exact running evidence or stage
-and activate a verified update with:
+`borg-mcp-server start` remains a foreground command. In an interactive
+terminal it opens a read-only dashboard showing the verified server identity,
+the most active cube in a detail panel, and all cubes ranked by coordination
+posts in the trailing 15 minutes. Distinct posting drones break ties. The
+dashboard displays aggregate counts and last-post age only; it never displays
+activity message bodies. It refreshes on committed activity, on terminal
+resize, and on a bounded five-second age tick.
+
+The dashboard uses box-drawing terminal glyphs by default. `--ascii` forces a
+strict 7-bit rendering, and incompatible terminal/locale settings select that
+fallback automatically. `NO_COLOR` removes color without removing status
+labels or layout cues. Terminals smaller than roughly 40 columns by 10 rows
+receive a bounded plain-text status view.
+
+Ctrl-C stops the server, restores the prior terminal screen and cursor, and
+does not install or enable persistence. Redirected output and managed-service
+execution never enter the alternate screen or emit ANSI rendering; they retain
+the existing single bounded machine-readable startup record. Inspect exact
+running evidence or stage and activate a verified update with:
 
 ```sh
 borg-mcp-server status

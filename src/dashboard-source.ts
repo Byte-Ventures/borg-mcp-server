@@ -139,6 +139,8 @@ export async function openReadonlyDashboardSnapshotSource(input: {
         if (closed) throw new Error("Dashboard snapshot source is closed.");
         listeners.add(listener);
         if (timer === undefined) {
+          // Unlike the embedded event source, this standalone source must own
+          // a referenced handle so the viewer process remains alive.
           timer = setInterval(() => { void poll(); }, pollIntervalMs);
         }
         return () => {

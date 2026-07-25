@@ -65,6 +65,7 @@ import { createManagedServiceDefinition } from "./managed-service.js";
 import {
   createDashboardRenderer,
   dashboardColorEnabled,
+  STANDALONE_DASHBOARD_FOOTER,
   rankDashboardSnapshot,
   renderPlainDashboard,
   selectDashboardGlyphMode,
@@ -669,7 +670,7 @@ async function runNodeDashboardViewer(
           environment: process.env,
         }),
         color: dashboardColorEnabled(process.env),
-        footer: "^C close viewer  |  read-only",
+        footer: STANDALONE_DASHBOARD_FOOTER,
       }),
     });
     try {

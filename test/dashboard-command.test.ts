@@ -9,6 +9,8 @@ import { bootstrapServer } from "../src/bootstrap.js";
 import { inspectRuntimeLock } from "../src/service.js";
 
 const mainPath = fileURLToPath(new URL("../dist/main.js", import.meta.url));
+const sqliteExperimentalWarning =
+  /\(node:\d+\) ExperimentalWarning: SQLite is an experimental feature and might change at any time\r?\n\(Use `node --trace-warnings \.\.\.` to show where the warning was created\)\r?\n?/u;
 let directory: string | undefined;
 let server: ChildProcess | undefined;
 
@@ -27,12 +29,8 @@ describe("dashboard command", () => {
     directory = await realpath(await mkdtemp(join(tmpdir(), "borg-dashboard-command-")));
     await bootstrapServer(directory);
     server = spawn(process.execPath, [mainPath, "start", "--port", "0"], {
-      env: {
-        ...process.env,
-        BORG_SERVER_DATA_DIR: directory,
-        NODE_NO_WARNINGS: "1",
-      },
-      stdio: ["ignore", "ignore", "pipe"],
+      env: childEnvironment(directory),
+      stdio: ["ignore", "ignore", "ignore"],
     });
     const live = await waitForLiveRuntime(directory);
     const result = await runDashboard(directory);
@@ -42,7 +40,8 @@ describe("dashboard command", () => {
     expect(result.stdout).toContain(live.endpoint);
     expect(result.stdout).toContain("0 cubes | 0 posts/15m");
     expect(result.stdout).not.toContain("\u001b");
-    expect(result.stderr).toBe("");
+    expect(result.stderr).toMatch(sqliteExperimentalWarning);
+    expect(withoutKnownSqliteWarning(result.stderr)).toBe("");
     expect(server.exitCode).toBeNull();
     expect(() => process.kill(server!.pid!, 0)).not.toThrow();
 
@@ -56,16 +55,21 @@ describe("dashboard command", () => {
     const missingPath = join(directory, "private-missing-installation");
     const missing = await runDashboard(missingPath);
     expect(missing).toMatchObject({ code: 1, signal: null });
-    expect(missing.stderr).toContain(
-      "Prepare the local server in BORG_SERVER_DATA_DIR before opening the dashboard.",
+    const missingStderr = withoutKnownSqliteWarning(missing.stderr);
+    expect(missingStderr).toBe(
+      "Server command failed: Prepare the local server in BORG_SERVER_DATA_DIR " +
+      "before opening the dashboard.\n",
     );
-    expect(missing.stderr).not.toContain(missingPath);
+    expect(missingStderr).not.toContain(missingPath);
 
     await bootstrapServer(directory);
     const stopped = await runDashboard(directory);
     expect(stopped).toMatchObject({ code: 1, signal: null });
-    expect(stopped.stderr).toContain("Start the local server before opening the dashboard.");
-    expect(stopped.stderr).not.toContain(directory);
+    const stoppedStderr = withoutKnownSqliteWarning(stopped.stderr);
+    expect(stoppedStderr).toBe(
+      "Server command failed: Start the local server before opening the dashboard.\n",
+    );
+    expect(stoppedStderr).not.toContain(directory);
   });
 });
 
@@ -76,11 +80,7 @@ async function runDashboard(dataDirectory: string): Promise<{
   readonly stderr: string;
 }> {
   const child = spawn(process.execPath, [mainPath, "dashboard"], {
-    env: {
-      ...process.env,
-      BORG_SERVER_DATA_DIR: dataDirectory,
-      NODE_NO_WARNINGS: "1",
-    },
+    env: childEnvironment(dataDirectory),
     stdio: ["ignore", "pipe", "pipe"],
   });
   let stdout = "";
@@ -88,6 +88,19 @@ async function runDashboard(dataDirectory: string): Promise<{
   child.stdout.on("data", (chunk: Buffer) => { stdout += chunk.toString("utf8"); });
   child.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString("utf8"); });
   return { ...await waitForExit(child), stdout, stderr };
+}
+
+function childEnvironment(dataDirectory: string): NodeJS.ProcessEnv {
+  const {
+    NODE_NO_WARNINGS: _nodeNoWarnings,
+    NODE_OPTIONS: _nodeOptions,
+    ...environment
+  } = process.env;
+  return { ...environment, BORG_SERVER_DATA_DIR: dataDirectory };
+}
+
+function withoutKnownSqliteWarning(stderr: string): string {
+  return stderr.replace(new RegExp(sqliteExperimentalWarning.source, "gu"), "");
 }
 
 async function waitForLiveRuntime(dataDirectory: string): Promise<{

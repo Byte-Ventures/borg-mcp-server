@@ -1,1 +1,12 @@
-[]
+[
+  {
+    "version": "0.2.0",
+    "tag": "v0.2.0",
+    "tag_object": "a62f645ced8d5e58620727f1bd20e5bb0ea61252",
+    "commit": "119bfc5d341b4d68efcb3f0466be7cb75c7966ee",
+    "tree": "c45d67a54ee4e36216474004814841101f05fa73",
+    "workflow_run_id": 30194326366,
+    "workflow_run_attempt": 1,
+    "artifact_integrity": "sha512-squb0+vdy0q7l/4FeV7OTvSm7OiFWGsAjGhcVEXYrQc9K/8jJYduqPS90VBwaJRT6z221Gxf3xQ5SeZe/Qoncw=="
+  }
+]

@@ -216,7 +216,7 @@ describe("node server service", () => {
         }),
         server: expect.objectContaining({
           name: "borgmcp-server",
-          version: "0.2.0",
+          version: "0.3.0",
           endpoint: "https://127.0.0.1:7091",
           state: "online",
         }),
@@ -353,7 +353,7 @@ describe("node server service", () => {
     expect(options?.tls.ca).toEqual(Buffer.from("test-certificate"));
     expect(onStarted).toHaveBeenCalledWith(
       "https://127.0.0.1:7091",
-      expect.objectContaining({ package_version: "0.2.0" }),
+      expect.objectContaining({ package_version: "0.3.0" }),
     );
     expect(waitForShutdown).toHaveBeenCalledOnce();
     expect(keyBuffer.every((byte) => byte === 0)).toBe(true);

@@ -6,9 +6,9 @@ HTTPS.
 
 ## Release status
 
-The current public preview is immutable `borgmcp-server@0.1.20`, published on
+The current public preview is immutable `borgmcp-server@0.1.21`, published on
 npm with integrity
-`sha512-ycI02wlgG3dV9OsDDR9nXsqOppiYv4qFhTBMR6Nmdsc3lrt/1tHgU0JCPnfReriIs7CaSen8XHb8jigfnpE3dg==`.
+`sha512-g0QH4cKcsKuDyZs1MvBmvCoCLaZ4wVI04yHCGSvcAeWghWxSBH0IIF8Q5OFi1pLB7TZXOVP6D3QAabUQ2eJTFg==`.
 Versions `0.1.2`, `0.1.3`, `0.1.13`, and `0.1.19` were not published; their immutable tags are
 preserved failed-release evidence and are not installation or dogfood targets.
 Version `0.1.5` includes the reviewed owner-enrollment, idempotent multi-cube
@@ -27,25 +27,27 @@ contract, and structured, safe role-section conflict reasons. Immutable
 metadata request timed out; its publish job was skipped. Published `0.1.20`
 pins audited exact `borgmcp-shared@0.6.3` and atomically creates or resolves one
 repository-associated cube with the selected Default (legacy), Software
-Development, or Starter template surfaces. Current source is the unpublished
-`borgmcp-server@0.1.21` protocol-v5 adoption hotfix candidate. It pins exact
-published `borgmcp-shared@0.6.4` and adds a mutation-free
+Development, or Starter template surfaces. Published `0.1.21` pins exact
+`borgmcp-shared@0.6.4` and adds a mutation-free
 repository-association resolve operation plus an explicit, manage-authorized
 atomic association operation for adopting legacy cubes after client
 confirmation.
+Current source is the unpublished `borgmcp-server@0.2.0` release candidate.
+It adds the static foreground dashboard, its reusable snapshot and rendering
+surfaces, and an operator-local read-only `dashboard` subcommand.
 Its lock verification is entirely offline: exact versions, canonical npm
 tarball URLs, SHA-512 integrity, root identity, duplicate consistency, and
 install-script boundaries are checked without querying registry metadata.
-Version `0.1.20` remains the install target until the candidate passes
+Version `0.1.21` remains the install target until the candidate passes
 exact-SHA review and authorized immutable tag publication.
 
 Setup prepares local identity and storage, writes owner access to the private
 portable credential file, and prints no credential or invitation; it creates no cube.
 Version `0.1.1` completed the
 documented exact-source, tagged-artifact, and protected-publication gates.
-Versions `0.1.18` and `0.1.20` completed fresh exact-source, tagged-artifact,
-tokenless OIDC publication and provenance gates; `0.1.20` ended at accepted
-publication without a postpublication registry read.
+Versions `0.1.18`, `0.1.20`, and `0.1.21` completed fresh exact-source,
+tagged-artifact, tokenless OIDC publication and provenance gates; `0.1.20` and
+`0.1.21` ended at accepted publication without a postpublication registry read.
 
 ## Repository topology
 

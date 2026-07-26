@@ -137,14 +137,14 @@ The server repository is public; visibility is complete, and `borgmcp-server@0.1
 `borgmcp-server@0.1.8`, `borgmcp-server@0.1.9`, `borgmcp-server@0.1.11`, and
 `borgmcp-server@0.1.12`, `borgmcp-server@0.1.14`, `borgmcp-server@0.1.15`,
 `borgmcp-server@0.1.16`, `borgmcp-server@0.1.17`, and
-`borgmcp-server@0.1.18`, and `borgmcp-server@0.1.20` are live on npm
+`borgmcp-server@0.1.18`, `borgmcp-server@0.1.20`, and `borgmcp-server@0.1.21` are live on npm
 under the sole expected maintainer.
-The `latest` tag resolves to `0.1.20`.
+The `latest` tag resolves to `0.1.21`.
 Versions `0.1.2`, `0.1.3`, `0.1.13`, and `0.1.19` are
 unpublished immutable failure evidence and must never be customer, install, or dogfood targets.
-Versions `0.1.18` and `0.1.20` completed the full exact-source,
+Versions `0.1.18`, `0.1.20`, and `0.1.21` completed the full exact-source,
 tagged-artifact, tokenless OIDC publication and provenance gate chain recorded
-below; `0.1.20` terminated at accepted publication without a postpublication
+below; `0.1.20` and `0.1.21` terminated at accepted publication without a postpublication
 registry read.
 
 The immutable annotated `v0.1.1` tag object
@@ -396,6 +396,17 @@ Publication completed at the terminal `npm publish` boundary with no
 postpublication registry read. Never move, delete, reuse, or rerun that tag or
 workflow.
 
+The immutable annotated `v0.1.21` tag object
+`d30037f0d13f752443d126b03fd81c063740bc6b` peels to protected-main commit
+`ecffe95f73dc6a767c07c774a7a8192cb64ea8c5`. Workflow run `30171059501`,
+attempt 1, built, tested, packed, verified, and published the exact 107-file
+reviewed artifact with tokenless OIDC provenance. The same-run verifier report
+records integrity
+`sha512-g0QH4cKcsKuDyZs1MvBmvCoCLaZ4wVI04yHCGSvcAeWghWxSBH0IIF8Q5OFi1pLB7TZXOVP6D3QAabUQ2eJTFg==`.
+Publication completed at the terminal `npm publish` boundary with no
+postpublication registry read. Never move, delete, reuse, or rerun that tag or
+workflow.
+
 The immutable annotated `v0.1.4` tag object
 `1604077e6249c7c0f7ce17b3f2848caad2bc773e` peels to protected-main merge
 `1f7e60a695f27d92b2d46233b0e3cad5aa43bd0d`, whose tree is byte-identical to reviewed source
@@ -428,22 +439,24 @@ artifacts were produced, and `borgmcp-server` remained unclaimed in the npm regi
 move, delete, or reuse that tag. Recovery uses separately authorized version `0.1.1`, a fresh reviewed
 source and merge commit, pre-tag repository-variable evidence, and a never-before-used annotated tag.
 
-The live `borgmcp-server@0.1.20` package consumes the audited exact
-`borgmcp-shared@0.6.3` registry release. Immutable `v0.1.6`, `v0.1.10`, `v0.1.13`,
+The live `borgmcp-server@0.1.21` package consumes the audited exact
+`borgmcp-shared@0.6.4` registry release. Immutable `v0.1.6`, `v0.1.10`, `v0.1.13`,
 and `v0.1.19` are failed
-prepublication evidence and are not install targets. Current post-`v0.1.20`
+prepublication evidence and are not install targets. Current post-`v0.1.21`
 source pins the published exact `borgmcp-shared@0.6.4` artifact for the
-unpublished `borgmcp-server@0.1.21` adoption hotfix candidate; the shrinkwrap
-binds its canonical registry tarball URL and matching in-run publication SRI.
+unpublished `borgmcp-server@0.2.0` release candidate; the shrinkwrap binds its
+canonical registry tarball URL and matching in-run publication SRI.
 The live package persists truthful advisory Agent CLI, reported-model, and
 working-repository seat metadata, the explicit Queen activation timing contract, and
 structured, safe role-section conflict reasons without changing authority, routes, or rollback
-behavior. The protocol-v5 candidate retains atomic creator-scoped cube creation
+behavior. The live protocol-v5 package retains atomic creator-scoped cube creation
 and adds a mutation-free authoritative repository resolve plus an explicit,
 manage-authorized atomic association operation for legacy cube adoption after
 client confirmation. It never infers identity from a cube name, backfills
 legacy rows, or reports client-local-only success.
-Version `0.1.20` remains the install target until that candidate passes exact-SHA review and an
+The `0.2.0` candidate adds the static foreground dashboard, reusable snapshot
+and rendering surfaces, and the operator-local read-only `dashboard` subcommand.
+Version `0.1.21` remains the install target until that candidate passes exact-SHA review and an
 authorized immutable tag publication. The source-lock, artifact, audit, and consumer gates must pass
 without Git dependencies; SBOM generation is supplemental and outside the publication-critical path.
 Source-lock verification performs no network access. It validates exact dependency versions,

@@ -249,7 +249,7 @@ describe("dashboard renderer", () => {
         pulsePhase: 4,
       },
     );
-    expect(frame).toContain("ALL 3 +@=");
+    expect(frame).toContain("ALL 3 +O=");
   });
 
   it("keeps the embedded footer by default and accepts a sanitized caller footer", () => {
@@ -435,11 +435,11 @@ describe("foreground dashboard lifecycle", () => {
     expect(pulse).not.toBe(before);
     expect(pulse).toContain("/....../|");
     expect(pulse.split("\n").find((line) => line.includes("cube-02"))).toMatch(
-      /^=\s+2 .*@\s*$/u,
+      /^=\s+2 .*O\s*$/u,
     );
     await vi.advanceTimersByTimeAsync(100);
     expect(harness.output.at(-1)!.split("\n").find((line) => line.includes("cube-02"))).toMatch(
-      /^=\s+2 .*!\s*$/u,
+      /^=\s+2 .*o\s*$/u,
     );
     dashboard.close();
   });

@@ -4,7 +4,7 @@ export const DASHBOARD_EVENT_COALESCE_MS = 250;
 export const DASHBOARD_RESIZE_DEBOUNCE_MS = 125;
 export const DASHBOARD_PULSE_FRAME_MS = 125;
 const DASHBOARD_PULSE_PHASES = 4;
-const DASHBOARD_ACTIVITY_PULSE_MARKERS = [" ", "-", "~", "!", "@"] as const;
+const DASHBOARD_ACTIVITY_PULSE_MARKERS = [" ", "_", "-", "o", "O"] as const;
 
 export interface DashboardCubeData {
   readonly id: string;

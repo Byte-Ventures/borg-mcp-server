@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   classifyReleasePullRequest,
@@ -16,6 +16,9 @@ const newVersion = "0.3.0";
 const integrity = `sha512-${"A".repeat(86)}==`;
 const fixturePinPath = "test/version-pin.test.ts";
 const directories: string[] = [];
+
+// Git-backed fixture tests are correctness checks, not performance gates on busy dev machines.
+vi.setConfig({ testTimeout: 30_000 });
 
 afterEach(async () => {
   await Promise.all(directories.splice(0).map((directory) => rm(directory, {

@@ -64,7 +64,8 @@ Before any tag is authorized, the Coordinator configures and verifies:
 - An active tag ruleset protects `refs/tags/v*.*.*` from update, deletion, and non-fast-forward;
   only the designated release operator may create a tag after exact authorization by the Coordinator.
 - The `npm-publish` environment allows only protected `v*.*.*` tags, has no admin bypass, and
-  requires the designated Queen operator to approve the exact same-run artifact deployment.
+  requires the designated Queen operator to approve publication after the exact-artifact `verify`
+  job succeeds.
 - npm ownership is verified and Trusted Publishing is bound to this repository,
   `.github/workflows/release.yml`, and the `npm-publish` environment. Owned-package releases use
   tokenless OIDC; the environment contains only the reviewed `NPM_EXPECTED_OWNER` variable and no
@@ -91,7 +92,7 @@ service artifacts must derive from the same audited npm tarball, pin base images
 their own SBOM and signatures, and pass separate exact-artifact CR/SR/Release Quality gates before
 any preview.
 
-## Verification and artifact audit
+## Verification, publication, and post-publish exercise
 
 1. Merge reviewed source to protected `main`, verify the merge commit and required CI checks, and
    obtain separate release authorization naming the immutable version, annotated tag, and commit.
@@ -107,20 +108,30 @@ any preview.
 5. The verify job uploads only the same-run tarball and verifier report. The report contains the
    package identity, version, and canonical SHA-512 SRI; no checksum bundle, run tuple, rebuild,
    duplicate verification, or critical-path SBOM is needed.
-6. The protected publish job downloads that same-run tarball and verifier report. Its read-only
+6. After `verify` succeeds, the designated Queen operator alone approves the `npm-publish`
+   environment. There is no separate pre-publication exact-artifact Security gate: `verify` is the
+   mechanical authority for the exact bytes that the publish job consumes.
+7. The protected publish job downloads that same-run tarball and verifier report. Its read-only
    preflight rejects a wrong package or version, an existing immutable version, an unclaimed package,
    or ownership other than the sole reviewed `NPM_EXPECTED_OWNER`. It then publishes the tarball once
    through npm Trusted Publishing with provenance, lifecycle scripts disabled, and no long-lived npm
    token.
-7. Successful completion of `npm publish` is the terminal release boundary. There is no
-   post-publication registry readback job: registry metadata and install visibility propagate
-   asynchronously and cannot invalidate an immutable publication after npm accepts it.
-8. Useful SBOM or supplemental report generation may run separately, but cannot gate, invalidate, or
+8. For immutable package bytes, successful completion of `npm publish` is the terminal release boundary.
+   There is no post-publication registry readback job: registry metadata and install visibility propagate
+   asynchronously and cannot invalidate an immutable publication after npm accepts it. Separately,
+   once the release is installable from the canonical registry, install it into an isolated prefix
+   and exercise the real user path end to end. This is product verification, not publication
+   validation: failure routes a new reviewed fix and never invalidates, rebuilds, retags, or reruns
+   the immutable release. Do not repeat byte comparisons, integrity/SRI checks, packed-version
+   checks, source-tree verification, dist-tag readback, or provenance readback.
+9. Useful SBOM or supplemental report generation may run separately, but cannot gate, invalidate, or
    make an otherwise authentic immutable publication ambiguous.
-9. After successful publication, update the README and this runbook in a fresh reviewed
+10. After successful publication, update the README and this runbook in a fresh reviewed
    documentation change so public release claims match the shipped package.
-10. Stop immediately on any mismatch before publication. Preserve every run and tag as immutable
+11. Stop immediately on any mismatch before publication. Preserve every run and tag as immutable
     evidence; recovery uses a newly reviewed source fix, a new version, and a newly authorized tag.
+    If the post-publication check fails, preserve the published identity and route a new reviewed
+    fix; never rerun, replace, or hide the immutable publication.
 
 ## Deterministic release identity preparation
 
@@ -462,8 +473,10 @@ propagation completed. The run and tag remain immutable and must not be rerun, m
 
 Releases through `0.1.17` used bounded postpublish version reads for propagation, integrity,
 signatures, and attestations. That policy is retired: the active workflow performs no read of the
-just-published version, and successful completion of `npm publish` is the terminal release boundary.
-The prior runs remain immutable historical evidence and must not be rerun.
+just-published version. The active release procedure instead performs one operator product check
+after publication: registry install and real-path exercise, without dist-tag or provenance readback
+and without repeating byte, integrity, or packed-version verification. The prior runs remain
+immutable historical evidence and must not be rerun.
 
 The immutable annotated `v0.1.0` tag object
 `0f454997ced06802f0d3a0518c2e294af5a73b56` and first-attempt workflow run `29494436948`

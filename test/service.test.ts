@@ -15,6 +15,7 @@ import {
   assertLanCaKeyOffline,
   acquireRuntimeLock,
   acquireInvitationMintLock,
+  createNodeDashboardTerminal,
   createNodeServerService,
   createOfflineCredentialService,
   isFatalTeardownError,
@@ -36,6 +37,64 @@ function requireFreshSetup(
 }
 
 describe("node server service", () => {
+  it.each([
+    [null, true],
+    [false, true],
+    [true, false],
+  ] as const)("restores the pre-dashboard stdin flow state %s", (readableFlowing, shouldPause) => {
+    const setRawMode = vi.fn();
+    const pause = vi.fn();
+    const stdin = {
+      readableFlowing,
+      isRaw: false,
+      setRawMode,
+      resume: vi.fn(),
+      pause,
+      on: vi.fn(),
+      off: vi.fn(),
+    } as unknown as typeof process.stdin;
+    const stdout = {
+      columns: 80,
+      rows: 24,
+      write: vi.fn(),
+      on: vi.fn(),
+      off: vi.fn(),
+    } as unknown as typeof process.stdout;
+
+    const terminal = createNodeDashboardTerminal(true, { stdin, stdout });
+    const unsubscribe = terminal.onInput!(() => undefined);
+    expect(setRawMode).toHaveBeenCalledWith(true);
+    unsubscribe();
+    expect(setRawMode).toHaveBeenLastCalledWith(false);
+    expect(pause).toHaveBeenCalledTimes(shouldPause ? 1 : 0);
+  });
+
+  it("restores raw and flow state when dashboard input setup fails", () => {
+    const setRawMode = vi.fn();
+    const pause = vi.fn();
+    const stdin = {
+      readableFlowing: null,
+      isRaw: false,
+      setRawMode,
+      resume: vi.fn(() => { throw new Error("resume failed"); }),
+      pause,
+      on: vi.fn(),
+      off: vi.fn(),
+    } as unknown as typeof process.stdin;
+    const stdout = {
+      columns: 80,
+      rows: 24,
+      write: vi.fn(),
+      on: vi.fn(),
+      off: vi.fn(),
+    } as unknown as typeof process.stdout;
+
+    const terminal = createNodeDashboardTerminal(true, { stdin, stdout });
+    expect(() => terminal.onInput!(() => undefined)).toThrow("resume failed");
+    expect(setRawMode.mock.calls).toEqual([[true], [false]]);
+    expect(pause).toHaveBeenCalledOnce();
+  });
+
   it("authorizes explicit invitations with the directly provisioned portable owner credential", async () => {
     const parent = await realpath(await mkdtemp(join(tmpdir(), "borg-owner-invite-")));
     try {

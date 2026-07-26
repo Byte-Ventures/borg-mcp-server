@@ -2,6 +2,8 @@ export const DASHBOARD_ACTIVITY_WINDOW_MS = 15 * 60_000;
 export const DASHBOARD_IDLE_REFRESH_MS = 5_000;
 export const DASHBOARD_EVENT_COALESCE_MS = 250;
 export const DASHBOARD_RESIZE_DEBOUNCE_MS = 125;
+export const DASHBOARD_PULSE_FRAME_MS = 125;
+const DASHBOARD_PULSE_PHASES = 4;
 
 export interface DashboardCubeData {
   readonly id: string;
@@ -54,18 +56,30 @@ export interface DashboardRenderOptions {
   readonly glyphMode: DashboardGlyphMode;
   readonly color: boolean;
   readonly footer?: DashboardFooter;
+  readonly navigation?: boolean;
+}
+
+export interface DashboardViewState {
+  readonly autoFollow: boolean;
+  readonly focusedCubeId: string | null;
+  readonly pulseCubeIds: ReadonlySet<string>;
+  readonly pulsePhase: number;
 }
 
 export type DashboardRenderer = (
   snapshot: DashboardSnapshot,
   columns: number,
   rows: number,
+  view?: DashboardViewState,
 ) => string;
 
 export interface DashboardTerminal {
   readonly write: (value: string) => void;
   readonly dimensions: () => { readonly columns: number; readonly rows: number };
   readonly onResize: (listener: () => void) => () => void;
+  readonly onInput?: (listener: (value: Uint8Array) => void) => () => void;
+  readonly requestInterrupt?: () => void;
+  readonly requestSuspend?: (resume: () => void) => void;
 }
 
 export interface ForegroundDashboard {
@@ -93,7 +107,7 @@ const BOX_GLYPHS: Glyphs = Object.freeze({
   bottomLeft: "└",
   bottomRight: "┘",
   rail: "█",
-  cube: ["▢", "▤", "▥", "▣"] as const,
+  cube: [".", ":", "+", "#"] as const,
   ellipsis: "…",
 });
 
@@ -144,8 +158,16 @@ export function rankDashboardSnapshot(
 
 export function createDashboardRenderer(options: DashboardRenderOptions): DashboardRenderer {
   const glyphs = options.glyphMode === "ascii" ? ASCII_GLYPHS : BOX_GLYPHS;
-  const footer = sanitizeTerminalLabel(options.footer ?? EMBEDDED_DASHBOARD_FOOTER);
-  return (snapshot, columns, rows) => {
+  const baseFooter = sanitizeTerminalLabel(options.footer ?? EMBEDDED_DASHBOARD_FOOTER);
+  const footer = options.navigation === true
+    ? `< > switch  |  a auto  |  ${baseFooter}`
+    : baseFooter;
+  return (snapshot, columns, rows, view = {
+    autoFollow: true,
+    focusedCubeId: null,
+    pulseCubeIds: new Set(),
+    pulsePhase: 0,
+  }) => {
     const width = boundedDimension(columns, 20, 500);
     const height = boundedDimension(rows, 4, 200);
     if (width < 40 || height < 10) return renderPlainDashboard(snapshot, width, height);
@@ -153,11 +175,13 @@ export function createDashboardRenderer(options: DashboardRenderOptions): Dashbo
     const lines: string[] = [];
     lines.push(renderRail(snapshot, width, glyphs, options.color));
     lines.push(glyphs.horizontal.repeat(width));
-    const focus = snapshot.cubes[0];
+    const focus = view.autoFollow || view.focusedCubeId === null
+      ? snapshot.cubes[0]
+      : snapshot.cubes.find((cube) => cube.id === view.focusedCubeId) ?? snapshot.cubes[0];
     if (focus === undefined) {
       lines.push(...renderEmptyPanel(width, glyphs));
     } else {
-      lines.push(...renderFocusPanel(snapshot, focus, width, glyphs, options.color));
+      lines.push(...renderFocusPanel(snapshot, focus, width, glyphs, options.color, view));
     }
     lines.push(glyphs.horizontal.repeat(width));
 
@@ -270,6 +294,7 @@ export function startForegroundDashboard(input: {
   readonly idleRefreshMs?: number;
   readonly eventCoalesceMs?: number;
   readonly resizeDebounceMs?: number;
+  readonly pulseFrameMs?: number;
 }): ForegroundDashboard {
   let closed = false;
   let restored = false;
@@ -277,6 +302,13 @@ export function startForegroundDashboard(input: {
   let idleTimer: ReturnType<typeof setTimeout> | undefined;
   let eventTimer: ReturnType<typeof setTimeout> | undefined;
   let resizeTimer: ReturnType<typeof setTimeout> | undefined;
+  let pulseTimer: ReturnType<typeof setTimeout> | undefined;
+  let autoFollow = true;
+  let focusedCubeId: string | null = null;
+  let pulseCubeIds = new Set<string>();
+  let pulsePhase = 0;
+  let previousPosts = new Map<string, number>();
+  let lastSnapshot: DashboardSnapshot | undefined;
   let rejectFailure!: (error: unknown) => void;
   const failure = new Promise<never>((_resolve, reject) => { rejectFailure = reject; });
 
@@ -289,15 +321,25 @@ export function startForegroundDashboard(input: {
     if (idleTimer !== undefined) clearTimeout(idleTimer);
     if (eventTimer !== undefined) clearTimeout(eventTimer);
     if (resizeTimer !== undefined) clearTimeout(resizeTimer);
+    if (pulseTimer !== undefined) clearTimeout(pulseTimer);
   };
   let unsubscribeSource = (): void => undefined;
   let unsubscribeResize = (): void => undefined;
+  let unsubscribeInput = (): void => undefined;
+  const subscribeInput = (): void => {
+    if (input.terminal.onInput === undefined) return;
+    if (input.terminal.requestInterrupt === undefined) {
+      throw new Error("Dashboard input requires interrupt handling.");
+    }
+    unsubscribeInput = input.terminal.onInput(handleInput);
+  };
   const stop = (): void => {
     if (closed) return;
     closed = true;
     clearTimers();
-    unsubscribeSource();
-    unsubscribeResize();
+    try { unsubscribeSource(); } catch { /* Continue restoring terminal state. */ }
+    try { unsubscribeResize(); } catch { /* Continue restoring terminal state. */ }
+    try { unsubscribeInput(); } catch { /* Continue restoring terminal state. */ }
     restore();
   };
   const fail = (error: unknown): void => {
@@ -318,22 +360,48 @@ export function startForegroundDashboard(input: {
     }
     rejectFailure(error);
   };
-  const render = (): void => {
+  const paint = (): void => {
+    if (closed || lastSnapshot === undefined) return;
+    try {
+      const dimensions = input.terminal.dimensions();
+      input.terminal.write(
+        `${clearScreen}${input.renderer(lastSnapshot, dimensions.columns, dimensions.rows, {
+          autoFollow,
+          focusedCubeId,
+          pulseCubeIds,
+          pulsePhase,
+        })}`,
+      );
+    } catch (error) {
+      fail(error);
+    }
+  };
+  const refresh = (): void => {
     if (closed) return;
     try {
       const snapshot = rankDashboardSnapshot(input.source.read(), input.server, priorRanks);
+      const changedCubeIds = snapshot.cubes
+        .filter((cube) => {
+          const previous = previousPosts.get(cube.id);
+          return previous !== undefined && cube.posts_15m > previous;
+        })
+        .map((cube) => cube.id);
+      previousPosts = new Map(snapshot.cubes.map((cube) => [cube.id, cube.posts_15m]));
+      if (changedCubeIds.length > 0) {
+        pulseCubeIds = new Set(changedCubeIds);
+        pulsePhase = DASHBOARD_PULSE_PHASES;
+        schedulePulse();
+      }
       priorRanks = new Map(snapshot.cubes.map((cube) => [cube.id, cube.rank]));
-      const dimensions = input.terminal.dimensions();
-      input.terminal.write(
-        `${clearScreen}${input.renderer(snapshot, dimensions.columns, dimensions.rows)}`,
-      );
+      lastSnapshot = snapshot;
+      paint();
     } catch (error) {
       fail(error);
     }
   };
   const scheduleIdle = (): void => {
     idleTimer = setTimeout(() => {
-      render();
+      refresh();
       if (!closed) scheduleIdle();
     }, input.idleRefreshMs ?? DASHBOARD_IDLE_REFRESH_MS);
     // Presentation timers never own process lifetime: the embedded server has
@@ -344,7 +412,7 @@ export function startForegroundDashboard(input: {
     if (closed || eventTimer !== undefined) return;
     eventTimer = setTimeout(() => {
       eventTimer = undefined;
-      render();
+      refresh();
     }, input.eventCoalesceMs ?? DASHBOARD_EVENT_COALESCE_MS);
     eventTimer.unref?.();
   };
@@ -353,16 +421,78 @@ export function startForegroundDashboard(input: {
     if (resizeTimer !== undefined) clearTimeout(resizeTimer);
     resizeTimer = setTimeout(() => {
       resizeTimer = undefined;
-      render();
+      paint();
     }, input.resizeDebounceMs ?? DASHBOARD_RESIZE_DEBOUNCE_MS);
     resizeTimer.unref?.();
+  };
+  function schedulePulse(): void {
+    if (closed || pulseTimer !== undefined) return;
+    pulseTimer = setTimeout(() => {
+      pulseTimer = undefined;
+      pulsePhase = Math.max(0, pulsePhase - 1);
+      if (pulsePhase === 0) pulseCubeIds = new Set();
+      paint();
+      if (!closed && pulsePhase > 0) schedulePulse();
+    }, input.pulseFrameMs ?? DASHBOARD_PULSE_FRAME_MS);
+    pulseTimer.unref?.();
+  }
+  const navigate = (direction: -1 | 1): void => {
+    const cubes = lastSnapshot?.cubes ?? [];
+    if (cubes.length === 0) return;
+    const currentIndex = autoFollow || focusedCubeId === null
+      ? 0
+      : Math.max(0, cubes.findIndex((cube) => cube.id === focusedCubeId));
+    const nextIndex = (currentIndex + direction + cubes.length) % cubes.length;
+    autoFollow = false;
+    focusedCubeId = cubes[nextIndex]!.id;
+    paint();
+  };
+  const suspend = (): void => {
+    if (input.terminal.requestSuspend === undefined) return;
+    unsubscribeInput();
+    unsubscribeInput = (): void => undefined;
+    input.terminal.write(alternateScreenRestore);
+    input.terminal.requestSuspend(() => {
+      if (closed) return;
+      try {
+        input.terminal.write(alternateScreenEnter);
+        subscribeInput();
+        refresh();
+      } catch (error) {
+        fail(error);
+      }
+    });
+  };
+  const handleInput = (value: Uint8Array): void => {
+    try {
+      for (const byte of value) {
+        if (byte === 3) {
+          input.terminal.requestInterrupt?.();
+          return;
+        }
+        if (byte === 26) {
+          suspend();
+          return;
+        }
+        if (byte === 60) navigate(-1);
+        else if (byte === 62) navigate(1);
+        else if (byte === 97) {
+          autoFollow = true;
+          focusedCubeId = null;
+          paint();
+        }
+      }
+    } catch (error) {
+      fail(error);
+    }
   };
 
   try {
     input.terminal.write(alternateScreenEnter);
     unsubscribeSource = input.source.subscribe(scheduleEvent);
     unsubscribeResize = input.terminal.onResize(scheduleResize);
-    render();
+    subscribeInput();
+    refresh();
     if (!closed) scheduleIdle();
   } catch (error) {
     stop();
@@ -400,6 +530,7 @@ function renderFocusPanel(
   width: number,
   glyphs: Glyphs,
   color: boolean,
+  view: DashboardViewState,
 ): string[] {
   const inner = Math.max(1, width - 2);
   const nameWidth = Math.max(8, inner - 13);
@@ -414,11 +545,16 @@ function renderFocusPanel(
   const top = glyphs.topLeft +
     title + glyphs.horizontal.repeat(Math.max(0, inner - displayWidth(title))) +
     glyphs.topRight;
+  const pulse = view.pulseCubeIds.has(cube.id)
+    ? Math.max(0, Math.min(DASHBOARD_PULSE_PHASES, Math.floor(view.pulsePhase)))
+    : 0;
+  const fill = [".", ":", "+", "*", "#"][pulse]!;
   const art = glyphs === ASCII_GLYPHS
-    ? ["  +------+  ", " /#=+.#/| ", "+------+ |", "|+=#.+=|/ ", "+------+  "]
-    : ["  ┌──────┐  ", " /▣▤▥▢▣/│ ", "┌──────┐ │", "│▤▥▢▣▤│/ ", "└──────┘  "];
+    ? ["  +------+  ", ` /${fill.repeat(6)}/| `, "+------+ |", `|${fill.repeat(6)}|/ `, "+------+  "]
+    : ["  ┌──────┐  ", ` /${fill.repeat(6)}/│ `, "┌──────┐ │", `│${fill.repeat(6)}│/ `, "└──────┘  "];
+  const artWidth = Math.max(...art.map(displayWidth)) + 1;
   const facts = [
-    `${name} #${cube.rank}`,
+    `${name} #${cube.rank}${view.autoFollow ? " (auto)" : ""}`,
     `${rate}  ${cube.distinct_posting_drones_15m} posting drones`,
     `${cube.drones_seen_15m}/${cube.drones_total} drones seen/15m`,
     `last post ${formatAge(snapshot.captured_at, cube.last_post_at)}`,
@@ -426,7 +562,8 @@ function renderFocusPanel(
   ];
   const lines = art.map((line, index) => {
     const fact = facts[index] ?? "";
-    const body = `${line}${index === 0 && color ? amber : ""}${fact}${index === 0 && color ? reset : ""}`;
+    const body = `${fitCell(line, artWidth)}${index === 0 && color ? amber : ""}` +
+      `${fact}${index === 0 && color ? reset : ""}`;
     return `${glyphs.vertical}${fitCell(body, inner, " ", glyphs.ellipsis)}${glyphs.vertical}`;
   });
   return [top, ...lines, `${glyphs.bottomLeft}${glyphs.horizontal.repeat(inner)}${glyphs.bottomRight}`];

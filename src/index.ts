@@ -53,6 +53,7 @@ export type {
   DashboardServerIdentity,
   DashboardSnapshot,
   DashboardSnapshotSource,
+  DashboardViewState,
 } from "./dashboard.js";
 export { createRuntimeOperator } from "./runtime-operator.js";
 export { RuntimeUpdateFailure } from "./runtime-operator.js";

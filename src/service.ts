@@ -72,6 +72,7 @@ import {
   startForegroundDashboard,
   type DashboardServerIdentity,
   type DashboardSnapshotSource,
+  type DashboardTerminal,
   type ForegroundDashboard,
 } from "./dashboard.js";
 import {
@@ -538,26 +539,18 @@ const startOnlyService = createNodeServerService({
   },
   startForegroundDashboard: ({ source, server, asciiRequested }) => {
     if (!supportsForegroundDashboard()) return undefined;
+    const navigation = supportsDashboardNavigation();
     return startForegroundDashboard({
       source,
       server,
-      terminal: {
-        write: (value) => { process.stdout.write(value); },
-        dimensions: () => ({
-          columns: process.stdout.columns ?? 80,
-          rows: process.stdout.rows ?? 24,
-        }),
-        onResize: (listener) => {
-          process.stdout.on("resize", listener);
-          return () => process.stdout.off("resize", listener);
-        },
-      },
+      terminal: createNodeDashboardTerminal(navigation),
       renderer: createDashboardRenderer({
         glyphMode: selectDashboardGlyphMode({
           asciiRequested,
           environment: process.env,
         }),
         color: dashboardColorEnabled(process.env),
+        navigation,
       }),
     });
   },
@@ -655,20 +648,11 @@ async function runNodeDashboardViewer(
       return;
     }
     const shutdown = installProcessShutdownHandlers();
+    const navigation = supportsDashboardNavigation();
     const dashboard = startForegroundDashboard({
       source,
       server,
-      terminal: {
-        write: (value) => { process.stdout.write(value); },
-        dimensions: () => ({
-          columns: process.stdout.columns ?? 80,
-          rows: process.stdout.rows ?? 24,
-        }),
-        onResize: (listener) => {
-          process.stdout.on("resize", listener);
-          return () => process.stdout.off("resize", listener);
-        },
-      },
+      terminal: createNodeDashboardTerminal(navigation),
       renderer: createDashboardRenderer({
         glyphMode: selectDashboardGlyphMode({
           asciiRequested: options.ascii,
@@ -676,6 +660,7 @@ async function runNodeDashboardViewer(
         }),
         color: dashboardColorEnabled(process.env),
         footer: STANDALONE_DASHBOARD_FOOTER,
+        navigation,
       }),
     });
     try {
@@ -1112,6 +1097,81 @@ function supportsForegroundDashboard(): boolean {
 
 function supportsStandaloneDashboard(): boolean {
   return process.stdout.isTTY === true && process.env["TERM"] !== "dumb";
+}
+
+function supportsDashboardNavigation(): boolean {
+  return process.stdin.isTTY === true && process.stdin.setRawMode !== undefined;
+}
+
+export function createNodeDashboardTerminal(
+  navigation: boolean,
+  streams: {
+    readonly stdin: typeof process.stdin;
+    readonly stdout: typeof process.stdout;
+  } = { stdin: process.stdin, stdout: process.stdout },
+): DashboardTerminal {
+  const { stdin, stdout } = streams;
+  const base = {
+    write: (value: string): void => { stdout.write(value); },
+    dimensions: (): { readonly columns: number; readonly rows: number } => ({
+      columns: stdout.columns ?? 80,
+      rows: stdout.rows ?? 24,
+    }),
+    onResize: (listener: () => void): (() => void) => {
+      stdout.on("resize", listener);
+      return () => stdout.off("resize", listener);
+    },
+  };
+  if (!navigation) return base;
+  return {
+    ...base,
+    onInput: (listener) => {
+      const wasFlowing = stdin.readableFlowing === true;
+      const wasRaw = stdin.isRaw === true;
+      const onData = (value: Buffer | string): void => {
+        listener(Buffer.from(value));
+      };
+      let subscribed = false;
+      const restoreInput = (): void => {
+        if (subscribed) {
+          stdin.off("data", onData);
+          subscribed = false;
+        }
+        try {
+          stdin.setRawMode!(wasRaw);
+        } finally {
+          if (!wasFlowing) stdin.pause();
+        }
+      };
+      stdin.setRawMode!(true);
+      try {
+        stdin.resume();
+        stdin.on("data", onData);
+        subscribed = true;
+      } catch (error) {
+        restoreInput();
+        throw error;
+      }
+      return restoreInput;
+    },
+    requestInterrupt: () => { process.kill(process.pid, "SIGINT"); },
+    ...(process.platform === "win32"
+      ? {}
+      : {
+          requestSuspend: (resume: () => void) => {
+            process.once("SIGCONT", resume);
+            try {
+              // Raw mode turns ^Z into a byte. Stop the entire foreground group
+              // so every terminal process suspends and the shell can resume the
+              // job as one unit. SIGSTOP also works for orphaned PTY groups.
+              process.kill(0, "SIGSTOP");
+            } catch (error) {
+              process.off("SIGCONT", resume);
+              throw error;
+            }
+          },
+        }),
+  };
 }
 
 function waitForAbort(signal: AbortSignal): Promise<void> {

@@ -46,7 +46,9 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
-    "verify:artifact": "node scripts/verify-packed-artifact.mjs"
+    "verify:artifact": "node scripts/verify-packed-artifact.mjs",
+    "release:prepare": "node scripts/release-identity.mjs prepare",
+    "verify:release-identity": "node scripts/release-identity.mjs verify"
   },
   "devDependencies": {
     "@types/node": "22.20.1",

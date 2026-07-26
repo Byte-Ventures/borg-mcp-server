@@ -86,7 +86,7 @@ export interface ServerService {
   readonly setup?: (options: SetupOptions) => Promise<ServerSetupResult>;
   readonly status?: () => Promise<ServerRuntimeStatus>;
   readonly stop?: () => Promise<ServerStopResult>;
-  readonly update?: () => Promise<RuntimeUpdateResult>;
+  readonly update?: () => Promise<ServerUpdateResult>;
   readonly rotateClient?: (clientId: string) => Promise<string>;
   readonly revokeClient?: (clientId: string) => Promise<void>;
   readonly grantClient?: (clientId: string, cubeId: string, access: CubeAccess) => Promise<void>;
@@ -127,7 +127,16 @@ export interface ServerRuntimeStatus {
   readonly mode: "foreground" | "managed" | "legacy" | "stopped";
   readonly serviceAdapter: "launchd" | "systemd" | null;
   readonly dataIdentity: "available" | "unavailable";
-  readonly nextAction: "borg-mcp-server update" | null;
+  readonly nextAction: ServerNextAction | null;
+}
+
+export type ServerNextAction =
+  | { readonly kind: "update-runtime" }
+  | { readonly kind: "install-controller"; readonly version: string };
+
+export interface ServerUpdateResult extends RuntimeUpdateResult {
+  readonly controllerVersion: string;
+  readonly nextAction: ServerNextAction | null;
 }
 
 export interface ServerStopResult {
@@ -599,7 +608,7 @@ export const nodeServerService: ServerService = {
     };
   },
   status: () => inspectNodeRuntime(dataDirectory, runtimeDirectory),
-  update: () => nodeRuntimeController.updateLatest(30_000),
+  update: async () => completeRuntimeUpdate(await nodeRuntimeController.updateLatest(30_000)),
   stop: () => nodeRuntimeController.stopRuntime(20_000),
   ...createOfflineCredentialService(dataDirectory, credentialFile),
 };
@@ -774,11 +783,10 @@ export async function inspectNodeRuntime(
     version: identity.package_version,
     integrity: identity.artifact_integrity,
   };
-  const nextAction = (activeArtifact !== null &&
-      versionIsNewer(SERVER_PACKAGE_VERSION, activeArtifact.version)) ||
-      (runningArtifact !== null && versionIsNewer(SERVER_PACKAGE_VERSION, runningArtifact.version))
-    ? "borg-mcp-server update" as const
-    : null;
+  const effectiveRuntime = runningArtifact ?? activeArtifact;
+  const nextAction = effectiveRuntime === null
+    ? null
+    : resolveControllerNextAction(SERVER_PACKAGE_VERSION, effectiveRuntime.version);
   return Object.freeze({
     status: lock.running ? "running" : "stopped",
     controllerVersion: SERVER_PACKAGE_VERSION,
@@ -826,6 +834,30 @@ export async function stopServerRuntime(input: {
   } finally {
     clearTimeout(timer);
   }
+}
+
+export function completeRuntimeUpdate(
+  result: RuntimeUpdateResult,
+  controllerVersion = SERVER_PACKAGE_VERSION,
+): ServerUpdateResult {
+  return Object.freeze({
+    ...result,
+    controllerVersion,
+    nextAction: resolveControllerNextAction(controllerVersion, result.artifact.version),
+  });
+}
+
+function resolveControllerNextAction(
+  controllerVersion: string,
+  runtimeVersion: string,
+): ServerNextAction | null {
+  if (versionIsNewer(controllerVersion, runtimeVersion)) {
+    return Object.freeze({ kind: "update-runtime" });
+  }
+  if (versionIsNewer(runtimeVersion, controllerVersion)) {
+    return Object.freeze({ kind: "install-controller", version: runtimeVersion });
+  }
+  return null;
 }
 
 function versionIsNewer(candidate: string, current: string): boolean {

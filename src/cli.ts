@@ -17,7 +17,7 @@ Commands:
   dashboard [--ascii]  View the running local server without stopping it
   status [--json]  Report exact local runtime evidence
   version [--json]  Report the installed controller version
-  update [--json]  Verify and activate the latest server artifact
+  update [--json]  Verify the latest runtime and report any controller step
   stop [--json]  Stop the managed local server
   invite   Create a single-use invitation in an interactive terminal.
   client-rotate <client-id>  Rotate one client credential offline
@@ -151,7 +151,7 @@ export async function runCli(
           mode: status.mode,
           service_adapter: status.serviceAdapter,
           data_identity: status.dataIdentity,
-          next_action: status.nextAction,
+          next_action: renderNextAction(status.nextAction),
         }));
       } else {
         io.stdout(renderRuntimeStatus(status));
@@ -188,11 +188,16 @@ export async function runCli(
       if (extraArgs[0] === "--json" || io.isTTY === false) {
         io.stdout(JSON.stringify({
           status: result.outcome,
+          installed_controller: `borgmcp-server@${result.controllerVersion}`,
           artifact: `borgmcp-server@${result.artifact.version}`,
           artifact_integrity: result.artifact.integrity,
+          running_runtime: result.runningIdentity === null
+            ? null
+            : `borgmcp-server@${result.runningIdentity.package_version}`,
           build_identity: result.runningIdentity?.source_sha ?? result.artifact.sourceSha,
           mode: result.outcome === "updated" ? "managed" : "stopped",
           data_identity: result.dataIdentity,
+          next_action: renderNextAction(result.nextAction),
         }));
       } else if (result.outcome === "updated") {
         io.stdout([
@@ -202,8 +207,9 @@ export async function runCli(
           `Local server is running.`,
           `Artifact: borgmcp-server@${result.artifact.version} (${result.artifact.integrity})`,
           `Build identity: ${result.runningIdentity?.source_sha ?? "unavailable"}`,
+          ...renderControllerCompletion(result.controllerVersion, result.artifact.version),
           "Data and identity: preserved",
-          "Next: borg-mcp-server status",
+          `Next: ${renderNextAction(result.nextAction) ?? "borg-mcp-server status"}`,
         ].join("\n"));
       } else {
         io.stdout([
@@ -212,8 +218,9 @@ export async function runCli(
           "No server process started.",
           `Artifact: borgmcp-server@${result.artifact.version} (${result.artifact.integrity})`,
           `Build identity: ${result.artifact.sourceSha ?? "unavailable"}`,
+          ...renderControllerCompletion(result.controllerVersion, result.artifact.version),
           "Data and identity: preserved",
-          "Next: borg-mcp-server start",
+          `Next: ${renderNextAction(result.nextAction) ?? "borg-mcp-server start"}`,
         ].join("\n"));
       }
       return 0;
@@ -352,8 +359,27 @@ function renderRuntimeStatus(status: Awaited<ReturnType<NonNullable<ServerServic
       : status.mode}`,
     `Data and identity: ${status.dataIdentity}`,
   ];
-  if (status.nextAction !== null) lines.push(`Next: ${status.nextAction}.`);
+  const nextAction = renderNextAction(status.nextAction);
+  if (nextAction !== null) lines.push(`Next: ${nextAction}.`);
   return lines.join("\n");
+}
+
+function renderControllerCompletion(
+  controllerVersion: string,
+  runtimeVersion: string,
+): readonly string[] {
+  return controllerVersion === runtimeVersion
+    ? []
+    : [`Installed controller remains: borgmcp-server@${controllerVersion}`];
+}
+
+function renderNextAction(
+  action: Awaited<ReturnType<NonNullable<ServerService["status"]>>>["nextAction"],
+): string | null {
+  if (action === null) return null;
+  return action.kind === "update-runtime"
+    ? "borg-mcp-server update"
+    : `npm install --global borgmcp-server@${action.version}`;
 }
 
 function parseClientInviteArguments(

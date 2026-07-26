@@ -149,7 +149,7 @@ describe("runCli", () => {
       mode: "managed",
       serviceAdapter: "launchd",
       dataIdentity: "available",
-      nextAction: "borg-mcp-server update",
+      nextAction: { kind: "update-runtime" },
     });
     const service: ServerService = { start: vi.fn(), status };
     const tty = { ...createIo(), isTTY: true };
@@ -177,6 +177,41 @@ describe("runCli", () => {
       next_action: "borg-mcp-server update",
     });
     expect(status).toHaveBeenCalledTimes(2);
+  });
+
+  it("renders the exact controller completion action from status in both output modes", async () => {
+    const status = vi.fn().mockResolvedValue({
+      status: "running",
+      controllerVersion: "0.2.0",
+      preparedArtifact: {
+        version: "0.3.0",
+        integrity: `sha512-${"A".repeat(86)}==`,
+      },
+      runningArtifact: {
+        version: "0.3.0",
+        integrity: `sha512-${"A".repeat(86)}==`,
+      },
+      buildIdentity: "a".repeat(40),
+      endpoint: "https://127.0.0.1:7091",
+      mode: "managed",
+      serviceAdapter: "launchd",
+      dataIdentity: "available",
+      nextAction: { kind: "install-controller", version: "0.3.0" },
+    });
+    const service: ServerService = { start: vi.fn(), status };
+    const tty = { ...createIo(), isTTY: true };
+    const machine = { ...createIo(), isTTY: false };
+
+    expect(await runCli(["status"], service, tty)).toBe(0);
+    expect(tty.stdout).toHaveBeenCalledWith(expect.stringContaining(
+      "Next: npm install --global borgmcp-server@0.3.0.",
+    ));
+    expect(await runCli(["status", "--json"], service, machine)).toBe(0);
+    expect(JSON.parse(machine.stdout.mock.calls[0]![0])).toMatchObject({
+      installed_controller: "borgmcp-server@0.2.0",
+      running_runtime: "borgmcp-server@0.3.0",
+      next_action: "npm install --global borgmcp-server@0.3.0",
+    });
   });
 
   it("reports the installed controller version and stops managed service idempotently", async () => {
@@ -242,6 +277,8 @@ describe("runCli", () => {
         started_at: "2026-07-21T12:00:00.000Z",
       },
       dataIdentity: "preserved",
+      controllerVersion: "0.3.0",
+      nextAction: null,
     });
     const service: ServerService = { start: vi.fn(), update };
     const io = { ...createIo(), isTTY: true };
@@ -250,6 +287,50 @@ describe("runCli", () => {
     expect(io.stdout).toHaveBeenCalledWith(expect.stringContaining("Artifact verified and activated."));
     expect(io.stdout).toHaveBeenCalledWith(expect.stringContaining("Data and identity: preserved"));
     expect(io.stdout.mock.calls[0]![0]).not.toContain("/private/runtime");
+  });
+
+  it("makes a newer runtime's remaining controller install explicit in TTY and JSON", async () => {
+    const update = vi.fn().mockResolvedValue({
+      outcome: "updated",
+      artifact: {
+        artifactDirectory: "/runtime/artifacts/candidate",
+        packageDirectory: "/runtime/artifacts/candidate/package",
+        version: "0.3.0",
+        integrity: `sha512-${"A".repeat(86)}==`,
+        sourceSha: "a".repeat(40),
+        treeSha256: "b".repeat(64),
+      },
+      runningIdentity: {
+        package_version: "0.3.0",
+        artifact_integrity: `sha512-${"A".repeat(86)}==`,
+        source_sha: "a".repeat(40),
+        protocol_version: "5",
+        started_at: "2026-07-26T12:00:00.000Z",
+      },
+      dataIdentity: "preserved",
+      controllerVersion: "0.2.0",
+      nextAction: { kind: "install-controller", version: "0.3.0" },
+    });
+    const service: ServerService = { start: vi.fn(), update };
+    const tty = { ...createIo(), isTTY: true };
+    const machine = { ...createIo(), isTTY: false };
+
+    expect(await runCli(["update"], service, tty)).toBe(0);
+    expect(tty.stdout).toHaveBeenCalledWith(expect.stringContaining(
+      "Installed controller remains: borgmcp-server@0.2.0",
+    ));
+    expect(tty.stdout).toHaveBeenCalledWith(expect.stringContaining(
+      "Next: npm install --global borgmcp-server@0.3.0",
+    ));
+
+    expect(await runCli(["update"], service, machine)).toBe(0);
+    expect(JSON.parse(machine.stdout.mock.calls[0]![0])).toMatchObject({
+      status: "updated",
+      installed_controller: "borgmcp-server@0.2.0",
+      artifact: "borgmcp-server@0.3.0",
+      running_runtime: "borgmcp-server@0.3.0",
+      next_action: "npm install --global borgmcp-server@0.3.0",
+    });
   });
 
   it("rotates and revokes clients only through explicit offline commands", async () => {

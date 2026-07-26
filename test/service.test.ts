@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { access, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { access, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -18,8 +18,12 @@ import {
   createNodeDashboardTerminal,
   createNodeServerService,
   createOfflineCredentialService,
+  completeRuntimeUpdate,
   isFatalTeardownError,
+  inspectManagedServiceState,
+  inspectNodeRuntime,
   inspectRuntimeLock,
+  recoverStaleRuntimeLock,
   stopServerRuntime,
   resolveStorageLimits,
   selectServerEnvironment,
@@ -28,6 +32,7 @@ import {
 import { createRuntimeBuildIdentity } from "../src/runtime-identity.js";
 import { writePortableServerCredential } from "../src/portable-credential-store.js";
 import type { ForegroundDashboard } from "../src/dashboard.js";
+import { createManagedServiceDefinition } from "../src/managed-service.js";
 
 function requireFreshSetup(
   result: Awaited<ReturnType<typeof setupNodeServerInstallation>>,
@@ -506,6 +511,280 @@ describe("node server service", () => {
       }), { mode: 0o600 });
       await expect(inspectRuntimeLock(directory)).rejects.toThrow(
         "A live process owns runtime.lock. Stop the server through a supported command; do not remove the lock.",
+      );
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("returns bounded stale-lock evidence when a valid server lock has no live owner", async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-stale-runtime-lock-")));
+    const identity = createRuntimeBuildIdentity({
+      artifactIntegrity: `sha512-${"A".repeat(86)}==`,
+      startedAt: new Date("2026-07-26T12:00:00.000Z"),
+    });
+    try {
+      await writeFile(join(directory, "runtime.lock"), JSON.stringify({
+        pid: 2_147_483_647,
+        nonce: randomUUID(),
+        purpose: "server",
+        mode: "managed",
+        runtime_identity: identity,
+        endpoint: "https://127.0.0.1:7091",
+      }), { mode: 0o600 });
+
+      await expect(inspectRuntimeLock(directory)).resolves.toEqual({
+        running: false,
+        stale: {
+          pid: 2_147_483_647,
+          identity,
+          endpoint: "https://127.0.0.1:7091",
+          mode: "managed",
+        },
+      });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("distinguishes an inactive managed definition from no service adapter", async () => {
+    const dataDirectory = await realpath(await mkdtemp(join(tmpdir(), "borg-service-state-data-")));
+    const runtimeDirectory = await realpath(await mkdtemp(join(tmpdir(), "borg-service-state-runtime-")));
+    const inspect = inspectNodeRuntime as unknown as (
+      data: string,
+      runtime: string,
+      inspectService: () => Promise<{
+        readonly state: "active" | "inactive" | "absent";
+        readonly adapter: "launchd" | "systemd" | null;
+        readonly recoveryCommand: readonly string[] | null;
+      }>,
+    ) => Promise<{
+      readonly serviceState: "active" | "inactive" | "absent";
+      readonly serviceAdapter: "launchd" | "systemd" | null;
+      readonly serviceRecoveryCommand: readonly string[] | null;
+    }>;
+    try {
+      const inactive = await inspect(dataDirectory, runtimeDirectory, async () => ({
+        state: "inactive",
+        adapter: "launchd",
+        recoveryCommand: [
+          "launchctl",
+          "bootstrap",
+          "gui/501",
+          "/Users/operator/Library/LaunchAgents/ai.borgmcp.server.plist",
+        ],
+      }));
+      const absent = await inspect(dataDirectory, runtimeDirectory, async () => ({
+        state: "absent",
+        adapter: null,
+        recoveryCommand: null,
+      }));
+
+      expect(inactive).toMatchObject({
+        serviceState: "inactive",
+        serviceAdapter: "launchd",
+        serviceRecoveryCommand: [
+          "launchctl",
+          "bootstrap",
+          "gui/501",
+          "/Users/operator/Library/LaunchAgents/ai.borgmcp.server.plist",
+        ],
+      });
+      expect(absent).toMatchObject({
+        serviceState: "absent",
+        serviceAdapter: null,
+        serviceRecoveryCommand: null,
+      });
+    } finally {
+      await rm(dataDirectory, { recursive: true, force: true });
+      await rm(runtimeDirectory, { recursive: true, force: true });
+    }
+  });
+
+  it("inspects active, inactive, absent, and unsafe managed service definitions separately", async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-managed-inspect-")));
+    const definitionPath = join(directory, "ai.borgmcp.server.plist");
+    const definition = createManagedServiceDefinition({
+      platform: "launchd",
+      nodeExecutable: "/usr/bin/node",
+      runtimeRoot: "/private/runtime",
+      dataDirectory: "/private/data",
+      definitionPath,
+      launchdDomain: "gui/501",
+    });
+    const run = vi.fn();
+    try {
+      run.mockRejectedValueOnce(new Error("unloaded"));
+      await expect(inspectManagedServiceState(definition, run)).resolves.toEqual({
+        state: "absent",
+        adapter: null,
+        recoveryCommand: null,
+      });
+
+      await writeFile(definitionPath, definition.content, { mode: 0o600 });
+      run.mockRejectedValueOnce(new Error("unloaded"));
+      await expect(inspectManagedServiceState(definition, run)).resolves.toEqual({
+        state: "inactive",
+        adapter: "launchd",
+        recoveryCommand: definition.install,
+      });
+
+      run.mockResolvedValueOnce({ stdout: "state = exited\n", stderr: "" });
+      await expect(inspectManagedServiceState(definition, run)).resolves.toEqual({
+        state: "inactive",
+        adapter: "launchd",
+        recoveryCommand: definition.recoverLoaded,
+      });
+
+      run.mockResolvedValueOnce({ stdout: "state = running\n", stderr: "" });
+      await expect(inspectManagedServiceState(definition, run)).resolves.toEqual({
+        state: "active",
+        adapter: "launchd",
+        recoveryCommand: null,
+      });
+
+      await rm(definitionPath);
+      const unsafeDefinition = { ...definition, definitionPath: directory };
+      run.mockRejectedValueOnce(new Error("unloaded"));
+      await expect(inspectManagedServiceState(unsafeDefinition, run)).rejects.toThrow(
+        "Ensure the managed service definition is a regular file, then retry.",
+      );
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("reports managed service state across running, inactive-defined, and absent updates", () => {
+    const artifact = {
+      artifactDirectory: "/runtime/artifacts/candidate",
+      packageDirectory: "/runtime/artifacts/candidate/package",
+      version: "0.3.0",
+      integrity: `sha512-${"A".repeat(86)}==`,
+      sourceSha: "a".repeat(40),
+      treeSha256: "b".repeat(64),
+    };
+    const prepared = {
+      outcome: "prepared" as const,
+      artifact,
+      runningIdentity: null,
+      dataIdentity: "preserved" as const,
+    };
+    const command = [
+      "launchctl",
+      "bootstrap",
+      "gui/501",
+      "/Users/operator/Library/LaunchAgents/ai.borgmcp.server.plist",
+    ] as const;
+
+    expect(completeRuntimeUpdate(prepared, "0.3.0", {
+      state: "inactive",
+      adapter: "launchd",
+      recoveryCommand: command,
+    })).toMatchObject({
+      serviceState: "inactive",
+      serviceAdapter: "launchd",
+      serviceRecoveryCommand: command,
+    });
+    expect(completeRuntimeUpdate(prepared, "0.3.0", {
+      state: "absent",
+      adapter: null,
+      recoveryCommand: null,
+    })).toMatchObject({
+      serviceState: "absent",
+      serviceAdapter: null,
+      serviceRecoveryCommand: null,
+    });
+    expect(completeRuntimeUpdate({
+      ...prepared,
+      outcome: "updated",
+      runningIdentity: createRuntimeBuildIdentity({
+        artifactIntegrity: artifact.integrity,
+        startedAt: new Date("2026-07-26T12:00:00.000Z"),
+      }),
+    }, "0.3.0", {
+      state: "active",
+      adapter: "launchd",
+      recoveryCommand: null,
+    })).toMatchObject({
+      serviceState: "active",
+      serviceAdapter: "launchd",
+      serviceRecoveryCommand: null,
+      runningIdentity: { package_version: "0.3.0" },
+    });
+  });
+
+  it("revalidates and preserves a stale runtime lock without starting or deleting evidence", async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-stale-recovery-")));
+    const identity = createRuntimeBuildIdentity({
+      artifactIntegrity: `sha512-${"A".repeat(86)}==`,
+      startedAt: new Date("2026-07-26T12:00:00.000Z"),
+    });
+    const record = {
+      pid: 2_147_483_647,
+      nonce: randomUUID(),
+      purpose: "server",
+      mode: "managed",
+      runtime_identity: identity,
+      endpoint: "https://127.0.0.1:7091",
+    };
+    try {
+      await writeFile(join(directory, "runtime.lock"), JSON.stringify(record), { mode: 0o600 });
+      const recovered = await recoverStaleRuntimeLock(
+        directory,
+        () => new Date("2026-07-26T12:34:56.789Z"),
+      );
+
+      expect(recovered).toMatchObject({
+        backupPath: expect.stringContaining("runtime.lock.stale-20260726T123456789Z-"),
+        stale: {
+          pid: record.pid,
+          identity,
+          endpoint: record.endpoint,
+          mode: "managed",
+        },
+      });
+      await expect(access(join(directory, "runtime.lock"))).rejects.toMatchObject({ code: "ENOENT" });
+      await expect(readFile(recovered.backupPath, "utf8")).resolves.toBe(JSON.stringify(record));
+      expect((await readdir(directory)).filter((name) => name.startsWith("runtime.lock.stale-")))
+        .toHaveLength(1);
+      await expect(recoverStaleRuntimeLock(directory)).rejects.toThrow(
+        "No safely recoverable stale runtime lock was found.",
+      );
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses stale-lock recovery for live, invalid, and unsafe lock evidence", async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-stale-refusal-")));
+    try {
+      const live = await acquireRuntimeLock(directory, "server");
+      await expect(recoverStaleRuntimeLock(directory)).rejects.toThrow(
+        "No safely recoverable stale runtime lock was found.",
+      );
+      await live.release();
+
+      await writeFile(join(directory, "runtime.lock"), JSON.stringify({
+        pid: 2_147_483_647,
+        purpose: "server",
+        runtime_identity: { package_version: "not-a-version" },
+      }), { mode: 0o600 });
+      await expect(recoverStaleRuntimeLock(directory)).rejects.toThrow(
+        "Confirm the server is stopped, then remove the invalid runtime.lock.",
+      );
+      await rm(join(directory, "runtime.lock"));
+      await writeFile(join(directory, "runtime.lock"), JSON.stringify({
+        pid: 2_147_483_647,
+        purpose: "server",
+        mode: "foreground",
+      }), { mode: 0o600 });
+      await expect(recoverStaleRuntimeLock(directory)).rejects.toThrow(
+        "Confirm the server is stopped, then remove the invalid runtime.lock.",
+      );
+      await rm(join(directory, "runtime.lock"));
+      await writeFile(join(directory, "runtime.lock"), "unsafe", { mode: 0o644 });
+      await expect(recoverStaleRuntimeLock(directory)).rejects.toThrow(
+        "Ensure runtime.lock is a private regular file before retrying.",
       );
     } finally {
       await rm(directory, { recursive: true, force: true });

@@ -94,13 +94,15 @@ v1 scope.
   refuses any existing or partial installation by default; only the explicit destructive
   `setup --reinitialize` path removes the known identity/database files, and it can never run while
   the server lock is live. Unrelated files in the data directory are not removed.
-- SIGINT/SIGTERM handlers are installed before runtime-lock acquisition. A signal observed during key,
+- SIGINT/SIGTERM/SIGHUP handlers are installed before runtime-lock acquisition. A signal observed during key,
   certificate, store, or listener startup completes that in-flight phase only to acquire cleanup
   ownership, then closes any listener, destroys authentication state, wipes the loaded key, and removes
   `runtime.lock`; the lock is never released ahead of listener/authentication teardown. If listener or
   authentication closure cannot be positively confirmed, the process retains those resources and the
   lock, emits only a sanitized fatal message, and exits nonzero so the operating system closes sockets;
-  operators must investigate before explicitly removing the resulting stale lock.
+  operators must investigate before using the explicit stale-lock recovery command. That command
+  revalidates a private, structurally valid server lock with a conclusively absent PID and renames it
+  to preserve evidence; it never deletes a lock or acts on ambiguous/live evidence.
 - Setup intentionally prints the recovery credential and owner enrollment invitation once to the invoking
   terminal. Rotation intentionally prints the new client credential once. These are the only
   secret-output exceptions: operators must use a private terminal and must not capture command output

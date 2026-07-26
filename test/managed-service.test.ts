@@ -61,5 +61,52 @@ describe("managed service adapters", () => {
       definitionPath: "/service",
       launchdDomain: "system",
     })).toThrow();
+    expect(() => createManagedServiceDefinition({
+      platform: "launchd",
+      nodeExecutable: "/node",
+      runtimeRoot: "/runtime",
+      dataDirectory: "/data",
+      definitionPath: "/service",
+      launchdDomain: "gui/501",
+      label: "invalid label",
+    })).toThrow("Managed service label is invalid.");
+    expect(() => createManagedServiceDefinition({
+      platform: "launchd",
+      nodeExecutable: "/node",
+      runtimeRoot: "/runtime",
+      dataDirectory: "/data",
+      definitionPath: "/service",
+      launchdDomain: "gui/501",
+      port: 70_000,
+    })).toThrow("Managed service port is invalid.");
+  });
+
+  it("supports a bounded unique launchd label for isolated lifecycle exercises", () => {
+    const definition = createManagedServiceDefinition({
+      platform: "launchd",
+      nodeExecutable: "/usr/bin/node",
+      runtimeRoot: "/private/runtime",
+      dataDirectory: "/private/data",
+      definitionPath: "/private/ai.borgmcp.server.test.plist",
+      launchdDomain: "gui/501",
+      label: "ai.borgmcp.server.test-154",
+      port: 0,
+    });
+
+    expect(definition.label).toBe("ai.borgmcp.server.test-154");
+    expect(definition.content).toContain(
+      "<key>Label</key><string>ai.borgmcp.server.test-154</string>",
+    );
+    expect(definition.content).toContain("<string>--port</string><string>0</string>");
+    expect(definition.status).toEqual([
+      "launchctl",
+      "print",
+      "gui/501/ai.borgmcp.server.test-154",
+    ]);
+    expect(definition.recoverLoaded).toEqual([
+      "launchctl",
+      "kickstart",
+      "gui/501/ai.borgmcp.server.test-154",
+    ]);
   });
 });

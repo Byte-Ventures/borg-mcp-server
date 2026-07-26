@@ -19,6 +19,7 @@ Commands:
   version [--json]  Report the installed controller version
   update [--json]  Verify the latest runtime and report any controller step
   stop [--json]  Stop the managed local server
+  recover-stale-lock [--json]  Preserve a safely identified stale runtime lock
   invite   Create a single-use invitation in an interactive terminal.
   client-rotate <client-id>  Rotate one client credential offline
   client-revoke <client-id>  Revoke one client and its credentials offline
@@ -134,6 +135,9 @@ export async function runCli(
       if (extraArgs.length > 1 || (extraArgs.length === 1 && extraArgs[0] !== "--json") ||
           service.status === undefined) return invalidArguments(io);
       const status = await service.status();
+      const runtimeLock = status.runtimeLock ?? { state: "clear" as const };
+      const serviceState = status.serviceState ??
+        (status.serviceAdapter === null ? "absent" as const : "active" as const);
       if (extraArgs[0] === "--json" || io.isTTY === false) {
         io.stdout(JSON.stringify({
           status: status.status,
@@ -150,13 +154,19 @@ export async function runCli(
           endpoint: status.endpoint,
           mode: status.mode,
           service_adapter: status.serviceAdapter,
+          service_state: serviceState,
+          service_recovery: renderServiceRecovery(
+            status.serviceRecoveryCommand ?? null,
+            false,
+          ),
+          runtime_lock: renderRuntimeLockDiagnostic(runtimeLock),
           data_identity: status.dataIdentity,
           next_action: renderNextAction(status.nextAction),
         }));
       } else {
         io.stdout(renderRuntimeStatus(status));
       }
-      return 0;
+      return runtimeLock.state === "stale" ? 1 : 0;
     }
     case "stop": {
       if (extraArgs.length > 1 || (extraArgs.length === 1 && extraArgs[0] !== "--json") ||
@@ -196,6 +206,13 @@ export async function runCli(
             : `borgmcp-server@${result.runningIdentity.package_version}`,
           build_identity: result.runningIdentity?.source_sha ?? result.artifact.sourceSha,
           mode: result.outcome === "updated" ? "managed" : "stopped",
+          service_adapter: result.serviceAdapter ?? null,
+          service_state: result.serviceState ??
+            (result.serviceAdapter === null || result.serviceAdapter === undefined ? "absent" : "active"),
+          service_recovery: renderServiceRecovery(
+            result.serviceRecoveryCommand ?? null,
+            false,
+          ),
           data_identity: result.dataIdentity,
           next_action: renderNextAction(result.nextAction),
         }));
@@ -208,6 +225,7 @@ export async function runCli(
           `Artifact: borgmcp-server@${result.artifact.version} (${result.artifact.integrity})`,
           `Build identity: ${result.runningIdentity?.source_sha ?? "unavailable"}`,
           ...renderControllerCompletion(result.controllerVersion, result.artifact.version),
+          ...renderManagedServiceCompletion(result),
           "Data and identity: preserved",
           `Next: ${renderNextAction(result.nextAction) ?? "borg-mcp-server status"}`,
         ].join("\n"));
@@ -219,8 +237,33 @@ export async function runCli(
           `Artifact: borgmcp-server@${result.artifact.version} (${result.artifact.integrity})`,
           `Build identity: ${result.artifact.sourceSha ?? "unavailable"}`,
           ...renderControllerCompletion(result.controllerVersion, result.artifact.version),
+          ...renderManagedServiceCompletion(result),
           "Data and identity: preserved",
           `Next: ${renderNextAction(result.nextAction) ?? "borg-mcp-server start"}`,
+        ].join("\n"));
+      }
+      return 0;
+    }
+    case "recover-stale-lock": {
+      if (extraArgs.length > 1 || (extraArgs.length === 1 && extraArgs[0] !== "--json") ||
+          service.recoverStaleLock === undefined) return invalidArguments(io);
+      const result = await service.recoverStaleLock();
+      if (extraArgs[0] === "--json" || io.isTTY === false) {
+        io.stdout(JSON.stringify({
+          status: "recovered",
+          previous_pid: result.stale.pid,
+          process_state: "absent",
+          preserved_lock: result.backupPath,
+          process: "stopped",
+          next_action: "borg-mcp-server status",
+        }));
+      } else {
+        io.stdout([
+          "Stale runtime lock preserved.",
+          `Recorded PID: ${result.stale.pid} (absent)`,
+          `Preserved lock: ${result.backupPath}`,
+          "No server process started.",
+          "Next: borg-mcp-server status",
         ].join("\n"));
       }
       return 0;
@@ -338,7 +381,12 @@ function renderUpdateFailure(failure: RuntimeUpdateFailure, io: CliIo, machine: 
 }
 
 function renderRuntimeStatus(status: Awaited<ReturnType<NonNullable<ServerService["status"]>>>): string {
-  const heading = status.status === "running"
+  const runtimeLock = status.runtimeLock ?? { state: "clear" as const };
+  const serviceState = status.serviceState ??
+    (status.serviceAdapter === null ? "absent" as const : "active" as const);
+  const heading = runtimeLock.state === "stale"
+    ? "Local server is stopped with a stale runtime lock."
+    : status.status === "running"
     ? status.buildIdentity === null
       ? "Local server is reachable, but its running build identity is unavailable."
       : "Local server is running."
@@ -357,11 +405,55 @@ function renderRuntimeStatus(status: Awaited<ReturnType<NonNullable<ServerServic
     `Mode: ${status.mode === "managed" && status.serviceAdapter !== null
       ? `managed (${status.serviceAdapter})`
       : status.mode}`,
+    `Managed service: ${serviceState}${status.serviceAdapter === null
+      ? ""
+      : ` (${status.serviceAdapter})`}`,
     `Data and identity: ${status.dataIdentity}`,
   ];
+  if (runtimeLock.state === "stale") {
+    lines.push(
+      `Stale lock PID: ${runtimeLock.pid} (absent)`,
+      `Stale lock mode: ${runtimeLock.mode}`,
+      `Recovery: ${runtimeLock.recoveryAction}`,
+    );
+  }
+  const serviceRecovery = renderServiceRecovery(status.serviceRecoveryCommand ?? null, true);
+  if (serviceRecovery !== null) lines.push(`Service recovery: ${serviceRecovery}`);
   const nextAction = renderNextAction(status.nextAction);
   if (nextAction !== null) lines.push(`Next: ${nextAction}.`);
   return lines.join("\n");
+}
+
+function renderRuntimeLockDiagnostic(
+  diagnostic: Awaited<ReturnType<NonNullable<ServerService["status"]>>>["runtimeLock"],
+): Readonly<Record<string, unknown>> {
+  if (diagnostic.state === "clear") return Object.freeze({ state: "clear" });
+  return Object.freeze({
+    state: "stale",
+    pid: diagnostic.pid,
+    process_state: diagnostic.processState,
+    runtime: `borgmcp-server@${diagnostic.identity.package_version}`,
+    runtime_integrity: diagnostic.identity.artifact_integrity,
+    build_identity: diagnostic.identity.source_sha,
+    endpoint: diagnostic.endpoint,
+    mode: diagnostic.mode,
+    recovery_action: diagnostic.recoveryAction,
+  });
+}
+
+function renderServiceRecovery(
+  command: readonly [string, ...string[]] | null,
+  tty: boolean,
+): string | Readonly<{ kind: "run-platform-command"; command: readonly string[] }> | null {
+  if (command === null) return null;
+  if (tty) return renderShellCommand(command);
+  return Object.freeze({ kind: "run-platform-command", command });
+}
+
+function renderShellCommand(command: readonly [string, ...string[]]): string {
+  return command.map((argument) => /^[A-Za-z0-9_./:@+-]+$/u.test(argument)
+    ? argument
+    : `'${argument.replaceAll("'", "'\"'\"'")}'`).join(" ");
 }
 
 function renderControllerCompletion(
@@ -371,6 +463,20 @@ function renderControllerCompletion(
   return controllerVersion === runtimeVersion
     ? []
     : [`Installed controller remains: borgmcp-server@${controllerVersion}`];
+}
+
+function renderManagedServiceCompletion(
+  result: Awaited<ReturnType<NonNullable<ServerService["update"]>>>,
+): readonly string[] {
+  const adapter = result.serviceAdapter ?? null;
+  const state = result.serviceState ??
+    (adapter === null ? "absent" as const : "active" as const);
+  const lines = [
+    `Managed service: ${state}${adapter === null ? "" : ` (${adapter})`}`,
+  ];
+  const recovery = renderServiceRecovery(result.serviceRecoveryCommand ?? null, true);
+  if (recovery !== null) lines.push(`Service recovery: ${recovery}`);
+  return lines;
 }
 
 function renderNextAction(

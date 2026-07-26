@@ -173,10 +173,119 @@ describe("runCli", () => {
       endpoint: "https://127.0.0.1:7091",
       mode: "managed",
       service_adapter: "launchd",
+      service_state: "active",
+      service_recovery: null,
+      runtime_lock: { state: "clear" },
       data_identity: "available",
       next_action: "borg-mcp-server update",
     });
     expect(status).toHaveBeenCalledTimes(2);
+  });
+
+  it("returns typed stale-lock and inactive-service recovery evidence instead of a generic failure", async () => {
+    const status = vi.fn().mockResolvedValue({
+      status: "stopped",
+      controllerVersion: "0.3.0",
+      preparedArtifact: {
+        version: "0.3.0",
+        integrity: `sha512-${"A".repeat(86)}==`,
+      },
+      runningArtifact: null,
+      buildIdentity: null,
+      endpoint: null,
+      mode: "stopped",
+      serviceAdapter: "launchd",
+      serviceState: "inactive",
+      serviceRecoveryCommand: [
+        "launchctl",
+        "bootstrap",
+        "gui/501",
+        "/Users/Test Operator/Library/LaunchAgents/ai.borgmcp.server.plist",
+      ],
+      runtimeLock: {
+        state: "stale",
+        pid: 77_814,
+        processState: "absent",
+        identity: {
+          package_version: "0.3.0",
+          artifact_integrity: `sha512-${"A".repeat(86)}==`,
+          source_sha: "a".repeat(40),
+          protocol_version: "5",
+          started_at: "2026-07-26T12:00:00.000Z",
+        },
+        endpoint: "https://127.0.0.1:7091",
+        mode: "foreground",
+        recoveryAction: "borg-mcp-server recover-stale-lock",
+      },
+      dataIdentity: "available",
+      nextAction: null,
+    });
+    const service: ServerService = { start: vi.fn(), status };
+    const machine = { ...createIo(), isTTY: false };
+    const tty = { ...createIo(), isTTY: true };
+
+    expect(await runCli(["status", "--json"], service, machine)).toBe(1);
+    expect(JSON.parse(machine.stdout.mock.calls[0]![0])).toMatchObject({
+      status: "stopped",
+      service_adapter: "launchd",
+      service_state: "inactive",
+      service_recovery: {
+        kind: "run-platform-command",
+        command: [
+          "launchctl",
+          "bootstrap",
+          "gui/501",
+          "/Users/Test Operator/Library/LaunchAgents/ai.borgmcp.server.plist",
+        ],
+      },
+      runtime_lock: {
+        state: "stale",
+        pid: 77_814,
+        process_state: "absent",
+        runtime: "borgmcp-server@0.3.0",
+        recovery_action: "borg-mcp-server recover-stale-lock",
+      },
+    });
+    expect(await runCli(["status"], service, tty)).toBe(1);
+    expect(tty.stdout).toHaveBeenCalledWith(expect.stringContaining(
+      "Recovery: borg-mcp-server recover-stale-lock",
+    ));
+    expect(tty.stdout).toHaveBeenCalledWith(expect.stringContaining(
+      "Service recovery: launchctl bootstrap gui/501 '/Users/Test Operator/Library/LaunchAgents/ai.borgmcp.server.plist'",
+    ));
+  });
+
+  it("preserves a stale lock only through the explicit recovery command", async () => {
+    const recoverStaleLock = vi.fn().mockResolvedValue({
+      backupPath: "/Users/operator/.borg/server/runtime.lock.stale-preserved",
+      stale: {
+        pid: 77_814,
+        identity: {
+          package_version: "0.3.0",
+          artifact_integrity: `sha512-${"A".repeat(86)}==`,
+          source_sha: "a".repeat(40),
+          protocol_version: "5",
+          started_at: "2026-07-26T12:00:00.000Z",
+        },
+        endpoint: null,
+        mode: "foreground",
+      },
+    });
+    const service: ServerService = { start: vi.fn(), recoverStaleLock };
+    const machine = { ...createIo(), isTTY: false };
+
+    expect(await runCli(["recover-stale-lock", "--json"], service, machine)).toBe(0);
+    expect(JSON.parse(machine.stdout.mock.calls[0]![0])).toEqual({
+      status: "recovered",
+      previous_pid: 77_814,
+      process_state: "absent",
+      preserved_lock: "/Users/operator/.borg/server/runtime.lock.stale-preserved",
+      process: "stopped",
+      next_action: "borg-mcp-server status",
+    });
+    expect(recoverStaleLock).toHaveBeenCalledOnce();
+    expect(await runCli(["recover-stale-lock", "--force"], service, machine)).toBe(1);
+    expect(recoverStaleLock).toHaveBeenCalledOnce();
   });
 
   it("renders the exact controller completion action from status in both output modes", async () => {
@@ -287,6 +396,56 @@ describe("runCli", () => {
     expect(io.stdout).toHaveBeenCalledWith(expect.stringContaining("Artifact verified and activated."));
     expect(io.stdout).toHaveBeenCalledWith(expect.stringContaining("Data and identity: preserved"));
     expect(io.stdout.mock.calls[0]![0]).not.toContain("/private/runtime");
+  });
+
+  it("keeps an inactive managed definition stopped and names its exact platform recovery", async () => {
+    const recoveryCommand = [
+      "launchctl",
+      "bootstrap",
+      "gui/501",
+      "/Users/operator/Library/LaunchAgents/ai.borgmcp.server.plist",
+    ] as const;
+    const update = vi.fn().mockResolvedValue({
+      outcome: "prepared",
+      artifact: {
+        artifactDirectory: "/runtime/artifacts/candidate",
+        packageDirectory: "/runtime/artifacts/candidate/package",
+        version: "0.3.0",
+        integrity: `sha512-${"A".repeat(86)}==`,
+        sourceSha: "a".repeat(40),
+        treeSha256: "b".repeat(64),
+      },
+      runningIdentity: null,
+      dataIdentity: "preserved",
+      controllerVersion: "0.3.0",
+      serviceAdapter: "launchd",
+      serviceState: "inactive",
+      serviceRecoveryCommand: recoveryCommand,
+      nextAction: null,
+    });
+    const service: ServerService = { start: vi.fn(), update };
+    const tty = { ...createIo(), isTTY: true };
+    const machine = { ...createIo(), isTTY: false };
+
+    expect(await runCli(["update"], service, tty)).toBe(0);
+    expect(tty.stdout).toHaveBeenCalledWith(expect.stringContaining(
+      "Managed service: inactive (launchd)",
+    ));
+    expect(tty.stdout).toHaveBeenCalledWith(expect.stringContaining(
+      "Service recovery: launchctl bootstrap gui/501 /Users/operator/Library/LaunchAgents/ai.borgmcp.server.plist",
+    ));
+    expect(await runCli(["update", "--json"], service, machine)).toBe(0);
+    expect(JSON.parse(machine.stdout.mock.calls[0]![0])).toMatchObject({
+      status: "prepared",
+      running_runtime: null,
+      mode: "stopped",
+      service_adapter: "launchd",
+      service_state: "inactive",
+      service_recovery: {
+        kind: "run-platform-command",
+        command: recoveryCommand,
+      },
+    });
   });
 
   it("makes a newer runtime's remaining controller install explicit in TTY and JSON", async () => {

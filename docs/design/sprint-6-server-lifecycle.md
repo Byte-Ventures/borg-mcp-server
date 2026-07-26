@@ -24,13 +24,15 @@ Repeated setup must be idempotent. It must say that data and identity are unchan
 
 ### Start
 
-Foreground start must report the verified artifact version, immutable build identity, loopback or explicitly consented LAN endpoint, and preserved data/identity. It must say that Ctrl-C stops the foreground process and that foreground mode does not manage persistence.
+Foreground start must report the verified artifact version, immutable build identity, loopback or explicitly consented LAN endpoint, and preserved data/identity. It must say that Ctrl-C stops the foreground process and that foreground mode does not manage persistence. SIGHUP from terminal teardown follows the same bounded cleanup path. Foreground start never loads an existing inactive service definition.
 
 ### Status
 
-Status must report only runtime evidence supplied by the server: running/stopped state, exact running artifact and immutable build identity when available, endpoint, process mode, and data-identity availability.
+Status must report only runtime evidence supplied by the server: running/stopped state, exact running artifact and immutable build identity when available, endpoint, process mode, managed-service state, runtime-lock state, and data-identity availability.
 
 If the running build identity is unavailable, status must say it is unavailable. It must never substitute a source checkout, package cache, or guessed version. The recovery direction is to activate a verified artifact or inspect the explicit service configuration.
+
+A private, structurally valid server lock with a conclusively absent PID is a typed stale-lock diagnostic, not a generic command failure. The diagnostic includes only the bounded decoded PID, process-absence evidence, identity, endpoint, and mode; it never includes the nonce or raw lock bytes. `recover-stale-lock` revalidates the evidence and renames the lock to a unique preserved file. It never deletes evidence, starts a process, or acts when the PID may be live or the lock cannot be verified.
 
 ### Update, Restart, And Rollback
 
@@ -42,9 +44,9 @@ Runtime activation and global controller installation are separate operations. U
 
 ### Managed Service Handoff
 
-Managed persistence is explicit and distinct from foreground start. The server may offer a platform adapter for `launchd` on macOS and `systemd` on Linux. Before enabling it, output must identify the adapter and instruct the operator to review the generated service definition. After enabling it, status must identify managed mode and the adapter.
+Managed persistence is explicit and distinct from foreground start. The server may offer a platform adapter for `launchd` on macOS and `systemd` on Linux. Before enabling it, output must identify the adapter and instruct the operator to review the generated service definition. Status reports the definition independently as active, inactive, or absent. Update restarts an active managed runtime, leaves an inactive definition stopped after preparing the verified artifact, and leaves an absent service in the foreground-only state.
 
-The implementation must not invent a canonical service subcommand until #109 settles its command grammar. Whatever grammar is selected must preserve this copy and behavior.
+The server does not own a command that loads platform service state. For an existing inactive definition it names the exact structured platform argv: restart/kickstart when the service remains loaded, or bootstrap/enable when it is unloaded but defined. Creating, rewriting, or loading service definitions remains outside this lifecycle slice.
 
 ### Non-TTY
 

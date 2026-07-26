@@ -200,10 +200,10 @@ export function createDashboardRenderer(options: DashboardRenderOptions): Dashbo
       : 0;
     const rankedRows = Math.max(0, availableRows - stripRows);
     for (const cube of snapshot.cubes.slice(0, rankedRows)) {
-      lines.push(renderSummaryRow(snapshot, cube, width, glyphs));
+      lines.push(renderSummaryRow(snapshot, cube, width, glyphs, view));
     }
     if (overflow) {
-      lines.push(...renderAllCubesStrip(snapshot, width, stripRows, glyphs));
+      lines.push(...renderAllCubesStrip(snapshot, width, stripRows, glyphs, view));
     }
     lines.push(fitCell(footer, width));
     return lines.slice(0, height)
@@ -307,7 +307,10 @@ export function startForegroundDashboard(input: {
   let focusedCubeId: string | null = null;
   let pulseCubeIds = new Set<string>();
   let pulsePhase = 0;
-  let previousPosts = new Map<string, number>();
+  let previousActivity = new Map<string, {
+    readonly posts15m: number;
+    readonly lastPostAt: string | null;
+  }>();
   let lastSnapshot: DashboardSnapshot | undefined;
   let rejectFailure!: (error: unknown) => void;
   const failure = new Promise<never>((_resolve, reject) => { rejectFailure = reject; });
@@ -382,11 +385,17 @@ export function startForegroundDashboard(input: {
       const snapshot = rankDashboardSnapshot(input.source.read(), input.server, priorRanks);
       const changedCubeIds = snapshot.cubes
         .filter((cube) => {
-          const previous = previousPosts.get(cube.id);
-          return previous !== undefined && cube.posts_15m > previous;
+          const previous = previousActivity.get(cube.id);
+          return previous !== undefined && (
+            cube.posts_15m > previous.posts15m ||
+            (cube.last_post_at !== null && cube.last_post_at !== previous.lastPostAt)
+          );
         })
         .map((cube) => cube.id);
-      previousPosts = new Map(snapshot.cubes.map((cube) => [cube.id, cube.posts_15m]));
+      previousActivity = new Map(snapshot.cubes.map((cube) => [
+        cube.id,
+        { posts15m: cube.posts_15m, lastPostAt: cube.last_post_at },
+      ]));
       if (changedCubeIds.length > 0) {
         pulseCubeIds = new Set(changedCubeIds);
         pulsePhase = DASHBOARD_PULSE_PHASES;
@@ -548,7 +557,7 @@ function renderFocusPanel(
   const pulse = view.pulseCubeIds.has(cube.id)
     ? Math.max(0, Math.min(DASHBOARD_PULSE_PHASES, Math.floor(view.pulsePhase)))
     : 0;
-  const fill = [".", ":", "+", "*", "#"][pulse]!;
+  const fill = pulseGlyph(pulse, glyphs);
   const art = glyphs === ASCII_GLYPHS
     ? ["  +------+  ", ` /${fill.repeat(6)}/| `, "+------+ |", `|${fill.repeat(6)}|/ `, "+------+  "]
     : ["  ┌──────┐  ", ` /${fill.repeat(6)}/│ `, "┌──────┐ │", `│${fill.repeat(6)}│/ `, "└──────┘  "];
@@ -583,17 +592,21 @@ function renderSummaryRow(
   cube: DashboardCubeSnapshot,
   width: number,
   glyphs: Glyphs,
+  view: DashboardViewState,
 ): string {
+  const activityGlyph = view.pulseCubeIds.has(cube.id)
+    ? pulseGlyph(view.pulsePhase, glyphs)
+    : heatGlyph(cube.posts_15m, glyphs);
   const marker = rankMarker(cube.rank_change);
   if (width < 60) {
     const nameWidth = Math.max(6, width - 30);
-    return `${heatGlyph(cube.posts_15m, glyphs)} ${String(cube.rank).padStart(3)} ` +
+    return `${activityGlyph} ${String(cube.rank).padStart(3)} ` +
       `${fitCell(sanitizeTerminalText(cube.name), nameWidth, " ", glyphs.ellipsis)} ` +
       `${String(cube.posts_15m).padStart(4)}/15m ` +
       `${formatAge(snapshot.captured_at, cube.last_post_at).padStart(5)} ${marker}`;
   }
   const nameWidth = Math.max(10, width - 52);
-  return `${heatGlyph(cube.posts_15m, glyphs)} ${String(cube.rank).padStart(3)} ` +
+  return `${activityGlyph} ${String(cube.rank).padStart(3)} ` +
     `${fitCell(sanitizeTerminalText(cube.name), nameWidth, " ", glyphs.ellipsis)} ` +
     `${String(cube.drones_seen_15m).padStart(3)}/${String(cube.drones_total).padEnd(3)} seen ` +
     `${String(cube.posts_15m).padStart(4)}/15m ` +
@@ -606,11 +619,14 @@ function renderAllCubesStrip(
   width: number,
   rows: number,
   glyphs: Glyphs,
+  view: DashboardViewState,
 ): string[] {
   if (rows < 1) return [];
   const label = `ALL ${snapshot.cubes.length} `;
   const capacity = Math.max(0, width - displayWidth(label));
-  const glyphValues = snapshot.cubes.map((cube) => heatGlyph(cube.posts_15m, glyphs));
+  const glyphValues = snapshot.cubes.map((cube) => view.pulseCubeIds.has(cube.id)
+    ? pulseGlyph(view.pulsePhase, glyphs)
+    : heatGlyph(cube.posts_15m, glyphs));
   const result = [`${label}${glyphValues.slice(0, capacity).join("")}`];
   let offset = capacity;
   for (let row = 1; row < rows && offset < glyphValues.length; row += 1) {
@@ -629,6 +645,21 @@ function heatGlyph(posts: number, glyphs: Glyphs): string {
   if (posts <= 2) return glyphs.cube[1];
   if (posts <= 8) return glyphs.cube[2];
   return glyphs.cube[3];
+}
+
+function pulseGlyph(phase: number, glyphs: Glyphs): string {
+  const pulseRamp = [
+    glyphs.cube[0],
+    glyphs.cube[1],
+    glyphs.cube[1],
+    glyphs.cube[2],
+    glyphs.cube[3],
+  ] as const;
+  const boundedPhase = Math.max(
+    0,
+    Math.min(DASHBOARD_PULSE_PHASES, Math.floor(phase)),
+  );
+  return pulseRamp[boundedPhase]!;
 }
 
 function rankMarker(delta: number): string {

@@ -212,6 +212,30 @@ describe("dashboard renderer", () => {
       .toEqual([14, 14, 14, 14, 14]);
   });
 
+  it("keeps pulse phases inside each glyph mode's declared cube vocabulary", () => {
+    const snapshot = rankDashboardSnapshot(snapshotData(1), server);
+    const pulseCubeIds = new Set([snapshot.cubes[0]!.id]);
+    const expectedFills = {
+      ascii: [".", "=", "=", "+", "#"],
+      box: [".", ":", ":", "+", "#"],
+    } as const;
+
+    for (const glyphMode of ["ascii", "box"] as const) {
+      const renderer = createDashboardRenderer({ glyphMode, color: false });
+      const fills = expectedFills[glyphMode];
+      for (let pulsePhase = 0; pulsePhase <= 4; pulsePhase += 1) {
+        const frame = renderer(snapshot, 80, 24, {
+          autoFollow: true,
+          focusedCubeId: null,
+          pulseCubeIds,
+          pulsePhase,
+        });
+        const fill = fills[pulsePhase]!;
+        expect(frame).toContain(`/${fill.repeat(6)}/${glyphMode === "ascii" ? "|" : "│"}`);
+      }
+    }
+  });
+
   it("keeps the embedded footer by default and accepts a sanitized caller footer", () => {
     const snapshot = rankDashboardSnapshot(snapshotData(1), server);
     const defaultFrame = createDashboardRenderer({ glyphMode: "ascii", color: false })(
@@ -335,6 +359,68 @@ describe("dashboard renderer", () => {
 });
 
 describe("foreground dashboard lifecycle", () => {
+  it("pulses when a newer post replaces an expired post at the same rolling count", async () => {
+    vi.useFakeTimers();
+    const harness = terminalHarness();
+    const initial = snapshotData(1);
+    const source = sourceHarness(initial);
+    const dashboard = startForegroundDashboard({
+      source,
+      server,
+      terminal: harness.terminal,
+      renderer: createDashboardRenderer({ glyphMode: "ascii", color: false }),
+      pulseFrameMs: 100,
+    });
+
+    source.set({
+      ...initial,
+      captured_at: "2026-07-25T12:01:00.000Z",
+      cubes: initial.cubes.map((cube) => ({
+        ...cube,
+        last_post_at: "2026-07-25T12:00:30.000Z",
+      })),
+    });
+    source.emit();
+    await vi.advanceTimersByTimeAsync(250);
+
+    expect(source.readCount()).toBe(2);
+    expect(harness.output.at(-1)).toContain("/######/|");
+    dashboard.close();
+  });
+
+  it("renders a visible pulse for activity on a non-focused rank-2 cube", async () => {
+    vi.useFakeTimers();
+    const harness = terminalHarness();
+    const initial = snapshotData(2);
+    const source = sourceHarness(initial);
+    const dashboard = startForegroundDashboard({
+      source,
+      server,
+      terminal: harness.terminal,
+      renderer: createDashboardRenderer({ glyphMode: "ascii", color: false }),
+      pulseFrameMs: 100,
+    });
+    const before = harness.output.at(-1)!;
+
+    source.set({
+      ...initial,
+      cubes: initial.cubes.map((cube, index) => index === 1
+        ? {
+            ...cube,
+            posts_15m: cube.posts_15m + 1,
+            last_post_at: "2026-07-25T12:00:30.000Z",
+          }
+        : cube),
+    });
+    source.emit();
+    await vi.advanceTimersByTimeAsync(250);
+
+    const pulse = harness.output.at(-1)!;
+    expect(pulse).not.toBe(before);
+    expect(pulse.split("\n").find((line) => line.includes("cube-02"))).toMatch(/^#\s+2 /u);
+    dashboard.close();
+  });
+
   it("pulses on snapshot deltas and supports pinned navigation with explicit auto return", async () => {
     vi.useFakeTimers();
     const harness = terminalHarness();

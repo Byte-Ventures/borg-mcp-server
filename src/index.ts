@@ -5,9 +5,11 @@ export { inspectNodeRuntime } from "./service.js";
 export type {
   DashboardCommandOptions,
   RuntimeLockStatus,
+  ServerNextAction,
   ServerRuntimeStatus,
   ServerSetupResult,
   ServerService,
+  ServerUpdateResult,
   SetupOptions,
 } from "./service.js";
 export {

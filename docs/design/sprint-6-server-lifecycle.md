@@ -38,6 +38,8 @@ Update has four visible phases: verification, activation, result, and next actio
 
 Restart and rollback are bounded. A successful result reports the running artifact identity. A bounded failure reports either that the last verified runtime was restored or that the server stopped safely; it must always state that data and identity were preserved and point to status as the next action.
 
+Runtime activation and global controller installation are separate operations. Update must never rewrite the executable that is currently running or guess the operator's global package prefix. When a verified runtime is newer than the installed controller, successful TTY and machine output must identify both versions and give the exact version-pinned `npm install --global borgmcp-server@<version>` completion action. Status gives that same action when the running runtime is newer, or when the prepared runtime is newer while stopped. When the controller is newer than the effective runtime, status retains `borg-mcp-server update` as the recovery action.
+
 ### Managed Service Handoff
 
 Managed persistence is explicit and distinct from foreground start. The server may offer a platform adapter for `launchd` on macOS and `systemd` on Linux. Before enabling it, output must identify the adapter and instruct the operator to review the generated service definition. After enabling it, status must identify managed mode and the adapter.

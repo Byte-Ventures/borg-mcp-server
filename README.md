@@ -180,9 +180,14 @@ borg-mcp-server stop
 When stdout is not a terminal, `status`, `version`, `update`, and `stop` emit one
 bounded JSON record. The installed controller and the prepared/running runtime
 are separate layers: installing a newer CLI does not activate its server
-artifact. Status reports all three identities independently and prints
-`Next: borg-mcp-server update.` when the installed controller is newer than the
-prepared or running runtime. It never derives a build identity from a source
+artifact, and activating a newer runtime does not rewrite the globally installed
+controller. `update` reports both identities. If the activated runtime is newer,
+follow its exact `Next: npm install --global borgmcp-server@<version>` action to
+finish the controller update. Status reports all three identities independently
+and returns a non-null `next_action` whenever the installed controller and the
+effective runtime disagree: `borg-mcp-server update` when the controller is
+newer, or the exact global install command when the running runtime (or prepared
+runtime while stopped) is newer. It never derives a build identity from a source
 checkout; unavailable evidence is reported as unavailable.
 
 `stop` unloads the existing managed launchd/systemd service and waits for its

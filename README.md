@@ -128,17 +128,26 @@ the server identity and database; use it only when prior state may be discarded.
 
 `borg-mcp-server start` remains a foreground command. In an interactive
 terminal it opens a read-only dashboard showing the verified server identity,
-the most active cube in a detail panel, and all cubes ranked by coordination
-posts in the trailing 15 minutes. Distinct posting drones break ties. The
-dashboard displays aggregate counts and last-post age only; it never displays
-activity message bodies. It refreshes on committed activity, on terminal
-resize, and on a bounded five-second age tick.
+the most active cube in an auto-following detail panel, and all cubes ranked by
+coordination posts in the trailing 15 minutes. Distinct posting drones break
+ties. New activity produces a short, event-driven cube pulse. The dashboard
+displays aggregate counts and last-post age only; it never displays activity
+message bodies. It refreshes on committed activity, on terminal resize, and on
+a bounded five-second age tick.
+
+No input is required. When stdin is also an interactive terminal, `<` and `>`
+pin the preceding or following ranked cube and `a` returns to auto-follow. The
+`(auto)` marker makes the current mode explicit; pinned focus never silently
+times out or jumps back to rank one. These keys change presentation only and
+never mutate server or cube state.
 
 The dashboard uses box-drawing terminal glyphs by default. `--ascii` forces a
 strict 7-bit rendering, and incompatible terminal/locale settings select that
 fallback automatically. `NO_COLOR` removes color without removing status
 labels or layout cues. Terminals smaller than roughly 40 columns by 10 rows
-receive a bounded plain-text status view.
+receive a bounded plain-text status view. The default CUBE DETAIL outline uses
+single-column box drawing with strict single-column face fills so common
+terminals do not skew the art through ambiguous-width cube glyphs.
 
 Ctrl-C stops the server, restores the prior terminal screen and cursor, and
 does not install or enable persistence. Redirected output and managed-service
@@ -149,8 +158,9 @@ running evidence or stage and activate a verified update with:
 To observe an already-running local server from a second terminal, run
 `borg-mcp-server dashboard` (or add `--ascii`). This viewer opens the existing
 SQLite database read-only and shows the same aggregate all-cubes dashboard.
-Ctrl-C closes only the viewer; the server keeps running. Redirected or non-TTY
-viewer output is one bounded non-ANSI snapshot and then exits.
+The same optional navigation keys work in this viewer. Ctrl-C closes only the
+viewer; the server keeps running. Redirected or non-TTY viewer output is one
+bounded non-ANSI snapshot and then exits.
 
 The standalone viewer is an operator-local, all-cubes view. Authorization is
 the ownership and private filesystem permissions on `BORG_SERVER_DATA_DIR`

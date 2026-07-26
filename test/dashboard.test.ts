@@ -165,11 +165,11 @@ describe("dashboard renderer", () => {
       "== BORGMCP-SERVER == ONLINE  3 cubes  6/15m  https://127....
       ------------------------------------------------------------
       + CUBE DETAIL ---------------------------------------------+
-      |  +------+  cube-01 #1                                    |
-      | /#=+.#/| 3 posts/15m  3 posting drones                   |
-      |+------+ |4/5 drones seen/15m                             |
-      ||+=#.+=|/ last post 1m                                    |
-      |+------+  activity = coordination log entries             |
+      |  +------+   cube-01 #1 (auto)                            |
+      | /....../|   3 posts/15m  3 posting drones                |
+      |+------+ |   4/5 drones seen/15m                          |
+      ||......|/    last post 1m                                 |
+      |+------+     activity = coordination log entries          |
       +----------------------------------------------------------+
       ------------------------------------------------------------
       +   1 cube-01      4/5   seen    3/15m   3 posters     1m
@@ -186,6 +186,70 @@ describe("dashboard renderer", () => {
     expect(tiny).toContain("borgmcp-server online");
     expect(tiny).not.toContain("\u001b[");
     expect(tiny).not.toContain("┌");
+  });
+
+  it("keeps default cube art and adjacent facts aligned with single-column glyphs", () => {
+    const frame = createDashboardRenderer({ glyphMode: "box", color: false })(
+      rankDashboardSnapshot(snapshotData(1), server),
+      80,
+      24,
+    );
+    const detail = frame.split("\n").slice(2, 9);
+    expect(detail.map((line) => line.replace(/\s+$/u, ""))).toMatchInlineSnapshot(`
+      [
+        "┌ CUBE DETAIL ─────────────────────────────────────────────────────────────────┐",
+        "│  ┌──────┐   cube-01 #1 (auto)                                                │",
+        "│ /....../│   1 posts/15m  1 posting drones                                    │",
+        "│┌──────┐ │   4/5 drones seen/15m                                              │",
+        "││......│/    last post 1m                                                     │",
+        "│└──────┘     activity = coordination log entries                              │",
+        "└──────────────────────────────────────────────────────────────────────────────┘",
+      ]
+    `);
+    expect(frame).not.toMatch(/[▣▤▥▢]/u);
+    expect(detail.slice(1, 6).map((line) =>
+      line.search(/(?:cube-01|1 posts|4\/5 drones|last post|activity =)/u)))
+      .toEqual([14, 14, 14, 14, 14]);
+  });
+
+  it("keeps pulse phases inside each glyph mode's declared cube vocabulary", () => {
+    const snapshot = rankDashboardSnapshot(snapshotData(1), server);
+    const pulseCubeIds = new Set([snapshot.cubes[0]!.id]);
+    const expectedFills = {
+      ascii: [".", "=", "=", "+", "#"],
+      box: [".", ":", ":", "+", "#"],
+    } as const;
+
+    for (const glyphMode of ["ascii", "box"] as const) {
+      const renderer = createDashboardRenderer({ glyphMode, color: false });
+      const fills = expectedFills[glyphMode];
+      for (let pulsePhase = 0; pulsePhase <= 4; pulsePhase += 1) {
+        const frame = renderer(snapshot, 80, 24, {
+          autoFollow: true,
+          focusedCubeId: null,
+          pulseCubeIds,
+          pulsePhase,
+        });
+        const fill = fills[pulsePhase]!;
+        expect(frame).toContain(`/${fill.repeat(6)}/${glyphMode === "ascii" ? "|" : "│"}`);
+      }
+    }
+  });
+
+  it("uses a distinct fixed-width activity marker in the overflow strip", () => {
+    const snapshot = rankDashboardSnapshot(snapshotData(3), server);
+    const frame = createDashboardRenderer({ glyphMode: "ascii", color: false })(
+      snapshot,
+      80,
+      12,
+      {
+        autoFollow: true,
+        focusedCubeId: null,
+        pulseCubeIds: new Set([snapshot.cubes[1]!.id]),
+        pulsePhase: 4,
+      },
+    );
+    expect(frame).toContain("ALL 3 +O=");
   });
 
   it("keeps the embedded footer by default and accepts a sanitized caller footer", () => {
@@ -206,6 +270,13 @@ describe("dashboard renderer", () => {
     expect(viewerFrame).not.toContain("stop server");
     expect(viewerFrame).not.toContain("\u001b");
     expect(viewerFrame).not.toContain("unsafe");
+
+    const interactiveFrame = createDashboardRenderer({
+      glyphMode: "ascii",
+      color: false,
+      navigation: true,
+    })(snapshot, 80, 24);
+    expect(interactiveFrame).toContain("< > switch  |  a auto");
   });
 
   it("keeps representative terminal widths and a thousand-cube snapshot bounded", () => {
@@ -304,6 +375,132 @@ describe("dashboard renderer", () => {
 });
 
 describe("foreground dashboard lifecycle", () => {
+  it("pulses when a newer post replaces an expired post at the same rolling count", async () => {
+    vi.useFakeTimers();
+    const harness = terminalHarness();
+    const initial = snapshotData(1);
+    const source = sourceHarness(initial);
+    const dashboard = startForegroundDashboard({
+      source,
+      server,
+      terminal: harness.terminal,
+      renderer: createDashboardRenderer({ glyphMode: "ascii", color: false }),
+      pulseFrameMs: 100,
+    });
+
+    source.set({
+      ...initial,
+      captured_at: "2026-07-25T12:01:00.000Z",
+      cubes: initial.cubes.map((cube) => ({
+        ...cube,
+        last_post_at: "2026-07-25T12:00:30.000Z",
+      })),
+    });
+    source.emit();
+    await vi.advanceTimersByTimeAsync(250);
+
+    expect(source.readCount()).toBe(2);
+    expect(harness.output.at(-1)).toContain("/######/|");
+    dashboard.close();
+  });
+
+  it("renders a visible pulse for activity on a non-focused rank-2 cube", async () => {
+    vi.useFakeTimers();
+    const harness = terminalHarness();
+    const initial = snapshotData(2);
+    const source = sourceHarness(initial);
+    const dashboard = startForegroundDashboard({
+      source,
+      server,
+      terminal: harness.terminal,
+      renderer: createDashboardRenderer({ glyphMode: "ascii", color: false }),
+      pulseFrameMs: 100,
+    });
+    const before = harness.output.at(-1)!;
+
+    source.set({
+      ...initial,
+      cubes: initial.cubes.map((cube, index) => index === 1
+        ? {
+            ...cube,
+            posts_15m: cube.posts_15m + 1,
+            last_post_at: "2026-07-25T12:00:30.000Z",
+          }
+        : cube),
+    });
+    source.emit();
+    await vi.advanceTimersByTimeAsync(250);
+
+    const pulse = harness.output.at(-1)!;
+    expect(pulse).not.toBe(before);
+    expect(pulse).toContain("/....../|");
+    expect(pulse.split("\n").find((line) => line.includes("cube-02"))).toMatch(
+      /^=\s+2 .*O\s*$/u,
+    );
+    await vi.advanceTimersByTimeAsync(100);
+    expect(harness.output.at(-1)!.split("\n").find((line) => line.includes("cube-02"))).toMatch(
+      /^=\s+2 .*o\s*$/u,
+    );
+    dashboard.close();
+  });
+
+  it("pulses on snapshot deltas and supports pinned navigation with explicit auto return", async () => {
+    vi.useFakeTimers();
+    const harness = terminalHarness();
+    const source = sourceHarness(snapshotData(3));
+    const renderer = vi.fn(createDashboardRenderer({
+      glyphMode: "ascii",
+      color: false,
+      navigation: true,
+    }));
+    const dashboard = startForegroundDashboard({
+      source,
+      server,
+      terminal: harness.terminal,
+      renderer,
+      pulseFrameMs: 100,
+    });
+
+    expect(harness.output.at(-1)).toContain("cube-01 #1 (auto)");
+    harness.input(">");
+    expect(harness.output.at(-1)).toContain("cube-02 #2");
+    expect(harness.output.at(-1)).not.toContain("(auto)");
+    harness.input("<");
+    expect(harness.output.at(-1)).toContain("cube-01 #1");
+    expect(harness.output.at(-1)).not.toContain("(auto)");
+    harness.input("a");
+    expect(harness.output.at(-1)).toContain("cube-01 #1 (auto)");
+    harness.input("<");
+    expect(harness.output.at(-1)).toContain("cube-03 #3");
+    harness.input("a");
+    expect(harness.output.at(-1)).toContain("cube-01 #1 (auto)");
+
+    const changed = snapshotData(3);
+    source.set({
+      ...changed,
+      cubes: changed.cubes.map((cube, index) => ({
+        ...cube,
+        posts_15m: index === 0 ? cube.posts_15m + 1 : cube.posts_15m,
+      })),
+    });
+    source.emit();
+    await vi.advanceTimersByTimeAsync(250);
+    expect(source.readCount()).toBe(2);
+    const pulseStart = harness.output.at(-1);
+    expect(pulseStart).toContain("/######/|");
+    await vi.advanceTimersByTimeAsync(100);
+    expect(harness.output.at(-1)).not.toBe(pulseStart);
+    expect(source.readCount()).toBe(2);
+
+    harness.input("\u0003");
+    expect(harness.interruptCount()).toBe(1);
+    harness.input("\u001a");
+    expect(harness.suspendCount()).toBe(1);
+    expect(harness.inputListenerCount()).toBe(1);
+    dashboard.close();
+    expect(harness.inputListenerCount()).toBe(0);
+  });
+
   it("enters once, coalesces activity, reflows on resize, and restores once", async () => {
     vi.useFakeTimers();
     const harness = terminalHarness();
@@ -330,7 +527,12 @@ describe("foreground dashboard lifecycle", () => {
     await vi.advanceTimersByTimeAsync(124);
     expect(renderer).toHaveBeenCalledTimes(2);
     await vi.advanceTimersByTimeAsync(1);
-    expect(renderer).toHaveBeenLastCalledWith(expect.anything(), 120, 40);
+    expect(renderer).toHaveBeenLastCalledWith(
+      expect.anything(),
+      120,
+      40,
+      expect.objectContaining({ autoFollow: true }),
+    );
 
     dashboard.close();
     dashboard.close();
@@ -418,10 +620,17 @@ function snapshotData(count: number): DashboardDataSnapshot {
 function sourceHarness(initial: DashboardDataSnapshot): DashboardSnapshotSource & {
   readonly emit: () => void;
   readonly listenerCount: () => number;
+  readonly readCount: () => number;
+  readonly set: (snapshot: DashboardDataSnapshot) => void;
 } {
   const listeners = new Set<() => void>();
+  let snapshot = initial;
+  let reads = 0;
   return {
-    read: () => initial,
+    read: () => {
+      reads += 1;
+      return snapshot;
+    },
     subscribe: (listener) => {
       listeners.add(listener);
       return () => listeners.delete(listener);
@@ -430,6 +639,8 @@ function sourceHarness(initial: DashboardDataSnapshot): DashboardSnapshotSource 
       for (const listener of listeners) listener();
     },
     listenerCount: () => listeners.size,
+    readCount: () => reads,
+    set: (value) => { snapshot = value; },
   };
 }
 
@@ -437,26 +648,48 @@ function terminalHarness(): {
   readonly terminal: DashboardTerminal;
   readonly output: string[];
   readonly resize: () => void;
+  readonly input: (value: string) => void;
   readonly setDimensions: (columns: number, rows: number) => void;
+  readonly inputListenerCount: () => number;
+  readonly interruptCount: () => number;
+  readonly suspendCount: () => number;
   readonly resizeListenerCount: () => number;
 } {
   const output: string[] = [];
-  const listeners = new Set<() => void>();
+  const resizeListeners = new Set<() => void>();
+  const inputListeners = new Set<(value: Uint8Array) => void>();
   let dimensions = { columns: 80, rows: 24 };
+  let interrupts = 0;
+  let suspends = 0;
   return {
     terminal: {
       write: (value) => { output.push(value); },
       dimensions: () => dimensions,
       onResize: (listener) => {
-        listeners.add(listener);
-        return () => listeners.delete(listener);
+        resizeListeners.add(listener);
+        return () => resizeListeners.delete(listener);
+      },
+      onInput: (listener) => {
+        inputListeners.add(listener);
+        return () => inputListeners.delete(listener);
+      },
+      requestInterrupt: () => { interrupts += 1; },
+      requestSuspend: (resume) => {
+        suspends += 1;
+        resume();
       },
     },
     output,
     resize: () => {
-      for (const listener of listeners) listener();
+      for (const listener of resizeListeners) listener();
+    },
+    input: (value) => {
+      for (const listener of [...inputListeners]) listener(Buffer.from(value));
     },
     setDimensions: (columns, rows) => { dimensions = { columns, rows }; },
-    resizeListenerCount: () => listeners.size,
+    inputListenerCount: () => inputListeners.size,
+    interruptCount: () => interrupts,
+    suspendCount: () => suspends,
+    resizeListenerCount: () => resizeListeners.size,
   };
 }

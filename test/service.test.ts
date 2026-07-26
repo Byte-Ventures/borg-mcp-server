@@ -822,17 +822,18 @@ describe("node server service", () => {
     }
   });
 
-  it("serializes stale preservation against runtime-lock acquisition", async () => {
-    const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-stale-serialized-")));
+  // Cross-process acquire-vs-recover serialization is deliberately not promised; see #179.
+  it("reports one concurrent stale preservation as success and the loser as safely not stale", async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-stale-concurrent-")));
     const identity = createRuntimeBuildIdentity({
       artifactIntegrity: `sha512-${"A".repeat(86)}==`,
       startedAt: new Date("2026-07-26T12:00:00.000Z"),
     });
-    let enterTimestamp!: () => void;
-    const timestampEntered = new Promise<void>((resolve) => { enterTimestamp = resolve; });
-    let releaseTimestamp!: () => void;
-    const timestampReleased = new Promise<void>((resolve) => { releaseTimestamp = resolve; });
-    let recovery: ReturnType<typeof recoverStaleRuntimeLock> | undefined;
+    let entered = 0;
+    let bothEntered!: () => void;
+    const bothAtTimestamp = new Promise<void>((resolve) => { bothEntered = resolve; });
+    let releaseBoth!: () => void;
+    const released = new Promise<void>((resolve) => { releaseBoth = resolve; });
     try {
       await writeFile(join(directory, "runtime.lock"), JSON.stringify({
         pid: 2_147_483_647,
@@ -842,23 +843,32 @@ describe("node server service", () => {
         runtime_identity: identity,
         endpoint: "https://127.0.0.1:7091",
       }), { mode: 0o600 });
-      recovery = recoverStaleRuntimeLock(directory, async () => {
-        enterTimestamp();
-        await timestampReleased;
+      const now = async () => {
+        entered += 1;
+        if (entered === 2) bothEntered();
+        await released;
         return new Date("2026-07-26T12:34:56.789Z");
-      });
-      await timestampEntered;
+      };
+      const recoveries = [
+        recoverStaleRuntimeLock(directory, now),
+        recoverStaleRuntimeLock(directory, now),
+      ];
+      await bothAtTimestamp;
+      releaseBoth();
+      const results = await Promise.allSettled(recoveries);
 
-      await expect(acquireRuntimeLock(directory)).rejects.toThrow(
-        "Another server lifecycle command is changing runtime.lock. Retry.",
-      );
-      releaseTimestamp();
-      await expect(recovery).resolves.toMatchObject({
-        stale: { pid: 2_147_483_647, identity },
+      expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+      expect(results.filter((result) => result.status === "rejected")).toHaveLength(1);
+      expect(results.find((result) => result.status === "fulfilled")).toMatchObject({
+        value: { stale: { pid: 2_147_483_647, identity } },
       });
+      expect(results.find((result) => result.status === "rejected")).toMatchObject({
+        reason: { message: "No safely recoverable stale runtime lock was found." },
+      });
+      expect((await readdir(directory)).filter((name) => name.startsWith("runtime.lock.stale-")))
+        .toHaveLength(1);
     } finally {
-      releaseTimestamp();
-      await recovery?.catch(() => undefined);
+      releaseBoth();
       await rm(directory, { recursive: true, force: true });
     }
   });

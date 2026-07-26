@@ -24,7 +24,6 @@ export type OperatorErrorCode =
   | "RUNTIME_LOCK_LIVE_UNRECOGNIZED"
   | "RUNTIME_LOCK_STALE"
   | "RUNTIME_LOCK_NOT_STALE"
-  | "RUNTIME_LOCK_BUSY"
   | "MANAGED_SERVICE_DEFINITION_UNSAFE"
   | "RUNTIME_ARTIFACT_INSTALL_FAILED"
   | "DASHBOARD_INSTALLATION_MISSING"
@@ -69,7 +68,6 @@ const publicMessages: Readonly<Record<OperatorErrorCode, string>> = Object.freez
   RUNTIME_LOCK_LIVE_UNRECOGNIZED: "A live process owns runtime.lock. Stop the server through a supported command; do not remove the lock.",
   RUNTIME_LOCK_STALE: "Confirm the recorded server process is stopped, then remove runtime.lock.",
   RUNTIME_LOCK_NOT_STALE: "No safely recoverable stale runtime lock was found.",
-  RUNTIME_LOCK_BUSY: "Another server lifecycle command is changing runtime.lock. Retry.",
   MANAGED_SERVICE_DEFINITION_UNSAFE: "Ensure the managed service definition is a regular file, then retry.",
   RUNTIME_ARTIFACT_INSTALL_FAILED: "Setup could not prepare the verified runtime.\nNext: check your Node.js and npm installation, then rerun setup.",
   DASHBOARD_INSTALLATION_MISSING: "Prepare the local server in BORG_SERVER_DATA_DIR before opening the dashboard.",

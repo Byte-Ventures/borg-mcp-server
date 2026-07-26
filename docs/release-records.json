@@ -8,5 +8,15 @@
     "workflow_run_id": 30194326366,
     "workflow_run_attempt": 1,
     "artifact_integrity": "sha512-squb0+vdy0q7l/4FeV7OTvSm7OiFWGsAjGhcVEXYrQc9K/8jJYduqPS90VBwaJRT6z221Gxf3xQ5SeZe/Qoncw=="
+  },
+  {
+    "version": "0.3.0",
+    "tag": "v0.3.0",
+    "tag_object": "0931d69e8c8b1bff24215a58bdd63ec6a207ff66",
+    "commit": "23ad0e22d62e7fcdaa6962a6d69885193cf59a6e",
+    "tree": "47eb84006a92953c179280cc4fbf51ef929eb315",
+    "workflow_run_id": 30206708486,
+    "workflow_run_attempt": 1,
+    "artifact_integrity": "sha512-DqaTPHNdO9cvLEXsGFugDsyLlvsxNYEvNTdHUHIV6GguvKrYVXPi95BZyneHAyp04cPHlcFmy9MLupZW7dZwCw=="
   }
 ]

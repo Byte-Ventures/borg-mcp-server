@@ -11,8 +11,9 @@ import {
   type ReleaseAuthorities,
 } from "../scripts/release-identity.mjs";
 
-const oldVersion = "0.2.0";
-const newVersion = "0.3.0";
+// Synthetic versions exercise the verifier without coupling fixtures to the live package identity.
+const oldVersion = "1.2.3";
+const newVersion = "1.3.0";
 const integrity = `sha512-${"A".repeat(86)}==`;
 const fixturePinPath = "test/version-pin.test.ts";
 const directories: string[] = [];
@@ -50,12 +51,13 @@ describe("release identity automation", () => {
   });
 
   it("keeps every production version pin explicit and live", async () => {
+    const manifest = JSON.parse(await readFile("package.json", "utf8")) as { version: string };
     const allowlist = JSON.parse(
       await readFile("scripts/release-identity-allowlist.json", "utf8"),
     ) as { versionPins: string[] };
     expect(allowlist.versionPins).toEqual([...allowlist.versionPins].sort());
     for (const path of allowlist.versionPins) {
-      expect((await readFile(path, "utf8")).split(oldVersion).length - 1).toBeGreaterThan(0);
+      expect((await readFile(path, "utf8")).split(manifest.version).length - 1).toBeGreaterThan(0);
     }
   });
 

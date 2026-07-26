@@ -6,11 +6,14 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createDashboardRenderer,
   dashboardColorEnabled,
+  EMBEDDED_DASHBOARD_FOOTER,
   rankDashboardSnapshot,
   sanitizeTerminalText,
   selectDashboardGlyphMode,
+  STANDALONE_DASHBOARD_FOOTER,
   startForegroundDashboard,
   type DashboardDataSnapshot,
+  type DashboardFooter,
   type DashboardServerIdentity,
   type DashboardSnapshotSource,
   type DashboardTerminal,
@@ -183,6 +186,26 @@ describe("dashboard renderer", () => {
     expect(tiny).toContain("borgmcp-server online");
     expect(tiny).not.toContain("\u001b[");
     expect(tiny).not.toContain("┌");
+  });
+
+  it("keeps the embedded footer by default and accepts a sanitized caller footer", () => {
+    const snapshot = rankDashboardSnapshot(snapshotData(1), server);
+    const defaultFrame = createDashboardRenderer({ glyphMode: "ascii", color: false })(
+      snapshot,
+      80,
+      24,
+    );
+    expect(defaultFrame).toContain(EMBEDDED_DASHBOARD_FOOTER);
+
+    const viewerFrame = createDashboardRenderer({
+      glyphMode: "ascii",
+      color: false,
+      footer: "^C close viewer\u001b]0;unsafe\u0007  |  read-only" as DashboardFooter,
+    })(snapshot, 80, 24);
+    expect(viewerFrame).toContain(STANDALONE_DASHBOARD_FOOTER);
+    expect(viewerFrame).not.toContain("stop server");
+    expect(viewerFrame).not.toContain("\u001b");
+    expect(viewerFrame).not.toContain("unsafe");
   });
 
   it("keeps representative terminal widths and a thousand-cube snapshot bounded", () => {

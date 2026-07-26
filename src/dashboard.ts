@@ -44,9 +44,16 @@ export interface DashboardSnapshot {
 
 export type DashboardGlyphMode = "box" | "ascii";
 
+export const EMBEDDED_DASHBOARD_FOOTER = "^C stop server  |  read-only";
+export const STANDALONE_DASHBOARD_FOOTER = "^C close viewer  |  read-only";
+export type DashboardFooter =
+  | typeof EMBEDDED_DASHBOARD_FOOTER
+  | typeof STANDALONE_DASHBOARD_FOOTER;
+
 export interface DashboardRenderOptions {
   readonly glyphMode: DashboardGlyphMode;
   readonly color: boolean;
+  readonly footer?: DashboardFooter;
 }
 
 export type DashboardRenderer = (
@@ -137,6 +144,7 @@ export function rankDashboardSnapshot(
 
 export function createDashboardRenderer(options: DashboardRenderOptions): DashboardRenderer {
   const glyphs = options.glyphMode === "ascii" ? ASCII_GLYPHS : BOX_GLYPHS;
+  const footer = sanitizeTerminalLabel(options.footer ?? EMBEDDED_DASHBOARD_FOOTER);
   return (snapshot, columns, rows) => {
     const width = boundedDimension(columns, 20, 500);
     const height = boundedDimension(rows, 4, 200);
@@ -173,7 +181,7 @@ export function createDashboardRenderer(options: DashboardRenderOptions): Dashbo
     if (overflow) {
       lines.push(...renderAllCubesStrip(snapshot, width, stripRows, glyphs));
     }
-    lines.push(fitCell("^C stop server  |  read-only", width));
+    lines.push(fitCell(footer, width));
     return lines.slice(0, height)
       .map((line) => fitCell(line, width, " ", glyphs.ellipsis))
       .join("\n");
@@ -239,6 +247,18 @@ export function sanitizeTerminalText(value: string): string {
     .replace(/\u001b\[[0-?]*[ -/]*[@-~]/gu, "")
     .replace(/[\p{Cc}\p{Cf}\p{Cs}]+/gu, " ")
     .replace(/\s+/gu, " ")
+    .trim();
+}
+
+function sanitizeTerminalLabel(value: string): string {
+  // DashboardFooter structurally limits callers to static copy. This preserves
+  // intentional spacing; untrusted terminal text must use sanitizeTerminalText.
+  return value
+    .normalize("NFC")
+    .replace(/\u001B\][^\u0007\u001B]*(?:\u0007|\u001B\\)/gu, "")
+    .replace(/\u001B(?:P|X|\^|_)[\s\S]*?\u001B\\/gu, "")
+    .replace(/\u001B\[[0-?]*[ -/]*[@-~]/gu, "")
+    .replace(/[\p{Cc}\p{Cf}\p{Cs}]+/gu, " ")
     .trim();
 }
 
@@ -316,6 +336,8 @@ export function startForegroundDashboard(input: {
       render();
       if (!closed) scheduleIdle();
     }, input.idleRefreshMs ?? DASHBOARD_IDLE_REFRESH_MS);
+    // Presentation timers never own process lifetime: the embedded server has
+    // its listener, while the standalone viewer's poll source holds one ref.
     idleTimer.unref?.();
   };
   const scheduleEvent = (): void => {

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { rmSync, writeFileSync } from "node:fs";
 import { access, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -39,6 +40,10 @@ function requireFreshSetup(
 ): BootstrapResult {
   if ("existing" in result) throw new Error("Expected a fresh server installation.");
   return result;
+}
+
+function serviceProbeError(code: string | number): Error {
+  return Object.assign(new Error("managed service probe failed"), { code });
 }
 
 describe("node server service", () => {
@@ -493,7 +498,7 @@ describe("node server service", () => {
     try {
       await writeFile(join(directory, "runtime.lock"), JSON.stringify({
         pid: process.pid,
-        nonce: "legacy-runtime",
+        nonce: randomUUID(),
         purpose: "server",
         endpoint: "https://127.0.0.1:7091",
       }), { mode: 0o600 });
@@ -614,7 +619,7 @@ describe("node server service", () => {
     });
     const run = vi.fn();
     try {
-      run.mockRejectedValueOnce(new Error("unloaded"));
+      run.mockRejectedValueOnce(serviceProbeError(113));
       await expect(inspectManagedServiceState(definition, run)).resolves.toEqual({
         state: "absent",
         adapter: null,
@@ -622,7 +627,7 @@ describe("node server service", () => {
       });
 
       await writeFile(definitionPath, definition.content, { mode: 0o600 });
-      run.mockRejectedValueOnce(new Error("unloaded"));
+      run.mockRejectedValueOnce(serviceProbeError(113));
       await expect(inspectManagedServiceState(definition, run)).resolves.toEqual({
         state: "inactive",
         adapter: "launchd",
@@ -645,10 +650,69 @@ describe("node server service", () => {
 
       await rm(definitionPath);
       const unsafeDefinition = { ...definition, definitionPath: directory };
-      run.mockRejectedValueOnce(new Error("unloaded"));
+      run.mockRejectedValueOnce(serviceProbeError(113));
       await expect(inspectManagedServiceState(unsafeDefinition, run)).rejects.toThrow(
         "Ensure the managed service definition is a regular file, then retry.",
       );
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    ["permission", "EACCES"],
+    ["timeout", "ETIMEDOUT"],
+    ["unknown exit", 9],
+  ] as const)("does not turn a %s service-probe failure into inactive guidance", async (_name, code) => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-managed-unknown-")));
+    const definitionPath = join(directory, "ai.borgmcp.server.plist");
+    const definition = createManagedServiceDefinition({
+      platform: "launchd",
+      nodeExecutable: "/usr/bin/node",
+      runtimeRoot: "/private/runtime",
+      dataDirectory: "/private/data",
+      definitionPath,
+      launchdDomain: "gui/501",
+    });
+    const error = serviceProbeError(code);
+    try {
+      await writeFile(definitionPath, definition.content, { mode: 0o600 });
+      await expect(inspectManagedServiceState(
+        definition,
+        vi.fn().mockRejectedValue(error),
+      )).rejects.toBe(error);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("uses systemd's explicit not-found state for inactive-unloaded guidance", async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-systemd-unloaded-")));
+    const definitionPath = join(directory, "ai.borgmcp.server.service");
+    const definition = createManagedServiceDefinition({
+      platform: "systemd",
+      nodeExecutable: "/usr/bin/node",
+      runtimeRoot: "/private/runtime",
+      dataDirectory: "/private/data",
+      definitionPath,
+    });
+    try {
+      await writeFile(definitionPath, definition.content, { mode: 0o600 });
+      await expect(inspectManagedServiceState(
+        definition,
+        vi.fn().mockResolvedValue({
+          stdout: "LoadState=not-found\nActiveState=inactive\nSubState=dead\nMainPID=0\n",
+          stderr: "",
+        }),
+      )).resolves.toEqual({
+        state: "inactive",
+        adapter: "systemd",
+        recoveryCommand: definition.install,
+      });
+      await expect(inspectManagedServiceState(
+        definition,
+        vi.fn().mockResolvedValue({ stdout: "unexpected output\n", stderr: "" }),
+      )).rejects.toThrow("systemd returned no service state.");
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
@@ -747,9 +811,151 @@ describe("node server service", () => {
       await expect(readFile(recovered.backupPath, "utf8")).resolves.toBe(JSON.stringify(record));
       expect((await readdir(directory)).filter((name) => name.startsWith("runtime.lock.stale-")))
         .toHaveLength(1);
+      await expect(access(join(directory, ".runtime.lock.operation"))).rejects.toMatchObject({
+        code: "ENOENT",
+      });
       await expect(recoverStaleRuntimeLock(directory)).rejects.toThrow(
         "No safely recoverable stale runtime lock was found.",
       );
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("serializes stale preservation against runtime-lock acquisition", async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-stale-serialized-")));
+    const identity = createRuntimeBuildIdentity({
+      artifactIntegrity: `sha512-${"A".repeat(86)}==`,
+      startedAt: new Date("2026-07-26T12:00:00.000Z"),
+    });
+    let enterTimestamp!: () => void;
+    const timestampEntered = new Promise<void>((resolve) => { enterTimestamp = resolve; });
+    let releaseTimestamp!: () => void;
+    const timestampReleased = new Promise<void>((resolve) => { releaseTimestamp = resolve; });
+    let recovery: ReturnType<typeof recoverStaleRuntimeLock> | undefined;
+    try {
+      await writeFile(join(directory, "runtime.lock"), JSON.stringify({
+        pid: 2_147_483_647,
+        nonce: randomUUID(),
+        purpose: "server",
+        mode: "managed",
+        runtime_identity: identity,
+        endpoint: "https://127.0.0.1:7091",
+      }), { mode: 0o600 });
+      recovery = recoverStaleRuntimeLock(directory, async () => {
+        enterTimestamp();
+        await timestampReleased;
+        return new Date("2026-07-26T12:34:56.789Z");
+      });
+      await timestampEntered;
+
+      await expect(acquireRuntimeLock(directory)).rejects.toThrow(
+        "Another server lifecycle command is changing runtime.lock. Retry.",
+      );
+      releaseTimestamp();
+      await expect(recovery).resolves.toMatchObject({
+        stale: { pid: 2_147_483_647, identity },
+      });
+    } finally {
+      releaseTimestamp();
+      await recovery?.catch(() => undefined);
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    ["missing", undefined],
+    ["malformed", "not-a-lock-owner"],
+  ] as const)("rejects a %s ownership nonce as invalid stale evidence", async (_name, nonce) => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-stale-nonce-")));
+    const identity = createRuntimeBuildIdentity({
+      artifactIntegrity: `sha512-${"A".repeat(86)}==`,
+      startedAt: new Date("2026-07-26T12:00:00.000Z"),
+    });
+    try {
+      await writeFile(join(directory, "runtime.lock"), JSON.stringify({
+        pid: 2_147_483_647,
+        ...(nonce === undefined ? {} : { nonce }),
+        purpose: "server",
+        mode: "managed",
+        runtime_identity: identity,
+        endpoint: "https://127.0.0.1:7091",
+      }), { mode: 0o600 });
+
+      await expect(inspectRuntimeLock(directory)).rejects.toThrow(
+        "Confirm the server is stopped, then remove the invalid runtime.lock.",
+      );
+      await expect(recoverStaleRuntimeLock(directory)).rejects.toThrow(
+        "Confirm the server is stopped, then remove the invalid runtime.lock.",
+      );
+      await expect(access(join(directory, "runtime.lock"))).resolves.toBeUndefined();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses when the stale record is replaced immediately before preservation", async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-stale-replaced-")));
+    const path = join(directory, "runtime.lock");
+    const identity = createRuntimeBuildIdentity({
+      artifactIntegrity: `sha512-${"A".repeat(86)}==`,
+      startedAt: new Date("2026-07-26T12:00:00.000Z"),
+    });
+    const original = {
+      pid: 2_147_483_647,
+      nonce: randomUUID(),
+      purpose: "server",
+      mode: "managed",
+      runtime_identity: identity,
+      endpoint: "https://127.0.0.1:7091",
+    };
+    const replacement = { ...original, nonce: randomUUID() };
+    try {
+      await writeFile(path, JSON.stringify(original), { mode: 0o600 });
+      await expect(recoverStaleRuntimeLock(directory, () => {
+        rmSync(path);
+        writeFileSync(path, JSON.stringify(replacement), { mode: 0o600 });
+        return new Date("2026-07-26T12:34:56.789Z");
+      })).rejects.toThrow("No safely recoverable stale runtime lock was found.");
+
+      await expect(readFile(path, "utf8")).resolves.toBe(JSON.stringify(replacement));
+      expect((await readdir(directory)).filter((name) => name.startsWith("runtime.lock.stale-")))
+        .toHaveLength(0);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("does not move a live lock that replaces stale evidence immediately before preservation", async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-stale-live-replaced-")));
+    const path = join(directory, "runtime.lock");
+    const identity = createRuntimeBuildIdentity({
+      artifactIntegrity: `sha512-${"A".repeat(86)}==`,
+      startedAt: new Date("2026-07-26T12:00:00.000Z"),
+    });
+    const original = {
+      pid: 2_147_483_647,
+      nonce: randomUUID(),
+      purpose: "server",
+      mode: "managed",
+      runtime_identity: identity,
+      endpoint: "https://127.0.0.1:7091",
+    };
+    const live = { ...original, pid: process.pid, nonce: randomUUID() };
+    try {
+      await writeFile(path, JSON.stringify(original), { mode: 0o600 });
+      await expect(recoverStaleRuntimeLock(directory, () => {
+        rmSync(path);
+        writeFileSync(path, JSON.stringify(live), { mode: 0o600 });
+        return new Date("2026-07-26T12:34:56.789Z");
+      })).rejects.toThrow("No safely recoverable stale runtime lock was found.");
+
+      await expect(readFile(path, "utf8")).resolves.toBe(JSON.stringify(live));
+      expect((await readdir(directory)).filter((name) => name.startsWith("runtime.lock.stale-")))
+        .toHaveLength(0);
+      await expect(access(join(directory, ".runtime.lock.operation"))).rejects.toMatchObject({
+        code: "ENOENT",
+      });
     } finally {
       await rm(directory, { recursive: true, force: true });
     }

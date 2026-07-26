@@ -86,7 +86,13 @@ export function createManagedServiceDefinition(input: ManagedServiceInput): Mana
     restart: ["systemctl", "--user", "restart", label] as const,
     recoverLoaded: ["systemctl", "--user", "restart", label] as const,
     stop: ["systemctl", "--user", "stop", label] as const,
-    status: ["systemctl", "--user", "show", label, "--property=ActiveState,SubState,MainPID"] as const,
+    status: [
+      "systemctl",
+      "--user",
+      "show",
+      label,
+      "--property=LoadState,ActiveState,SubState,MainPID",
+    ] as const,
   });
 }
 

@@ -18,6 +18,13 @@ describe("managed service adapters", () => {
     expect(service.content).toContain('Environment="BORG_SERVER_DATA_DIR=/home/operator/.borg/server"');
     expect(service.content).toContain('Environment="BORG_SERVER_PROCESS_MODE=managed"');
     expect(service.install).toEqual(["systemctl", "--user", "enable", "--now", "ai.borgmcp.server"]);
+    expect(service.status).toEqual([
+      "systemctl",
+      "--user",
+      "show",
+      "ai.borgmcp.server",
+      "--property=LoadState,ActiveState,SubState,MainPID",
+    ]);
     expect(service.content).not.toContain("checkout");
   });
 

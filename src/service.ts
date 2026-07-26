@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
-import { lstat, open, readFile, rename, unlink } from "node:fs/promises";
+import { link, lstat, open, readFile, rename, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import { promisify } from "node:util";
@@ -817,12 +817,22 @@ export async function inspectManagedServiceState(
   let loaded = false;
   try {
     const result = await run(definition.status, new AbortController().signal);
-    loaded = true;
-    active = definition.platform === "launchd"
-      ? /(?:^|\n)\s*state = running\s*(?:\n|$)/u.test(result.stdout)
-      : /(?:^|\n)ActiveState=active(?:\n|$)/u.test(result.stdout);
-  } catch {
-    // A failed status probe is expected when a definition exists but is unloaded.
+    if (definition.platform === "launchd") {
+      const state = /(?:^|\n)\s*state = ([a-z-]+)\s*(?:\n|$)/u.exec(result.stdout)?.[1];
+      if (state === undefined) throw new Error("launchd returned no service state.");
+      loaded = true;
+      active = state === "running";
+    } else {
+      const loadState = /(?:^|\n)LoadState=([a-z-]+)(?:\n|$)/u.exec(result.stdout)?.[1];
+      const activeState = /(?:^|\n)ActiveState=([a-z-]+)(?:\n|$)/u.exec(result.stdout)?.[1];
+      if (loadState === undefined || activeState === undefined) {
+        throw new Error("systemd returned no service state.");
+      }
+      loaded = loadState !== "not-found";
+      active = loaded && activeState === "active";
+    }
+  } catch (error) {
+    if (!isExpectedUnloadedServiceProbe(definition, error)) throw error;
   }
   if (active) {
     return Object.freeze({
@@ -853,6 +863,16 @@ export async function inspectManagedServiceState(
     adapter: definition.platform,
     recoveryCommand: loaded ? definition.recoverLoaded : definition.install,
   });
+}
+
+function isExpectedUnloadedServiceProbe(
+  definition: ManagedServiceDefinition,
+  error: unknown,
+): boolean {
+  return definition.platform === "launchd" &&
+    typeof error === "object" &&
+    error !== null &&
+    (error as { readonly code?: unknown }).code === 113;
 }
 
 async function waitForRuntimeIdentity(
@@ -1214,6 +1234,7 @@ export function createOfflineCredentialService(
 }
 
 const canonicalCubeUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
+const canonicalRuntimeLockNonce = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const uuidLikeCubeSelector = /^[0-9a-fA-F-]{32,36}$/u;
 
 function parseInvitationCubeSelector(
@@ -1395,6 +1416,18 @@ export async function acquireRuntimeLock(
   identity?: RuntimeBuildIdentity,
   mode: "foreground" | "managed" = "foreground",
 ): Promise<RuntimeLock> {
+  return withRuntimeLockOperationGuard(
+    runtimeDataDirectory,
+    () => acquireRuntimeLockWithoutGuard(runtimeDataDirectory, purpose, identity, mode),
+  );
+}
+
+async function acquireRuntimeLockWithoutGuard(
+  runtimeDataDirectory: string,
+  purpose: "server" | "exclusive-admin",
+  identity: RuntimeBuildIdentity | undefined,
+  mode: "foreground" | "managed",
+): Promise<RuntimeLock> {
   const path = join(runtimeDataDirectory, "runtime.lock");
   const nonce = randomUUID();
   try {
@@ -1460,13 +1493,35 @@ export async function acquireRuntimeLock(
 }
 
 export async function inspectRuntimeLock(runtimeDataDirectory: string): Promise<RuntimeLockStatus> {
+  return (await inspectRuntimeLockFile(runtimeDataDirectory)).status;
+}
+
+interface RuntimeLockFileInspection {
+  readonly status: RuntimeLockStatus;
+  readonly raw: string | null;
+  readonly nonce: string | null;
+  readonly device: number | null;
+  readonly inode: number | null;
+}
+
+async function inspectRuntimeLockFile(
+  runtimeDataDirectory: string,
+): Promise<RuntimeLockFileInspection> {
   const path = join(runtimeDataDirectory, "runtime.lock");
   let metadata;
   let liveOwner = false;
   try {
     metadata = await lstat(path);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return Object.freeze({ running: false });
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return Object.freeze({
+        status: Object.freeze({ running: false }),
+        raw: null,
+        nonce: null,
+        device: null,
+        inode: null,
+      });
+    }
     throw error;
   }
   if (!metadata.isFile() || metadata.isSymbolicLink() || (metadata.mode & 0o077) !== 0 ||
@@ -1474,8 +1529,17 @@ export async function inspectRuntimeLock(runtimeDataDirectory: string): Promise<
     throw operatorErrors.RUNTIME_LOCK_UNSAFE;
   }
   try {
-    const value = JSON.parse(await readFile(path, "utf8")) as {
+    const raw = await readFile(path, "utf8");
+    const confirmedMetadata = await lstat(path);
+    if (!confirmedMetadata.isFile() || confirmedMetadata.isSymbolicLink() ||
+        confirmedMetadata.dev !== metadata.dev || confirmedMetadata.ino !== metadata.ino ||
+        confirmedMetadata.size !== Buffer.byteLength(raw) ||
+        (confirmedMetadata.mode & 0o077) !== 0) {
+      throw new Error();
+    }
+    const value = JSON.parse(raw) as {
       pid?: unknown;
+      nonce?: unknown;
       purpose?: unknown;
       runtime_identity?: unknown;
       endpoint?: unknown;
@@ -1484,7 +1548,8 @@ export async function inspectRuntimeLock(runtimeDataDirectory: string): Promise<
     if (!Number.isSafeInteger(value.pid) || (value.pid as number) <= 0) throw new Error();
     const pid = value.pid as number;
     liveOwner = processIsAlive(pid);
-    if (value.purpose !== "server" ||
+    if (typeof value.nonce !== "string" || !canonicalRuntimeLockNonce.test(value.nonce) ||
+        value.purpose !== "server" ||
         (value.endpoint !== undefined &&
           (typeof value.endpoint !== "string" || !isRuntimeEndpoint(value.endpoint))) ||
         (value.mode !== undefined && value.mode !== "foreground" && value.mode !== "managed")) {
@@ -1496,16 +1561,28 @@ export async function inspectRuntimeLock(runtimeDataDirectory: string): Promise<
     if (!liveOwner) {
       if (identity === null) throw new Error();
       return Object.freeze({
-        running: false,
-        stale: Object.freeze({ pid, identity, endpoint, mode }),
+        status: Object.freeze({
+          running: false,
+          stale: Object.freeze({ pid, identity, endpoint, mode }),
+        }),
+        raw,
+        nonce: value.nonce,
+        device: confirmedMetadata.dev,
+        inode: confirmedMetadata.ino,
       });
     }
     return Object.freeze({
-      running: true,
-      pid,
-      identity,
-      endpoint,
-      mode,
+      status: Object.freeze({
+        running: true,
+        pid,
+        identity,
+        endpoint,
+        mode,
+      }),
+      raw,
+      nonce: value.nonce,
+      device: confirmedMetadata.dev,
+      inode: confirmedMetadata.ino,
     });
   } catch (error) {
     if (liveOwner) throw operatorErrors.RUNTIME_LOCK_LIVE_UNRECOGNIZED;
@@ -1515,25 +1592,144 @@ export async function inspectRuntimeLock(runtimeDataDirectory: string): Promise<
 
 export async function recoverStaleRuntimeLock(
   runtimeDataDirectory: string,
-  now: () => Date = () => new Date(),
+  now: () => Date | Promise<Date> = () => new Date(),
 ): Promise<StaleRuntimeLockRecovery> {
-  const status = await inspectRuntimeLock(runtimeDataDirectory);
-  if (status.running || status.stale === undefined) throw operatorErrors.RUNTIME_LOCK_NOT_STALE;
-  const confirmed = await inspectRuntimeLock(runtimeDataDirectory);
-  if (confirmed.running || confirmed.stale === undefined ||
-      JSON.stringify(confirmed.stale) !== JSON.stringify(status.stale)) {
-    throw operatorErrors.RUNTIME_LOCK_NOT_STALE;
-  }
-  if (processIsAlive(confirmed.stale.pid)) throw operatorErrors.RUNTIME_ACTIVE;
+  return withRuntimeLockOperationGuard(runtimeDataDirectory, async () => {
+    const initial = await inspectRuntimeLockFile(runtimeDataDirectory);
+    if (initial.status.running || initial.status.stale === undefined) {
+      throw operatorErrors.RUNTIME_LOCK_NOT_STALE;
+    }
+    const confirmed = await inspectRuntimeLockFile(runtimeDataDirectory);
+    if (!sameRuntimeLockFile(initial, confirmed) ||
+        confirmed.status.running || confirmed.status.stale === undefined ||
+        processIsAlive(confirmed.status.stale.pid)) {
+      throw operatorErrors.RUNTIME_LOCK_NOT_STALE;
+    }
 
-  const path = join(runtimeDataDirectory, "runtime.lock");
-  const timestamp = now().toISOString().replaceAll(/[-:.]/gu, "");
-  const backupPath = join(
-    runtimeDataDirectory,
-    `runtime.lock.stale-${timestamp}-${randomUUID()}`,
-  );
-  await rename(path, backupPath);
-  return Object.freeze({ backupPath, stale: confirmed.stale });
+    const timestamp = (await now()).toISOString().replaceAll(/[-:.]/gu, "");
+    const beforePreservation = await inspectRuntimeLockFile(runtimeDataDirectory);
+    if (!sameRuntimeLockFile(confirmed, beforePreservation) ||
+        beforePreservation.status.running || beforePreservation.status.stale === undefined ||
+        processIsAlive(beforePreservation.status.stale.pid)) {
+      throw operatorErrors.RUNTIME_LOCK_NOT_STALE;
+    }
+
+    const path = join(runtimeDataDirectory, "runtime.lock");
+    const backupPath = join(
+      runtimeDataDirectory,
+      `runtime.lock.stale-${timestamp}-${randomUUID()}`,
+    );
+    await rename(path, backupPath);
+    return Object.freeze({ backupPath, stale: beforePreservation.status.stale });
+  });
+}
+
+function sameRuntimeLockFile(
+  left: RuntimeLockFileInspection,
+  right: RuntimeLockFileInspection,
+): boolean {
+  return left.raw !== null &&
+    left.raw === right.raw &&
+    left.nonce === right.nonce &&
+    left.device === right.device &&
+    left.inode === right.inode;
+}
+
+async function withRuntimeLockOperationGuard<T>(
+  runtimeDataDirectory: string,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const guard = await acquireRuntimeLockOperationGuard(runtimeDataDirectory);
+  try {
+    return await operation();
+  } finally {
+    await guard.release();
+  }
+}
+
+async function acquireRuntimeLockOperationGuard(
+  runtimeDataDirectory: string,
+): Promise<{ readonly release: () => Promise<void> }> {
+  const path = join(runtimeDataDirectory, ".runtime.lock.operation");
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const nonce = randomUUID();
+    const temporaryPath = join(
+      runtimeDataDirectory,
+      `.runtime.lock.operation-${nonce}.tmp`,
+    );
+    const handle = await open(temporaryPath, "wx", 0o600);
+    let writeError: unknown;
+    try {
+      await handle.writeFile(JSON.stringify({ pid: process.pid, nonce }));
+      await handle.sync();
+    } catch (error) {
+      writeError = error;
+    } finally {
+      await handle.close();
+    }
+    if (writeError !== undefined) {
+      await unlink(temporaryPath).catch(() => undefined);
+      throw writeError;
+    }
+
+    let acquired = false;
+    try {
+      await link(temporaryPath, path);
+      acquired = true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    } finally {
+      await unlink(temporaryPath).catch(() => undefined);
+    }
+    if (acquired) {
+      return Object.freeze({
+        release: async () => {
+          try {
+            const value = JSON.parse(await readFile(path, "utf8")) as { nonce?: unknown };
+            if (value.nonce !== nonce) throw operatorErrors.RUNTIME_LOCK_BUSY;
+            await unlink(path);
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+          }
+        },
+      });
+    }
+
+    let staleGuard = false;
+    try {
+      const metadata = await lstat(path);
+      if (!metadata.isFile() || metadata.isSymbolicLink() || (metadata.mode & 0o077) !== 0 ||
+          metadata.size > 1024) {
+        throw operatorErrors.RUNTIME_LOCK_BUSY;
+      }
+      const value = JSON.parse(await readFile(path, "utf8")) as {
+        pid?: unknown;
+        nonce?: unknown;
+      };
+      if (!Number.isSafeInteger(value.pid) || (value.pid as number) <= 0 ||
+          typeof value.nonce !== "string" || !canonicalRuntimeLockNonce.test(value.nonce)) {
+        throw operatorErrors.RUNTIME_LOCK_BUSY;
+      }
+      if (processIsAlive(value.pid as number)) throw operatorErrors.RUNTIME_LOCK_BUSY;
+      staleGuard = true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+      throw error;
+    }
+    if (!staleGuard) throw operatorErrors.RUNTIME_LOCK_BUSY;
+
+    const stalePath = join(
+      runtimeDataDirectory,
+      `.runtime.lock.operation-stale-${randomUUID()}`,
+    );
+    try {
+      await rename(path, stalePath);
+      await unlink(stalePath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
+  throw operatorErrors.RUNTIME_LOCK_BUSY;
 }
 
 function isRuntimeEndpoint(value: string): boolean {

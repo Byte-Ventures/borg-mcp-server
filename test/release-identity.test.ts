@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
+  classifyReleasePullRequest,
   prepareRelease,
   verifyReleaseIdentity,
   type ReleaseAuthorities,
@@ -24,12 +25,25 @@ afterEach(async () => {
 });
 
 describe("release identity automation", () => {
-  it("runs the classifier on release branches in protected CI", async () => {
-    const workflow = await readFile(".github/workflows/ci.yml", "utf8");
-    expect(workflow).toContain("- 'release/**'");
-    expect(workflow).toContain("actions: read");
+  it("loads the classifier from the pull request base and never executes candidate code", async () => {
+    const workflow = await readFile(".github/workflows/release-identity.yml", "utf8");
+    const ordinaryCi = await readFile(".github/workflows/ci.yml", "utf8");
+    expect(workflow).toContain("pull_request_target:");
+    expect(workflow).not.toMatch(/^\s+push:/mu);
+    expect(workflow).toContain("github.event.pull_request.head.repo.full_name == github.repository");
+    expect(workflow).toContain("ref: ${{ github.event.pull_request.base.sha }}");
     expect(workflow).toContain("fetch-depth: 0");
-    expect(workflow).toContain("npm run verify:release-identity -- --base origin/main");
+    expect(workflow).toContain("fetch-tags: true");
+    expect(workflow).toContain("persist-credentials: false");
+    expect(workflow).toContain('git fetch --no-tags origin "$CANDIDATE_SHA"');
+    expect(workflow).toContain("node scripts/release-identity.mjs classify");
+    expect(workflow).toContain('--base "$BASE_SHA"');
+    expect(workflow).toContain('--candidate "$CANDIDATE_SHA"');
+    expect(workflow).not.toMatch(/\bnpm (?:ci|install|run)\b/u);
+    expect(workflow.match(/uses: actions\/checkout/gu)).toHaveLength(1);
+    expect(workflow).not.toContain("ref: ${{ github.event.pull_request.head.sha }}");
+    expect(ordinaryCi).not.toContain("'release/**'");
+    expect(ordinaryCi).not.toContain("verify:release-identity");
   });
 
   it("keeps every production version pin explicit and live", async () => {
@@ -58,13 +72,60 @@ describe("release identity automation", () => {
       "src/runtime-identity.ts",
       fixturePinPath,
     ]);
-    commitAll(fixture.root, "prepare release");
+    const candidate = commitAll(fixture.root, "prepare release");
 
-    expect(verifyReleaseIdentity(fixture.root, fixture.base, fixture.authorities)).toMatchObject({
+    expect(verifyReleaseIdentity(
+      fixture.root,
+      fixture.base,
+      candidate,
+      fixture.authorities,
+    )).toMatchObject({
       base: fixture.base,
+      candidate,
       oldVersion,
       newVersion,
     });
+  });
+
+  it("runs trusted-base bytes green on the transform and red on a self-bypassing candidate", async () => {
+    const fixture = await preparedFixture();
+    git(fixture.root, ["checkout", "--detach", "-q", fixture.base]);
+
+    expect(classifyReleasePullRequest(
+      fixture.root,
+      classificationInput(fixture, fixture.candidate),
+      fixture.authorities,
+    )).toMatchObject({ base: fixture.base, candidate: fixture.candidate });
+
+    git(fixture.root, ["checkout", "--detach", "-q", fixture.candidate]);
+    const manifestPath = join(fixture.root, "package.json");
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as {
+      scripts: Record<string, string>;
+    };
+    manifest.scripts["verify:release-identity"] = 'node -e "process.exit(0)" --';
+    await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+    await writeFile(
+      join(fixture.root, ".github/workflows/release-identity.yml"),
+      "name: bypass\njobs: { classify: { steps: [{ run: 'true' }] } }\n",
+    );
+    await writeFile(
+      join(fixture.root, "scripts/release-identity.mjs"),
+      "process.exit(0);\n",
+    );
+    await writeFile(
+      join(fixture.root, "src/unreviewed-payload.ts"),
+      "export const unreviewed = true;\n",
+    );
+    const attack = commitAll(fixture.root, "replace classifier and add payload");
+
+    git(fixture.root, ["checkout", "--detach", "-q", fixture.base]);
+    expect(git(fixture.root, ["status", "--porcelain"])).toBe("");
+    expect(git(fixture.root, ["rev-parse", "HEAD"])).toBe(fixture.base);
+    expect(() => classifyReleasePullRequest(
+      fixture.root,
+      classificationInput(fixture, attack),
+      fixture.authorities,
+    )).toThrow("package.json diff is not exactly the package version.");
   });
 
   it.each([
@@ -85,9 +146,14 @@ describe("release identity automation", () => {
     const records = JSON.parse(await readFile(recordsPath, "utf8")) as ReleaseRecordFixture[];
     mutate(records[0]!);
     await writeFile(recordsPath, `${JSON.stringify(records, null, 2)}\n`);
-    commitAll(fixture.root, "mutate provenance");
+    const candidate = commitAll(fixture.root, "mutate provenance");
 
-    expect(() => verifyReleaseIdentity(fixture.root, fixture.base, fixture.authorities)).toThrow();
+    expect(() => verifyReleaseIdentity(
+      fixture.root,
+      fixture.base,
+      candidate,
+      fixture.authorities,
+    )).toThrow();
   });
 
   it.each([
@@ -117,9 +183,14 @@ describe("release identity automation", () => {
   ])("rejects %s", async (_description, mutate) => {
     const fixture = await preparedFixture();
     await mutate(fixture);
-    commitAll(fixture.root, "mutate release shape");
+    const candidate = commitAll(fixture.root, "mutate release shape");
 
-    expect(() => verifyReleaseIdentity(fixture.root, fixture.base, fixture.authorities)).toThrow();
+    expect(() => verifyReleaseIdentity(
+      fixture.root,
+      fixture.base,
+      candidate,
+      fixture.authorities,
+    )).toThrow();
   });
 });
 
@@ -137,6 +208,7 @@ interface ReleaseRecordFixture {
 interface Fixture {
   readonly root: string;
   readonly base: string;
+  readonly candidate: string;
   readonly authorities: ReleaseAuthorities;
 }
 
@@ -147,12 +219,17 @@ async function preparedFixture(): Promise<Fixture> {
     workflowRunAttempt: 1,
     artifactIntegrity: integrity,
   }, fixture.authorities);
-  commitAll(fixture.root, "prepare release");
-  expect(() => verifyReleaseIdentity(fixture.root, fixture.base, fixture.authorities)).not.toThrow();
-  return fixture;
+  const candidate = commitAll(fixture.root, "prepare release");
+  expect(() => verifyReleaseIdentity(
+    fixture.root,
+    fixture.base,
+    candidate,
+    fixture.authorities,
+  )).not.toThrow();
+  return { ...fixture, candidate };
 }
 
-async function createFixture(): Promise<Fixture> {
+async function createFixture(): Promise<Omit<Fixture, "candidate">> {
   const root = await mkdtemp(join(tmpdir(), "borg-release-identity-"));
   directories.push(root);
   const allowlist = { versionPins: [fixturePinPath] };
@@ -162,7 +239,20 @@ async function createFixture(): Promise<Fixture> {
     name: "borgmcp-server",
     version: oldVersion,
     private: false,
+    scripts: {
+      "verify:release-identity": "node scripts/release-identity.mjs verify",
+    },
   }, null, 2)}\n`);
+  await writeFixture(
+    root,
+    ".github/workflows/release-identity.yml",
+    "name: trusted fixture classifier\n",
+  );
+  await writeFixture(
+    root,
+    "scripts/release-identity.mjs",
+    "// trusted fixture verifier\n",
+  );
   await writeFixture(root, "npm-shrinkwrap.json", `${JSON.stringify({
     name: "borgmcp-server",
     version: oldVersion,
@@ -207,14 +297,25 @@ async function createFixture(): Promise<Fixture> {
   return { root, base, authorities };
 }
 
+function classificationInput(fixture: Fixture, candidate: string) {
+  return {
+    base: fixture.base,
+    candidate,
+    repository: "Byte-Ventures/borg-mcp-server",
+    headRepository: "Byte-Ventures/borg-mcp-server",
+    headRef: "release/0.3.0",
+  };
+}
+
 async function writeFixture(root: string, path: string, value: string): Promise<void> {
   await mkdir(dirname(join(root, path)), { recursive: true });
   await writeFile(join(root, path), value);
 }
 
-function commitAll(root: string, message: string): void {
+function commitAll(root: string, message: string): string {
   git(root, ["add", "."]);
   git(root, ["commit", "-q", "-m", message]);
+  return git(root, ["rev-parse", "HEAD"]);
 }
 
 function git(root: string, args: string[]): string {

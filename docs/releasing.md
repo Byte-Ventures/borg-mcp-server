@@ -139,18 +139,28 @@ run and artifact integrity are explicit operator inputs because they are not pre
 tree. It validates every input against GitHub Actions and the immutable npm package, updates only the
 generated version surfaces, and appends a canonical entry to `docs/release-records.json`.
 
-Release branches use the `release/` prefix. CI runs the complete lane and then classifies the commit
-with:
+Release branches use the `release/` prefix and enter protected `main` through a pull request. A
+direct push only updates the untrusted staging branch; it does not produce a release-identity
+verdict and grants no review skip, merge authority, or release authority.
 
-```sh
-npm run verify:release-identity -- --base origin/main
-```
+For a pull request from a same-repository `release/` branch, the dedicated release-identity
+workflow is loaded from the exact protected base commit. It checks out that base, fetches the exact
+candidate commit into the Git object database without checking it out, and invokes the base
+commit's verifier with explicit base and candidate SHAs. It does not install or execute candidate
+dependencies, package scripts, workflow code, actions, or verifier code. The candidate is treated
+only as Git tree and blob data.
 
 The verifier does not trust the prepare command or its flags. It independently rechecks the
 annotated tag, the exact successful workflow attempt, and the npm integrity; verifies the manifest,
 two shrinkwrap root identity fields, runtime literal, version-pin assertion counts, and byte-stable
 allowlist; reconstructs the expected Git tree in a temporary index; and requires exact tree equality.
 Any other edit is a code change and follows the ordinary review chain.
+
+Merging this workflow does not by itself make it a merge authority. Until an operator applies and
+verifies a protected-main ruleset that requires this workflow by identity, rather than requiring
+only a forgeable status-context name, every release-identity preparation continues through the full
+human review chain. The mechanically classified review skip becomes available only after that
+repository setting is active and verified.
 
 ## Current audit state
 

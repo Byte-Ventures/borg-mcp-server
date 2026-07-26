@@ -65,12 +65,25 @@ export function prepareRelease(
 export function verifyReleaseIdentity(
   root: string,
   base: string,
+  candidate: string,
   authorities?: ReleaseAuthorities,
 ): Readonly<{
   base: string;
-  head: string;
+  candidate: string;
   tree: string;
   oldVersion: string;
   newVersion: string;
   paths: readonly string[];
 }>;
+
+export function classifyReleasePullRequest(
+  root: string,
+  input: Readonly<{
+    base: string;
+    candidate: string;
+    repository: string;
+    headRepository: string;
+    headRef: string;
+  }>,
+  authorities?: ReleaseAuthorities,
+): ReturnType<typeof verifyReleaseIdentity>;

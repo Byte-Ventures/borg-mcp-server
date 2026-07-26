@@ -9,15 +9,18 @@ export interface ManagedServiceInput {
   readonly dataDirectory: string;
   readonly definitionPath: string;
   readonly launchdDomain?: string;
+  readonly label?: string;
+  readonly port?: number;
 }
 
 export interface ManagedServiceDefinition {
   readonly platform: ManagedServicePlatform;
-  readonly label: "ai.borgmcp.server";
+  readonly label: string;
   readonly definitionPath: string;
   readonly content: string;
   readonly install: readonly [string, ...string[]];
   readonly restart: readonly [string, ...string[]];
+  readonly recoverLoaded: readonly [string, ...string[]];
   readonly stop: readonly [string, ...string[]];
   readonly status: readonly [string, ...string[]];
 }
@@ -35,42 +38,76 @@ export function createManagedServiceDefinition(input: ManagedServiceInput): Mana
       throw new Error("Managed service paths must be absolute and single-line.");
     }
   }
+  const label = input.label ?? serviceLabel;
+  if (!/^[A-Za-z0-9][A-Za-z0-9.-]{0,127}$/u.test(label)) {
+    throw new Error("Managed service label is invalid.");
+  }
+  if (input.port !== undefined &&
+      (!Number.isSafeInteger(input.port) || input.port < 0 || input.port > 65_535)) {
+    throw new Error("Managed service port is invalid.");
+  }
   const entrypoint = join(input.runtimeRoot, "current", "package", "dist", "main.js");
   if (input.platform === "launchd") {
     const domain = input.launchdDomain;
     if (domain === undefined || !/^gui\/[1-9][0-9]*$/u.test(domain)) {
       throw new Error("Managed launchd domain is invalid.");
     }
-    const service = `${domain}/${serviceLabel}`;
+    const service = `${domain}/${label}`;
     return Object.freeze({
       platform: "launchd",
-      label: serviceLabel,
+      label,
       definitionPath: input.definitionPath,
-      content: launchdDefinition(input.nodeExecutable, entrypoint, input.dataDirectory),
+      content: launchdDefinition(
+        label,
+        input.nodeExecutable,
+        entrypoint,
+        input.dataDirectory,
+        input.port,
+      ),
       install: ["launchctl", "bootstrap", domain, input.definitionPath] as const,
       restart: ["launchctl", "kickstart", "-k", service] as const,
+      recoverLoaded: ["launchctl", "kickstart", service] as const,
       stop: ["launchctl", "bootout", service] as const,
       status: ["launchctl", "print", service] as const,
     });
   }
   return Object.freeze({
     platform: "systemd",
-    label: serviceLabel,
+    label,
     definitionPath: input.definitionPath,
-    content: systemdDefinition(input.nodeExecutable, entrypoint, input.dataDirectory),
-    install: ["systemctl", "--user", "enable", "--now", serviceLabel] as const,
-    restart: ["systemctl", "--user", "restart", serviceLabel] as const,
-    stop: ["systemctl", "--user", "stop", serviceLabel] as const,
-    status: ["systemctl", "--user", "show", serviceLabel, "--property=ActiveState,SubState,MainPID"] as const,
+    content: systemdDefinition(
+      label,
+      input.nodeExecutable,
+      entrypoint,
+      input.dataDirectory,
+      input.port,
+    ),
+    install: ["systemctl", "--user", "enable", "--now", label] as const,
+    restart: ["systemctl", "--user", "restart", label] as const,
+    recoverLoaded: ["systemctl", "--user", "restart", label] as const,
+    stop: ["systemctl", "--user", "stop", label] as const,
+    status: [
+      "systemctl",
+      "--user",
+      "show",
+      label,
+      "--property=LoadState,ActiveState,SubState,MainPID",
+    ] as const,
   });
 }
 
-function launchdDefinition(nodeExecutable: string, entrypoint: string, dataDirectory: string): string {
+function launchdDefinition(
+  label: string,
+  nodeExecutable: string,
+  entrypoint: string,
+  dataDirectory: string,
+  port: number | undefined,
+): string {
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-  <key>Label</key><string>${serviceLabel}</string>
-  <key>ProgramArguments</key><array><string>${xml(nodeExecutable)}</string><string>${xml(entrypoint)}</string><string>start</string></array>
+  <key>Label</key><string>${xml(label)}</string>
+  <key>ProgramArguments</key><array><string>${xml(nodeExecutable)}</string><string>${xml(entrypoint)}</string><string>start</string>${port === undefined ? "" : `<string>--port</string><string>${port}</string>`}</array>
   <key>EnvironmentVariables</key><dict><key>BORG_SERVER_DATA_DIR</key><string>${xml(dataDirectory)}</string><key>BORG_SERVER_PROCESS_MODE</key><string>managed</string></dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
@@ -79,13 +116,19 @@ function launchdDefinition(nodeExecutable: string, entrypoint: string, dataDirec
 `;
 }
 
-function systemdDefinition(nodeExecutable: string, entrypoint: string, dataDirectory: string): string {
+function systemdDefinition(
+  label: string,
+  nodeExecutable: string,
+  entrypoint: string,
+  dataDirectory: string,
+  port: number | undefined,
+): string {
   return `[Unit]
-Description=Borg MCP server
+Description=Borg MCP server (${label})
 
 [Service]
 Type=simple
-ExecStart=${systemdQuote(nodeExecutable)} ${systemdQuote(entrypoint)} start
+ExecStart=${systemdQuote(nodeExecutable)} ${systemdQuote(entrypoint)} start${port === undefined ? "" : ` --port ${port}`}
 Environment=${systemdQuote(`BORG_SERVER_DATA_DIR=${dataDirectory}`)}
 Environment="BORG_SERVER_PROCESS_MODE=managed"
 Restart=on-failure

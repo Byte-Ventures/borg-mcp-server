@@ -1,10 +1,18 @@
 export { runCli } from "./cli.js";
 export type { CliIo } from "./cli.js";
-export { inspectRuntimeLock } from "./service.js";
+export {
+  inspectManagedServiceState,
+  inspectRuntimeLock,
+  recoverStaleRuntimeLock,
+} from "./service.js";
 export { inspectNodeRuntime } from "./service.js";
 export type {
   DashboardCommandOptions,
   RuntimeLockStatus,
+  ManagedServiceStatus,
+  ServerRuntimeLockDiagnostic,
+  StaleRuntimeLockEvidence,
+  StaleRuntimeLockRecovery,
   ServerNextAction,
   ServerRuntimeStatus,
   ServerSetupResult,

@@ -13,6 +13,26 @@ const startedChildren = new WeakSet<ChildProcess>();
 const pendingMessages = new WeakMap<ChildProcess, unknown[]>();
 
 describe("production process signal lifecycle", () => {
+  it("cleans a post-lock foreground start when terminal teardown sends SIGHUP", async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-process-sighup-")));
+    try {
+      await bootstrapServer(directory);
+      const child = startChild(directory, "post-lock");
+      const output = captureOutput(child);
+      await waitForPhase(child, "post-lock");
+      const observed = waitForPhase(child, "signal-observed");
+      child.kill("SIGHUP");
+      await observed;
+      child.send("continue");
+
+      await expect(waitForExit(child, 3_000)).resolves.toMatchObject({ code: 0, signal: null });
+      await expect(access(join(directory, "runtime.lock"))).rejects.toMatchObject({ code: "ENOENT" });
+      expect(await output).not.toMatch(/credential|invitation|private-key|secret/iu);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  }, 15_000);
+
   it.each(["SIGTERM", "SIGINT"] as const)(
     "cleans every named startup phase on %s",
     async (signal) => {

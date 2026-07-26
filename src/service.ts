@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
-import { lstat, open, readFile, unlink } from "node:fs/promises";
+import { lstat, open, readFile, rename, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import { promisify } from "node:util";
@@ -61,7 +61,11 @@ import {
 } from "./runtime-lifecycle.js";
 import { createRegistryArtifactSource } from "./registry-artifact.js";
 import { createRuntimeOperator, type RuntimeUpdateResult } from "./runtime-operator.js";
-import { createManagedServiceDefinition } from "./managed-service.js";
+import {
+  createManagedServiceDefinition,
+  type ManagedServiceDefinition,
+  type ManagedServicePlatform,
+} from "./managed-service.js";
 import {
   createDashboardRenderer,
   dashboardColorEnabled,
@@ -87,6 +91,7 @@ export interface ServerService {
   readonly status?: () => Promise<ServerRuntimeStatus>;
   readonly stop?: () => Promise<ServerStopResult>;
   readonly update?: () => Promise<ServerUpdateResult>;
+  readonly recoverStaleLock?: () => Promise<StaleRuntimeLockRecovery>;
   readonly rotateClient?: (clientId: string) => Promise<string>;
   readonly revokeClient?: (clientId: string) => Promise<void>;
   readonly grantClient?: (clientId: string, cubeId: string, access: CubeAccess) => Promise<void>;
@@ -126,6 +131,9 @@ export interface ServerRuntimeStatus {
   readonly endpoint: string | null;
   readonly mode: "foreground" | "managed" | "legacy" | "stopped";
   readonly serviceAdapter: "launchd" | "systemd" | null;
+  readonly serviceState: "active" | "inactive" | "absent";
+  readonly serviceRecoveryCommand: readonly [string, ...string[]] | null;
+  readonly runtimeLock: ServerRuntimeLockDiagnostic;
   readonly dataIdentity: "available" | "unavailable";
   readonly nextAction: ServerNextAction | null;
 }
@@ -136,7 +144,51 @@ export type ServerNextAction =
 
 export interface ServerUpdateResult extends RuntimeUpdateResult {
   readonly controllerVersion: string;
+  readonly serviceAdapter: "launchd" | "systemd" | null;
+  readonly serviceState: "active" | "inactive" | "absent";
+  readonly serviceRecoveryCommand: readonly [string, ...string[]] | null;
   readonly nextAction: ServerNextAction | null;
+}
+
+export type ManagedServiceStatus =
+  | {
+      readonly state: "active";
+      readonly adapter: ManagedServicePlatform;
+      readonly recoveryCommand: null;
+    }
+  | {
+      readonly state: "inactive";
+      readonly adapter: ManagedServicePlatform;
+      readonly recoveryCommand: readonly [string, ...string[]];
+    }
+  | {
+      readonly state: "absent";
+      readonly adapter: null;
+      readonly recoveryCommand: null;
+    };
+
+export interface StaleRuntimeLockEvidence {
+  readonly pid: number;
+  readonly identity: RuntimeBuildIdentity;
+  readonly endpoint: string | null;
+  readonly mode: "foreground" | "managed" | "legacy";
+}
+
+export type ServerRuntimeLockDiagnostic =
+  | { readonly state: "clear" }
+  | {
+      readonly state: "stale";
+      readonly pid: number;
+      readonly processState: "absent";
+      readonly identity: RuntimeBuildIdentity;
+      readonly endpoint: string | null;
+      readonly mode: "foreground" | "managed" | "legacy";
+      readonly recoveryAction: "borg-mcp-server recover-stale-lock";
+    };
+
+export interface StaleRuntimeLockRecovery {
+  readonly backupPath: string;
+  readonly stale: StaleRuntimeLockEvidence;
 }
 
 export interface ServerStopResult {
@@ -191,7 +243,7 @@ interface RuntimeResources {
 }
 
 export type RuntimeLockStatus =
-  | { readonly running: false }
+  | { readonly running: false; readonly stale?: StaleRuntimeLockEvidence }
   | {
       readonly running: true;
       readonly pid: number;
@@ -607,9 +659,18 @@ export const nodeServerService: ServerService = {
       },
     };
   },
-  status: () => inspectNodeRuntime(dataDirectory, runtimeDirectory),
-  update: async () => completeRuntimeUpdate(await nodeRuntimeController.updateLatest(30_000)),
+  status: () => inspectNodeRuntime(
+    dataDirectory,
+    runtimeDirectory,
+    nodeRuntimeController.inspectManagedService,
+  ),
+  update: async () => completeRuntimeUpdate(
+    await nodeRuntimeController.updateLatest(30_000),
+    SERVER_PACKAGE_VERSION,
+    await nodeRuntimeController.inspectManagedService(),
+  ),
   stop: () => nodeRuntimeController.stopRuntime(20_000),
+  recoverStaleLock: () => recoverStaleRuntimeLock(dataDirectory),
   ...createOfflineCredentialService(dataDirectory, credentialFile),
 };
 
@@ -713,20 +774,17 @@ function createNodeRuntimeOperator(managedRuntimeDirectory: string, runtimeDataD
     stop: async (signal) => { await run(definition.stop, signal); },
     probe: (signal) => waitForRuntimeIdentity(runtimeDataDirectory, signal),
   });
-  const isManagedServiceActive = async (): Promise<boolean> => {
-    try {
-      const result = await run(definition.status, new AbortController().signal);
-      return definition.platform === "launchd" || /(?:^|\n)ActiveState=active(?:\n|$)/u.test(result.stdout);
-    } catch {
-      return false;
-    }
-  };
+  const inspectManagedService = (): Promise<ManagedServiceStatus> =>
+    inspectManagedServiceState(definition, run);
+  const isManagedServiceActive = async (): Promise<boolean> =>
+    (await inspectManagedService()).state === "active";
   const operator = createRuntimeOperator({
     runtimeRoot: managedRuntimeDirectory,
     artifacts: createRegistryArtifactSource(),
     lifecycle,
     isRunning: async () => {
       const status = await inspectRuntimeLock(runtimeDataDirectory);
+      if (!status.running && status.stale !== undefined) throw operatorErrors.RUNTIME_LOCK_STALE;
       if (status.running && status.mode === "legacy" && await isManagedServiceActive()) {
         return true;
       }
@@ -738,6 +796,7 @@ function createNodeRuntimeOperator(managedRuntimeDirectory: string, runtimeDataD
   });
   return Object.freeze({
     ...operator,
+    inspectManagedService,
     stopRuntime: (timeoutMs: number) => stopServerRuntime({
       runtimeDataDirectory,
       timeoutMs,
@@ -745,6 +804,75 @@ function createNodeRuntimeOperator(managedRuntimeDirectory: string, runtimeDataD
       stopManaged: async (signal) => { await run(definition.stop, signal); },
     }),
   });
+}
+
+export async function inspectManagedServiceState(
+  definition: ManagedServiceDefinition,
+  run: (
+    command: readonly [string, ...string[]],
+    signal: AbortSignal,
+  ) => Promise<{ readonly stdout: string; readonly stderr: string }>,
+): Promise<ManagedServiceStatus> {
+  let active = false;
+  let loaded = false;
+  try {
+    const result = await run(definition.status, new AbortController().signal);
+    if (definition.platform === "launchd") {
+      const state = /(?:^|\n)\s*state = ([a-z-]+)\s*(?:\n|$)/u.exec(result.stdout)?.[1];
+      if (state === undefined) throw new Error("launchd returned no service state.");
+      loaded = true;
+      active = state === "running";
+    } else {
+      const loadState = /(?:^|\n)LoadState=([a-z-]+)(?:\n|$)/u.exec(result.stdout)?.[1];
+      const activeState = /(?:^|\n)ActiveState=([a-z-]+)(?:\n|$)/u.exec(result.stdout)?.[1];
+      if (loadState === undefined || activeState === undefined) {
+        throw new Error("systemd returned no service state.");
+      }
+      loaded = loadState !== "not-found";
+      active = loaded && activeState === "active";
+    }
+  } catch (error) {
+    if (!isExpectedUnloadedServiceProbe(definition, error)) throw error;
+  }
+  if (active) {
+    return Object.freeze({
+      state: "active",
+      adapter: definition.platform,
+      recoveryCommand: null,
+    });
+  }
+
+  let metadata;
+  try {
+    metadata = await lstat(definition.definitionPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return Object.freeze({
+        state: "absent",
+        adapter: null,
+        recoveryCommand: null,
+      });
+    }
+    throw error;
+  }
+  if (!metadata.isFile() || metadata.isSymbolicLink()) {
+    throw operatorErrors.MANAGED_SERVICE_DEFINITION_UNSAFE;
+  }
+  return Object.freeze({
+    state: "inactive",
+    adapter: definition.platform,
+    recoveryCommand: loaded ? definition.recoverLoaded : definition.install,
+  });
+}
+
+function isExpectedUnloadedServiceProbe(
+  definition: ManagedServiceDefinition,
+  error: unknown,
+): boolean {
+  return definition.platform === "launchd" &&
+    typeof error === "object" &&
+    error !== null &&
+    (error as { readonly code?: unknown }).code === 113;
 }
 
 async function waitForRuntimeIdentity(
@@ -756,7 +884,8 @@ async function waitForRuntimeIdentity(
       const status = await inspectRuntimeLock(runtimeDataDirectory);
       if (status.running && status.identity !== null) return status.identity;
     } catch (error) {
-      if (error !== operatorErrors.RUNTIME_LOCK_STALE) throw error;
+      if (error !== operatorErrors.RUNTIME_LOCK_STALE &&
+          error !== operatorErrors.RUNTIME_LOCK_INVALID) throw error;
     }
     await new Promise<void>((resolve) => {
       const timer = setTimeout(resolve, 50);
@@ -772,11 +901,17 @@ async function waitForRuntimeIdentity(
 export async function inspectNodeRuntime(
   runtimeDataDirectory: string,
   managedRuntimeDirectory: string,
+  inspectManagedService: () => Promise<ManagedServiceStatus> = async () => Object.freeze({
+    state: "absent",
+    adapter: null,
+    recoveryCommand: null,
+  }),
 ): Promise<ServerRuntimeStatus> {
-  const [lock, activeArtifact, dataIdentity] = await Promise.all([
+  const [lock, activeArtifact, dataIdentity, managedService] = await Promise.all([
     inspectRuntimeLock(runtimeDataDirectory),
     inspectActiveRuntimeArtifact(managedRuntimeDirectory),
     hasDataIdentity(runtimeDataDirectory),
+    inspectManagedService(),
   ]);
   const identity = lock.running ? lock.identity : null;
   const runningArtifact = identity === null ? null : {
@@ -795,9 +930,20 @@ export async function inspectNodeRuntime(
     buildIdentity: identity?.source_sha ?? null,
     endpoint: lock.running ? lock.endpoint : null,
     mode: lock.running ? lock.mode : "stopped",
-    serviceAdapter: lock.running && lock.mode === "managed"
-      ? process.platform === "darwin" ? "launchd" : "systemd"
-      : null,
+    serviceAdapter: managedService.adapter,
+    serviceState: managedService.state,
+    serviceRecoveryCommand: managedService.recoveryCommand,
+    runtimeLock: lock.running || lock.stale === undefined
+      ? Object.freeze({ state: "clear" })
+      : Object.freeze({
+          state: "stale",
+          pid: lock.stale.pid,
+          processState: "absent",
+          identity: lock.stale.identity,
+          endpoint: lock.stale.endpoint,
+          mode: lock.stale.mode,
+          recoveryAction: "borg-mcp-server recover-stale-lock",
+        }),
     dataIdentity,
     nextAction,
   });
@@ -815,6 +961,7 @@ export async function stopServerRuntime(input: {
   }
   const inspect = input.inspect ?? inspectRuntimeLock;
   const initial = await inspect(input.runtimeDataDirectory);
+  if (!initial.running && initial.stale !== undefined) throw operatorErrors.RUNTIME_LOCK_STALE;
   if (!initial.running) return Object.freeze({ outcome: "already-stopped" });
   const managed = initial.mode === "managed" ||
     (initial.mode === "legacy" && await input.isManagedServiceActive());
@@ -839,10 +986,18 @@ export async function stopServerRuntime(input: {
 export function completeRuntimeUpdate(
   result: RuntimeUpdateResult,
   controllerVersion = SERVER_PACKAGE_VERSION,
+  managedService: ManagedServiceStatus = Object.freeze({
+    state: "absent",
+    adapter: null,
+    recoveryCommand: null,
+  }),
 ): ServerUpdateResult {
   return Object.freeze({
     ...result,
     controllerVersion,
+    serviceAdapter: managedService.adapter,
+    serviceState: managedService.state,
+    serviceRecoveryCommand: managedService.recoveryCommand,
     nextAction: resolveControllerNextAction(controllerVersion, result.artifact.version),
   });
 }
@@ -1079,6 +1234,7 @@ export function createOfflineCredentialService(
 }
 
 const canonicalCubeUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
+const canonicalRuntimeLockNonce = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const uuidLikeCubeSelector = /^[0-9a-fA-F-]{32,36}$/u;
 
 function parseInvitationCubeSelector(
@@ -1325,13 +1481,36 @@ export async function acquireRuntimeLock(
 }
 
 export async function inspectRuntimeLock(runtimeDataDirectory: string): Promise<RuntimeLockStatus> {
+  return (await inspectRuntimeLockFile(runtimeDataDirectory)).status;
+}
+
+interface RuntimeLockFileInspection {
+  readonly status: RuntimeLockStatus;
+  readonly raw: string | null;
+  readonly nonce: string | null;
+  readonly device: number | null;
+  readonly inode: number | null;
+}
+
+async function inspectRuntimeLockFile(
+  runtimeDataDirectory: string,
+  concurrentRecovery = false,
+): Promise<RuntimeLockFileInspection> {
   const path = join(runtimeDataDirectory, "runtime.lock");
   let metadata;
   let liveOwner = false;
   try {
     metadata = await lstat(path);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return Object.freeze({ running: false });
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return Object.freeze({
+        status: Object.freeze({ running: false }),
+        raw: null,
+        nonce: null,
+        device: null,
+        inode: null,
+      });
+    }
     throw error;
   }
   if (!metadata.isFile() || metadata.isSymbolicLink() || (metadata.mode & 0o077) !== 0 ||
@@ -1339,8 +1518,17 @@ export async function inspectRuntimeLock(runtimeDataDirectory: string): Promise<
     throw operatorErrors.RUNTIME_LOCK_UNSAFE;
   }
   try {
-    const value = JSON.parse(await readFile(path, "utf8")) as {
+    const raw = await readFile(path, "utf8");
+    const confirmedMetadata = await lstat(path);
+    if (!confirmedMetadata.isFile() || confirmedMetadata.isSymbolicLink() ||
+        confirmedMetadata.dev !== metadata.dev || confirmedMetadata.ino !== metadata.ino ||
+        confirmedMetadata.size !== Buffer.byteLength(raw) ||
+        (confirmedMetadata.mode & 0o077) !== 0) {
+      throw new Error();
+    }
+    const value = JSON.parse(raw) as {
       pid?: unknown;
+      nonce?: unknown;
       purpose?: unknown;
       runtime_identity?: unknown;
       endpoint?: unknown;
@@ -1349,25 +1537,101 @@ export async function inspectRuntimeLock(runtimeDataDirectory: string): Promise<
     if (!Number.isSafeInteger(value.pid) || (value.pid as number) <= 0) throw new Error();
     const pid = value.pid as number;
     liveOwner = processIsAlive(pid);
-    if (value.purpose !== "server" ||
+    if (typeof value.nonce !== "string" || !canonicalRuntimeLockNonce.test(value.nonce) ||
+        value.purpose !== "server" ||
         (value.endpoint !== undefined &&
           (typeof value.endpoint !== "string" || !isRuntimeEndpoint(value.endpoint))) ||
         (value.mode !== undefined && value.mode !== "foreground" && value.mode !== "managed")) {
       throw new Error();
     }
-    if (!liveOwner) throw operatorErrors.RUNTIME_LOCK_STALE;
+    const identity = decodeRuntimeLockIdentity(value.runtime_identity);
+    const endpoint = value.endpoint ?? null;
+    const mode = value.mode ?? "legacy";
+    if (!liveOwner) {
+      if (identity === null) throw new Error();
+      return Object.freeze({
+        status: Object.freeze({
+          running: false,
+          stale: Object.freeze({ pid, identity, endpoint, mode }),
+        }),
+        raw,
+        nonce: value.nonce,
+        device: confirmedMetadata.dev,
+        inode: confirmedMetadata.ino,
+      });
+    }
     return Object.freeze({
-      running: true,
-      pid,
-      identity: decodeRuntimeLockIdentity(value.runtime_identity),
-      endpoint: value.endpoint ?? null,
-      mode: value.mode ?? "legacy",
+      status: Object.freeze({
+        running: true,
+        pid,
+        identity,
+        endpoint,
+        mode,
+      }),
+      raw,
+      nonce: value.nonce,
+      device: confirmedMetadata.dev,
+      inode: confirmedMetadata.ino,
     });
   } catch (error) {
-    if (error === operatorErrors.RUNTIME_LOCK_STALE) throw error;
+    if (concurrentRecovery && (error as NodeJS.ErrnoException).code === "ENOENT") {
+      throw operatorErrors.RUNTIME_LOCK_RECOVERY_CONCURRENT;
+    }
     if (liveOwner) throw operatorErrors.RUNTIME_LOCK_LIVE_UNRECOGNIZED;
     throw operatorErrors.RUNTIME_LOCK_INVALID;
   }
+}
+
+export async function recoverStaleRuntimeLock(
+  runtimeDataDirectory: string,
+  now: () => Date | Promise<Date> = () => new Date(),
+): Promise<StaleRuntimeLockRecovery> {
+    const initial = await inspectRuntimeLockFile(runtimeDataDirectory, true);
+    if (initial.status.running || initial.status.stale === undefined) {
+      throw operatorErrors.RUNTIME_LOCK_NOT_STALE;
+    }
+    const confirmed = await inspectRuntimeLockFile(runtimeDataDirectory, true);
+    if (confirmed.raw === null) throw operatorErrors.RUNTIME_LOCK_RECOVERY_CONCURRENT;
+    if (!sameRuntimeLockFile(initial, confirmed) ||
+        confirmed.status.running || confirmed.status.stale === undefined ||
+        processIsAlive(confirmed.status.stale.pid)) {
+      throw operatorErrors.RUNTIME_LOCK_NOT_STALE;
+    }
+
+    const timestamp = (await now()).toISOString().replaceAll(/[-:.]/gu, "");
+    const beforePreservation = await inspectRuntimeLockFile(runtimeDataDirectory, true);
+    if (beforePreservation.raw === null) throw operatorErrors.RUNTIME_LOCK_RECOVERY_CONCURRENT;
+    if (!sameRuntimeLockFile(confirmed, beforePreservation) ||
+        beforePreservation.status.running || beforePreservation.status.stale === undefined ||
+        processIsAlive(beforePreservation.status.stale.pid)) {
+      throw operatorErrors.RUNTIME_LOCK_NOT_STALE;
+    }
+
+    const path = join(runtimeDataDirectory, "runtime.lock");
+    const backupPath = join(
+      runtimeDataDirectory,
+      `runtime.lock.stale-${timestamp}-${randomUUID()}`,
+    );
+    try {
+      await rename(path, backupPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        throw operatorErrors.RUNTIME_LOCK_RECOVERY_CONCURRENT;
+      }
+      throw error;
+    }
+    return Object.freeze({ backupPath, stale: beforePreservation.status.stale });
+}
+
+function sameRuntimeLockFile(
+  left: RuntimeLockFileInspection,
+  right: RuntimeLockFileInspection,
+): boolean {
+  return left.raw !== null &&
+    left.raw === right.raw &&
+    left.nonce === right.nonce &&
+    left.device === right.device &&
+    left.inode === right.inode;
 }
 
 function isRuntimeEndpoint(value: string): boolean {
@@ -1501,11 +1765,13 @@ export function installProcessShutdownHandlers(): {
   const stop = (): void => controller.abort();
   process.once("SIGINT", stop);
   process.once("SIGTERM", stop);
+  process.once("SIGHUP", stop);
   return {
     signal: controller.signal,
     dispose: () => {
       process.off("SIGINT", stop);
       process.off("SIGTERM", stop);
+      process.off("SIGHUP", stop);
     },
   };
 }

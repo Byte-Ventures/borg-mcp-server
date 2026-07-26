@@ -149,7 +149,7 @@ receive a bounded plain-text status view. The default CUBE DETAIL outline uses
 single-column box drawing with strict single-column face fills so common
 terminals do not skew the art through ambiguous-width cube glyphs.
 
-Ctrl-C stops the server, restores the prior terminal screen and cursor, and
+Ctrl-C or terminal teardown stops the server, restores the prior terminal screen and cursor, and
 does not install or enable persistence. Redirected output and managed-service
 execution never enter the alternate screen or emit ANSI rendering; they retain
 the existing single bounded machine-readable startup record. Inspect exact
@@ -175,10 +175,11 @@ borg-mcp-server status
 borg-mcp-server version
 borg-mcp-server update
 borg-mcp-server stop
+borg-mcp-server recover-stale-lock
 ```
 
-When stdout is not a terminal, `status`, `version`, `update`, and `stop` emit one
-bounded JSON record. The installed controller and the prepared/running runtime
+When stdout is not a terminal, `status`, `version`, `update`, `stop`, and
+`recover-stale-lock` emit one bounded JSON record. The installed controller and the prepared/running runtime
 are separate layers: installing a newer CLI does not activate its server
 artifact, and activating a newer runtime does not rewrite the globally installed
 controller. `update` reports both identities. If the activated runtime is newer,
@@ -190,6 +191,23 @@ newer, or the exact global install command when the running runtime (or prepared
 runtime while stopped) is newer. It never derives a build identity from a source
 checkout; unavailable evidence is reported as unavailable.
 
+Status also reports managed-service state independently as `active`, `inactive`,
+or `absent`. An existing but inactive definition stays stopped during update;
+status names its exact platform recovery command (`launchctl bootstrap ...` on
+an unloaded macOS definition, `launchctl kickstart ...` when it remains loaded,
+or the corresponding `systemctl --user enable --now ...` / `restart ...` command
+on Linux) without running it.
+`borg-mcp-server start` is always foreground-only: it never loads an existing
+LaunchAgent or systemd unit.
+
+A private, valid `runtime.lock` whose recorded PID is conclusively absent is
+reported as typed stale-lock evidence rather than making status unusable.
+`borg-mcp-server recover-stale-lock` revalidates that evidence and preserves the
+lock under a unique `runtime.lock.stale-*` name. It never deletes the evidence,
+starts a process, or acts on an unsafe, malformed, possibly-live, or
+identity-unverifiable lock. Run status again afterward; if a managed definition
+is inactive, follow the separately reported platform command.
+
 `stop` unloads the existing managed launchd/systemd service and waits for its
 runtime lock to disappear. It is idempotent and preserves server data, TLS
 identity, credentials, cubes, artifacts, and service definition. A foreground
@@ -199,7 +217,7 @@ Ctrl-C there rather than signaling a PID inferred from an untrusted lock.
 The server library provides matching launchd and systemd adapter definitions
 that point at the atomically selected `current` artifact and preserve
 `BORG_SERVER_DATA_DIR`. Managed persistence is an explicit, separately reviewed
-handoff; foreground start never installs it. The lifecycle contract and terminal
+handoff; foreground start never installs or loads it. The lifecycle contract and terminal
 copy are documented in
 [`docs/design/sprint-6-server-lifecycle.md`](docs/design/sprint-6-server-lifecycle.md).
 

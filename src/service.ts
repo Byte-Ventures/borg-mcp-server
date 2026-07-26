@@ -1494,6 +1494,7 @@ interface RuntimeLockFileInspection {
 
 async function inspectRuntimeLockFile(
   runtimeDataDirectory: string,
+  concurrentRecovery = false,
 ): Promise<RuntimeLockFileInspection> {
   const path = join(runtimeDataDirectory, "runtime.lock");
   let metadata;
@@ -1573,6 +1574,9 @@ async function inspectRuntimeLockFile(
       inode: confirmedMetadata.ino,
     });
   } catch (error) {
+    if (concurrentRecovery && (error as NodeJS.ErrnoException).code === "ENOENT") {
+      throw operatorErrors.RUNTIME_LOCK_RECOVERY_CONCURRENT;
+    }
     if (liveOwner) throw operatorErrors.RUNTIME_LOCK_LIVE_UNRECOGNIZED;
     throw operatorErrors.RUNTIME_LOCK_INVALID;
   }
@@ -1582,11 +1586,12 @@ export async function recoverStaleRuntimeLock(
   runtimeDataDirectory: string,
   now: () => Date | Promise<Date> = () => new Date(),
 ): Promise<StaleRuntimeLockRecovery> {
-    const initial = await inspectRuntimeLockFile(runtimeDataDirectory);
+    const initial = await inspectRuntimeLockFile(runtimeDataDirectory, true);
     if (initial.status.running || initial.status.stale === undefined) {
       throw operatorErrors.RUNTIME_LOCK_NOT_STALE;
     }
-    const confirmed = await inspectRuntimeLockFile(runtimeDataDirectory);
+    const confirmed = await inspectRuntimeLockFile(runtimeDataDirectory, true);
+    if (confirmed.raw === null) throw operatorErrors.RUNTIME_LOCK_RECOVERY_CONCURRENT;
     if (!sameRuntimeLockFile(initial, confirmed) ||
         confirmed.status.running || confirmed.status.stale === undefined ||
         processIsAlive(confirmed.status.stale.pid)) {
@@ -1594,7 +1599,8 @@ export async function recoverStaleRuntimeLock(
     }
 
     const timestamp = (await now()).toISOString().replaceAll(/[-:.]/gu, "");
-    const beforePreservation = await inspectRuntimeLockFile(runtimeDataDirectory);
+    const beforePreservation = await inspectRuntimeLockFile(runtimeDataDirectory, true);
+    if (beforePreservation.raw === null) throw operatorErrors.RUNTIME_LOCK_RECOVERY_CONCURRENT;
     if (!sameRuntimeLockFile(confirmed, beforePreservation) ||
         beforePreservation.status.running || beforePreservation.status.stale === undefined ||
         processIsAlive(beforePreservation.status.stale.pid)) {
@@ -1610,7 +1616,7 @@ export async function recoverStaleRuntimeLock(
       await rename(path, backupPath);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-        throw operatorErrors.RUNTIME_LOCK_NOT_STALE;
+        throw operatorErrors.RUNTIME_LOCK_RECOVERY_CONCURRENT;
       }
       throw error;
     }

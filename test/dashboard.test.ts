@@ -236,6 +236,22 @@ describe("dashboard renderer", () => {
     }
   });
 
+  it("uses a distinct fixed-width activity marker in the overflow strip", () => {
+    const snapshot = rankDashboardSnapshot(snapshotData(3), server);
+    const frame = createDashboardRenderer({ glyphMode: "ascii", color: false })(
+      snapshot,
+      80,
+      12,
+      {
+        autoFollow: true,
+        focusedCubeId: null,
+        pulseCubeIds: new Set([snapshot.cubes[1]!.id]),
+        pulsePhase: 4,
+      },
+    );
+    expect(frame).toContain("ALL 3 +@=");
+  });
+
   it("keeps the embedded footer by default and accepts a sanitized caller footer", () => {
     const snapshot = rankDashboardSnapshot(snapshotData(1), server);
     const defaultFrame = createDashboardRenderer({ glyphMode: "ascii", color: false })(
@@ -417,7 +433,14 @@ describe("foreground dashboard lifecycle", () => {
 
     const pulse = harness.output.at(-1)!;
     expect(pulse).not.toBe(before);
-    expect(pulse.split("\n").find((line) => line.includes("cube-02"))).toMatch(/^#\s+2 /u);
+    expect(pulse).toContain("/....../|");
+    expect(pulse.split("\n").find((line) => line.includes("cube-02"))).toMatch(
+      /^=\s+2 .*@\s*$/u,
+    );
+    await vi.advanceTimersByTimeAsync(100);
+    expect(harness.output.at(-1)!.split("\n").find((line) => line.includes("cube-02"))).toMatch(
+      /^=\s+2 .*!\s*$/u,
+    );
     dashboard.close();
   });
 

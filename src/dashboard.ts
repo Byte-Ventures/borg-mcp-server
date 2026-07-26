@@ -4,6 +4,7 @@ export const DASHBOARD_EVENT_COALESCE_MS = 250;
 export const DASHBOARD_RESIZE_DEBOUNCE_MS = 125;
 export const DASHBOARD_PULSE_FRAME_MS = 125;
 const DASHBOARD_PULSE_PHASES = 4;
+const DASHBOARD_ACTIVITY_PULSE_MARKERS = [" ", "-", "~", "!", "@"] as const;
 
 export interface DashboardCubeData {
   readonly id: string;
@@ -594,19 +595,18 @@ function renderSummaryRow(
   glyphs: Glyphs,
   view: DashboardViewState,
 ): string {
-  const activityGlyph = view.pulseCubeIds.has(cube.id)
-    ? pulseGlyph(view.pulsePhase, glyphs)
-    : heatGlyph(cube.posts_15m, glyphs);
-  const marker = rankMarker(cube.rank_change);
+  const marker = view.pulseCubeIds.has(cube.id)
+    ? `${activityPulseMarker(view.pulsePhase)} `
+    : rankMarker(cube.rank_change);
   if (width < 60) {
     const nameWidth = Math.max(6, width - 30);
-    return `${activityGlyph} ${String(cube.rank).padStart(3)} ` +
+    return `${heatGlyph(cube.posts_15m, glyphs)} ${String(cube.rank).padStart(3)} ` +
       `${fitCell(sanitizeTerminalText(cube.name), nameWidth, " ", glyphs.ellipsis)} ` +
       `${String(cube.posts_15m).padStart(4)}/15m ` +
       `${formatAge(snapshot.captured_at, cube.last_post_at).padStart(5)} ${marker}`;
   }
   const nameWidth = Math.max(10, width - 52);
-  return `${activityGlyph} ${String(cube.rank).padStart(3)} ` +
+  return `${heatGlyph(cube.posts_15m, glyphs)} ${String(cube.rank).padStart(3)} ` +
     `${fitCell(sanitizeTerminalText(cube.name), nameWidth, " ", glyphs.ellipsis)} ` +
     `${String(cube.drones_seen_15m).padStart(3)}/${String(cube.drones_total).padEnd(3)} seen ` +
     `${String(cube.posts_15m).padStart(4)}/15m ` +
@@ -625,7 +625,7 @@ function renderAllCubesStrip(
   const label = `ALL ${snapshot.cubes.length} `;
   const capacity = Math.max(0, width - displayWidth(label));
   const glyphValues = snapshot.cubes.map((cube) => view.pulseCubeIds.has(cube.id)
-    ? pulseGlyph(view.pulsePhase, glyphs)
+    ? activityPulseMarker(view.pulsePhase)
     : heatGlyph(cube.posts_15m, glyphs));
   const result = [`${label}${glyphValues.slice(0, capacity).join("")}`];
   let offset = capacity;
@@ -660,6 +660,14 @@ function pulseGlyph(phase: number, glyphs: Glyphs): string {
     Math.min(DASHBOARD_PULSE_PHASES, Math.floor(phase)),
   );
   return pulseRamp[boundedPhase]!;
+}
+
+function activityPulseMarker(phase: number): string {
+  const boundedPhase = Math.max(
+    0,
+    Math.min(DASHBOARD_PULSE_PHASES, Math.floor(phase)),
+  );
+  return DASHBOARD_ACTIVITY_PULSE_MARKERS[boundedPhase]!;
 }
 
 function rankMarker(delta: number): string {

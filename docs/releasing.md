@@ -122,6 +122,40 @@ any preview.
 10. Stop immediately on any mismatch before publication. Preserve every run and tag as immutable
     evidence; recovery uses a newly reviewed source fix, a new version, and a newly authorized tag.
 
+## Deterministic release identity preparation
+
+After a successful immutable publication, prepare the next package identity from a clean branch
+whose base contains the annotated tag for the currently recorded package version:
+
+```sh
+npm run release:prepare -- <next-version> \
+  --workflow-run-id <successful-tag-run-id> \
+  --workflow-run-attempt <attempt> \
+  --artifact-integrity <sha512-SRI>
+```
+
+The command derives the annotated tag object, peeled commit, and release tree from Git. The workflow
+run and artifact integrity are explicit operator inputs because they are not present in the base
+tree. It validates every input against GitHub Actions and the immutable npm package, updates only the
+generated version surfaces, and appends a canonical entry to `docs/release-records.json`.
+
+Release branches use the `release/` prefix and enter protected `main` through a pull request. A
+direct push only updates the staging branch; it does not produce a release-identity
+verdict and grants no review skip, merge authority, or release authority.
+
+For a pull request from a same-repository `release/` branch, the dedicated release-identity
+workflow is loaded from the exact protected base commit. It checks out that base, fetches the exact
+candidate commit into the Git object database without checking it out, and invokes the base
+commit's verifier with explicit base and candidate SHAs. It does not install or execute candidate
+dependencies, package scripts, workflow code, actions, or verifier code. The candidate is treated
+only as Git tree and blob data.
+
+The verifier does not trust the prepare command or its flags. It independently rechecks the
+annotated tag, the exact successful workflow attempt, and the npm integrity; verifies the manifest,
+two shrinkwrap root identity fields, runtime literal, version-pin assertion counts, and byte-stable
+allowlist; reconstructs the expected Git tree in a temporary index; and requires exact tree equality.
+Any other edit is a code change and follows the ordinary review chain.
+
 ## Current audit state
 
 The active local/self-hosted product spans the public

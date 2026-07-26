@@ -116,11 +116,14 @@ any preview.
    or ownership other than the sole reviewed `NPM_EXPECTED_OWNER`. It then publishes the tarball once
    through npm Trusted Publishing with provenance, lifecycle scripts disabled, and no long-lived npm
    token.
-8. After publication becomes visible, perform exactly one post-publication check: install the release
-   from the canonical registry into an isolated prefix and exercise the real user path end to end;
-   confirm that the registry's `latest` dist-tag moved to the release; and confirm that npm attached
-   provenance. Do not repeat byte comparisons, integrity/SRI checks, packed-version checks, or
-   source-tree verification that `verify` already completed.
+8. For immutable package bytes, successful completion of `npm publish` is the terminal release boundary.
+   There is no post-publication registry readback job: registry metadata and install visibility propagate
+   asynchronously and cannot invalidate an immutable publication after npm accepts it. Separately,
+   once the release is installable from the canonical registry, install it into an isolated prefix
+   and exercise the real user path end to end. This is product verification, not publication
+   validation: failure routes a new reviewed fix and never invalidates, rebuilds, retags, or reruns
+   the immutable release. Do not repeat byte comparisons, integrity/SRI checks, packed-version
+   checks, source-tree verification, dist-tag readback, or provenance readback.
 9. Useful SBOM or supplemental report generation may run separately, but cannot gate, invalidate, or
    make an otherwise authentic immutable publication ambiguous.
 10. After successful publication, update the README and this runbook in a fresh reviewed
@@ -470,10 +473,10 @@ propagation completed. The run and tag remain immutable and must not be rerun, m
 
 Releases through `0.1.17` used bounded postpublish version reads for propagation, integrity,
 signatures, and attestations. That policy is retired: the active workflow performs no read of the
-just-published version. The active release procedure instead performs one operator check after
-publication: registry install and real-path exercise, `latest` dist-tag confirmation, and provenance
-confirmation, without repeating byte, integrity, or packed-version verification. The prior runs
-remain immutable historical evidence and must not be rerun.
+just-published version. The active release procedure instead performs one operator product check
+after publication: registry install and real-path exercise, without dist-tag or provenance readback
+and without repeating byte, integrity, or packed-version verification. The prior runs remain
+immutable historical evidence and must not be rerun.
 
 The immutable annotated `v0.1.0` tag object
 `0f454997ced06802f0d3a0518c2e294af5a73b56` and first-attempt workflow run `29494436948`

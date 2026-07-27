@@ -174,7 +174,7 @@ describe("dashboard renderer", () => {
       ------------------------------------------------------------
       +   1 cube-01      4/5   seen    3/15m   3 posters     1m
       =   2 cube-02      3/5   seen    2/15m   2 posters     2m
-      =   3 cube-03      2/5   seen    1/15m   1 posters     3m
+      =   3 cube-03      2/5   seen    1/15m   1 poster     3m
       ^C stop server  |  read-only"
     `);
 
@@ -199,7 +199,7 @@ describe("dashboard renderer", () => {
       [
         "┌ CUBE DETAIL ─────────────────────────────────────────────────────────────────┐",
         "│  ┌──────┐   cube-01 #1 (auto)                                                │",
-        "│ /....../│   1 posts/15m  1 posting drones                                    │",
+        "│ /....../│   1 posts/15m  1 posting drone                                     │",
         "│┌──────┐ │   4/5 drones seen/15m                                              │",
         "││......│/    last post 1m                                                     │",
         "│└──────┘     activity = coordination log entries                              │",
@@ -275,8 +275,33 @@ describe("dashboard renderer", () => {
       glyphMode: "ascii",
       color: false,
       navigation: true,
-    })(snapshot, 80, 24);
+    })(rankDashboardSnapshot(snapshotData(2), server), 80, 24);
     expect(interactiveFrame).toContain("< > switch  |  a auto");
+  });
+
+  it("renders explicit modes, useful navigation, and singular dashboard labels", () => {
+    const renderer = createDashboardRenderer({
+      glyphMode: "ascii",
+      color: false,
+      navigation: true,
+    });
+    const oneCube = rankDashboardSnapshot(snapshotData(1), server);
+    const auto = renderer(oneCube, 80, 24);
+    const pinned = renderer(oneCube, 80, 24, {
+      autoFollow: false,
+      focusedCubeId: oneCube.cubes[0]!.id,
+      pulseCubeIds: new Set(),
+      pulsePhase: 0,
+    });
+    const empty = renderer(rankDashboardSnapshot(snapshotData(0), server), 80, 24);
+
+    expect(auto).toContain("1 cube");
+    expect(auto).toContain("1 posts/15m  1 posting drone");
+    expect(auto).toContain("1 poster");
+    expect(auto).toContain("#1 (auto)");
+    expect(auto).not.toContain("< > switch");
+    expect(pinned).toContain("#1 (pinned - a to resume)");
+    expect(empty).not.toContain("< > switch");
   });
 
   it("keeps representative terminal widths and a thousand-cube snapshot bounded", () => {
@@ -499,6 +524,36 @@ describe("foreground dashboard lifecycle", () => {
     expect(harness.inputListenerCount()).toBe(1);
     dashboard.close();
     expect(harness.inputListenerCount()).toBe(0);
+  });
+
+  it("skips writes for pulse ticks whose composed frame is unchanged", async () => {
+    vi.useFakeTimers();
+    const harness = terminalHarness();
+    const initial = snapshotData(1_000);
+    const source = sourceHarness(initial);
+    const dashboard = startForegroundDashboard({
+      source,
+      server,
+      terminal: harness.terminal,
+      renderer: createDashboardRenderer({ glyphMode: "ascii", color: false }),
+      pulseFrameMs: 100,
+    });
+    const lastCube = initial.cubes.at(-1)!;
+    const writesBeforeHiddenPulse = harness.output.length;
+
+    source.set({
+      ...initial,
+      cubes: initial.cubes.map((cube) => cube.id === lastCube.id
+        ? { ...cube, last_post_at: "2026-07-25T12:00:30.000Z" }
+        : cube),
+    });
+    source.emit();
+    await vi.advanceTimersByTimeAsync(250);
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(source.readCount()).toBe(2);
+    expect(harness.output).toHaveLength(writesBeforeHiddenPulse);
+    dashboard.close();
   });
 
   it("enters once, coalesces activity, reflows on resize, and restores once", async () => {

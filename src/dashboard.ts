@@ -160,9 +160,6 @@ export function rankDashboardSnapshot(
 export function createDashboardRenderer(options: DashboardRenderOptions): DashboardRenderer {
   const glyphs = options.glyphMode === "ascii" ? ASCII_GLYPHS : BOX_GLYPHS;
   const baseFooter = sanitizeTerminalLabel(options.footer ?? EMBEDDED_DASHBOARD_FOOTER);
-  const footer = options.navigation === true
-    ? `< > switch  |  a auto  |  ${baseFooter}`
-    : baseFooter;
   return (snapshot, columns, rows, view = {
     autoFollow: true,
     focusedCubeId: null,
@@ -172,6 +169,9 @@ export function createDashboardRenderer(options: DashboardRenderOptions): Dashbo
     const width = boundedDimension(columns, 20, 500);
     const height = boundedDimension(rows, 4, 200);
     if (width < 40 || height < 10) return renderPlainDashboard(snapshot, width, height);
+    const footer = options.navigation === true && snapshot.cubes.length > 1
+      ? `< > switch  |  a auto  |  ${baseFooter}`
+      : baseFooter;
 
     const lines: string[] = [];
     lines.push(renderRail(snapshot, width, glyphs, options.color));
@@ -313,6 +313,7 @@ export function startForegroundDashboard(input: {
     readonly lastPostAt: string | null;
   }>();
   let lastSnapshot: DashboardSnapshot | undefined;
+  let lastFrame: string | undefined;
   let rejectFailure!: (error: unknown) => void;
   const failure = new Promise<never>((_resolve, reject) => { rejectFailure = reject; });
 
@@ -368,14 +369,15 @@ export function startForegroundDashboard(input: {
     if (closed || lastSnapshot === undefined) return;
     try {
       const dimensions = input.terminal.dimensions();
-      input.terminal.write(
-        `${clearScreen}${input.renderer(lastSnapshot, dimensions.columns, dimensions.rows, {
-          autoFollow,
-          focusedCubeId,
-          pulseCubeIds,
-          pulsePhase,
-        })}`,
-      );
+      const frame = input.renderer(lastSnapshot, dimensions.columns, dimensions.rows, {
+        autoFollow,
+        focusedCubeId,
+        pulseCubeIds,
+        pulsePhase,
+      });
+      if (frame === lastFrame) return;
+      input.terminal.write(`${clearScreen}${frame}`);
+      lastFrame = frame;
     } catch (error) {
       fail(error);
     }
@@ -466,6 +468,7 @@ export function startForegroundDashboard(input: {
       if (closed) return;
       try {
         input.terminal.write(alternateScreenEnter);
+        lastFrame = undefined;
         subscribeInput();
         refresh();
       } catch (error) {
@@ -524,7 +527,7 @@ function renderRail(
   const totalPosts = snapshot.cubes.reduce((sum, cube) => sum + cube.posts_15m, 0);
   const state = snapshot.server.state.toUpperCase();
   const body = `${glyphs.rail}${glyphs.rail} ${identity} ${glyphs.rail}${glyphs.rail} ` +
-    `${state}  ${snapshot.cubes.length} cubes  ${totalPosts}/15m  ` +
+    `${state}  ${snapshot.cubes.length} ${plural(snapshot.cubes.length, "cube")}  ${totalPosts}/15m  ` +
     `${endpoint}  v${version}  up ${uptime}`;
   const line = fitCell(body, width, " ", glyphs.ellipsis);
   if (!color) return line;
@@ -564,8 +567,8 @@ function renderFocusPanel(
     : ["  ┌──────┐  ", ` /${fill.repeat(6)}/│ `, "┌──────┐ │", `│${fill.repeat(6)}│/ `, "└──────┘  "];
   const artWidth = Math.max(...art.map(displayWidth)) + 1;
   const facts = [
-    `${name} #${cube.rank}${view.autoFollow ? " (auto)" : ""}`,
-    `${rate}  ${cube.distinct_posting_drones_15m} posting drones`,
+    `${name} #${cube.rank}${view.autoFollow ? " (auto)" : " (pinned - a to resume)"}`,
+    `${rate}  ${cube.distinct_posting_drones_15m} posting ${plural(cube.distinct_posting_drones_15m, "drone")}`,
     `${cube.drones_seen_15m}/${cube.drones_total} drones seen/15m`,
     `last post ${formatAge(snapshot.captured_at, cube.last_post_at)}`,
     "activity = coordination log entries",
@@ -610,7 +613,7 @@ function renderSummaryRow(
     `${fitCell(sanitizeTerminalText(cube.name), nameWidth, " ", glyphs.ellipsis)} ` +
     `${String(cube.drones_seen_15m).padStart(3)}/${String(cube.drones_total).padEnd(3)} seen ` +
     `${String(cube.posts_15m).padStart(4)}/15m ` +
-    `${String(cube.distinct_posting_drones_15m).padStart(3)} posters ` +
+    `${String(cube.distinct_posting_drones_15m).padStart(3)} ${plural(cube.distinct_posting_drones_15m, "poster")} ` +
     `${formatAge(snapshot.captured_at, cube.last_post_at).padStart(6)} ${marker}`;
 }
 
@@ -673,6 +676,10 @@ function activityPulseMarker(phase: number): string {
 function rankMarker(delta: number): string {
   if (delta === 0) return "  ";
   return `${delta > 0 ? "^" : "v"}${Math.min(9, Math.abs(delta))}`;
+}
+
+function plural(count: number, singular: string): string {
+  return count === 1 ? singular : `${singular}s`;
 }
 
 function formatAge(capturedAt: string, timestamp: string | null): string {

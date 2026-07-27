@@ -452,6 +452,50 @@ Publication completed at the terminal `npm publish` boundary with no
 postpublication registry read. Never move, delete, reuse, or rerun that tag or
 workflow.
 
+The immutable annotated `v0.2.0` tag object
+`a62f645ced8d5e58620727f1bd20e5bb0ea61252` peels to protected-main commit
+`119bfc5d341b4d68efcb3f0466be7cb75c7966ee`. Workflow run `30194326366`,
+attempt 1, built, tested, packed, verified, and published the exact reviewed
+artifact with tokenless OIDC provenance. The same-run verifier report records
+integrity
+`sha512-squb0+vdy0q7l/4FeV7OTvSm7OiFWGsAjGhcVEXYrQc9K/8jJYduqPS90VBwaJRT6z221Gxf3xQ5SeZe/Qoncw==`.
+Publication completed at the terminal `npm publish` boundary with no
+postpublication registry read. Never move, delete, reuse, or rerun that tag or
+workflow.
+
+The immutable annotated `v0.3.0` tag object
+`0931d69e8c8b1bff24215a58bdd63ec6a207ff66` peels to protected-main commit
+`23ad0e22d62e7fcdaa6962a6d69885193cf59a6e`. Workflow run `30206708486`,
+attempt 1, built, tested, packed, verified, and published the exact reviewed
+artifact with tokenless OIDC provenance. The same-run verifier report records
+integrity
+`sha512-DqaTPHNdO9cvLEXsGFugDsyLlvsxNYEvNTdHUHIV6GguvKrYVXPi95BZyneHAyp04cPHlcFmy9MLupZW7dZwCw==`.
+Publication completed at the terminal `npm publish` boundary with no
+postpublication registry read. Never move, delete, reuse, or rerun that tag or
+workflow.
+
+The immutable annotated `v0.4.0` tag object
+`6fdcd88cb3548a3eaf767b0a3810727b67e72c83` peels to protected-main commit
+`e4b6208c010d6d3e63f1f1b598bbf8c0ed9234a3`. Workflow run `30217101457`,
+attempt 1, built, tested, packed, verified, and published the exact reviewed
+artifact with tokenless OIDC provenance. The same-run verifier report records
+integrity
+`sha512-MIDnrX9bYbfXmXZZnnbD52U6+GDF8tsorauVEYK9PVf/c5TI5KDL+uFff8jV5YRDQ4pzsHxAfTm2S+OlSvxhAg==`.
+Publication completed at the terminal `npm publish` boundary with no
+postpublication registry read. Never move, delete, reuse, or rerun that tag or
+workflow.
+
+The immutable annotated `v0.5.0` tag object
+`f366c02ab1dc5e50cb12c9f6db3f1d9642c0c244` peels to protected-main commit
+`87d16e903760e31eedd1b182732b5ff3fd52145c`. Workflow run `30268303844`,
+attempt 1, built, tested, packed, verified, and published the exact reviewed
+artifact with tokenless OIDC provenance. The same-run verifier report records
+integrity
+`sha512-6MWqD/56W7g4uXE8UdPuss52QWAjBOh/3PkGMmz5SI5YC4u6Sbn8EFFd9jo3KE4/gGq9ZSLu+aAIRHKGoV6aEQ==`.
+Publication completed at the terminal `npm publish` boundary with no
+postpublication registry read. Never move, delete, reuse, or rerun that tag or
+workflow.
+
 The immutable annotated `v0.1.4` tag object
 `1604077e6249c7c0f7ce17b3f2848caad2bc773e` peels to protected-main merge
 `1f7e60a695f27d92b2d46233b0e3cad5aa43bd0d`, whose tree is byte-identical to reviewed source
@@ -486,13 +530,11 @@ artifacts were produced, and `borgmcp-server` remained unclaimed in the npm regi
 move, delete, or reuse that tag. Recovery uses separately authorized version `0.1.1`, a fresh reviewed
 source and merge commit, pre-tag repository-variable evidence, and a never-before-used annotated tag.
 
-The live `borgmcp-server@0.1.21` package consumes the audited exact
+The live `borgmcp-server@0.5.0` package consumes the audited exact
 `borgmcp-shared@0.6.4` registry release. Immutable `v0.1.6`, `v0.1.10`, `v0.1.13`,
 and `v0.1.19` are failed
-prepublication evidence and are not install targets. Current post-`v0.1.21`
-source pins the published exact `borgmcp-shared@0.6.4` artifact for the
-unpublished `borgmcp-server@0.2.0` release candidate; the shrinkwrap binds its
-canonical registry tarball URL and matching in-run publication SRI.
+prepublication evidence and are not install targets. The shrinkwrap binds the
+shared package's canonical registry tarball URL and matching publication SRI.
 The live package persists truthful advisory Agent CLI, reported-model, and
 working-repository seat metadata, the explicit Queen activation timing contract, and
 structured, safe role-section conflict reasons without changing authority, routes, or rollback
@@ -501,11 +543,12 @@ and adds a mutation-free authoritative repository resolve plus an explicit,
 manage-authorized atomic association operation for legacy cube adoption after
 client confirmation. It never infers identity from a cube name, backfills
 legacy rows, or reports client-local-only success.
-The `0.2.0` candidate adds the static foreground dashboard, reusable snapshot
-and rendering surfaces, and the operator-local read-only `dashboard` subcommand.
-Version `0.1.21` remains the install target until that candidate passes exact-SHA review and an
-authorized immutable tag publication. The source-lock, artifact, audit, and consumer gates must pass
-without Git dependencies; SBOM generation is supplemental and outside the publication-critical path.
+The live `0.5.0` package includes the foreground and operator-local read-only
+dashboard surfaces, with per-drone activity histories over an
+operator-selectable window. Version `0.5.0` is the current install target. The
+source-lock, artifact, audit, and consumer gates must pass without Git
+dependencies; SBOM generation is supplemental and outside the
+publication-critical path.
 Source-lock verification performs no network access. It validates exact dependency versions,
 canonical npm tarball URLs, SHA-512 integrity, root identity, duplicate consistency, and
 install-script boundaries directly from the reviewed manifest and shrinkwrap.

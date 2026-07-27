@@ -6,9 +6,10 @@ HTTPS.
 
 ## Release status
 
-The current public preview is immutable `borgmcp-server@0.1.21`, published on
+The current public preview and install target is immutable
+`borgmcp-server@0.5.0`, published on
 npm with integrity
-`sha512-g0QH4cKcsKuDyZs1MvBmvCoCLaZ4wVI04yHCGSvcAeWghWxSBH0IIF8Q5OFi1pLB7TZXOVP6D3QAabUQ2eJTFg==`.
+`sha512-6MWqD/56W7g4uXE8UdPuss52QWAjBOh/3PkGMmz5SI5YC4u6Sbn8EFFd9jo3KE4/gGq9ZSLu+aAIRHKGoV6aEQ==`.
 Versions `0.1.2`, `0.1.3`, `0.1.13`, and `0.1.19` were not published; their immutable tags are
 preserved failed-release evidence and are not installation or dogfood targets.
 Version `0.1.5` includes the reviewed owner-enrollment, idempotent multi-cube
@@ -32,14 +33,16 @@ Development, or Starter template surfaces. Published `0.1.21` pins exact
 repository-association resolve operation plus an explicit, manage-authorized
 atomic association operation for adopting legacy cubes after client
 confirmation.
-Current source is the unpublished `borgmcp-server@0.2.0` release candidate.
-It adds the static foreground dashboard, its reusable snapshot and rendering
-surfaces, and an operator-local read-only `dashboard` subcommand.
-Its lock verification is entirely offline: exact versions, canonical npm
-tarball URLs, SHA-512 integrity, root identity, duplicate consistency, and
-install-script boundaries are checked without querying registry metadata.
-Version `0.1.21` remains the install target until the candidate passes
-exact-SHA review and authorized immutable tag publication.
+Published `0.2.0` added the static foreground dashboard and operator-local
+read-only `dashboard` subcommand. Published `0.3.0` added interactive dashboard
+navigation and animation plus deterministic release-identity preparation and
+classification. Published `0.4.0` added stale-lock recovery ownership
+validation and truthful controller-versus-runtime version reporting. Published
+`0.5.0` adds the per-drone activity panel, dashboard presentation fixes, and
+release-gate documentation alignment. Current lock verification remains
+entirely offline: exact versions, canonical npm tarball URLs, SHA-512 integrity,
+root identity, duplicate consistency, and install-script boundaries are
+checked without querying registry metadata.
 
 Setup prepares local identity and storage, writes owner access to the private
 portable credential file, and prints no credential or invitation; it creates no cube.
@@ -128,26 +131,30 @@ the server identity and database; use it only when prior state may be discarded.
 
 `borg-mcp-server start` remains a foreground command. In an interactive
 terminal it opens a read-only dashboard showing the verified server identity,
-the most active cube in an auto-following detail panel, and all cubes ranked by
-coordination posts in the trailing 15 minutes. Distinct posting drones break
-ties. New activity produces a short, event-driven cube pulse. The dashboard
-displays aggregate counts and last-post age only; it never displays activity
-message bodies. It refreshes on committed activity, on terminal resize, and on
-a bounded five-second age tick.
+the most active cube in an auto-following per-drone activity panel, and a paged
+cube list ranked by coordination posts in the trailing 15 minutes. Distinct
+posting drones break ties. New activity produces a short, event-driven cube
+pulse. The panel shows per-drone labels, sent counts, last-active age, and an
+in-process activity history over the selected window; at full density it also
+shows role and received counts. The dashboard never displays activity message
+bodies. The panel absorbs the terminal rows left after the cube list and fixed
+chrome. It refreshes on committed activity, on terminal resize, and on a
+bounded five-second age tick.
 
 No input is required. When stdin is also an interactive terminal, `<` and `>`
 pin the preceding or following ranked cube and `a` returns to auto-follow. The
 `(auto)` marker makes the current mode explicit; pinned focus never silently
-times out or jumps back to rank one. These keys change presentation only and
-never mutate server or cube state.
+times out or jumps back to rank one. `w` cycles a fixed 5m, 15m, or 60m
+activity window without changing it automatically, and Space pages the cube
+list. These keys change presentation only and never mutate server or cube
+state.
 
 The dashboard uses box-drawing terminal glyphs by default. `--ascii` forces a
 strict 7-bit rendering, and incompatible terminal/locale settings select that
 fallback automatically. `NO_COLOR` removes color without removing status
 labels or layout cues. Terminals smaller than roughly 40 columns by 10 rows
-receive a bounded plain-text status view. The default CUBE DETAIL outline uses
-single-column box drawing with strict single-column face fills so common
-terminals do not skew the art through ambiguous-width cube glyphs.
+receive a bounded plain-text status view. The activity panel uses a flat
+single-column box outline with no perspective cube art.
 
 Ctrl-C or terminal teardown stops the server, restores the prior terminal screen and cursor, and
 does not install or enable persistence. Redirected output and managed-service
@@ -157,7 +164,7 @@ running evidence or stage and activate a verified update with:
 
 To observe an already-running local server from a second terminal, run
 `borg-mcp-server dashboard` (or add `--ascii`). This viewer opens the existing
-SQLite database read-only and shows the same aggregate all-cubes dashboard.
+SQLite database read-only and shows the same dashboard.
 The same optional navigation keys work in this viewer. Ctrl-C closes only the
 viewer; the server keeps running. Redirected or non-TTY viewer output is one
 bounded non-ANSI snapshot and then exits.

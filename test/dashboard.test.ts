@@ -379,6 +379,30 @@ describe("dashboard renderer", () => {
     expect(frame).not.toContain("clipboard");
   });
 
+  it("leaves empty launch activity blank while reporting zero observed coverage", () => {
+    const snapshot = rankDashboardSnapshot(snapshotData(1), server);
+    const drone = snapshot.cubes[0]!.drones[0]!;
+    const frame = createDashboardRenderer({ glyphMode: "ascii", color: false })(
+      snapshot,
+      100,
+      16,
+      {
+        autoFollow: true,
+        focusedCubeId: null,
+        pulseCubeIds: new Set(),
+        pulsePhase: 0,
+        activity: new Map(),
+        observation: [],
+        activityWindowMs: 15 * 60_000,
+      },
+    );
+    expect(frame).toContain("collecting — 0% of 15m observed");
+    const lines = frame.split("\n");
+    const identity = lines.findIndex((line) => line.includes(drone.label));
+    expect(lines[identity + 1]!.slice(1, -1)).toMatch(/^\s+$/u);
+    expect(lines[identity + 2]!.slice(1, -1)).toMatch(/^\s+$/u);
+  });
+
   it("keeps poll buckets in their timestamp positions across the four coverage compositions", () => {
     const data = snapshotData(1);
     const snapshot = rankDashboardSnapshot(data, server);

@@ -692,7 +692,6 @@ function renderDroneBand(
 }
 
 function renderActivityGraph(samples: readonly DashboardActivitySample[], width: number, height: number, windowMs: number, capturedAt: string, glyphs: Glyphs, row = 0): string {
-  if (samples.length === 0) return "·".repeat(width);
   const slots = activitySlots(samples, capturedAt, windowMs);
   const max = Math.max(...[...slots.values()].map((sample) => sample.sentRate), 0);
   const graph = Array.from({ length: width }, (_unused, columnIndex) => {

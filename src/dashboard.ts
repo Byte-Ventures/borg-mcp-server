@@ -611,14 +611,19 @@ function renderFocusPanel(
     )];
   }
   const window = view.activityWindowMs ?? DASHBOARD_ACTIVITY_WINDOW_MS;
-  const title = ` ${sanitizeTerminalText(cube.name)} · DRONE ACTIVITY · ${formatWindow(window)} ago → now `;
+  const axis = glyphs === ASCII_GLYPHS ? "->" : "→";
+  const title = ` ${sanitizeTerminalText(cube.name)} · DRONE ACTIVITY · ${formatWindow(window)} ago ${axis} now `;
   const top = glyphs.topLeft + title + glyphs.horizontal.repeat(Math.max(0, inner - displayWidth(title))) + glyphs.topRight;
   const contentRows = rows - 2;
-  const collecting = true;
+  const allSamples = cube.drones.flatMap((drone) => view.activity?.get(`${cube.id}:${drone.id}`) ?? []);
+  const collecting = activityCoverage(allSamples, window) < 1;
   const reserveNotes = collecting ? 1 : 0;
   const bandHeight = ([3, 2, 1] as const).find((candidate) =>
     cube.drones.length <= Math.floor((contentRows - reserveNotes) / candidate)) ?? 1;
-  const visible = Math.max(1, Math.floor((contentRows - reserveNotes - 1) / bandHeight));
+  const allFit = cube.drones.length <= Math.floor((contentRows - reserveNotes) / bandHeight);
+  const visible = allFit
+    ? cube.drones.length
+    : Math.max(1, Math.floor((contentRows - reserveNotes - 1) / bandHeight));
   const drones = cube.drones.slice(0, visible);
   const lines = drones.flatMap((drone) => renderDroneBand(
     drone,
@@ -665,8 +670,7 @@ function renderDroneBand(
 function renderActivityGraph(samples: readonly DashboardActivitySample[], width: number, height: number, windowMs: number, glyphs: Glyphs, row = 0): string {
   if (samples.length === 0) return "·".repeat(width);
   const visible = samples.filter((sample) => Date.parse(sample.capturedAt) >= Date.parse(samples.at(-1)!.capturedAt) - windowMs);
-  const elapsed = Math.max(0, Date.parse(visible.at(-1)!.capturedAt) - Date.parse(visible[0]!.capturedAt));
-  const dataColumns = Math.max(1, Math.min(width, Math.round(Math.min(1, elapsed / windowMs) * width)));
+  const dataColumns = Math.max(1, Math.min(width, Math.round(activityCoverage(visible, windowMs) * width)));
   const max = Math.max(...visible.map((sample) => sample.sentRate), 0);
   const graph = Array.from({ length: dataColumns }, (_unused, columnIndex) => {
     const sample = visible[Math.min(visible.length - 1, Math.floor(columnIndex * visible.length / dataColumns))]!;
@@ -679,6 +683,14 @@ function renderActivityGraph(samples: readonly DashboardActivitySample[], width:
     return glyph;
   }).join("");
   return " ".repeat(Math.max(0, width - dataColumns)) + graph;
+}
+
+function activityCoverage(samples: readonly DashboardActivitySample[], windowMs: number): number {
+  if (samples.length === 0) return 0;
+  const elapsed = Math.max(0, Date.parse(samples.at(-1)!.capturedAt) - Date.parse(samples[0]!.capturedAt));
+  const elapsedCoverage = elapsed / windowMs;
+  const cadenceCoverage = samples.length / Math.max(1, windowMs / DASHBOARD_IDLE_REFRESH_MS);
+  return Math.min(1, elapsedCoverage, cadenceCoverage);
 }
 
 function formatWindow(windowMs: number): string { return `${Math.floor(windowMs / 60_000)}m`; }

@@ -182,15 +182,15 @@ The server repository is public; visibility is complete, and `borgmcp-server@0.1
 `borgmcp-server@0.1.8`, `borgmcp-server@0.1.9`, `borgmcp-server@0.1.11`, and
 `borgmcp-server@0.1.12`, `borgmcp-server@0.1.14`, `borgmcp-server@0.1.15`,
 `borgmcp-server@0.1.16`, `borgmcp-server@0.1.17`, and
-`borgmcp-server@0.1.18`, `borgmcp-server@0.1.20`, and `borgmcp-server@0.1.21` are live on npm
-under the sole expected maintainer.
-The `latest` tag resolves to `0.1.21`.
+`borgmcp-server@0.1.18`, `borgmcp-server@0.1.20`, `borgmcp-server@0.1.21`,
+`borgmcp-server@0.2.0`, `borgmcp-server@0.3.0`, `borgmcp-server@0.4.0`, and
+`borgmcp-server@0.5.0` are live on npm under the sole expected maintainer.
 Versions `0.1.2`, `0.1.3`, `0.1.13`, and `0.1.19` are
 unpublished immutable failure evidence and must never be customer, install, or dogfood targets.
-Versions `0.1.18`, `0.1.20`, and `0.1.21` completed the full exact-source,
-tagged-artifact, tokenless OIDC publication and provenance gate chain recorded
-below; `0.1.20` and `0.1.21` terminated at accepted publication without a postpublication
-registry read.
+Versions `0.1.18`, `0.1.20`, `0.1.21`, `0.2.0`, `0.3.0`, `0.4.0`, and `0.5.0`
+completed the full exact-source, tagged-artifact, tokenless OIDC publication and provenance gate
+chain recorded below; `0.1.20` and `0.1.21` terminated at accepted publication without a
+postpublication registry read.
 
 The immutable annotated `v0.1.1` tag object
 `e3f6ee268d5cd4f1e88adabdc6171c1e732cd096` peels to protected-main commit

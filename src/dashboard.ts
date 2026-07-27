@@ -660,25 +660,17 @@ function renderDroneBand(
 function renderActivityGraph(samples: readonly DashboardActivitySample[], width: number, height: number, windowMs: number, glyphs: Glyphs, row = 0): string {
   if (samples.length === 0) return "·".repeat(width);
   const visible = samples.filter((sample) => Date.parse(sample.capturedAt) >= Date.parse(samples.at(-1)!.capturedAt) - windowMs);
-  const bars = visible.length <= width ? visible : aggregateActivitySamples(visible, width);
-  const barWidth = Math.max(1, Math.floor(width / bars.length));
-  const max = Math.max(...bars.map((sample) => sample.sentRate), 0);
-  const graph = bars.map((sample) => {
-    if (sample.sentRate <= 0 || max <= 0) return "·".repeat(barWidth);
+  const expectedSamples = Math.max(1, windowMs / DASHBOARD_IDLE_REFRESH_MS);
+  const dataColumns = Math.max(1, Math.min(width, Math.round(Math.min(1, visible.length / expectedSamples) * width)));
+  const max = Math.max(...visible.map((sample) => sample.sentRate), 0);
+  const graph = Array.from({ length: dataColumns }, (_unused, columnIndex) => {
+    const sample = visible[Math.min(visible.length - 1, Math.floor(columnIndex * visible.length / dataColumns))]!;
+    if (sample.sentRate <= 0 || max <= 0) return "·";
     const level = Math.max(1, Math.ceil((sample.sentRate / max) * (height * 8)) - (row * 8));
     const glyph = glyphs === ASCII_GLYPHS ? "#" : "▁▂▃▄▅▆▇█"[Math.min(7, level - 1)]!;
-    return glyph.repeat(barWidth);
+    return glyph;
   }).join("");
-  return fitCell(graph, width, " ");
-}
-
-function aggregateActivitySamples(samples: readonly DashboardActivitySample[], width: number): readonly DashboardActivitySample[] {
-  return Array.from({ length: width }, (_unused, index) => {
-    const start = Math.floor(index * samples.length / width);
-    const end = Math.max(start + 1, Math.floor((index + 1) * samples.length / width));
-    const group = samples.slice(start, end);
-    return { capturedAt: group.at(-1)!.capturedAt, sentRate: Math.max(...group.map((sample) => sample.sentRate)) };
-  });
+  return " ".repeat(Math.max(0, width - dataColumns)) + graph;
 }
 
 function formatWindow(windowMs: number): string { return `${Math.floor(windowMs / 60_000)}m`; }

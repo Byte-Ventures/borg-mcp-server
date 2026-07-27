@@ -54,11 +54,9 @@ export function createDashboardSnapshotReader(
            (SELECT COUNT(*) FROM activity_log AS entry
             WHERE entry.cube_id = drone.cube_id AND entry.drone_id = drone.id) AS sent,
            (SELECT COUNT(*) FROM activity_log AS entry
-            WHERE entry.cube_id = drone.cube_id AND (
-              entry.visibility = 'broadcast' OR EXISTS (
-                SELECT 1 FROM activity_log_recipients AS recipient
-                WHERE recipient.entry_id = entry.id AND recipient.drone_id = drone.id
-              )
+            WHERE entry.cube_id = drone.cube_id AND EXISTS (
+              SELECT 1 FROM activity_log_recipients AS recipient
+              WHERE recipient.entry_id = entry.id AND recipient.drone_id = drone.id
             )) AS received
     FROM drones AS drone
     JOIN roles AS role ON role.id = drone.role_id AND role.cube_id = drone.cube_id

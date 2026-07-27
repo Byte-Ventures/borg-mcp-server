@@ -91,7 +91,7 @@ describe("dashboard snapshot source", () => {
           drones_total: 1,
           drones_seen_15m: 1,
           last_post_at: "2026-07-25T11:51:00.000Z",
-          drones: [{ id: ids.droneA, label: "builder-alpha", role: "Builder", last_seen: "2026-07-25T11:51:00.000Z", sent: 2, received: 2 }],
+          drones: [{ id: ids.droneA, label: "builder-alpha", role: "Builder", last_seen: "2026-07-25T11:51:00.000Z", sent: 2, received: 0 }],
         },
         {
           id: ids.cubeB,
@@ -101,7 +101,7 @@ describe("dashboard snapshot source", () => {
           drones_total: 1,
           drones_seen_15m: 1,
           last_post_at: "2026-07-25T11:56:00.000Z",
-          drones: [{ id: ids.droneB, label: "builder-beta", role: "Builder", last_seen: "2026-07-25T11:56:00.000Z", sent: 1, received: 1 }],
+          drones: [{ id: ids.droneB, label: "builder-beta", role: "Builder", last_seen: "2026-07-25T11:56:00.000Z", sent: 1, received: 0 }],
         },
       ],
     });

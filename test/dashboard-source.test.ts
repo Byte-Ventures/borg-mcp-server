@@ -80,7 +80,11 @@ describe("read-only dashboard snapshot source", () => {
       clientId: ids.client,
       cubeId: ids.cube,
       droneId: ids.drone,
-    })).appendLog(ids.cube, { message: "poll-secret-body" });
+    })).appendLog(ids.cube, {
+      message: "poll-secret-body",
+      visibility: "direct",
+      recipientDroneIds: [ids.drone],
+    });
     await vi.advanceTimersByTimeAsync(100);
 
     expect(validate).toHaveBeenCalledOnce();

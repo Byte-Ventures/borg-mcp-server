@@ -6,6 +6,15 @@ export const DASHBOARD_PULSE_FRAME_MS = 125;
 const DASHBOARD_PULSE_PHASES = 4;
 const DASHBOARD_ACTIVITY_PULSE_MARKERS = [" ", "_", "-", "o", "O"] as const;
 
+export interface DashboardDroneData {
+  readonly id: string;
+  readonly label: string;
+  readonly role: string;
+  readonly last_seen: string;
+  readonly sent: number;
+  readonly received: number;
+}
+
 export interface DashboardCubeData {
   readonly id: string;
   readonly name: string;
@@ -14,6 +23,7 @@ export interface DashboardCubeData {
   readonly drones_total: number;
   readonly drones_seen_15m: number;
   readonly last_post_at: string | null;
+  readonly drones: readonly DashboardDroneData[];
 }
 
 export interface DashboardDataSnapshot {
@@ -65,6 +75,15 @@ export interface DashboardViewState {
   readonly focusedCubeId: string | null;
   readonly pulseCubeIds: ReadonlySet<string>;
   readonly pulsePhase: number;
+  readonly activity?: ReadonlyMap<string, readonly DashboardActivitySample[]>;
+  readonly observation?: readonly DashboardActivitySample[];
+  readonly activityWindowMs?: number;
+  readonly page?: number;
+}
+
+export interface DashboardActivitySample {
+  readonly capturedAt: string;
+  readonly sentRate: number;
 }
 
 export type DashboardRenderer = (
@@ -165,12 +184,15 @@ export function createDashboardRenderer(options: DashboardRenderOptions): Dashbo
     focusedCubeId: null,
     pulseCubeIds: new Set(),
     pulsePhase: 0,
+    activity: new Map(),
+    activityWindowMs: DASHBOARD_ACTIVITY_WINDOW_MS,
+    page: 0,
   }) => {
     const width = boundedDimension(columns, 20, 500);
     const height = boundedDimension(rows, 4, 200);
     if (width < 40 || height < 10) return renderPlainDashboard(snapshot, width, height);
-    const footer = options.navigation === true && snapshot.cubes.length > 1
-      ? `< > switch  |  a auto  |  ${baseFooter}`
+    const footer = options.navigation === true
+      ? `${snapshot.cubes.length > 1 ? "< > switch  |  a auto  |  " : ""}w ${formatWindow(view.activityWindowMs ?? DASHBOARD_ACTIVITY_WINDOW_MS)}  |  SPACE page  |  ${baseFooter}`
       : baseFooter;
 
     const lines: string[] = [];
@@ -179,34 +201,31 @@ export function createDashboardRenderer(options: DashboardRenderOptions): Dashbo
     const focus = view.autoFollow || view.focusedCubeId === null
       ? snapshot.cubes[0]
       : snapshot.cubes.find((cube) => cube.id === view.focusedCubeId) ?? snapshot.cubes[0];
+    const footerRows = 1;
+    const chromeRows = 3 + footerRows;
+    const bodyRows = Math.max(0, height - chromeRows);
+    const listCap = Math.max(1, Math.floor(bodyRows * 0.42));
+    const listRows = Math.min(snapshot.cubes.length, listCap);
+    const panelRows = Math.max(1, bodyRows - listRows);
     if (focus === undefined) {
       lines.push(...renderEmptyPanel(width, glyphs));
     } else {
-      lines.push(...renderFocusPanel(snapshot, focus, width, glyphs, options.color, view));
+      lines.push(...renderFocusPanel(snapshot, focus, width, panelRows, glyphs, view));
     }
     lines.push(glyphs.horizontal.repeat(width));
-
-    const footerRows = 1;
-    const availableRows = Math.max(0, height - lines.length - footerRows);
-    const overflow = snapshot.cubes.length > availableRows;
-    const firstStripCapacity = Math.max(
-      0,
-      width - displayWidth(`ALL ${snapshot.cubes.length} `),
-    );
-    const neededStripRows = 1 + Math.ceil(
-      Math.max(0, snapshot.cubes.length - firstStripCapacity) / width,
-    );
-    const stripRows = overflow
-      ? Math.min(3, neededStripRows, Math.max(1, availableRows - 1))
-      : 0;
-    const rankedRows = Math.max(0, availableRows - stripRows);
-    for (const cube of snapshot.cubes.slice(0, rankedRows)) {
+    const pageCount = Math.max(1, Math.ceil(snapshot.cubes.length / listCap));
+    const page = Math.max(0, view.page ?? 0) % pageCount;
+    const pageStart = page * listCap;
+    for (const cube of snapshot.cubes.slice(pageStart, pageStart + listRows)) {
       lines.push(renderSummaryRow(snapshot, cube, width, glyphs, view));
     }
-    if (overflow) {
-      lines.push(...renderAllCubesStrip(snapshot, width, stripRows, glyphs, view));
-    }
-    lines.push(fitCell(footer, width));
+    const footerWithPage = snapshot.cubes.length > listRows
+      ? `${footer}  |  page ${page + 1}/${pageCount}`
+      : footer;
+    const compactFooter = options.navigation === true
+      ? `w ${formatWindow(view.activityWindowMs ?? DASHBOARD_ACTIVITY_WINDOW_MS)}  |  SPACE ${page + 1}/${pageCount}  |  ${baseFooter}`
+      : baseFooter;
+    lines.push(fitCell(displayWidth(footerWithPage) > width ? compactFooter : footerWithPage, width));
     return lines.slice(0, height)
       .map((line) => fitCell(line, width, " ", glyphs.ellipsis))
       .join("\n");
@@ -308,6 +327,11 @@ export function startForegroundDashboard(input: {
   let focusedCubeId: string | null = null;
   let pulseCubeIds = new Set<string>();
   let pulsePhase = 0;
+  let activityWindowMs = DASHBOARD_ACTIVITY_WINDOW_MS;
+  let page = 0;
+  const activityHistory = new Map<string, DashboardActivitySample[]>();
+  const observationHistory: DashboardActivitySample[] = [];
+  const previousDroneCounts = new Map<string, { readonly sent: number; readonly capturedAt: number }>();
   let previousActivity = new Map<string, {
     readonly posts15m: number;
     readonly lastPostAt: string | null;
@@ -374,6 +398,10 @@ export function startForegroundDashboard(input: {
         focusedCubeId,
         pulseCubeIds,
         pulsePhase,
+        activity: activityHistory,
+        observation: observationHistory,
+        activityWindowMs,
+        page,
       });
       if (frame === lastFrame) return;
       input.terminal.write(`${clearScreen}${frame}`);
@@ -405,6 +433,7 @@ export function startForegroundDashboard(input: {
         schedulePulse();
       }
       priorRanks = new Map(snapshot.cubes.map((cube) => [cube.id, cube.rank]));
+      recordDashboardActivity(snapshot, activityHistory, observationHistory, previousDroneCounts, activityWindowMs);
       lastSnapshot = snapshot;
       paint();
     } catch (error) {
@@ -493,6 +522,14 @@ export function startForegroundDashboard(input: {
           autoFollow = true;
           focusedCubeId = null;
           paint();
+        } else if (byte === 119) {
+          activityWindowMs = activityWindowMs === 5 * 60_000
+            ? DASHBOARD_ACTIVITY_WINDOW_MS
+            : activityWindowMs === DASHBOARD_ACTIVITY_WINDOW_MS ? 60 * 60_000 : 5 * 60_000;
+          paint();
+        } else if (byte === 32) {
+          page += 1;
+          paint();
         }
       }
     } catch (error) {
@@ -512,6 +549,47 @@ export function startForegroundDashboard(input: {
     throw error;
   }
   return Object.freeze({ failure, close: stop });
+}
+
+function recordDashboardActivity(
+  snapshot: DashboardSnapshot,
+  history: Map<string, DashboardActivitySample[]>,
+  observation: DashboardActivitySample[],
+  previous: Map<string, { readonly sent: number; readonly capturedAt: number }>,
+  windowMs: number,
+): void {
+  const capturedAt = Date.parse(snapshot.captured_at);
+  if (!Number.isFinite(capturedAt)) return;
+  recordActivityBucket(observation, { capturedAt: snapshot.captured_at, sentRate: 0 });
+  while (observation.length > 0 && Date.parse(observation[0]!.capturedAt) < capturedAt - Math.max(windowMs, 60 * 60_000)) observation.shift();
+  for (const cube of snapshot.cubes) for (const drone of cube.drones) {
+    const key = `${cube.id}:${drone.id}`;
+    const prior = previous.get(key);
+    const elapsed = prior === undefined ? 0 : Math.max(0, capturedAt - prior.capturedAt);
+    const sentRate = prior === undefined || elapsed === 0 ? 0 : Math.max(0, drone.sent - prior.sent) / (elapsed / 1_000);
+    const samples = history.get(key) ?? [];
+    recordActivityBucket(samples, { capturedAt: snapshot.captured_at, sentRate });
+    const oldest = capturedAt - Math.max(windowMs, 60 * 60_000);
+    while (samples.length > 0 && Date.parse(samples[0]!.capturedAt) < oldest) samples.shift();
+    history.set(key, samples);
+    previous.set(key, { sent: drone.sent, capturedAt });
+  }
+}
+
+function recordActivityBucket(
+  samples: DashboardActivitySample[],
+  sample: DashboardActivitySample,
+): void {
+  const timestamp = Date.parse(sample.capturedAt);
+  if (!Number.isFinite(timestamp)) return;
+  const bucket = Math.floor(timestamp / DASHBOARD_IDLE_REFRESH_MS);
+  const existing = samples.findIndex((candidate) =>
+    Math.floor(Date.parse(candidate.capturedAt) / DASHBOARD_IDLE_REFRESH_MS) === bucket);
+  if (existing >= 0) samples[existing] = sample;
+  else {
+    samples.push(sample);
+    samples.sort((left, right) => Date.parse(left.capturedAt) - Date.parse(right.capturedAt));
+  }
 }
 
 function renderRail(
@@ -541,46 +619,117 @@ function renderFocusPanel(
   snapshot: DashboardSnapshot,
   cube: DashboardCubeSnapshot,
   width: number,
+  rows: number,
   glyphs: Glyphs,
-  color: boolean,
   view: DashboardViewState,
 ): string[] {
   const inner = Math.max(1, width - 2);
-  const nameWidth = Math.max(8, inner - 13);
-  const name = fitCell(
-    sanitizeTerminalText(cube.name),
-    nameWidth,
-    " ",
-    glyphs.ellipsis,
-  ).trimEnd();
-  const rate = `${cube.posts_15m} posts/15m`;
-  const title = " CUBE DETAIL ";
-  const top = glyphs.topLeft +
-    title + glyphs.horizontal.repeat(Math.max(0, inner - displayWidth(title))) +
-    glyphs.topRight;
-  const pulse = view.pulseCubeIds.has(cube.id)
-    ? Math.max(0, Math.min(DASHBOARD_PULSE_PHASES, Math.floor(view.pulsePhase)))
-    : 0;
-  const fill = pulseGlyph(pulse, glyphs);
-  const art = glyphs === ASCII_GLYPHS
-    ? ["  +------+  ", ` /${fill.repeat(6)}/| `, "+------+ |", `|${fill.repeat(6)}|/ `, "+------+  "]
-    : ["  ┌──────┐  ", ` /${fill.repeat(6)}/│ `, "┌──────┐ │", `│${fill.repeat(6)}│/ `, "└──────┘  "];
-  const artWidth = Math.max(...art.map(displayWidth)) + 1;
-  const facts = [
-    `${name} #${cube.rank}${view.autoFollow ? " (auto)" : " (pinned - a to resume)"}`,
-    `${rate}  ${cube.distinct_posting_drones_15m} posting ${plural(cube.distinct_posting_drones_15m, "drone")}`,
-    `${cube.drones_seen_15m}/${cube.drones_total} drones seen/15m`,
-    `last post ${formatAge(snapshot.captured_at, cube.last_post_at)}`,
-    "activity = coordination log entries",
-  ];
-  const lines = art.map((line, index) => {
-    const fact = facts[index] ?? "";
-    const body = `${fitCell(line, artWidth)}${index === 0 && color ? amber : ""}` +
-      `${fact}${index === 0 && color ? reset : ""}`;
-    return `${glyphs.vertical}${fitCell(body, inner, " ", glyphs.ellipsis)}${glyphs.vertical}`;
-  });
-  return [top, ...lines, `${glyphs.bottomLeft}${glyphs.horizontal.repeat(inner)}${glyphs.bottomRight}`];
+  if (rows < 4) {
+    return [fitCell(
+      `${sanitizeTerminalText(cube.name)} — ${cube.drones.length} ${plural(cube.drones.length, "drone")} · activity panel needs a taller terminal`,
+      width,
+      " ",
+      glyphs.ellipsis,
+    )];
+  }
+  const window = view.activityWindowMs ?? DASHBOARD_ACTIVITY_WINDOW_MS;
+  const axis = glyphs === ASCII_GLYPHS ? "->" : "→";
+  const title = ` ${sanitizeTerminalText(cube.name)} · DRONE ACTIVITY · ${formatWindow(window)} ago ${axis} now `;
+  const top = glyphs.topLeft + title + glyphs.horizontal.repeat(Math.max(0, inner - displayWidth(title))) + glyphs.topRight;
+  const contentRows = rows - 2;
+  const coverage = activityCoverage(view.observation ?? [], snapshot.captured_at, window);
+  const collecting = coverage < 1;
+  const reserveNotes = collecting ? 1 : 0;
+  const bandHeight = ([3, 2, 1] as const).find((candidate) =>
+    cube.drones.length <= Math.floor((contentRows - reserveNotes) / candidate)) ?? 1;
+  const allFit = cube.drones.length <= Math.floor((contentRows - reserveNotes) / bandHeight);
+  const visible = allFit
+    ? cube.drones.length
+    : Math.max(1, Math.floor((contentRows - reserveNotes - 1) / bandHeight));
+  const drones = cube.drones.slice(0, visible);
+  const lines = drones.flatMap((drone) => renderDroneBand(
+    drone,
+    snapshot.captured_at,
+    inner,
+    bandHeight,
+    view.activity?.get(`${cube.id}:${drone.id}`) ?? [],
+    window,
+    glyphs,
+  ));
+  const hidden = Math.max(0, cube.drones.length - drones.length);
+  if (hidden > 0 && lines.length < contentRows) lines.push(fitCell(` +${hidden} more drones — taller terminal shows them`, inner));
+  if (collecting && lines.length < contentRows) {
+    lines.push(fitCell(
+      ` collecting — ${Math.round(coverage * 100)}% of ${formatWindow(window)} observed`,
+      inner,
+    ));
+  }
+  while (lines.length < contentRows) lines.push(" ".repeat(inner));
+  return [top, ...lines.slice(0, contentRows).map((line) => `${glyphs.vertical}${fitCell(line, inner, " ", glyphs.ellipsis)}${glyphs.vertical}`), `${glyphs.bottomLeft}${glyphs.horizontal.repeat(inner)}${glyphs.bottomRight}`];
 }
+
+function renderDroneBand(
+  drone: DashboardDroneData,
+  capturedAt: string,
+  width: number,
+  height: number,
+  samples: readonly DashboardActivitySample[],
+  windowMs: number,
+  glyphs: Glyphs,
+): string[] {
+  const label = fitCell(sanitizeTerminalText(drone.label), Math.max(8, Math.floor(width * 0.32)), " ", glyphs.ellipsis).trimEnd();
+  const role = fitCell(sanitizeTerminalText(drone.role), Math.max(4, Math.floor(width * 0.12)), " ", glyphs.ellipsis).trimEnd();
+  const last = formatAge(capturedAt, drone.last_seen);
+  if (height === 1) {
+    const prefix = `${label} ${drone.sent} ${last} `;
+    return [fitCell(`${prefix}${renderActivityGraph(samples, Math.max(4, width - displayWidth(prefix)), 1, windowMs, capturedAt, glyphs)}`, width)];
+  }
+  const identity = height >= 3
+    ? `${label} ${role}  SENT ${drone.sent}  RECV ${drone.received}  LAST ${last}`
+    : `${label} ${role}  SENT ${drone.sent}  LAST ${last}`;
+  return [fitCell(identity, width), ...Array.from({ length: height - 1 }, (_unused, index) =>
+    renderActivityGraph(samples, width, height - 1, windowMs, capturedAt, glyphs, index))];
+}
+
+function renderActivityGraph(samples: readonly DashboardActivitySample[], width: number, height: number, windowMs: number, capturedAt: string, glyphs: Glyphs, row = 0): string {
+  const slots = activitySlots(samples, capturedAt, windowMs);
+  const max = Math.max(...[...slots.values()].map((sample) => sample.sentRate), 0);
+  const graph = Array.from({ length: width }, (_unused, columnIndex) => {
+    const startSlot = Math.floor(columnIndex * slots.total / width);
+    const endSlot = Math.max(startSlot + 1, Math.floor((columnIndex + 1) * slots.total / width));
+    const sample = [...slots.entries()].find(([slot]) => slot >= startSlot && slot < endSlot)?.[1];
+    if (sample === undefined) return " ";
+    if (sample.sentRate <= 0 || max <= 0) return "·";
+    const level = Math.ceil((sample.sentRate / max) * (height * 8)) - ((height - row - 1) * 8);
+    if (level <= 0) return " ";
+    const glyph = glyphs === ASCII_GLYPHS
+      ? "..::++*#"[Math.min(7, level - 1)]!
+      : "▁▂▃▄▅▆▇█"[Math.min(7, level - 1)]!;
+    return glyph;
+  }).join("");
+  return graph;
+}
+
+function activityCoverage(samples: readonly DashboardActivitySample[], capturedAt: string, windowMs: number): number {
+  const slots = activitySlots(samples, capturedAt, windowMs);
+  return slots.size / slots.total;
+}
+
+function activitySlots(samples: readonly DashboardActivitySample[], capturedAt: string, windowMs: number): (Map<number, DashboardActivitySample> & { total: number }) {
+  const end = Date.parse(capturedAt);
+  const start = end - windowMs;
+  const buckets = new Map<number, DashboardActivitySample>() as Map<number, DashboardActivitySample> & { total: number };
+  buckets.total = Math.max(1, Math.ceil(windowMs / DASHBOARD_IDLE_REFRESH_MS));
+  for (const sample of samples) {
+    const timestamp = Date.parse(sample.capturedAt);
+    if (!Number.isFinite(timestamp) || timestamp < start || timestamp > end) continue;
+    const bucket = Math.min(buckets.total - 1, Math.floor((timestamp - start) / DASHBOARD_IDLE_REFRESH_MS));
+    buckets.set(bucket, sample);
+  }
+  return buckets;
+}
+
+function formatWindow(windowMs: number): string { return `${Math.floor(windowMs / 60_000)}m`; }
 
 function renderEmptyPanel(width: number, glyphs: Glyphs): string[] {
   const inner = Math.max(1, width - 2);
@@ -617,52 +766,11 @@ function renderSummaryRow(
     `${formatAge(snapshot.captured_at, cube.last_post_at).padStart(6)} ${marker}`;
 }
 
-function renderAllCubesStrip(
-  snapshot: DashboardSnapshot,
-  width: number,
-  rows: number,
-  glyphs: Glyphs,
-  view: DashboardViewState,
-): string[] {
-  if (rows < 1) return [];
-  const label = `ALL ${snapshot.cubes.length} `;
-  const capacity = Math.max(0, width - displayWidth(label));
-  const glyphValues = snapshot.cubes.map((cube) => view.pulseCubeIds.has(cube.id)
-    ? activityPulseMarker(view.pulsePhase)
-    : heatGlyph(cube.posts_15m, glyphs));
-  const result = [`${label}${glyphValues.slice(0, capacity).join("")}`];
-  let offset = capacity;
-  for (let row = 1; row < rows && offset < glyphValues.length; row += 1) {
-    result.push(glyphValues.slice(offset, offset + width).join(""));
-    offset += width;
-  }
-  if (offset < glyphValues.length) {
-    const hidden = `+${glyphValues.length - offset} more`;
-    result[result.length - 1] = fitCell(result[result.length - 1] ?? "", width - hidden.length) + hidden;
-  }
-  return result;
-}
-
 function heatGlyph(posts: number, glyphs: Glyphs): string {
   if (posts <= 0) return glyphs.cube[0];
   if (posts <= 2) return glyphs.cube[1];
   if (posts <= 8) return glyphs.cube[2];
   return glyphs.cube[3];
-}
-
-function pulseGlyph(phase: number, glyphs: Glyphs): string {
-  const pulseRamp = [
-    glyphs.cube[0],
-    glyphs.cube[1],
-    glyphs.cube[1],
-    glyphs.cube[2],
-    glyphs.cube[3],
-  ] as const;
-  const boundedPhase = Math.max(
-    0,
-    Math.min(DASHBOARD_PULSE_PHASES, Math.floor(phase)),
-  );
-  return pulseRamp[boundedPhase]!;
 }
 
 function activityPulseMarker(phase: number): string {

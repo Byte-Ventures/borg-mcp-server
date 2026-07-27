@@ -91,6 +91,7 @@ describe("dashboard snapshot source", () => {
           drones_total: 1,
           drones_seen_15m: 1,
           last_post_at: "2026-07-25T11:51:00.000Z",
+          drones: [{ id: ids.droneA, label: "builder-alpha", role: "Builder", last_seen: "2026-07-25T11:51:00.000Z", sent: 2, received: 0 }],
         },
         {
           id: ids.cubeB,
@@ -100,6 +101,7 @@ describe("dashboard snapshot source", () => {
           drones_total: 1,
           drones_seen_15m: 1,
           last_post_at: "2026-07-25T11:56:00.000Z",
+          drones: [{ id: ids.droneB, label: "builder-beta", role: "Builder", last_seen: "2026-07-25T11:56:00.000Z", sent: 1, received: 0 }],
         },
       ],
     });
@@ -139,14 +141,14 @@ describe("dashboard renderer", () => {
     const eight = rankDashboardSnapshot(snapshotData(8), server);
     const frame = renderer(eight, 80, 24);
     expect(frame).toContain("██ BORGMCP-SERVER ██");
-    expect(frame).toContain("CUBE DETAIL");
+    expect(frame).toContain("DRONE ACTIVITY");
     expect(frame).toContain("cube-01");
-    expect(frame).toContain("activity = coordination log entries");
-    expect(frame).not.toContain("ALL 8");
+    expect(frame).toContain("collecting");
+    expect(frame).not.toContain("CUBE DETAIL");
     expect(renderer(eight, 80, 24)).toBe(frame);
 
     const crowded = renderer(rankDashboardSnapshot(snapshotData(47), server), 80, 24);
-    expect(crowded).toContain("ALL 47");
+    expect(crowded).toContain("page 1/");
     expect(crowded.split("\n").length).toBeLessThanOrEqual(24);
   });
 
@@ -161,22 +163,8 @@ describe("dashboard renderer", () => {
     expect(ascii).toContain("+");
     expect(ascii).not.toMatch(/[─│┌┐└┘█▢▤▥▣…]/u);
     for (const line of ascii.split("\n")) expect([...line]).toHaveLength(60);
-    expect(ascii.split("\n").map((line) => line.trimEnd()).join("\n")).toMatchInlineSnapshot(`
-      "== BORGMCP-SERVER == ONLINE  3 cubes  6/15m  https://127....
-      ------------------------------------------------------------
-      + CUBE DETAIL ---------------------------------------------+
-      |  +------+   cube-01 #1 (auto)                            |
-      | /....../|   3 posts/15m  3 posting drones                |
-      |+------+ |   4/5 drones seen/15m                          |
-      ||......|/    last post 1m                                 |
-      |+------+     activity = coordination log entries          |
-      +----------------------------------------------------------+
-      ------------------------------------------------------------
-      +   1 cube-01      4/5   seen    3/15m   3 posters     1m
-      =   2 cube-02      3/5   seen    2/15m   2 posters     2m
-      =   3 cube-03      2/5   seen    1/15m   1 poster     3m
-      ^C stop server  |  read-only"
-    `);
+    expect(ascii).toContain("DRONE ACTIVITY");
+    expect(ascii).toContain("collecting —");
 
     const tiny = createDashboardRenderer({ glyphMode: "box", color: true })(
       snapshot,
@@ -188,41 +176,23 @@ describe("dashboard renderer", () => {
     expect(tiny).not.toContain("┌");
   });
 
-  it("keeps default cube art and adjacent facts aligned with single-column glyphs", () => {
+  it("replaces isometric art with a flat bounded activity panel", () => {
     const frame = createDashboardRenderer({ glyphMode: "box", color: false })(
       rankDashboardSnapshot(snapshotData(1), server),
       80,
       24,
     );
-    const detail = frame.split("\n").slice(2, 9);
-    expect(detail.map((line) => line.replace(/\s+$/u, ""))).toMatchInlineSnapshot(`
-      [
-        "┌ CUBE DETAIL ─────────────────────────────────────────────────────────────────┐",
-        "│  ┌──────┐   cube-01 #1 (auto)                                                │",
-        "│ /....../│   1 posts/15m  1 posting drone                                     │",
-        "│┌──────┐ │   4/5 drones seen/15m                                              │",
-        "││......│/    last post 1m                                                     │",
-        "│└──────┘     activity = coordination log entries                              │",
-        "└──────────────────────────────────────────────────────────────────────────────┘",
-      ]
-    `);
-    expect(frame).not.toMatch(/[▣▤▥▢]/u);
-    expect(detail.slice(1, 6).map((line) =>
-      line.search(/(?:cube-01|1 posts|4\/5 drones|last post|activity =)/u)))
-      .toEqual([14, 14, 14, 14, 14]);
+    const detail = frame.split("\n").slice(2, -3);
+    expect(detail[0]).toContain("DRONE ACTIVITY");
+    expect(detail.every((line) => [...line].length === 80)).toBe(true);
+    expect(frame).not.toContain("/......");
   });
 
-  it("keeps pulse phases inside each glyph mode's declared cube vocabulary", () => {
+  it("keeps pulse phases out of the flat activity panel", () => {
     const snapshot = rankDashboardSnapshot(snapshotData(1), server);
     const pulseCubeIds = new Set([snapshot.cubes[0]!.id]);
-    const expectedFills = {
-      ascii: [".", "=", "=", "+", "#"],
-      box: [".", ":", ":", "+", "#"],
-    } as const;
-
     for (const glyphMode of ["ascii", "box"] as const) {
       const renderer = createDashboardRenderer({ glyphMode, color: false });
-      const fills = expectedFills[glyphMode];
       for (let pulsePhase = 0; pulsePhase <= 4; pulsePhase += 1) {
         const frame = renderer(snapshot, 80, 24, {
           autoFollow: true,
@@ -230,13 +200,13 @@ describe("dashboard renderer", () => {
           pulseCubeIds,
           pulsePhase,
         });
-        const fill = fills[pulsePhase]!;
-        expect(frame).toContain(`/${fill.repeat(6)}/${glyphMode === "ascii" ? "|" : "│"}`);
+        expect(frame).toContain("DRONE ACTIVITY");
+        expect(frame).not.toContain("/......");
       }
     }
   });
 
-  it("uses a distinct fixed-width activity marker in the overflow strip", () => {
+  it("uses a distinct fixed-width activity marker in cube list rows", () => {
     const snapshot = rankDashboardSnapshot(snapshotData(3), server);
     const frame = createDashboardRenderer({ glyphMode: "ascii", color: false })(
       snapshot,
@@ -249,7 +219,7 @@ describe("dashboard renderer", () => {
         pulsePhase: 4,
       },
     );
-    expect(frame).toContain("ALL 3 +O=");
+    expect(frame.split("\n").find((line) => line.includes("cube-02"))).toContain("O");
   });
 
   it("keeps the embedded footer by default and accepts a sanitized caller footer", () => {
@@ -296,11 +266,11 @@ describe("dashboard renderer", () => {
     const empty = renderer(rankDashboardSnapshot(snapshotData(0), server), 80, 24);
 
     expect(auto).toContain("1 cube");
-    expect(auto).toContain("1 posts/15m  1 posting drone");
+    expect(auto).toContain("DRONE ACTIVITY");
     expect(auto).toContain("1 poster");
-    expect(auto).toContain("#1 (auto)");
+    expect(auto).toContain("collecting");
     expect(auto).not.toContain("< > switch");
-    expect(pinned).toContain("#1 (pinned - a to resume)");
+    expect(pinned).toContain("DRONE ACTIVITY");
     expect(empty).not.toContain("< > switch");
   });
 
@@ -312,8 +282,7 @@ describe("dashboard renderer", () => {
       const lines = frame.split("\n");
       expect(lines.length).toBeLessThanOrEqual(24);
       expect(lines.every((line) => [...line].length <= columns)).toBe(true);
-      expect(frame).toContain("ALL 1000");
-      expect(frame).toMatch(/\+\d+ more/u);
+      expect(frame).toContain("page 1/");
     }
   });
 
@@ -377,6 +346,193 @@ describe("dashboard renderer", () => {
     expect(sanitizeTerminalText("a\nb\u001b[2Jc")).toBe("a bc");
   });
 
+  it("renders sanitized wide drone labels with sent, received, last-active, and right-edge activity", () => {
+    const data = snapshotData(1);
+    const cube = data.cubes[0]!;
+    const snapshot = rankDashboardSnapshot({
+      ...data,
+      cubes: [{ ...cube, drones: [{
+        ...cube.drones[0]!,
+        label: "\u001b]52;c;clipboard\u0007東京🚀\u001b[31m-red",
+        role: "Builder\nrole",
+        sent: 12,
+        received: 8,
+      }] }],
+    }, server);
+    const key = `${cube.id}:${cube.drones[0]!.id}`;
+    const frame = createDashboardRenderer({ glyphMode: "box", color: false })(snapshot, 100, 16, {
+      autoFollow: true,
+      focusedCubeId: null,
+      pulseCubeIds: new Set(),
+      pulsePhase: 0,
+      activity: new Map([[key, [
+        { capturedAt: "2026-07-25T11:59:50.000Z", sentRate: 1 },
+        { capturedAt: "2026-07-25T12:00:00.000Z", sentRate: 4 },
+      ]]]),
+      activityWindowMs: 15 * 60_000,
+    });
+    expect(frame).toContain("東京🚀-red");
+    expect(frame).toContain("SENT 12  RECV 8");
+    expect(frame).toContain("LAST 1m");
+    expect(frame).toContain("██");
+    expect(frame).not.toContain("\u001b");
+    expect(frame).not.toContain("clipboard");
+  });
+
+  it("leaves empty launch activity blank while reporting zero observed coverage", () => {
+    const snapshot = rankDashboardSnapshot(snapshotData(1), server);
+    const drone = snapshot.cubes[0]!.drones[0]!;
+    const frame = createDashboardRenderer({ glyphMode: "ascii", color: false })(
+      snapshot,
+      100,
+      16,
+      {
+        autoFollow: true,
+        focusedCubeId: null,
+        pulseCubeIds: new Set(),
+        pulsePhase: 0,
+        activity: new Map(),
+        observation: [],
+        activityWindowMs: 15 * 60_000,
+      },
+    );
+    expect(frame).toContain("collecting — 0% of 15m observed");
+    const lines = frame.split("\n");
+    const identity = lines.findIndex((line) => line.includes(drone.label));
+    expect(lines[identity + 1]!.slice(1, -1)).toMatch(/^\s+$/u);
+    expect(lines[identity + 2]!.slice(1, -1)).toMatch(/^\s+$/u);
+  });
+
+  it("keeps poll buckets in their timestamp positions across the four coverage compositions", () => {
+    const data = snapshotData(1);
+    const snapshot = rankDashboardSnapshot(data, server);
+    const cube = snapshot.cubes[0]!;
+    const drone = cube.drones[0]!;
+    const key = `${cube.id}:${drone.id}`;
+    const end = Date.parse(snapshot.captured_at);
+    const start = end - (15 * 60_000);
+    const renderer = createDashboardRenderer({ glyphMode: "ascii", color: false });
+    const sample = (timestamp: number, sentRate = 1) => ({
+      capturedAt: new Date(timestamp).toISOString(),
+      sentRate,
+    });
+    const graphFor = (samples: readonly { capturedAt: string; sentRate: number }[]) => {
+      const frame = renderer(snapshot, 100, 16, {
+        autoFollow: true,
+        focusedCubeId: null,
+        pulseCubeIds: new Set(),
+        pulsePhase: 0,
+        activity: new Map([[key, samples]]),
+        observation: samples,
+        activityWindowMs: 15 * 60_000,
+      });
+      const lines = frame.split("\n");
+      const identity = lines.findIndex((line) => line.includes(drone.label));
+      return { frame, graph: lines[identity + 2]!.slice(1, -1) };
+    };
+
+    const clustered = [
+      ...Array.from({ length: 90 }, (_, index) => sample(start + (index * 100), 1)),
+      ...Array.from({ length: 90 }, (_, index) => sample(end - 9_000 + (index * 100), 4)),
+    ];
+    const clusteredFrame = graphFor(clustered);
+    expect(clusteredFrame.frame).toContain("collecting");
+    expect(clusteredFrame.graph).toMatch(/[.:+*#]\s{40,}[.:+*#]/u);
+
+    const uniformMinute = Array.from(
+      { length: 180 },
+      (_, index) => sample(end - 60_000 + Math.floor(index * 60_000 / 180), 1 + (index % 4)),
+    );
+    const uniformGraph = graphFor(uniformMinute).graph;
+    expect(uniformGraph.search(/[.:+*#]/u)).toBeGreaterThan(85);
+
+    const endpoints = graphFor([sample(start, 1), sample(end, 4)]).graph;
+    expect(endpoints[0]).toMatch(/[.:+*#]/u);
+    expect(endpoints.at(-1)).toMatch(/[.:+*#]/u);
+    expect(endpoints.slice(1, -1)).toMatch(/^\s+$/u);
+
+    const full = Array.from(
+      { length: 180 },
+      (_, index) => sample(start + (index * 5_000), 1 + (index % 4)),
+    );
+    expect(graphFor(full).frame).not.toContain("collecting");
+  });
+
+  it("uses the global observation timeline instead of reducing per-drone histories", () => {
+    const data = snapshotData(1);
+    const original = data.cubes[0]!;
+    const joined = {
+      ...original.drones[0]!,
+      id: "20000000-0000-4000-8000-000000000002",
+      label: "late-joiner",
+    };
+    const snapshot = rankDashboardSnapshot({
+      ...data,
+      cubes: [{ ...original, drones: [original.drones[0]!, joined] }],
+    }, server);
+    const cube = snapshot.cubes[0]!;
+    const end = Date.parse(snapshot.captured_at);
+    const start = end - (15 * 60_000);
+    const sample = (timestamp: number) => ({
+      capturedAt: new Date(timestamp).toISOString(),
+      sentRate: 1,
+    });
+    const full = Array.from({ length: 180 }, (_, index) => sample(start + (index * 5_000)));
+    const late = Array.from({ length: 24 }, (_, index) => sample(end - (120_000 - (index * 5_000))));
+    const sparse = Array.from({ length: 18 }, (_, index) =>
+      sample(start + Math.floor(index * (15 * 60_000) / 18)));
+    const tenDrones = Array.from({ length: 10 }, (_, index) => ({
+      ...original.drones[0]!,
+      id: `30000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`,
+      label: `drone-${index + 1}`,
+    }));
+    const sparseSnapshot = rankDashboardSnapshot({
+      ...data,
+      cubes: [{ ...original, drones: tenDrones }],
+    }, server);
+    const sparseCube = sparseSnapshot.cubes[0]!;
+    const sparseFrame = createDashboardRenderer({ glyphMode: "ascii", color: false })(
+      sparseSnapshot,
+      120,
+      36,
+      {
+        autoFollow: true,
+        focusedCubeId: null,
+        pulseCubeIds: new Set(),
+        pulsePhase: 0,
+        activity: new Map(tenDrones.map((drone) => [
+          `${sparseCube.id}:${drone.id}`,
+          sparse,
+        ])),
+        observation: sparse,
+        activityWindowMs: 15 * 60_000,
+      },
+    );
+    expect(sparseFrame).toContain("collecting");
+
+    const frame = createDashboardRenderer({ glyphMode: "ascii", color: false })(
+      snapshot,
+      120,
+      36,
+      {
+        autoFollow: true,
+        focusedCubeId: null,
+        pulseCubeIds: new Set(),
+        pulsePhase: 0,
+        activity: new Map([
+          [`${cube.id}:${cube.drones[0]!.id}`, full],
+          [`${cube.id}:${joined.id}`, late],
+        ]),
+        observation: full,
+        activityWindowMs: 15 * 60_000,
+      },
+    );
+    expect(frame).not.toContain("collecting");
+    const lines = frame.split("\n");
+    const lateLine = lines.findIndex((line) => line.includes("late-joiner"));
+    expect(lines[lateLine + 1]!.slice(1, -1)).toMatch(/^\s{70,}[.:+*#]+$/u);
+  });
+
   it("treats NO_COLOR and terminal/locale fallback as first-class variants", () => {
     expect(dashboardColorEnabled({ NO_COLOR: "" })).toBe(false);
     expect(dashboardColorEnabled({ TERM: "xterm-256color" })).toBe(true);
@@ -400,6 +556,45 @@ describe("dashboard renderer", () => {
 });
 
 describe("foreground dashboard lifecycle", () => {
+  it("collapses event refreshes into one poll bucket at record time", async () => {
+    vi.useFakeTimers();
+    const harness = terminalHarness();
+    const initial = snapshotData(1);
+    const source = sourceHarness(initial);
+    const renderer = vi.fn(createDashboardRenderer({ glyphMode: "ascii", color: false }));
+    const dashboard = startForegroundDashboard({
+      source,
+      server,
+      terminal: harness.terminal,
+      renderer,
+    });
+    const cube = initial.cubes[0]!;
+    const drone = cube.drones[0]!;
+
+    for (let index = 1; index <= 5; index += 1) {
+      source.set({
+        ...initial,
+        captured_at: new Date(Date.parse(initial.captured_at) + (index * 500)).toISOString(),
+        cubes: [{
+          ...cube,
+          drones: [{ ...drone, sent: drone.sent + index }],
+        }],
+      });
+      source.emit();
+      await vi.advanceTimersByTimeAsync(250);
+    }
+
+    const view = renderer.mock.lastCall?.[3];
+    expect(view?.observation).toHaveLength(1);
+    const samples = view?.activity?.get(`${cube.id}:${drone.id}`);
+    expect(samples).toHaveLength(1);
+    expect(samples?.[0]).toMatchObject({
+      capturedAt: "2026-07-25T12:00:02.500Z",
+      sentRate: 2,
+    });
+    dashboard.close();
+  });
+
   it("pulses when a newer post replaces an expired post at the same rolling count", async () => {
     vi.useFakeTimers();
     const harness = terminalHarness();
@@ -425,7 +620,7 @@ describe("foreground dashboard lifecycle", () => {
     await vi.advanceTimersByTimeAsync(250);
 
     expect(source.readCount()).toBe(2);
-    expect(harness.output.at(-1)).toContain("/######/|");
+    expect(harness.output.at(-1)).toContain("DRONE ACTIVITY");
     dashboard.close();
   });
 
@@ -458,7 +653,7 @@ describe("foreground dashboard lifecycle", () => {
 
     const pulse = harness.output.at(-1)!;
     expect(pulse).not.toBe(before);
-    expect(pulse).toContain("/....../|");
+    expect(pulse).toContain("DRONE ACTIVITY");
     expect(pulse.split("\n").find((line) => line.includes("cube-02"))).toMatch(
       /^=\s+2 .*O\s*$/u,
     );
@@ -486,19 +681,24 @@ describe("foreground dashboard lifecycle", () => {
       pulseFrameMs: 100,
     });
 
-    expect(harness.output.at(-1)).toContain("cube-01 #1 (auto)");
+    expect(harness.output.at(-1)).toContain("cube-01 · DRONE ACTIVITY");
     harness.input(">");
-    expect(harness.output.at(-1)).toContain("cube-02 #2");
-    expect(harness.output.at(-1)).not.toContain("(auto)");
+    expect(harness.output.at(-1)).toContain("cube-02 · DRONE ACTIVITY");
     harness.input("<");
-    expect(harness.output.at(-1)).toContain("cube-01 #1");
-    expect(harness.output.at(-1)).not.toContain("(auto)");
+    expect(harness.output.at(-1)).toContain("cube-01 · DRONE ACTIVITY");
     harness.input("a");
-    expect(harness.output.at(-1)).toContain("cube-01 #1 (auto)");
+    expect(harness.output.at(-1)).toContain("cube-01 · DRONE ACTIVITY");
     harness.input("<");
-    expect(harness.output.at(-1)).toContain("cube-03 #3");
+    expect(harness.output.at(-1)).toContain("cube-03 · DRONE ACTIVITY");
     harness.input("a");
-    expect(harness.output.at(-1)).toContain("cube-01 #1 (auto)");
+    expect(harness.output.at(-1)).toContain("cube-01 · DRONE ACTIVITY");
+
+    harness.input("w");
+    expect(harness.output.at(-1)).toContain("of 60m");
+    harness.input("w");
+    expect(harness.output.at(-1)).toContain("of 5m");
+    harness.input(" ");
+    expect(harness.output.at(-1)).toContain("SPACE page");
 
     const changed = snapshotData(3);
     source.set({
@@ -512,7 +712,7 @@ describe("foreground dashboard lifecycle", () => {
     await vi.advanceTimersByTimeAsync(250);
     expect(source.readCount()).toBe(2);
     const pulseStart = harness.output.at(-1);
-    expect(pulseStart).toContain("/######/|");
+    expect(pulseStart).toContain("DRONE ACTIVITY");
     await vi.advanceTimersByTimeAsync(100);
     expect(harness.output.at(-1)).not.toBe(pulseStart);
     expect(source.readCount()).toBe(2);
@@ -668,6 +868,14 @@ function snapshotData(count: number): DashboardDataSnapshot {
         ? null
         : new Date(Date.parse("2026-07-25T12:00:00.000Z") - ((index + 1) * 60_000))
             .toISOString(),
+      drones: [{
+        id: `10000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`,
+        label: `builder-${String(index + 1).padStart(2, "0")}`,
+        role: "Builder",
+        last_seen: new Date(Date.parse("2026-07-25T12:00:00.000Z") - ((index + 1) * 60_000)).toISOString(),
+        sent: index + 1,
+        received: index + 1,
+      }],
     })),
   };
 }

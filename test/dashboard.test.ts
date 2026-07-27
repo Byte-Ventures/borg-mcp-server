@@ -379,6 +379,136 @@ describe("dashboard renderer", () => {
     expect(frame).not.toContain("clipboard");
   });
 
+  it("keeps poll buckets in their timestamp positions across the four coverage compositions", () => {
+    const data = snapshotData(1);
+    const snapshot = rankDashboardSnapshot(data, server);
+    const cube = snapshot.cubes[0]!;
+    const drone = cube.drones[0]!;
+    const key = `${cube.id}:${drone.id}`;
+    const end = Date.parse(snapshot.captured_at);
+    const start = end - (15 * 60_000);
+    const renderer = createDashboardRenderer({ glyphMode: "ascii", color: false });
+    const sample = (timestamp: number, sentRate = 1) => ({
+      capturedAt: new Date(timestamp).toISOString(),
+      sentRate,
+    });
+    const graphFor = (samples: readonly { capturedAt: string; sentRate: number }[]) => {
+      const frame = renderer(snapshot, 100, 16, {
+        autoFollow: true,
+        focusedCubeId: null,
+        pulseCubeIds: new Set(),
+        pulsePhase: 0,
+        activity: new Map([[key, samples]]),
+        observation: samples,
+        activityWindowMs: 15 * 60_000,
+      });
+      const lines = frame.split("\n");
+      const identity = lines.findIndex((line) => line.includes(drone.label));
+      return { frame, graph: lines[identity + 2]!.slice(1, -1) };
+    };
+
+    const clustered = [
+      ...Array.from({ length: 90 }, (_, index) => sample(start + (index * 100), 1)),
+      ...Array.from({ length: 90 }, (_, index) => sample(end - 9_000 + (index * 100), 4)),
+    ];
+    const clusteredFrame = graphFor(clustered);
+    expect(clusteredFrame.frame).toContain("collecting");
+    expect(clusteredFrame.graph).toMatch(/[.:+*#]\s{40,}[.:+*#]/u);
+
+    const uniformMinute = Array.from(
+      { length: 180 },
+      (_, index) => sample(end - 60_000 + Math.floor(index * 60_000 / 180), 1 + (index % 4)),
+    );
+    const uniformGraph = graphFor(uniformMinute).graph;
+    expect(uniformGraph.search(/[.:+*#]/u)).toBeGreaterThan(85);
+
+    const endpoints = graphFor([sample(start, 1), sample(end, 4)]).graph;
+    expect(endpoints[0]).toMatch(/[.:+*#]/u);
+    expect(endpoints.at(-1)).toMatch(/[.:+*#]/u);
+    expect(endpoints.slice(1, -1)).toMatch(/^\s+$/u);
+
+    const full = Array.from(
+      { length: 180 },
+      (_, index) => sample(start + (index * 5_000), 1 + (index % 4)),
+    );
+    expect(graphFor(full).frame).not.toContain("collecting");
+  });
+
+  it("uses the global observation timeline instead of reducing per-drone histories", () => {
+    const data = snapshotData(1);
+    const original = data.cubes[0]!;
+    const joined = {
+      ...original.drones[0]!,
+      id: "20000000-0000-4000-8000-000000000002",
+      label: "late-joiner",
+    };
+    const snapshot = rankDashboardSnapshot({
+      ...data,
+      cubes: [{ ...original, drones: [original.drones[0]!, joined] }],
+    }, server);
+    const cube = snapshot.cubes[0]!;
+    const end = Date.parse(snapshot.captured_at);
+    const start = end - (15 * 60_000);
+    const sample = (timestamp: number) => ({
+      capturedAt: new Date(timestamp).toISOString(),
+      sentRate: 1,
+    });
+    const full = Array.from({ length: 180 }, (_, index) => sample(start + (index * 5_000)));
+    const late = Array.from({ length: 24 }, (_, index) => sample(end - (120_000 - (index * 5_000))));
+    const sparse = Array.from({ length: 18 }, (_, index) =>
+      sample(start + Math.floor(index * (15 * 60_000) / 18)));
+    const tenDrones = Array.from({ length: 10 }, (_, index) => ({
+      ...original.drones[0]!,
+      id: `30000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`,
+      label: `drone-${index + 1}`,
+    }));
+    const sparseSnapshot = rankDashboardSnapshot({
+      ...data,
+      cubes: [{ ...original, drones: tenDrones }],
+    }, server);
+    const sparseCube = sparseSnapshot.cubes[0]!;
+    const sparseFrame = createDashboardRenderer({ glyphMode: "ascii", color: false })(
+      sparseSnapshot,
+      120,
+      36,
+      {
+        autoFollow: true,
+        focusedCubeId: null,
+        pulseCubeIds: new Set(),
+        pulsePhase: 0,
+        activity: new Map(tenDrones.map((drone) => [
+          `${sparseCube.id}:${drone.id}`,
+          sparse,
+        ])),
+        observation: sparse,
+        activityWindowMs: 15 * 60_000,
+      },
+    );
+    expect(sparseFrame).toContain("collecting");
+
+    const frame = createDashboardRenderer({ glyphMode: "ascii", color: false })(
+      snapshot,
+      120,
+      36,
+      {
+        autoFollow: true,
+        focusedCubeId: null,
+        pulseCubeIds: new Set(),
+        pulsePhase: 0,
+        activity: new Map([
+          [`${cube.id}:${cube.drones[0]!.id}`, full],
+          [`${cube.id}:${joined.id}`, late],
+        ]),
+        observation: full,
+        activityWindowMs: 15 * 60_000,
+      },
+    );
+    expect(frame).not.toContain("collecting");
+    const lines = frame.split("\n");
+    const lateLine = lines.findIndex((line) => line.includes("late-joiner"));
+    expect(lines[lateLine + 1]!.slice(1, -1)).toMatch(/^\s{70,}[.:+*#]+$/u);
+  });
+
   it("treats NO_COLOR and terminal/locale fallback as first-class variants", () => {
     expect(dashboardColorEnabled({ NO_COLOR: "" })).toBe(false);
     expect(dashboardColorEnabled({ TERM: "xterm-256color" })).toBe(true);
@@ -402,6 +532,45 @@ describe("dashboard renderer", () => {
 });
 
 describe("foreground dashboard lifecycle", () => {
+  it("collapses event refreshes into one poll bucket at record time", async () => {
+    vi.useFakeTimers();
+    const harness = terminalHarness();
+    const initial = snapshotData(1);
+    const source = sourceHarness(initial);
+    const renderer = vi.fn(createDashboardRenderer({ glyphMode: "ascii", color: false }));
+    const dashboard = startForegroundDashboard({
+      source,
+      server,
+      terminal: harness.terminal,
+      renderer,
+    });
+    const cube = initial.cubes[0]!;
+    const drone = cube.drones[0]!;
+
+    for (let index = 1; index <= 5; index += 1) {
+      source.set({
+        ...initial,
+        captured_at: new Date(Date.parse(initial.captured_at) + (index * 500)).toISOString(),
+        cubes: [{
+          ...cube,
+          drones: [{ ...drone, sent: drone.sent + index }],
+        }],
+      });
+      source.emit();
+      await vi.advanceTimersByTimeAsync(250);
+    }
+
+    const view = renderer.mock.lastCall?.[3];
+    expect(view?.observation).toHaveLength(1);
+    const samples = view?.activity?.get(`${cube.id}:${drone.id}`);
+    expect(samples).toHaveLength(1);
+    expect(samples?.[0]).toMatchObject({
+      capturedAt: "2026-07-25T12:00:02.500Z",
+      sentRate: 2,
+    });
+    dashboard.close();
+  });
+
   it("pulses when a newer post replaces an expired post at the same rolling count", async () => {
     vi.useFakeTimers();
     const harness = terminalHarness();

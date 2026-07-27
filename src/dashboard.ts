@@ -76,6 +76,7 @@ export interface DashboardViewState {
   readonly pulseCubeIds: ReadonlySet<string>;
   readonly pulsePhase: number;
   readonly activity?: ReadonlyMap<string, readonly DashboardActivitySample[]>;
+  readonly observation?: readonly DashboardActivitySample[];
   readonly activityWindowMs?: number;
   readonly page?: number;
 }
@@ -329,6 +330,7 @@ export function startForegroundDashboard(input: {
   let activityWindowMs = DASHBOARD_ACTIVITY_WINDOW_MS;
   let page = 0;
   const activityHistory = new Map<string, DashboardActivitySample[]>();
+  const observationHistory: DashboardActivitySample[] = [];
   const previousDroneCounts = new Map<string, { readonly sent: number; readonly capturedAt: number }>();
   let previousActivity = new Map<string, {
     readonly posts15m: number;
@@ -397,6 +399,7 @@ export function startForegroundDashboard(input: {
         pulseCubeIds,
         pulsePhase,
         activity: activityHistory,
+        observation: observationHistory,
         activityWindowMs,
         page,
       });
@@ -430,7 +433,7 @@ export function startForegroundDashboard(input: {
         schedulePulse();
       }
       priorRanks = new Map(snapshot.cubes.map((cube) => [cube.id, cube.rank]));
-      recordDashboardActivity(snapshot, activityHistory, previousDroneCounts, activityWindowMs);
+      recordDashboardActivity(snapshot, activityHistory, observationHistory, previousDroneCounts, activityWindowMs);
       lastSnapshot = snapshot;
       paint();
     } catch (error) {
@@ -551,22 +554,41 @@ export function startForegroundDashboard(input: {
 function recordDashboardActivity(
   snapshot: DashboardSnapshot,
   history: Map<string, DashboardActivitySample[]>,
+  observation: DashboardActivitySample[],
   previous: Map<string, { readonly sent: number; readonly capturedAt: number }>,
   windowMs: number,
 ): void {
   const capturedAt = Date.parse(snapshot.captured_at);
   if (!Number.isFinite(capturedAt)) return;
+  recordActivityBucket(observation, { capturedAt: snapshot.captured_at, sentRate: 0 });
+  while (observation.length > 0 && Date.parse(observation[0]!.capturedAt) < capturedAt - Math.max(windowMs, 60 * 60_000)) observation.shift();
   for (const cube of snapshot.cubes) for (const drone of cube.drones) {
     const key = `${cube.id}:${drone.id}`;
     const prior = previous.get(key);
     const elapsed = prior === undefined ? 0 : Math.max(0, capturedAt - prior.capturedAt);
     const sentRate = prior === undefined || elapsed === 0 ? 0 : Math.max(0, drone.sent - prior.sent) / (elapsed / 1_000);
     const samples = history.get(key) ?? [];
-    samples.push({ capturedAt: snapshot.captured_at, sentRate });
+    recordActivityBucket(samples, { capturedAt: snapshot.captured_at, sentRate });
     const oldest = capturedAt - Math.max(windowMs, 60 * 60_000);
     while (samples.length > 0 && Date.parse(samples[0]!.capturedAt) < oldest) samples.shift();
     history.set(key, samples);
     previous.set(key, { sent: drone.sent, capturedAt });
+  }
+}
+
+function recordActivityBucket(
+  samples: DashboardActivitySample[],
+  sample: DashboardActivitySample,
+): void {
+  const timestamp = Date.parse(sample.capturedAt);
+  if (!Number.isFinite(timestamp)) return;
+  const bucket = Math.floor(timestamp / DASHBOARD_IDLE_REFRESH_MS);
+  const existing = samples.findIndex((candidate) =>
+    Math.floor(Date.parse(candidate.capturedAt) / DASHBOARD_IDLE_REFRESH_MS) === bucket);
+  if (existing >= 0) samples[existing] = sample;
+  else {
+    samples.push(sample);
+    samples.sort((left, right) => Date.parse(left.capturedAt) - Date.parse(right.capturedAt));
   }
 }
 
@@ -615,8 +637,8 @@ function renderFocusPanel(
   const title = ` ${sanitizeTerminalText(cube.name)} · DRONE ACTIVITY · ${formatWindow(window)} ago ${axis} now `;
   const top = glyphs.topLeft + title + glyphs.horizontal.repeat(Math.max(0, inner - displayWidth(title))) + glyphs.topRight;
   const contentRows = rows - 2;
-  const allSamples = cube.drones.flatMap((drone) => view.activity?.get(`${cube.id}:${drone.id}`) ?? []);
-  const collecting = activityCoverage(allSamples, window) < 1;
+  const coverage = activityCoverage(view.observation ?? [], snapshot.captured_at, window);
+  const collecting = coverage < 1;
   const reserveNotes = collecting ? 1 : 0;
   const bandHeight = ([3, 2, 1] as const).find((candidate) =>
     cube.drones.length <= Math.floor((contentRows - reserveNotes) / candidate)) ?? 1;
@@ -637,8 +659,10 @@ function renderFocusPanel(
   const hidden = Math.max(0, cube.drones.length - drones.length);
   if (hidden > 0 && lines.length < contentRows) lines.push(fitCell(` +${hidden} more drones — taller terminal shows them`, inner));
   if (collecting && lines.length < contentRows) {
-    const elapsed = formatElapsed(Date.parse(snapshot.captured_at) - dashboardSampleStart(view.activity));
-    lines.push(fitCell(` collecting — ${elapsed} of ${formatWindow(window)}`, inner));
+    lines.push(fitCell(
+      ` collecting — ${Math.round(coverage * 100)}% of ${formatWindow(window)} observed`,
+      inner,
+    ));
   }
   while (lines.length < contentRows) lines.push(" ".repeat(inner));
   return [top, ...lines.slice(0, contentRows).map((line) => `${glyphs.vertical}${fitCell(line, inner, " ", glyphs.ellipsis)}${glyphs.vertical}`), `${glyphs.bottomLeft}${glyphs.horizontal.repeat(inner)}${glyphs.bottomRight}`];
@@ -658,22 +682,24 @@ function renderDroneBand(
   const last = formatAge(capturedAt, drone.last_seen);
   if (height === 1) {
     const prefix = `${label} ${drone.sent} ${last} `;
-    return [fitCell(`${prefix}${renderActivityGraph(samples, Math.max(4, width - displayWidth(prefix)), 1, windowMs, glyphs)}`, width)];
+    return [fitCell(`${prefix}${renderActivityGraph(samples, Math.max(4, width - displayWidth(prefix)), 1, windowMs, capturedAt, glyphs)}`, width)];
   }
   const identity = height >= 3
     ? `${label} ${role}  SENT ${drone.sent}  RECV ${drone.received}  LAST ${last}`
     : `${label} ${role}  SENT ${drone.sent}  LAST ${last}`;
   return [fitCell(identity, width), ...Array.from({ length: height - 1 }, (_unused, index) =>
-    renderActivityGraph(samples, width, height - 1, windowMs, glyphs, index))];
+    renderActivityGraph(samples, width, height - 1, windowMs, capturedAt, glyphs, index))];
 }
 
-function renderActivityGraph(samples: readonly DashboardActivitySample[], width: number, height: number, windowMs: number, glyphs: Glyphs, row = 0): string {
+function renderActivityGraph(samples: readonly DashboardActivitySample[], width: number, height: number, windowMs: number, capturedAt: string, glyphs: Glyphs, row = 0): string {
   if (samples.length === 0) return "·".repeat(width);
-  const visible = samples.filter((sample) => Date.parse(sample.capturedAt) >= Date.parse(samples.at(-1)!.capturedAt) - windowMs);
-  const dataColumns = Math.max(1, Math.min(width, Math.round(activityCoverage(visible, windowMs) * width)));
-  const max = Math.max(...visible.map((sample) => sample.sentRate), 0);
-  const graph = Array.from({ length: dataColumns }, (_unused, columnIndex) => {
-    const sample = visible[Math.min(visible.length - 1, Math.floor(columnIndex * visible.length / dataColumns))]!;
+  const slots = activitySlots(samples, capturedAt, windowMs);
+  const max = Math.max(...[...slots.values()].map((sample) => sample.sentRate), 0);
+  const graph = Array.from({ length: width }, (_unused, columnIndex) => {
+    const startSlot = Math.floor(columnIndex * slots.total / width);
+    const endSlot = Math.max(startSlot + 1, Math.floor((columnIndex + 1) * slots.total / width));
+    const sample = [...slots.entries()].find(([slot]) => slot >= startSlot && slot < endSlot)?.[1];
+    if (sample === undefined) return " ";
     if (sample.sentRate <= 0 || max <= 0) return "·";
     const level = Math.ceil((sample.sentRate / max) * (height * 8)) - ((height - row - 1) * 8);
     if (level <= 0) return " ";
@@ -682,26 +708,29 @@ function renderActivityGraph(samples: readonly DashboardActivitySample[], width:
       : "▁▂▃▄▅▆▇█"[Math.min(7, level - 1)]!;
     return glyph;
   }).join("");
-  return " ".repeat(Math.max(0, width - dataColumns)) + graph;
+  return graph;
 }
 
-function activityCoverage(samples: readonly DashboardActivitySample[], windowMs: number): number {
-  if (samples.length === 0) return 0;
-  const elapsed = Math.max(0, Date.parse(samples.at(-1)!.capturedAt) - Date.parse(samples[0]!.capturedAt));
-  const elapsedCoverage = elapsed / windowMs;
-  const cadenceCoverage = samples.length / Math.max(1, windowMs / DASHBOARD_IDLE_REFRESH_MS);
-  return Math.min(1, elapsedCoverage, cadenceCoverage);
+function activityCoverage(samples: readonly DashboardActivitySample[], capturedAt: string, windowMs: number): number {
+  const slots = activitySlots(samples, capturedAt, windowMs);
+  return slots.size / slots.total;
+}
+
+function activitySlots(samples: readonly DashboardActivitySample[], capturedAt: string, windowMs: number): (Map<number, DashboardActivitySample> & { total: number }) {
+  const end = Date.parse(capturedAt);
+  const start = end - windowMs;
+  const buckets = new Map<number, DashboardActivitySample>() as Map<number, DashboardActivitySample> & { total: number };
+  buckets.total = Math.max(1, Math.ceil(windowMs / DASHBOARD_IDLE_REFRESH_MS));
+  for (const sample of samples) {
+    const timestamp = Date.parse(sample.capturedAt);
+    if (!Number.isFinite(timestamp) || timestamp < start || timestamp > end) continue;
+    const bucket = Math.min(buckets.total - 1, Math.floor((timestamp - start) / DASHBOARD_IDLE_REFRESH_MS));
+    buckets.set(bucket, sample);
+  }
+  return buckets;
 }
 
 function formatWindow(windowMs: number): string { return `${Math.floor(windowMs / 60_000)}m`; }
-function formatElapsed(elapsed: number): string {
-  const seconds = Math.max(0, Math.floor(elapsed / 1_000));
-  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
-}
-function dashboardSampleStart(activity: DashboardViewState["activity"]): number {
-  const first = activity === undefined ? undefined : [...activity.values()].flat().map((sample) => Date.parse(sample.capturedAt)).filter(Number.isFinite).sort((a, b) => a - b)[0];
-  return first ?? Date.now();
-}
 
 function renderEmptyPanel(width: number, glyphs: Glyphs): string[] {
   const inner = Math.max(1, width - 2);

@@ -6,6 +6,15 @@ export const DASHBOARD_PULSE_FRAME_MS = 125;
 const DASHBOARD_PULSE_PHASES = 4;
 const DASHBOARD_ACTIVITY_PULSE_MARKERS = [" ", "_", "-", "o", "O"] as const;
 
+export interface DashboardDroneData {
+  readonly id: string;
+  readonly label: string;
+  readonly role: string;
+  readonly last_seen: string;
+  readonly sent: number;
+  readonly received: number;
+}
+
 export interface DashboardCubeData {
   readonly id: string;
   readonly name: string;
@@ -14,6 +23,7 @@ export interface DashboardCubeData {
   readonly drones_total: number;
   readonly drones_seen_15m: number;
   readonly last_post_at: string | null;
+  readonly drones: readonly DashboardDroneData[];
 }
 
 export interface DashboardDataSnapshot {

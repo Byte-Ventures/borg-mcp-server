@@ -668,6 +668,7 @@ function snapshotData(count: number): DashboardDataSnapshot {
         ? null
         : new Date(Date.parse("2026-07-25T12:00:00.000Z") - ((index + 1) * 60_000))
             .toISOString(),
+      drones: [],
     })),
   };
 }

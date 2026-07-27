@@ -62,7 +62,17 @@ describe("read-only dashboard snapshot source", () => {
     });
     const listener = vi.fn();
     const unsubscribe = source.subscribe(listener);
-    expect(source.read().cubes[0]).toMatchObject({ posts_15m: 0 });
+    expect(source.read().cubes[0]).toMatchObject({
+      posts_15m: 0,
+      drones: [{
+        id: ids.drone,
+        label: "builder-dashboard",
+        role: "Builder",
+        last_seen: "2026-07-25T12:00:00.000Z",
+        sent: 0,
+        received: 0,
+      }],
+    });
 
     now = new Date("2026-07-25T12:01:00.000Z");
     writer.forPrincipal(droneSessionPrincipal({
@@ -79,6 +89,7 @@ describe("read-only dashboard snapshot source", () => {
       posts_15m: 1,
       distinct_posting_drones_15m: 1,
       last_post_at: "2026-07-25T12:01:00.000Z",
+      drones: [{ sent: 1, received: 1 }],
     });
     expect(JSON.stringify(source.read())).not.toContain("poll-secret-body");
     unsubscribe();

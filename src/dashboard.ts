@@ -671,9 +671,10 @@ function renderActivityGraph(samples: readonly DashboardActivitySample[], width:
   const graph = Array.from({ length: dataColumns }, (_unused, columnIndex) => {
     const sample = visible[Math.min(visible.length - 1, Math.floor(columnIndex * visible.length / dataColumns))]!;
     if (sample.sentRate <= 0 || max <= 0) return "·";
-    const level = Math.max(1, Math.ceil((sample.sentRate / max) * (height * 8)) - (row * 8));
+    const level = Math.ceil((sample.sentRate / max) * (height * 8)) - ((height - row - 1) * 8);
+    if (level <= 0) return " ";
     const glyph = glyphs === ASCII_GLYPHS
-      ? ".-=+#"[Math.min(4, Math.ceil(level / Math.max(1, height * 8 / 5)) - 1)]!
+      ? "..::++*#"[Math.min(7, level - 1)]!
       : "▁▂▃▄▅▆▇█"[Math.min(7, level - 1)]!;
     return glyph;
   }).join("");

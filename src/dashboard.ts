@@ -191,7 +191,7 @@ export function createDashboardRenderer(options: DashboardRenderOptions): Dashbo
     const height = boundedDimension(rows, 4, 200);
     if (width < 40 || height < 10) return renderPlainDashboard(snapshot, width, height);
     const footer = options.navigation === true
-      ? `${snapshot.cubes.length > 1 ? "< > switch  |  a auto  |  " : ""}w window 5m/15m/60m  |  SPACE page  |  ${baseFooter}`
+      ? `${snapshot.cubes.length > 1 ? "< > switch  |  a auto  |  " : ""}w ${formatWindow(view.activityWindowMs ?? DASHBOARD_ACTIVITY_WINDOW_MS)}  |  SPACE page  |  ${baseFooter}`
       : baseFooter;
 
     const lines: string[] = [];
@@ -218,10 +218,13 @@ export function createDashboardRenderer(options: DashboardRenderOptions): Dashbo
     for (const cube of snapshot.cubes.slice(pageStart, pageStart + listRows)) {
       lines.push(renderSummaryRow(snapshot, cube, width, glyphs, view));
     }
-    if (snapshot.cubes.length > listRows) {
-      lines.push(fitCell(`SPACE page ${page + 1}/${pageCount}`, width));
-    }
-    lines.push(fitCell(footer, width));
+    const footerWithPage = snapshot.cubes.length > listRows
+      ? `${footer}  |  page ${page + 1}/${pageCount}`
+      : footer;
+    const compactFooter = options.navigation === true
+      ? `w ${formatWindow(view.activityWindowMs ?? DASHBOARD_ACTIVITY_WINDOW_MS)}  |  SPACE ${page + 1}/${pageCount}  |  ${baseFooter}`
+      : baseFooter;
+    lines.push(fitCell(displayWidth(footerWithPage) > width ? compactFooter : footerWithPage, width));
     return lines.slice(0, height)
       .map((line) => fitCell(line, width, " ", glyphs.ellipsis))
       .join("\n");
@@ -607,29 +610,31 @@ function renderFocusPanel(
       glyphs.ellipsis,
     )];
   }
-  const title = ` ${sanitizeTerminalText(cube.name)} · DRONE ACTIVITY `;
+  const window = view.activityWindowMs ?? DASHBOARD_ACTIVITY_WINDOW_MS;
+  const title = ` ${sanitizeTerminalText(cube.name)} · DRONE ACTIVITY · ${formatWindow(window)} ago → now `;
   const top = glyphs.topLeft + title + glyphs.horizontal.repeat(Math.max(0, inner - displayWidth(title))) + glyphs.topRight;
   const contentRows = rows - 2;
-  const bandHeight = contentRows >= 9 ? 3 : contentRows >= 5 ? 2 : 1;
-  const visible = Math.max(1, Math.floor(contentRows / bandHeight));
-  const pageCount = Math.max(1, Math.ceil(cube.drones.length / visible));
-  const page = Math.max(0, view.page ?? 0) % pageCount;
-  const drones = cube.drones.slice(page * visible, page * visible + visible);
+  const collecting = true;
+  const reserveNotes = collecting ? 1 : 0;
+  const bandHeight = ([3, 2, 1] as const).find((candidate) =>
+    cube.drones.length <= Math.floor((contentRows - reserveNotes) / candidate)) ?? 1;
+  const visible = Math.max(1, Math.floor((contentRows - reserveNotes - 1) / bandHeight));
+  const drones = cube.drones.slice(0, visible);
   const lines = drones.flatMap((drone) => renderDroneBand(
     drone,
     snapshot.captured_at,
     inner,
     bandHeight,
     view.activity?.get(`${cube.id}:${drone.id}`) ?? [],
-    view.activityWindowMs ?? DASHBOARD_ACTIVITY_WINDOW_MS,
+    window,
     glyphs,
   ));
-  if (lines.length < contentRows) {
-    const elapsed = formatElapsed(Date.parse(snapshot.captured_at) - dashboardSampleStart(view.activity));
-    lines.push(fitCell(` collecting — ${elapsed} of ${formatWindow(view.activityWindowMs ?? DASHBOARD_ACTIVITY_WINDOW_MS)}`, inner));
-  }
-  const hidden = Math.max(0, cube.drones.length - (page * visible) - drones.length);
+  const hidden = Math.max(0, cube.drones.length - drones.length);
   if (hidden > 0 && lines.length < contentRows) lines.push(fitCell(` +${hidden} more drones — taller terminal shows them`, inner));
+  if (collecting && lines.length < contentRows) {
+    const elapsed = formatElapsed(Date.parse(snapshot.captured_at) - dashboardSampleStart(view.activity));
+    lines.push(fitCell(` collecting — ${elapsed} of ${formatWindow(window)}`, inner));
+  }
   while (lines.length < contentRows) lines.push(" ".repeat(inner));
   return [top, ...lines.slice(0, contentRows).map((line) => `${glyphs.vertical}${fitCell(line, inner, " ", glyphs.ellipsis)}${glyphs.vertical}`), `${glyphs.bottomLeft}${glyphs.horizontal.repeat(inner)}${glyphs.bottomRight}`];
 }
@@ -660,14 +665,16 @@ function renderDroneBand(
 function renderActivityGraph(samples: readonly DashboardActivitySample[], width: number, height: number, windowMs: number, glyphs: Glyphs, row = 0): string {
   if (samples.length === 0) return "·".repeat(width);
   const visible = samples.filter((sample) => Date.parse(sample.capturedAt) >= Date.parse(samples.at(-1)!.capturedAt) - windowMs);
-  const expectedSamples = Math.max(1, windowMs / DASHBOARD_IDLE_REFRESH_MS);
-  const dataColumns = Math.max(1, Math.min(width, Math.round(Math.min(1, visible.length / expectedSamples) * width)));
+  const elapsed = Math.max(0, Date.parse(visible.at(-1)!.capturedAt) - Date.parse(visible[0]!.capturedAt));
+  const dataColumns = Math.max(1, Math.min(width, Math.round(Math.min(1, elapsed / windowMs) * width)));
   const max = Math.max(...visible.map((sample) => sample.sentRate), 0);
   const graph = Array.from({ length: dataColumns }, (_unused, columnIndex) => {
     const sample = visible[Math.min(visible.length - 1, Math.floor(columnIndex * visible.length / dataColumns))]!;
     if (sample.sentRate <= 0 || max <= 0) return "·";
     const level = Math.max(1, Math.ceil((sample.sentRate / max) * (height * 8)) - (row * 8));
-    const glyph = glyphs === ASCII_GLYPHS ? "#" : "▁▂▃▄▅▆▇█"[Math.min(7, level - 1)]!;
+    const glyph = glyphs === ASCII_GLYPHS
+      ? ".-=+#"[Math.min(4, Math.ceil(level / Math.max(1, height * 8 / 5)) - 1)]!
+      : "▁▂▃▄▅▆▇█"[Math.min(7, level - 1)]!;
     return glyph;
   }).join("");
   return " ".repeat(Math.max(0, width - dataColumns)) + graph;

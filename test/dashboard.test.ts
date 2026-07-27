@@ -148,7 +148,7 @@ describe("dashboard renderer", () => {
     expect(renderer(eight, 80, 24)).toBe(frame);
 
     const crowded = renderer(rankDashboardSnapshot(snapshotData(47), server), 80, 24);
-    expect(crowded).toContain("SPACE page");
+    expect(crowded).toContain("page 1/");
     expect(crowded.split("\n").length).toBeLessThanOrEqual(24);
   });
 
@@ -282,7 +282,7 @@ describe("dashboard renderer", () => {
       const lines = frame.split("\n");
       expect(lines.length).toBeLessThanOrEqual(24);
       expect(lines.every((line) => [...line].length <= columns)).toBe(true);
-      expect(frame).toContain("SPACE page");
+      expect(frame).toContain("page 1/");
     }
   });
 

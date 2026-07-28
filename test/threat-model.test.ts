@@ -25,7 +25,7 @@ describe("server threat-model document and release metadata", () => {
       "Rate, body, connection, and storage limits",
       "No remote tool or subprocess execution",
       "Negative bind/auth/CORS/log-secret tests",
-      "secret-output exception",
+      "secret-output exceptions",
       "move `ca.key` to offline storage",
       "Repository-cube adoption is an explicit client-confirmed operation",
       "stale, foreign, and inaccessible bindings are indistinguishable",

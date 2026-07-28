@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   portableCredentialAccount,
   readPortableServerCredential,
+  readPortableServerCredentialForTrustIdentity,
   writePortableServerCredential,
   type PortableServerCredential,
 } from "../src/portable-credential-store.js";
@@ -46,6 +47,20 @@ describe("portable parent credential store", () => {
     expect(updated.accounts["unrelated-account"]).toBe("opaque unrelated value");
     await expect(readPortableServerCredential(target, record.origin, record.trustIdentity))
       .resolves.toEqual(second);
+  });
+
+  it("finds one owner credential by trust identity without guessing an origin", async () => {
+    const parent = await temporaryDirectory();
+    const target = join(parent, "credentials");
+    await writePortableServerCredential(target, record);
+    await writePortableServerCredential(target, { ...record, origin: "https://127.0.0.1:7391" });
+
+    await expect(readPortableServerCredentialForTrustIdentity(target, record.trustIdentity))
+      .resolves.toEqual(record);
+    await expect(readPortableServerCredentialForTrustIdentity(
+      target,
+      `spki-sha256:${"b".repeat(64)}`,
+    )).rejects.toThrow("Local owner credential is unavailable.");
   });
 
   it("rejects symlinked and non-private roots or files", async () => {

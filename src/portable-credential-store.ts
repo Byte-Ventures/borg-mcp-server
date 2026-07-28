@@ -94,6 +94,40 @@ export async function readPortableServerCredential(
   return Object.freeze(parsed);
 }
 
+export async function readPortableServerCredentialForTrustIdentity(
+  path: string,
+  trustIdentity: string,
+): Promise<PortableServerCredential> {
+  if (!trustPattern.test(trustIdentity)) throw new Error("Portable credential trust identity is invalid.");
+  const target = await credentialPath(path);
+  await assertPrivateFile(target);
+  const document = parseDocument(await readPrivateBytes(target));
+  const matches: PortableServerCredential[] = [];
+  for (const [account, value] of Object.entries(document.accounts)) {
+    if (!account.startsWith("borg-server-credential:")) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(value);
+    } catch {
+      throw new Error("Portable credential store is invalid.");
+    }
+    validateRecord(parsed);
+    if (portableCredentialAccount(parsed.origin, parsed.trustIdentity) !== account) {
+      throw new Error("Portable credential binding is invalid.");
+    }
+    if (parsed.trustIdentity === trustIdentity) matches.push(parsed);
+  }
+  if (matches.length === 0) throw new Error("Local owner credential is unavailable.");
+  const first = matches[0]!;
+  if (matches.some((candidate) =>
+    candidate.credential !== first.credential ||
+    candidate.clientId !== first.clientId ||
+    candidate.serverCapabilities[0] !== first.serverCapabilities[0])) {
+    throw new Error("Local owner credential binding is ambiguous.");
+  }
+  return Object.freeze(first);
+}
+
 async function credentialPath(path: string): Promise<string> {
   if (path !== resolve(path)) throw new Error("Portable credential path is unsafe.");
   const target = path;

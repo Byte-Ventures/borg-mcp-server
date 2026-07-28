@@ -24,7 +24,7 @@ Repeated setup must be idempotent. It must say that data and identity are unchan
 
 ### Start
 
-For non-TTY foreground starts, the JSON record must report the verified artifact version, immutable build identity, loopback or explicitly consented LAN endpoint, and preserved data/identity. For TTY foreground starts, the dashboard must continuously render that information and state: `Ctrl-C stops this server process. Cube data is saved on disk and is not affected.` SIGHUP from terminal teardown follows the same bounded cleanup path. Foreground start never loads an existing inactive service definition.
+For non-TTY foreground starts, the JSON record must report the verified artifact version, immutable build identity, loopback or explicitly consented LAN endpoint, and preserved data/identity. For TTY foreground starts, the normal dashboard must render the server name and version, endpoint, online state, and cube activity, and state: `Ctrl-C stops this server process. Cube data is saved on disk and is not affected.` The supported tiny-terminal fallback must retain a bounded explicit indication that Ctrl-C stops the server process and cube data remains saved. SIGHUP from terminal teardown follows the same bounded cleanup path. Foreground start never loads an existing inactive service definition.
 
 ### Status
 

@@ -173,8 +173,12 @@ describe("dashboard renderer", () => {
       9,
     );
     expect(tiny).toContain("borgmcp-server online");
+    expect(tiny).toContain("Ctrl-C stops this server process.");
+    expect(tiny).toContain("Cube data is saved.");
     expect(tiny).not.toContain("\u001b[");
     expect(tiny).not.toContain("┌");
+    expect(tiny.split("\n")).toHaveLength(7);
+    expect(tiny.split("\n").every((line) => [...line].length <= 39)).toBe(true);
   });
 
   it("replaces isometric art with a flat bounded activity panel", () => {

@@ -276,6 +276,8 @@ export function renderPlainDashboard(
       " ",
       ASCII_GLYPHS.ellipsis,
     ),
+    width >= 33 ? "Ctrl-C stops this server process." : "Ctrl-C stops server.",
+    "Cube data is saved.",
   ];
   const available = Math.max(0, height - lines.length);
   for (const cube of snapshot.cubes.slice(0, available)) {

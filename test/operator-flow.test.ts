@@ -12,6 +12,7 @@ import { CredentialAuthority, CredentialDigester, generateSecret } from "../src/
 import { CoordinationApi } from "../src/coordination-api.js";
 import { createEnrollmentExchange } from "../src/enrollment.js";
 import { startHttpsServer } from "../src/https-server.js";
+import { runCli } from "../src/cli.js";
 import { acquireRuntimeLock, createOfflineCredentialService } from "../src/service.js";
 import { openStore } from "../src/store.js";
 import type { Principal } from "../src/principal.js";
@@ -189,7 +190,11 @@ describe("offline operator flow", () => {
     const runtime = await openStore({ path: bootstrap.paths.database });
     runtime.maintenance.createClient({ id: firstId, name: "Local client" });
     runtime.maintenance.createClient({ id: secondId, name: "Local client" });
-    runtime.maintenance.createCube({ id: cubeId, name: "Handle grant", directive: "" });
+    runtime.maintenance.createCube({
+      id: cubeId,
+      name: "Handle\u001b[31m grant",
+      directive: "",
+    });
     runtime.close();
 
     const service = createOfflineCredentialService(dataDirectory);
@@ -201,7 +206,7 @@ describe("offline operator flow", () => {
         state: "active",
         grants: [{
           cubeId,
-          cubeName: "Handle grant",
+          cubeName: "Handle\u001b[31m grant",
           access: "read",
         }],
       },
@@ -212,6 +217,16 @@ describe("offline operator flow", () => {
         grants: [],
       },
     ]));
+    const stdout = vi.fn();
+    expect(await runCli(
+      ["client-list"],
+      { start: vi.fn(), ...service },
+      { stdout, stderr: vi.fn() },
+    )).toBe(0);
+    expect(stdout).toHaveBeenCalledWith(expect.stringContaining(
+      `read  Handle grant (${cubeId})`,
+    ));
+    expect(JSON.stringify(stdout.mock.calls)).not.toContain("\u001b");
     await service.revokeClient("aaaaaaaa1");
     expect(await service.listClients()).toEqual(expect.arrayContaining([{
       name: "Local client",
@@ -219,7 +234,7 @@ describe("offline operator flow", () => {
       state: "revoked",
       grants: [{
         cubeId,
-        cubeName: "Handle grant",
+        cubeName: "Handle\u001b[31m grant",
         access: "read",
       }],
     }]));

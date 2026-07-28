@@ -7,6 +7,7 @@ import {
   createDashboardRenderer,
   dashboardColorEnabled,
   EMBEDDED_DASHBOARD_FOOTER,
+  EMBEDDED_DASHBOARD_LIFECYCLE_FOOTER,
   rankDashboardSnapshot,
   sanitizeTerminalText,
   selectDashboardGlyphMode,
@@ -230,6 +231,9 @@ describe("dashboard renderer", () => {
       24,
     );
     expect(defaultFrame).toContain(EMBEDDED_DASHBOARD_FOOTER);
+    for (const sentence of EMBEDDED_DASHBOARD_LIFECYCLE_FOOTER.split(". ")) {
+      expect(defaultFrame).toContain(sentence);
+    }
 
     const viewerFrame = createDashboardRenderer({
       glyphMode: "ascii",

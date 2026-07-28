@@ -34,7 +34,7 @@ describe("runCli", () => {
     expect(service.setup).toHaveBeenCalledWith({ reinitialize: false });
     expect(listen).not.toHaveBeenCalled();
     expect(io.stdout).toHaveBeenCalledWith(
-      "Local server setup completed.\nArtifact: unavailable\nLocal owner access: prepared.\nNo server process started.\nNext: start the server, then run borg assimilate.",
+      "Local server setup completed.\nArtifact: unavailable\nThis machine's owner credential is ready, so you do not need an invitation to attach from this machine.\nThe server is a separate long-running process, and setup did not start it.\nStart the server in its own terminal and leave it running:\n  borgmcp-server start\nThen, in another terminal, attach a drone:\n  borg assimilate",
     );
   });
 
@@ -55,7 +55,7 @@ describe("runCli", () => {
     expect(await runCli(["setup"], service, io)).toBe(0);
     const output = io.stdout.mock.calls[0]![0];
     expect(output).toBe(
-      `Local server is already prepared.\nArtifact: borgmcp-server@0.1.8 (sha512-${"A".repeat(86)}==)\nBuild identity: ${"a".repeat(40)}\nData and identity: unchanged\nNo server process started.\nNext: borg-mcp-server start`,
+      `Local server is already prepared.\nArtifact: borgmcp-server@0.1.8 (sha512-${"A".repeat(86)}==)\nBuild identity: ${"a".repeat(40)}\nYour data and identity are unchanged, and setup did not start the server.\nStart the server in its own terminal and leave it running:\n  borgmcp-server start`,
     );
     expect(output).not.toMatch(/credential|invitation/iu);
   });
@@ -84,7 +84,7 @@ describe("runCli", () => {
     const interactive = { ...createIo(), isTTY: true };
     expect(await runCli(["invite"], { start: vi.fn(), invite }, interactive)).toBe(0);
     expect(interactive.stdout).toHaveBeenCalledWith(
-      `Invitation (single-use; shown once): ${"i".repeat(43)}\nShare it only with the intended recipient.`,
+      `Client enrollment invitation (single-use, shown once): ${"i".repeat(43)}\nShare it only with the intended recipient.`,
     );
 
     const nonInteractive = { ...createIo(), isTTY: false };

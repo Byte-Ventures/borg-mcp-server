@@ -57,6 +57,8 @@ export interface DashboardSnapshot {
 
 export type DashboardGlyphMode = "box" | "ascii";
 
+export const EMBEDDED_DASHBOARD_LIFECYCLE_FOOTER =
+  "Ctrl-C stops this server process. Cube data is saved on disk and is not affected.";
 export const EMBEDDED_DASHBOARD_FOOTER = "^C stop server  |  read-only";
 export const STANDALONE_DASHBOARD_FOOTER = "^C close viewer  |  read-only";
 export type DashboardFooter =
@@ -191,6 +193,9 @@ export function createDashboardRenderer(options: DashboardRenderOptions): Dashbo
     const width = boundedDimension(columns, 20, 500);
     const height = boundedDimension(rows, 4, 200);
     if (width < 40 || height < 10) return renderPlainDashboard(snapshot, width, height);
+    const lifecycleFooter = options.footer === undefined
+      ? wrapDashboardFooter(EMBEDDED_DASHBOARD_LIFECYCLE_FOOTER, width)
+      : [];
     const footer = options.navigation === true
       ? `${snapshot.cubes.length > 1 ? "< > switch  |  a auto  |  " : ""}w ${formatWindow(view.activityWindowMs ?? DASHBOARD_ACTIVITY_WINDOW_MS)}  |  SPACE page  |  ${baseFooter}`
       : baseFooter;
@@ -201,7 +206,7 @@ export function createDashboardRenderer(options: DashboardRenderOptions): Dashbo
     const focus = view.autoFollow || view.focusedCubeId === null
       ? snapshot.cubes[0]
       : snapshot.cubes.find((cube) => cube.id === view.focusedCubeId) ?? snapshot.cubes[0];
-    const footerRows = 1;
+    const footerRows = lifecycleFooter.length + 1;
     const chromeRows = 3 + footerRows;
     const bodyRows = Math.max(0, height - chromeRows);
     const listCap = Math.max(1, Math.floor(bodyRows * 0.42));
@@ -225,11 +230,28 @@ export function createDashboardRenderer(options: DashboardRenderOptions): Dashbo
     const compactFooter = options.navigation === true
       ? `w ${formatWindow(view.activityWindowMs ?? DASHBOARD_ACTIVITY_WINDOW_MS)}  |  SPACE ${page + 1}/${pageCount}  |  ${baseFooter}`
       : baseFooter;
+    lines.push(...lifecycleFooter.map((line) => fitCell(line, width)));
     lines.push(fitCell(displayWidth(footerWithPage) > width ? compactFooter : footerWithPage, width));
     return lines.slice(0, height)
       .map((line) => fitCell(line, width, " ", glyphs.ellipsis))
       .join("\n");
   };
+}
+
+function wrapDashboardFooter(value: string, width: number): string[] {
+  const sentences = value.match(/[^.]+(?:\.|$)/gu)?.map((sentence) => sentence.trim()) ?? [value];
+  return sentences.flatMap((sentence) => {
+    const lines: string[] = [];
+    for (const word of sentence.split(/\s+/u)) {
+      const current = lines.at(-1);
+      if (current === undefined || displayWidth(`${current} ${word}`) > width) {
+        lines.push(word);
+      } else {
+        lines[lines.length - 1] = `${current} ${word}`;
+      }
+    }
+    return lines;
+  });
 }
 
 export function renderPlainDashboard(

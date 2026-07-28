@@ -20,7 +20,7 @@ Commands:
   update [--json]  Verify the latest runtime and report any controller step
   stop [--json]  Stop the managed local server
   recover-stale-lock [--json]  Preserve a safely identified stale runtime lock
-  invite   Create a single-use invitation in an interactive terminal.
+  invite   Create a client enrollment invitation in an interactive terminal.
   client-rotate <client-id>  Rotate one client credential offline
   client-revoke <client-id>  Revoke one client and its credentials offline
   client-grant <client-id> <cube-id> <read|write|manage>  Set one offline cube grant
@@ -106,18 +106,21 @@ export async function runCli(
           "Local server is already prepared.",
           artifact,
           `Build identity: ${result.artifact?.sourceSha ?? "unavailable"}`,
-          "Data and identity: unchanged",
-          "No server process started.",
-          "Next: borg-mcp-server start",
+          "Your data and identity are unchanged, and setup did not start the server.",
+          "Start the server in its own terminal and leave it running:",
+          "  borgmcp-server start",
         ].join("\n"));
         return 0;
       }
       io.stdout([
         "Local server setup completed.",
         artifact,
-        "Local owner access: prepared.",
-        "No server process started.",
-        "Next: start the server, then run borg assimilate.",
+        "This machine's owner credential is ready, so you do not need an invitation to attach from this machine.",
+        "The server is a separate long-running process, and setup did not start it.",
+        "Start the server in its own terminal and leave it running:",
+        "  borgmcp-server start",
+        "Then, in another terminal, attach a drone:",
+        "  borg assimilate",
       ].join("\n"));
       return 0;
     case "start":
@@ -327,7 +330,7 @@ export async function runCli(
         return 1;
       }
       const invitation = await service.invite();
-      io.stdout(`Invitation (single-use; shown once): ${invitation}\nShare it only with the intended recipient.`);
+      io.stdout(`Client enrollment invitation (single-use, shown once): ${invitation}\nShare it only with the intended recipient.`);
       return 0;
     }
     case "help":

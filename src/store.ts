@@ -3956,21 +3956,25 @@ function resolveClientSelector(database: DatabaseSync, selector: string): Client
   const clients = clientIdentities(database);
   const handles = clientHandles(clients);
   const named = clients.filter((client) => client.name === selector);
-  if (named.length > 1) {
-    throw ambiguousClientSelector("name", named.map((client) => handles.get(client.id)!));
-  }
-  if (named.length === 1) return named[0]!;
-
   const handled = /^[0-9a-f]{8,32}$/u.test(selector)
     ? clients.filter((client) => client.id.replaceAll("-", "").startsWith(selector))
     : [];
-  if (handled.length > 1) {
-    throw ambiguousClientSelector("handle", handled.map((client) => handles.get(client.id)!));
-  }
-  if (handled.length === 1) return handled[0]!;
-
   const identified = clients.find((client) => client.id === selector);
-  if (identified !== undefined) return identified;
+  const matches = new Map<string, ClientIdentity>();
+  for (const client of named) matches.set(client.id, client);
+  for (const client of handled) matches.set(client.id, client);
+  if (identified !== undefined) matches.set(identified.id, identified);
+  if (matches.size > 1) {
+    const matched = [...matches.values()];
+    const allNamed = matched.every((client) => named.some((candidate) => candidate.id === client.id));
+    const allHandled = matched.every((client) =>
+      handled.some((candidate) => candidate.id === client.id));
+    throw ambiguousClientSelector(
+      allNamed ? "name" : allHandled ? "handle" : "selector",
+      matched.map((client) => handles.get(client.id)!),
+    );
+  }
+  if (matches.size === 1) return matches.values().next().value!;
   throw operatorErrors.CLIENT_SELECTOR_NOT_FOUND;
 }
 

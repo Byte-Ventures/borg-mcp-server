@@ -77,8 +77,9 @@ v1 scope.
   but no credential or invitation material. Revocation and grant changes resolve an exact unique
   name, a listed handle, or a full client UUID in the same immediate transaction as the
   mutation. Resolution spans active and revoked clients, keeping old handle prefixes anchored;
-  ambiguous names or stale handle prefixes fail closed with current candidate handles, while a
-  uniquely resolved revoked client is reported as revoked rather than absent. Stop the server first, run
+  duplicate names, stale handle prefixes, and cross-namespace name/handle/UUID collisions fail
+  closed with current candidate handles, while a uniquely resolved revoked client is reported as
+  revoked rather than absent. Stop the server first, run
   `borg-mcp-server client-rotate <client-id>` or `borg-mcp-server client-revoke <client-name-or-handle>`, securely
   deliver any one-time rotated credential, then restart. A PID-bound runtime lock rejects offline
   changes while the service is live. Stale locks fail closed and require explicit removal only after

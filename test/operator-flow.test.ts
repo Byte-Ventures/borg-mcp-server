@@ -161,9 +161,12 @@ describe("offline operator flow", () => {
         : verb === "ungrant"
           ? service.ungrantClient("Local client", cubeId)
           : service.revokeClient("Local client");
-      await expect(operation).rejects.toThrow(
-        "Client name is ambiguous. Use one of these handles: aaaaaaaa1, aaaaaaaa2.",
-      );
+      let failure: unknown;
+      try {
+        await operation;
+      } catch (error) {
+        failure = error;
+      }
 
       const database = new DatabaseSync(bootstrap.paths.database);
       try {
@@ -176,6 +179,74 @@ describe("offline operator flow", () => {
       } finally {
         database.close();
       }
+      expect(failure).toMatchObject({
+        message: "Client name is ambiguous. Use one of these handles: " +
+          "aaaaaaaa1, aaaaaaaa2.",
+      });
+    },
+  );
+
+  it.each([
+    ["handle", "grant"],
+    ["handle", "ungrant"],
+    ["handle", "revoke"],
+    ["uuid", "grant"],
+    ["uuid", "ungrant"],
+    ["uuid", "revoke"],
+  ] as const)(
+    "refuses a name-versus-%s collision before %s can target the wrong client",
+    async (namespace, verb) => {
+      const parent = await realpath(await mkdtemp(join(
+        tmpdir(),
+        `borg-operator-${namespace}-${verb}-collision-`,
+      )));
+      directories.push(parent);
+      const dataDirectory = join(parent, "server");
+      const bootstrap = await bootstrapServer(dataDirectory);
+      const firstId = "aaaaaaaa-1000-4000-8000-000000000001";
+      const secondId = "bbbbbbbb-2000-4000-8000-000000000002";
+      const selector = namespace === "handle" ? "bbbbbbbb" : secondId;
+      const cubeId = "00000000-0000-4000-8000-000000000053";
+      const runtime = await openStore({ path: bootstrap.paths.database });
+      runtime.maintenance.createClient({ id: firstId, name: selector });
+      runtime.maintenance.createClient({ id: secondId, name: "Target client" });
+      runtime.maintenance.createCube({ id: cubeId, name: "Collision grant", directive: "" });
+      runtime.maintenance.grantClientCube({ clientId: firstId, cubeId, access: "manage" });
+      runtime.maintenance.grantClientCube({ clientId: secondId, cubeId, access: "manage" });
+      runtime.close();
+
+      const service = createOfflineCredentialService(dataDirectory);
+      const operation = verb === "grant"
+        ? service.grantClient(selector, cubeId, "read")
+        : verb === "ungrant"
+          ? service.ungrantClient(selector, cubeId)
+          : service.revokeClient(selector);
+      let failure: unknown;
+      try {
+        await operation;
+      } catch (error) {
+        failure = error;
+      }
+
+      const database = new DatabaseSync(bootstrap.paths.database);
+      try {
+        expect(database.prepare(`
+          SELECT client_id, access FROM client_cube_grants
+          WHERE cube_id = ? ORDER BY client_id
+        `).all(cubeId)).toEqual([
+          { client_id: firstId, access: "manage" },
+          { client_id: secondId, access: "manage" },
+        ]);
+        expect(database.prepare(`
+          SELECT id FROM clients WHERE revoked_at IS NOT NULL ORDER BY id
+        `).all()).toEqual([]);
+      } finally {
+        database.close();
+      }
+      expect(failure).toMatchObject({
+        message: "Client selector matches more than one client. " +
+          "Use one of these handles: aaaaaaaa, bbbbbbbb.",
+      });
     },
   );
 

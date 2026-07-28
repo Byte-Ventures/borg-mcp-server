@@ -293,7 +293,8 @@ active or revoked state, and its cube grants. Names created before named
 invitations may be duplicated. A duplicated name is refused as a selector; use
 one of the listed handles. If a later client collides with an earlier short
 handle, both handles lengthen and the stale shorter form fails closed with the
-current candidates. Existing client UUIDs remain accepted.
+current candidates. A name that also identifies another client's handle or UUID
+is likewise refused with both candidates. Existing client UUIDs remain accepted.
 
 Invitations and rotation output are secrets; do not paste them into issues, logs,
 or chat.

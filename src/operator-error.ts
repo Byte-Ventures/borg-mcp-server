@@ -131,7 +131,7 @@ export const operatorErrors: Readonly<Record<OperatorErrorCode, Error>> = Object
 );
 
 export function ambiguousClientSelector(
-  kind: "name" | "handle",
+  kind: "name" | "handle" | "selector",
   handles: readonly string[],
 ): Error {
   if (handles.length < 2 ||
@@ -144,7 +144,9 @@ export function ambiguousClientSelector(
     "CLIENT_SELECTOR_AMBIGUOUS",
     kind === "name"
       ? `Client name is ambiguous. Use one of these handles: ${[...handles].sort().join(", ")}.`
-      : `Client handle now matches more than one client. Use one of these handles: ${[...handles].sort().join(", ")}.`,
+      : kind === "handle"
+        ? `Client handle now matches more than one client. Use one of these handles: ${[...handles].sort().join(", ")}.`
+        : `Client selector matches more than one client. Use one of these handles: ${[...handles].sort().join(", ")}.`,
   );
 }
 

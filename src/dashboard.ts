@@ -57,6 +57,8 @@ export interface DashboardSnapshot {
 
 export type DashboardGlyphMode = "box" | "ascii";
 
+export const EMBEDDED_DASHBOARD_LIFECYCLE_FOOTER =
+  "Ctrl-C stops this server process. Cube data is saved on disk and is not affected.";
 export const EMBEDDED_DASHBOARD_FOOTER = "^C stop server  |  read-only";
 export const STANDALONE_DASHBOARD_FOOTER = "^C close viewer  |  read-only";
 export type DashboardFooter =
@@ -66,7 +68,7 @@ export type DashboardFooter =
 export interface DashboardRenderOptions {
   readonly glyphMode: DashboardGlyphMode;
   readonly color: boolean;
-  readonly footer?: DashboardFooter;
+  readonly footer: DashboardFooter;
   readonly navigation?: boolean;
 }
 
@@ -178,7 +180,7 @@ export function rankDashboardSnapshot(
 
 export function createDashboardRenderer(options: DashboardRenderOptions): DashboardRenderer {
   const glyphs = options.glyphMode === "ascii" ? ASCII_GLYPHS : BOX_GLYPHS;
-  const baseFooter = sanitizeTerminalLabel(options.footer ?? EMBEDDED_DASHBOARD_FOOTER);
+  const baseFooter = sanitizeTerminalLabel(options.footer);
   return (snapshot, columns, rows, view = {
     autoFollow: true,
     focusedCubeId: null,
@@ -190,7 +192,17 @@ export function createDashboardRenderer(options: DashboardRenderOptions): Dashbo
   }) => {
     const width = boundedDimension(columns, 20, 500);
     const height = boundedDimension(rows, 4, 200);
-    if (width < 40 || height < 10) return renderPlainDashboard(snapshot, width, height);
+    if (width < 40 || height < 10) {
+      return renderPlainDashboard(
+        snapshot,
+        width,
+        height,
+        options.footer,
+      );
+    }
+    const lifecycleFooter = options.footer === EMBEDDED_DASHBOARD_FOOTER
+      ? wrapDashboardFooter(EMBEDDED_DASHBOARD_LIFECYCLE_FOOTER, width)
+      : [];
     const footer = options.navigation === true
       ? `${snapshot.cubes.length > 1 ? "< > switch  |  a auto  |  " : ""}w ${formatWindow(view.activityWindowMs ?? DASHBOARD_ACTIVITY_WINDOW_MS)}  |  SPACE page  |  ${baseFooter}`
       : baseFooter;
@@ -201,7 +213,7 @@ export function createDashboardRenderer(options: DashboardRenderOptions): Dashbo
     const focus = view.autoFollow || view.focusedCubeId === null
       ? snapshot.cubes[0]
       : snapshot.cubes.find((cube) => cube.id === view.focusedCubeId) ?? snapshot.cubes[0];
-    const footerRows = 1;
+    const footerRows = lifecycleFooter.length + 1;
     const chromeRows = 3 + footerRows;
     const bodyRows = Math.max(0, height - chromeRows);
     const listCap = Math.max(1, Math.floor(bodyRows * 0.42));
@@ -225,6 +237,7 @@ export function createDashboardRenderer(options: DashboardRenderOptions): Dashbo
     const compactFooter = options.navigation === true
       ? `w ${formatWindow(view.activityWindowMs ?? DASHBOARD_ACTIVITY_WINDOW_MS)}  |  SPACE ${page + 1}/${pageCount}  |  ${baseFooter}`
       : baseFooter;
+    lines.push(...lifecycleFooter.map((line) => fitCell(line, width)));
     lines.push(fitCell(displayWidth(footerWithPage) > width ? compactFooter : footerWithPage, width));
     return lines.slice(0, height)
       .map((line) => fitCell(line, width, " ", glyphs.ellipsis))
@@ -232,10 +245,27 @@ export function createDashboardRenderer(options: DashboardRenderOptions): Dashbo
   };
 }
 
+function wrapDashboardFooter(value: string, width: number): string[] {
+  const sentences = value.match(/[^.]+(?:\.|$)/gu)?.map((sentence) => sentence.trim()) ?? [value];
+  return sentences.flatMap((sentence) => {
+    const lines: string[] = [];
+    for (const word of sentence.split(/\s+/u)) {
+      const current = lines.at(-1);
+      if (current === undefined || displayWidth(`${current} ${word}`) > width) {
+        lines.push(word);
+      } else {
+        lines[lines.length - 1] = `${current} ${word}`;
+      }
+    }
+    return lines;
+  });
+}
+
 export function renderPlainDashboard(
   snapshot: DashboardSnapshot,
   columns = 80,
   rows = 20,
+  footer?: DashboardFooter,
 ): string {
   const width = boundedDimension(columns, 20, 500);
   const height = boundedDimension(rows, 4, 200);
@@ -254,6 +284,7 @@ export function renderPlainDashboard(
       " ",
       ASCII_GLYPHS.ellipsis,
     ),
+    ...renderPlainDashboardFooter(footer, width),
   ];
   const available = Math.max(0, height - lines.length);
   for (const cube of snapshot.cubes.slice(0, available)) {
@@ -266,6 +297,21 @@ export function renderPlainDashboard(
     ));
   }
   return lines.join("\n");
+}
+
+function renderPlainDashboardFooter(footer: DashboardFooter | undefined, width: number): string[] {
+  if (footer === EMBEDDED_DASHBOARD_FOOTER) {
+    return [
+      width >= 33 ? "Ctrl-C stops this server process." : "Ctrl-C stops server.",
+      "Cube data is saved.",
+    ];
+  }
+  if (footer === STANDALONE_DASHBOARD_FOOTER) {
+    return width >= 35
+      ? ["Ctrl-C closes this viewer.", "Server stays up. View is read-only."]
+      : ["Ctrl-C closes viewer", "Read-only, server up"];
+  }
+  return [];
 }
 
 export function selectDashboardGlyphMode(input: {
@@ -311,6 +357,7 @@ export function startForegroundDashboard(input: {
   readonly server: DashboardServerIdentity;
   readonly terminal: DashboardTerminal;
   readonly renderer: DashboardRenderer;
+  readonly fallbackFooter?: DashboardFooter;
   readonly idleRefreshMs?: number;
   readonly eventCoalesceMs?: number;
   readonly resizeDebounceMs?: number;
@@ -379,6 +426,7 @@ export function startForegroundDashboard(input: {
         rankDashboardSnapshot(input.source.read(), input.server),
         input.terminal.dimensions().columns,
         input.terminal.dimensions().rows,
+        input.fallbackFooter,
       );
     } catch {
       // Preserve the original rendering failure.

@@ -24,7 +24,7 @@ Repeated setup must be idempotent. It must say that data and identity are unchan
 
 ### Start
 
-Foreground start must report the verified artifact version, immutable build identity, loopback or explicitly consented LAN endpoint, and preserved data/identity. It must say that Ctrl-C stops the foreground process and that foreground mode does not manage persistence. SIGHUP from terminal teardown follows the same bounded cleanup path. Foreground start never loads an existing inactive service definition.
+For non-TTY foreground starts, the JSON record must report the verified artifact version, immutable build identity, loopback or explicitly consented LAN endpoint, and preserved data/identity. For TTY foreground starts, the normal dashboard must render the server name and version, endpoint, online state, and cube activity, and state: `Ctrl-C stops this server process. Cube data is saved on disk and is not affected.` The supported tiny-terminal fallback must retain a bounded explicit indication that Ctrl-C stops the server process and cube data remains saved. Verified build-identity and data-identity evidence must remain available through both `borg server status` and the non-TTY JSON record. SIGHUP from terminal teardown follows the same bounded cleanup path. Foreground start never loads an existing inactive service definition.
 
 ### Status
 

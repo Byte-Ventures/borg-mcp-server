@@ -69,6 +69,7 @@ import {
 import {
   createDashboardRenderer,
   dashboardColorEnabled,
+  EMBEDDED_DASHBOARD_FOOTER,
   STANDALONE_DASHBOARD_FOOTER,
   rankDashboardSnapshot,
   renderPlainDashboard,
@@ -611,8 +612,10 @@ const startOnlyService = createNodeServerService({
           environment: process.env,
         }),
         color: dashboardColorEnabled(process.env),
+        footer: EMBEDDED_DASHBOARD_FOOTER,
         navigation,
       }),
+      fallbackFooter: EMBEDDED_DASHBOARD_FOOTER,
     });
   },
   onStartupPhase: (phase) => nodeServerTestHooks?.onStartupPhase?.(phase) ?? Promise.resolve(),
@@ -732,6 +735,7 @@ async function runNodeDashboardViewer(
         footer: STANDALONE_DASHBOARD_FOOTER,
         navigation,
       }),
+      fallbackFooter: STANDALONE_DASHBOARD_FOOTER,
     });
     try {
       await Promise.race([dashboard.failure, waitForAbort(shutdown.signal)]);

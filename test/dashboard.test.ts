@@ -4,22 +4,32 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
-  createDashboardRenderer,
+  createDashboardRenderer as createRenderer,
   dashboardColorEnabled,
   EMBEDDED_DASHBOARD_FOOTER,
+  EMBEDDED_DASHBOARD_LIFECYCLE_FOOTER,
   rankDashboardSnapshot,
+  renderPlainDashboard,
   sanitizeTerminalText,
   selectDashboardGlyphMode,
   STANDALONE_DASHBOARD_FOOTER,
   startForegroundDashboard,
   type DashboardDataSnapshot,
   type DashboardFooter,
+  type DashboardRenderOptions,
+  type DashboardRenderer,
   type DashboardServerIdentity,
   type DashboardSnapshotSource,
   type DashboardTerminal,
 } from "../src/dashboard.js";
 import { droneSessionPrincipal } from "../src/principal.js";
 import { openStore, type StoreRuntime } from "../src/store.js";
+
+function createDashboardRenderer(
+  options: Omit<DashboardRenderOptions, "footer">,
+): DashboardRenderer {
+  return createRenderer({ ...options, footer: EMBEDDED_DASHBOARD_FOOTER });
+}
 
 const server: DashboardServerIdentity = Object.freeze({
   name: "borgmcp-server",
@@ -172,8 +182,28 @@ describe("dashboard renderer", () => {
       9,
     );
     expect(tiny).toContain("borgmcp-server online");
+    expect(tiny).toContain("Ctrl-C stops this server process.");
+    expect(tiny).toContain("Cube data is saved.");
     expect(tiny).not.toContain("\u001b[");
     expect(tiny).not.toContain("┌");
+    expect(tiny.split("\n")).toHaveLength(7);
+    expect(tiny.split("\n").every((line) => [...line].length <= 39)).toBe(true);
+
+    const tinyViewer = createRenderer({
+      glyphMode: "box",
+      color: true,
+      footer: STANDALONE_DASHBOARD_FOOTER,
+    })(snapshot, 39, 9);
+    expect(tinyViewer).toContain("Ctrl-C closes this viewer.");
+    expect(tinyViewer).toContain("Server stays up. View is read-only.");
+    expect(tinyViewer).not.toContain("stops this server");
+    expect(tinyViewer.split("\n")).toHaveLength(7);
+    expect(tinyViewer.split("\n").every((line) => [...line].length <= 39)).toBe(true);
+
+    const oneShotViewer = renderPlainDashboard(snapshot, 39, 9);
+    expect(oneShotViewer).toContain("borgmcp-server online");
+    expect(oneShotViewer).not.toContain("Ctrl-C");
+    expect(oneShotViewer).not.toContain("read-only");
   });
 
   it("replaces isometric art with a flat bounded activity panel", () => {
@@ -222,7 +252,7 @@ describe("dashboard renderer", () => {
     expect(frame.split("\n").find((line) => line.includes("cube-02"))).toContain("O");
   });
 
-  it("keeps the embedded footer by default and accepts a sanitized caller footer", () => {
+  it("keeps the explicit embedded footer and accepts a sanitized caller footer", () => {
     const snapshot = rankDashboardSnapshot(snapshotData(1), server);
     const defaultFrame = createDashboardRenderer({ glyphMode: "ascii", color: false })(
       snapshot,
@@ -230,8 +260,11 @@ describe("dashboard renderer", () => {
       24,
     );
     expect(defaultFrame).toContain(EMBEDDED_DASHBOARD_FOOTER);
+    for (const sentence of EMBEDDED_DASHBOARD_LIFECYCLE_FOOTER.split(". ")) {
+      expect(defaultFrame).toContain(sentence);
+    }
 
-    const viewerFrame = createDashboardRenderer({
+    const viewerFrame = createRenderer({
       glyphMode: "ascii",
       color: false,
       footer: "^C close viewer\u001b]0;unsafe\u0007  |  read-only" as DashboardFooter,

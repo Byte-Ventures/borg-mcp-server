@@ -137,6 +137,128 @@ describe("offline operator flow", () => {
     );
   });
 
+  it.each(["grant", "ungrant", "revoke"] as const)(
+    "refuses a duplicate client name for %s with disambiguating handles",
+    async (verb) => {
+      const parent = await realpath(await mkdtemp(join(tmpdir(), "borg-operator-ambiguous-client-")));
+      directories.push(parent);
+      const dataDirectory = join(parent, "server");
+      const bootstrap = await bootstrapServer(dataDirectory);
+      const firstId = "aaaaaaaa-1000-4000-8000-000000000001";
+      const secondId = "aaaaaaaa-2000-4000-8000-000000000002";
+      const cubeId = "00000000-0000-4000-8000-000000000051";
+      const runtime = await openStore({ path: bootstrap.paths.database });
+      runtime.maintenance.createClient({ id: firstId, name: "Local client" });
+      runtime.maintenance.createClient({ id: secondId, name: "Local client" });
+      runtime.maintenance.createCube({ id: cubeId, name: "Ambiguous grant", directive: "" });
+      runtime.maintenance.grantClientCube({ clientId: firstId, cubeId, access: "manage" });
+      runtime.close();
+
+      const service = createOfflineCredentialService(dataDirectory);
+      const operation = verb === "grant"
+        ? service.grantClient("Local client", cubeId, "read")
+        : verb === "ungrant"
+          ? service.ungrantClient("Local client", cubeId)
+          : service.revokeClient("Local client");
+      await expect(operation).rejects.toThrow(
+        "Client name is ambiguous. Use one of these handles: aaaaaaaa1, aaaaaaaa2.",
+      );
+
+      const database = new DatabaseSync(bootstrap.paths.database);
+      try {
+        expect(database.prepare(`
+          SELECT client_id, access FROM client_cube_grants WHERE cube_id = ?
+        `).all(cubeId)).toEqual([{ client_id: firstId, access: "manage" }]);
+        expect(database.prepare(`
+          SELECT id FROM clients WHERE revoked_at IS NOT NULL ORDER BY id
+        `).all()).toEqual([]);
+      } finally {
+        database.close();
+      }
+    },
+  );
+
+  it("uses the current deterministic handle to grant exactly one duplicate-named client", async () => {
+    const parent = await realpath(await mkdtemp(join(tmpdir(), "borg-operator-handle-client-")));
+    directories.push(parent);
+    const dataDirectory = join(parent, "server");
+    const bootstrap = await bootstrapServer(dataDirectory);
+    const firstId = "aaaaaaaa-1000-4000-8000-000000000001";
+    const secondId = "aaaaaaaa-2000-4000-8000-000000000002";
+    const cubeId = "00000000-0000-4000-8000-000000000052";
+    const runtime = await openStore({ path: bootstrap.paths.database });
+    runtime.maintenance.createClient({ id: firstId, name: "Local client" });
+    runtime.maintenance.createClient({ id: secondId, name: "Local client" });
+    runtime.maintenance.createCube({ id: cubeId, name: "Handle grant", directive: "" });
+    runtime.close();
+
+    const service = createOfflineCredentialService(dataDirectory);
+    await service.grantClient("aaaaaaaa1", cubeId, "read");
+    expect(await service.listClients()).toEqual(expect.arrayContaining([
+      {
+        name: "Local client",
+        handle: "aaaaaaaa1",
+        state: "active",
+        grants: [{
+          cubeId,
+          cubeName: "Handle grant",
+          access: "read",
+        }],
+      },
+      {
+        name: "Local client",
+        handle: "aaaaaaaa2",
+        state: "active",
+        grants: [],
+      },
+    ]));
+    await service.revokeClient("aaaaaaaa1");
+    expect(await service.listClients()).toEqual(expect.arrayContaining([{
+      name: "Local client",
+      handle: "aaaaaaaa1",
+      state: "revoked",
+      grants: [{
+        cubeId,
+        cubeName: "Handle grant",
+        access: "read",
+      }],
+    }]));
+    await expect(service.grantClient("aaaaaaaa1", cubeId, "write")).rejects.toThrow(
+      "Client exists but is revoked.",
+    );
+    await expect(service.ungrantClient("aaaaaaaa1", cubeId)).rejects.toThrow(
+      "Client exists but is revoked.",
+    );
+    await expect(service.revokeClient("aaaaaaaa1")).rejects.toThrow(
+      "Client exists but is revoked.",
+    );
+    await expect(service.grantClient("aaaaaaaa", cubeId, "write")).rejects.toThrow(
+      "Client handle now matches more than one client. Use one of these handles: " +
+      "aaaaaaaa1, aaaaaaaa2.",
+    );
+    await expect(service.grantClient("Local client", cubeId, "write")).rejects.toThrow(
+      "Client name is ambiguous. Use one of these handles: aaaaaaaa1, aaaaaaaa2.",
+    );
+    await expect(service.grantClient("missing client", cubeId, "write")).rejects.toThrow(
+      "Provide an existing client name, handle, or ID.",
+    );
+
+    const database = new DatabaseSync(bootstrap.paths.database);
+    try {
+      expect(database.prepare(`
+        SELECT client_id, access FROM client_cube_grants WHERE cube_id = ?
+      `).all(cubeId)).toEqual([{ client_id: firstId, access: "read" }]);
+      expect(database.prepare(
+        "SELECT revoked_at FROM clients WHERE id = ?",
+      ).get(firstId)).toMatchObject({ revoked_at: expect.any(String) });
+      expect(database.prepare(
+        "SELECT revoked_at FROM clients WHERE id = ?",
+      ).get(secondId)).toEqual({ revoked_at: null });
+    } finally {
+      database.close();
+    }
+  });
+
   it("rotates and revokes a hashed client credential without a listener", async () => {
     const listen = vi.spyOn(Server.prototype, "listen");
     const parent = await realpath(await mkdtemp(join(tmpdir(), "borg-operator-credential-")));
@@ -145,7 +267,11 @@ describe("offline operator flow", () => {
     const bootstrap = await bootstrapServer(dataDirectory);
     const credential = generateSecret();
     const enrolled = await withAuthority(dataDirectory, (authority) => {
-      const invitation = authority.createInvitation(bootstrap.recoveryCredential, 60_000)!;
+      const invitation = authority.createInvitation(
+        bootstrap.recoveryCredential,
+        60_000,
+        "operator",
+      )!;
       return authority.exchangeInvitation({
         invitation,
         retryKey: randomUUID(),
@@ -168,7 +294,7 @@ describe("offline operator flow", () => {
     expect(await withAuthority(dataDirectory, (authority) =>
       authority.authenticate(`Bearer ${rotated}`))).toMatchObject({ kind: "client", id: enrolled!.clientId });
 
-    await service.revokeClient(enrolled!.clientId);
+    await service.revokeClient("operator");
     expect(await withAuthority(dataDirectory, (authority) =>
       authority.authenticate(`Bearer ${rotated}`))).toBeNull();
     expect(listen).not.toHaveBeenCalled();

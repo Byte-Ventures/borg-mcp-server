@@ -69,6 +69,20 @@ describe("main operator errors", () => {
     }
   });
 
+  it("prints validated ambiguity handles from a dynamic operator error", async () => {
+    const error = operatorErrorModule.ambiguousClientSelector("name", [
+      "aaaaaaaa2",
+      "aaaaaaaa1",
+    ]);
+    expect(operatorErrorModule.operatorPublicMessage(error)).toBe(
+      "Client name is ambiguous. Use one of these handles: aaaaaaaa1, aaaaaaaa2.",
+    );
+    expect(() => operatorErrorModule.ambiguousClientSelector("handle", [
+      "aaaaaaaa1",
+      "attacker\u001b[31m",
+    ])).toThrow("Ambiguous client handles are invalid.");
+  });
+
   it("prints actionable output through the real CLI and service option parser", async () => {
     const previousExitCode = process.exitCode;
     const stderr = vi.fn();
@@ -195,7 +209,7 @@ describe("main operator errors", () => {
         "00000000-0000-4000-8000-000000000001",
       ], offline, { stdout: vi.fn(), stderr });
       expect(stderr).toHaveBeenLastCalledWith(
-        "Server command failed: Provide an existing active client ID.",
+        "Server command failed: Provide an existing client name, handle, or ID.",
       );
     } finally {
       process.exitCode = previousExitCode;

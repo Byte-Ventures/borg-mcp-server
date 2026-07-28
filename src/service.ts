@@ -37,6 +37,7 @@ import {
   DEFAULT_STORAGE_LIMITS,
   openStore,
   preparePrivateDataDirectory,
+  type ClientAdministrationRecord,
   type LivenessStore,
   type StorageLimits,
 } from "./store.js";
@@ -87,9 +88,10 @@ export interface ServerService {
   readonly update?: () => Promise<ServerUpdateResult>;
   readonly recoverStaleLock?: () => Promise<StaleRuntimeLockRecovery>;
   readonly rotateClient?: (clientId: string) => Promise<string>;
-  readonly revokeClient?: (clientId: string) => Promise<void>;
-  readonly grantClient?: (clientId: string, cubeId: string, access: CubeAccess) => Promise<void>;
-  readonly ungrantClient?: (clientId: string, cubeId: string) => Promise<void>;
+  readonly listClients?: () => Promise<readonly ClientAdministrationRecord[]>;
+  readonly revokeClient?: (clientSelector: string) => Promise<void>;
+  readonly grantClient?: (clientSelector: string, cubeId: string, access: CubeAccess) => Promise<void>;
+  readonly ungrantClient?: (clientSelector: string, cubeId: string) => Promise<void>;
   readonly createClientInvitation?: (recoveryCredential: string) => Promise<string>;
   readonly replaceOwnerInvitation?: (recoveryCredential: string) => Promise<string>;
   readonly invite?: (clientName?: string) => Promise<string>;
@@ -1166,7 +1168,7 @@ export function createOfflineCredentialService(
   offlineDataDirectory: string,
   credentialRoot?: string,
 ): Pick<Required<ServerService>,
-  "rotateClient" | "revokeClient" | "grantClient" | "ungrantClient" |
+  "rotateClient" | "listClients" | "revokeClient" | "grantClient" | "ungrantClient" |
   "createClientInvitation" | "replaceOwnerInvitation" | "invite"
 > {
   const withAuthority = async <T>(operation: (
@@ -1222,16 +1224,13 @@ export function createOfflineCredentialService(
   };
   return {
     rotateClient: (clientId) => withAuthority((authority) => authority.rotateClient(clientId)),
-    revokeClient: (clientId) => withAuthority((authority) => authority.revokeClient(clientId)),
-    grantClient: (clientId, cubeId, access) => withAuthority((_authority, runtime) => {
-      if (!runtime.credentials.clientIsActive(clientId)) {
-        throw operatorErrors.CLIENT_NOT_FOUND;
-      }
-      runtime.maintenance.grantClientCube({ clientId, cubeId, access });
+    listClients: () => withAuthority((_authority, runtime) => runtime.maintenance.listClients()),
+    revokeClient: (selector) => withAuthority((authority) => authority.revokeClient(selector)),
+    grantClient: (selector, cubeId, access) => withAuthority((_authority, runtime) => {
+      runtime.maintenance.grantClientCubeBySelector({ selector, cubeId, access });
     }),
-    ungrantClient: (clientId, cubeId) => withAuthority((_authority, runtime) => {
-      if (!runtime.credentials.clientIsActive(clientId)) throw operatorErrors.CLIENT_NOT_FOUND;
-      if (!runtime.maintenance.removeClientCubeGrant(clientId, cubeId)) {
+    ungrantClient: (selector, cubeId) => withAuthority((_authority, runtime) => {
+      if (!runtime.maintenance.removeClientCubeGrantBySelector(selector, cubeId)) {
         throw operatorErrors.GRANT_NOT_FOUND;
       }
     }),

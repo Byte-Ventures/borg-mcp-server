@@ -323,9 +323,8 @@ export class CredentialAuthority {
     return secret;
   }
 
-  revokeClient(clientId: string): void {
-    if (!this.#store.clientExists(clientId)) throw operatorErrors.CLIENT_NOT_FOUND;
-    this.#store.revokeClientCredentials(clientId);
+  revokeClient(selector: string): void {
+    const clientId = this.#store.revokeClientCredentialsBySelector(selector);
     this.#registry.invalidate(clientId);
     this.#debugLogger.emit({ event: "credential", action: "client_revoked", clientId });
   }

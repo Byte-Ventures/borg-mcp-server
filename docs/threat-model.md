@@ -72,8 +72,14 @@ v1 scope.
   `ca.key`. After setup, operators deploying on a LAN must move `ca.key` to offline storage that the
   service account cannot read; only `ca.crt`, `server.crt`, and `server.key` remain available at
   runtime.
-- Client rotation, revocation, and grant changes are offline commands, not network routes. Stop the server first, run
-  `borg-mcp-server client-rotate <client-id>` or `borg-mcp-server client-revoke <client-id>`, securely
+- Client listing, rotation, revocation, and grant changes are offline commands, not network routes.
+  The listing exposes client names, current ID-derived handles, active/revoked state, and cube grants,
+  but no credential or invitation material. Revocation and grant changes resolve an exact unique
+  name, a listed handle, or a full client UUID in the same immediate transaction as the
+  mutation. Resolution spans active and revoked clients, keeping old handle prefixes anchored;
+  ambiguous names or stale handle prefixes fail closed with current candidate handles, while a
+  uniquely resolved revoked client is reported as revoked rather than absent. Stop the server first, run
+  `borg-mcp-server client-rotate <client-id>` or `borg-mcp-server client-revoke <client-name-or-handle>`, securely
   deliver any one-time rotated credential, then restart. A PID-bound runtime lock rejects offline
   changes while the service is live. Stale locks fail closed and require explicit removal only after
   confirming the recorded PID is stopped; an old cross-process SSE stream therefore cannot survive

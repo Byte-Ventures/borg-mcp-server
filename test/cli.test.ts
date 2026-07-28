@@ -82,7 +82,8 @@ describe("runCli", () => {
   it("creates an invitation only in an interactive terminal with the approved copy", async () => {
     const invite = vi.fn().mockResolvedValue("i".repeat(43));
     const interactive = { ...createIo(), isTTY: true };
-    expect(await runCli(["invite"], { start: vi.fn(), invite }, interactive)).toBe(0);
+    expect(await runCli(["invite", "Alice laptop"], { start: vi.fn(), invite }, interactive)).toBe(0);
+    expect(invite).toHaveBeenCalledWith("Alice laptop");
     expect(interactive.stdout).toHaveBeenCalledWith(
       `Client enrollment invitation (single-use, shown once): ${"i".repeat(43)}\nShare it only with the intended recipient.`,
     );
@@ -93,6 +94,11 @@ describe("runCli", () => {
       "Invitation creation requires an interactive terminal.",
     );
     expect(invite).toHaveBeenCalledTimes(1);
+    expect(await runCli(
+      ["invite", "too", "many"],
+      { start: vi.fn(), invite },
+      { ...createIo(), isTTY: true },
+    )).toBe(1);
   });
 
   it("requires an explicit unambiguous setup reinitialization flag", async () => {
@@ -549,7 +555,7 @@ describe("runCli", () => {
     const help = createIo();
     expect(await runCli(["help"], service, help)).toBe(0);
     expect(help.stdout).toHaveBeenCalledWith(expect.stringContaining(
-      "invite   Create a client enrollment invitation in an interactive terminal.\n" +
+      "invite [<client-name>]  Create a named client enrollment invitation interactively.\n" +
       "           An enrolled client has no cube access until it is granted.",
     ));
     expect(help.stdout).toHaveBeenCalledWith(expect.not.stringContaining("client-invite"));

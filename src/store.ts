@@ -227,6 +227,7 @@ export interface StoredSecretDigest extends DigestPair {
 export interface StoredInvitationDigest extends StoredSecretDigest {
   readonly purpose: "owner" | "client";
   readonly ownerEpoch: number | null;
+  readonly clientName: string | null;
 }
 
 export interface EnrollmentClaimResult {
@@ -252,6 +253,7 @@ export interface CredentialStore {
     readonly digest: DigestPair;
     readonly expiresAt: string;
     readonly purpose: "owner" | "client";
+    readonly clientName: string | null;
   }) => void;
   readonly findInvitation: (lookup: Buffer) => StoredInvitationDigest | null;
   readonly claimInvitation: (input: {
@@ -2950,12 +2952,36 @@ class SqliteCredentialStore implements CredentialStore {
     readonly digest: DigestPair;
     readonly expiresAt: string;
     readonly purpose: "owner" | "client";
+    readonly clientName: string | null;
   }): void {
     assertCanonicalUuid(input.id, "Invitation id");
     validateDigest(input.digest);
     validateTimestamp(input.expiresAt);
+    if (input.purpose === "owner" && input.clientName !== null) {
+      throw new Error("Owner invitations cannot carry a client name.");
+    }
+    const clientName = input.purpose === "client"
+      ? input.clientName ?? defaultInvitationClientName(input.id)
+      : null;
+    if (clientName !== null) validatePresentationName(clientName);
     this.#database.exec("BEGIN IMMEDIATE");
     try {
+      if (input.purpose === "client" && input.clientName !== null) {
+        // Revoked client names and expired invitation labels are intentionally reusable.
+        if (this.#database.prepare(`
+          SELECT 1 FROM clients WHERE name = ? AND revoked_at IS NULL LIMIT 1
+        `).get(clientName) !== undefined) {
+          throw operatorErrors.CLIENT_NAME_CONFLICT;
+        }
+        if (this.#database.prepare(`
+          SELECT 1 FROM enrollment_invitations
+          WHERE purpose = 'client' AND client_name = ?
+            AND consumed_at IS NULL AND revoked_at IS NULL AND expires_at > ?
+          LIMIT 1
+        `).get(clientName, this.#now()) !== undefined) {
+          throw operatorErrors.INVITATION_NAME_CONFLICT;
+        }
+      }
       let ownerEpoch: number | null = null;
       if (input.purpose === "owner") {
         const state = this.#database.prepare(
@@ -2980,11 +3006,12 @@ class SqliteCredentialStore implements CredentialStore {
       }
       this.#database.prepare(`
         INSERT INTO enrollment_invitations (
-          id, lookup_digest, verifier_digest, expires_at, created_at, purpose, owner_epoch
-        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+          id, lookup_digest, verifier_digest, expires_at, created_at, purpose, owner_epoch,
+          client_name
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         input.id, input.digest.lookup, input.digest.verifier, input.expiresAt,
-        this.#now(), input.purpose, ownerEpoch,
+        this.#now(), input.purpose, ownerEpoch, clientName,
       );
       this.#database.exec("COMMIT");
     } catch (error) {
@@ -3003,7 +3030,7 @@ class SqliteCredentialStore implements CredentialStore {
              COALESCE(invitation.expires_at, '') AS expires_at,
              invitation.consumed_at, invitation.revoked_at,
              COALESCE(invitation.purpose, 'client') AS purpose,
-             invitation.owner_epoch
+             invitation.owner_epoch, invitation.client_name
       FROM (SELECT 1) AS seed
       LEFT JOIN enrollment_invitations AS invitation ON invitation.lookup_digest = ?
     `).get(lookup);
@@ -3033,6 +3060,7 @@ class SqliteCredentialStore implements CredentialStore {
         SELECT invitation.id IS NOT NULL AS found,
                COALESCE(invitation.purpose, 'client') AS purpose,
                invitation.owner_epoch,
+               invitation.client_name,
                COALESCE(invitation.expires_at, '') AS expires_at,
                invitation.consumed_at, invitation.revoked_at
         FROM (SELECT 1) AS seed
@@ -3092,10 +3120,16 @@ class SqliteCredentialStore implements CredentialStore {
           return null;
         }
       }
-      this.#capacityGuard.assertCanGrow(Buffer.byteLength(input.requestedClientName ?? "") + 8_192);
+      const invitationClientName = nullableText(invitation, "client_name");
+      const clientName = purpose === "client"
+        ? invitationClientName ?? defaultInvitationClientName(input.invitationId)
+        : input.requestedClientName ?? defaultInvitationClientName(input.invitationId);
+      this.#capacityGuard.assertCanGrow(
+        Buffer.byteLength(input.requestedClientName ?? "") + Buffer.byteLength(clientName) + 8_192,
+      );
       this.#database.prepare(
         "INSERT INTO clients (id, name, created_at) VALUES (?, ?, ?)",
-      ).run(input.clientId, input.requestedClientName ?? "Local client", now);
+      ).run(input.clientId, clientName, now);
       this.#mutationHook?.("enrollment.insert-client");
       this.#database.prepare(`
         INSERT INTO client_credentials (
@@ -3699,7 +3733,12 @@ function storedInvitationDigest(row: Record<string, unknown>): StoredInvitationD
   }
   const epochValue = row["owner_epoch"];
   const ownerEpoch = epochValue === null ? null : requiredInteger(row, "owner_epoch");
-  return { ...digest, purpose, ownerEpoch };
+  return { ...digest, purpose, ownerEpoch, clientName: nullableText(row, "client_name") };
+}
+
+function defaultInvitationClientName(invitationId: string): string {
+  assertCanonicalUuid(invitationId, "Invitation id");
+  return `Client ${invitationId}`;
 }
 
 function enrollmentClaimResult(

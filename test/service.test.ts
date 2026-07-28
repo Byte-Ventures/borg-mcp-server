@@ -119,18 +119,33 @@ describe("node server service", () => {
         () => new Date(),
         (record) => writePortableServerCredential(credentials, record),
       );
-      const invitation = await createOfflineCredentialService(directory, credentials).invite();
+      const invitation = await createOfflineCredentialService(directory, credentials)
+        .invite("Alice laptop");
       expect(invitation).toMatch(/^[A-Za-z0-9_-]{43}$/u);
       const runtime = await openStore({ path: join(directory, "borg.db") });
       try {
         const key = await loadDigestKey(join(directory, "credential-digest.key"));
         const authority = new CredentialAuthority(runtime.credentials, new CredentialDigester(key));
         key.fill(0);
-        expect(authority.exchangeInvitation({
+        const enrolled = authority.exchangeInvitation({
           invitation,
           retryKey: randomUUID(),
           clientCredential: generateSecret(),
-        })).toMatchObject({ purpose: "client", serverCapabilities: [] });
+          clientName: "Far end self description",
+        });
+        expect(enrolled).toMatchObject({ purpose: "client", serverCapabilities: [] });
+        const database = new DatabaseSync(join(directory, "borg.db"));
+        try {
+          expect(database.prepare("SELECT name FROM clients WHERE id = ?").get(enrolled!.clientId))
+            .toEqual({ name: "Alice laptop" });
+          expect(database.prepare(`
+            SELECT requested_client_name FROM enrollment_claims WHERE client_id = ?
+          `).get(enrolled!.clientId)).toEqual({
+            requested_client_name: "Far end self description",
+          });
+        } finally {
+          database.close();
+        }
       } finally {
         runtime.close();
       }

@@ -160,18 +160,22 @@ export class CredentialAuthority {
     return this.#createInvitation("owner", ttlMs);
   }
 
-  createInvitation(recoveryCredential: string, ttlMs: number): string | null {
+  createInvitation(recoveryCredential: string, ttlMs: number, clientName?: string): string | null {
     const digest = safeDigest(this.#digester, recoveryCredential, "recovery");
     const stored = this.#store.findRecoveryCredential(digest.lookup);
     if (!this.#digester.verify(recoveryCredential, "recovery", stored?.verifier)) return null;
-    return this.#createInvitation("client", ttlMs);
+    return this.#createInvitation("client", ttlMs, clientName);
   }
 
-  createInvitationForOwnerCredential(clientCredential: string, ttlMs: number): string | null {
+  createInvitationForOwnerCredential(
+    clientCredential: string,
+    ttlMs: number,
+    clientName?: string,
+  ): string | null {
     const principal = this.authenticate(`Bearer ${clientCredential}`);
     if (principal?.kind !== "client" ||
         !this.#store.clientHasServerCapability(principal.id, "create_cube")) return null;
-    return this.#createInvitation("client", ttlMs);
+    return this.#createInvitation("client", ttlMs, clientName);
   }
 
   replaceOwnerInvitation(recoveryCredential: string, ttlMs: number): string | null {
@@ -181,16 +185,18 @@ export class CredentialAuthority {
     return this.#createInvitation("owner", ttlMs);
   }
 
-  #createInvitation(purpose: "owner" | "client", ttlMs: number): string {
+  #createInvitation(purpose: "owner" | "client", ttlMs: number, clientName?: string): string {
     if (!Number.isSafeInteger(ttlMs) || ttlMs < 1_000 || ttlMs > 86_400_000) {
       throw new Error("Invitation TTL must be an integer from 1000 to 86400000 milliseconds.");
     }
     const secret = generateSecret();
+    const invitationId = randomUUID();
     this.#store.createInvitation({
-      id: randomUUID(),
+      id: invitationId,
       digest: this.#digester.digest(secret, "invitation"),
       expiresAt: new Date(this.#clock().getTime() + ttlMs).toISOString(),
       purpose,
+      clientName: purpose === "client" ? clientName ?? null : null,
     });
     this.#debugLogger.emit({
       event: "credential",

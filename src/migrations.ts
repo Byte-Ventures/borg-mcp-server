@@ -543,6 +543,20 @@ export const STORE_MIGRATIONS: readonly Migration[] = Object.freeze([
       ALTER TABLE enrollment_invitations DROP COLUMN access;
     `,
   },
+  {
+    version: 17,
+    name: "invitation_client_names",
+    sql: `
+      ALTER TABLE enrollment_invitations ADD COLUMN client_name TEXT
+        CHECK (
+          client_name IS NULL OR (
+            length(CAST(client_name AS BLOB)) BETWEEN 1 AND 120
+            AND client_name GLOB '[A-Za-z0-9]*'
+            AND client_name NOT GLOB '*[^A-Za-z0-9 ._-]*'
+          )
+        );
+    `,
+  },
 ]);
 
 interface AppliedMigrationRow {

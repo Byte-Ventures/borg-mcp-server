@@ -274,16 +274,18 @@ before running those commands.
 ```sh
 borg-mcp-server client-rotate <client-id>
 borg-mcp-server client-revoke <client-id>
-borg-mcp-server invite
+borg-mcp-server invite "Alice laptop"
 borg-mcp-server client-grant <client-id> <cube-id> <read|write|manage>
 borg-mcp-server client-ungrant <client-id> <cube-id>
 ```
 
-`invite` uses the locally stored owner credential to authorize one existing
-single-use client invitation and prints it only in an interactive terminal. It
-never places a credential or invitation in argv or environment, and refuses
-non-interactive output. The invitation can then be exchanged through the existing
-enrollment protocol. It grants no server capability or cube access.
+`invite` uses the locally stored owner credential to create one single-use client
+invitation with the supplied client name and prints it only in an interactive
+terminal. It never places a credential or invitation in argv or environment, and
+refuses non-interactive output. The invitation can then be exchanged through the
+existing enrollment protocol. It grants no server capability or cube access.
+An explicit name must not already belong to an active client or a live unclaimed
+invitation; choose another name when the mint is refused.
 
 Invitations and rotation output are secrets; do not paste them into issues, logs,
 or chat.

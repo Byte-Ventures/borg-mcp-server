@@ -115,6 +115,106 @@ describe("credential authority", () => {
     expect(runtime.maintenance.observeAuthorityState()).toMatchObject({ grants: 0 });
   });
 
+  it("persists the owner's invitation label instead of the enrolling client's hint", () => {
+    const recovery = authority.createRecoveryCredential();
+    const invitation = authority.createInvitation(recovery, 60_000, "Alice laptop");
+    if (invitation === null) throw new Error("Recovery authorization failed.");
+
+    const enrolled = authority.exchangeInvitation({
+      ...enrollmentRequest(invitation),
+      clientName: "Far end self description",
+    });
+    if (enrolled === null) throw new Error("Test enrollment failed.");
+
+    const database = new DatabaseSync(join(directory, "borg.db"));
+    try {
+      expect(database.prepare("SELECT name FROM clients WHERE id = ?").get(enrolled.clientId))
+        .toEqual({ name: "Alice laptop" });
+      expect(database.prepare(`
+        SELECT requested_client_name FROM enrollment_claims WHERE client_id = ?
+      `).get(enrolled.clientId)).toEqual({ requested_client_name: "Far end self description" });
+    } finally {
+      database.close();
+    }
+  });
+
+  it("gives separate unnamed invitations distinct client names", () => {
+    const recovery = authority.createRecoveryCredential();
+    const firstInvitation = authority.createInvitation(recovery, 60_000);
+    const secondInvitation = authority.createInvitation(recovery, 60_000);
+    if (firstInvitation === null || secondInvitation === null) {
+      throw new Error("Recovery authorization failed.");
+    }
+
+    const first = authority.exchangeInvitation(enrollmentRequest(firstInvitation));
+    const second = authority.exchangeInvitation(enrollmentRequest(secondInvitation));
+    if (first === null || second === null) throw new Error("Test enrollment failed.");
+
+    const database = new DatabaseSync(join(directory, "borg.db"));
+    try {
+      const rows = database.prepare(`
+        SELECT name FROM clients WHERE id IN (?, ?) ORDER BY id
+      `).all(first.clientId, second.clientId) as Array<{ readonly name: string }>;
+      expect(rows).toHaveLength(2);
+      expect(new Set(rows.map((row) => row.name)).size).toBe(2);
+      expect(rows.map((row) => row.name)).not.toContain("Local client");
+    } finally {
+      database.close();
+    }
+  });
+
+  it("validates client labels at mint and leaves owner-purpose invitations unlabeled", () => {
+    const recovery = authority.createRecoveryCredential();
+    expect(() => authority.createInvitation(recovery, 60_000, "\u001b]8;;unsafe"))
+      .toThrow("Presentation name is invalid.");
+    expect(() => authority.createInvitation(recovery, 60_000, "a".repeat(121)))
+      .toThrow("Presentation name is invalid.");
+
+    authority.createBootstrapInvitation(60_000);
+    expect(authority.createInvitation(recovery, 60_000, "Alice laptop")).not.toBeNull();
+
+    const database = new DatabaseSync(join(directory, "borg.db"));
+    try {
+      expect(database.prepare(`
+        SELECT purpose, client_name FROM enrollment_invitations ORDER BY rowid
+      `).all()).toEqual([
+        { purpose: "owner", client_name: null },
+        { purpose: "client", client_name: "Alice laptop" },
+      ]);
+    } finally {
+      database.close();
+    }
+  });
+
+  it("refuses a label already held by an active client at mint", () => {
+    const recovery = authority.createRecoveryCredential();
+    const invitation = authority.createInvitation(recovery, 60_000, "Alice laptop");
+    if (invitation === null) throw new Error("Recovery authorization failed.");
+    const enrolled = authority.exchangeInvitation(enrollmentRequest(invitation));
+    if (enrolled === null) throw new Error("Test enrollment failed.");
+
+    expect(() => authority.createInvitation(recovery, 60_000, "Alice laptop"))
+      .toThrow(
+        "A client with this name already exists. Choose another name, or revoke the existing client before reusing it.",
+      );
+
+    authority.revokeClient(enrolled.clientId);
+    expect(authority.createInvitation(recovery, 60_000, "Alice laptop")).not.toBeNull();
+  });
+
+  it("refuses a label held by an outstanding invitation at mint", () => {
+    const recovery = authority.createRecoveryCredential();
+    expect(authority.createInvitation(recovery, 1_000, "Alice laptop")).not.toBeNull();
+
+    expect(() => authority.createInvitation(recovery, 60_000, "Alice laptop"))
+      .toThrow(
+        "An unclaimed invitation with this label is outstanding. Choose another name, or wait for it to expire before reusing the label.",
+      );
+
+    now = new Date("2026-07-14T12:00:01.001Z");
+    expect(authority.createInvitation(recovery, 60_000, "Alice laptop")).not.toBeNull();
+  });
+
   it("rejects expired invitations with the same null result", () => {
     const recovery = authority.createRecoveryCredential();
     const invitation = authority.createInvitation(recovery, 1_000);

@@ -92,7 +92,7 @@ export interface ServerService {
   readonly ungrantClient?: (clientId: string, cubeId: string) => Promise<void>;
   readonly createClientInvitation?: (recoveryCredential: string) => Promise<string>;
   readonly replaceOwnerInvitation?: (recoveryCredential: string) => Promise<string>;
-  readonly invite?: () => Promise<string>;
+  readonly invite?: (clientName?: string) => Promise<string>;
 }
 
 export interface DashboardCommandOptions {
@@ -1245,7 +1245,7 @@ export function createOfflineCredentialService(
       if (invitation === null) throw operatorErrors.RECOVERY_INVALID;
       return invitation;
     }),
-    invite: () => withInvitationAuthority(async (authority) => {
+    invite: (clientName) => withInvitationAuthority(async (authority) => {
       if (credentialRoot === undefined) throw new Error("Local owner credential store is unavailable.");
       const config = JSON.parse((await readFile(join(offlineDataDirectory, "server.json"))).toString("utf8")) as {
         bind_host?: unknown;
@@ -1256,7 +1256,11 @@ export function createOfflineCredentialService(
       }
       const trustIdentity = `spki-sha256:${config.ca_spki_sha256}`;
       const record = await readPortableServerCredentialForTrustIdentity(credentialRoot, trustIdentity);
-      const invitation = authority.createInvitationForOwnerCredential(record.credential, 15 * 60_000);
+      const invitation = authority.createInvitationForOwnerCredential(
+        record.credential,
+        15 * 60_000,
+        clientName,
+      );
       if (invitation === null) throw new Error("Local owner credential is invalid.");
       return invitation;
     }),

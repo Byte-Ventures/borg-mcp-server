@@ -192,7 +192,14 @@ export function createDashboardRenderer(options: DashboardRenderOptions): Dashbo
   }) => {
     const width = boundedDimension(columns, 20, 500);
     const height = boundedDimension(rows, 4, 200);
-    if (width < 40 || height < 10) return renderPlainDashboard(snapshot, width, height);
+    if (width < 40 || height < 10) {
+      return renderPlainDashboard(
+        snapshot,
+        width,
+        height,
+        options.footer ?? EMBEDDED_DASHBOARD_FOOTER,
+      );
+    }
     const lifecycleFooter = options.footer === undefined
       ? wrapDashboardFooter(EMBEDDED_DASHBOARD_LIFECYCLE_FOOTER, width)
       : [];
@@ -258,6 +265,7 @@ export function renderPlainDashboard(
   snapshot: DashboardSnapshot,
   columns = 80,
   rows = 20,
+  footer?: DashboardFooter,
 ): string {
   const width = boundedDimension(columns, 20, 500);
   const height = boundedDimension(rows, 4, 200);
@@ -276,8 +284,7 @@ export function renderPlainDashboard(
       " ",
       ASCII_GLYPHS.ellipsis,
     ),
-    width >= 33 ? "Ctrl-C stops this server process." : "Ctrl-C stops server.",
-    "Cube data is saved.",
+    ...renderPlainDashboardFooter(footer, width),
   ];
   const available = Math.max(0, height - lines.length);
   for (const cube of snapshot.cubes.slice(0, available)) {
@@ -290,6 +297,21 @@ export function renderPlainDashboard(
     ));
   }
   return lines.join("\n");
+}
+
+function renderPlainDashboardFooter(footer: DashboardFooter | undefined, width: number): string[] {
+  if (footer === EMBEDDED_DASHBOARD_FOOTER) {
+    return [
+      width >= 33 ? "Ctrl-C stops this server process." : "Ctrl-C stops server.",
+      "Cube data is saved.",
+    ];
+  }
+  if (footer === STANDALONE_DASHBOARD_FOOTER) {
+    return width >= 35
+      ? ["Ctrl-C closes this viewer.", "Server stays up. View is read-only."]
+      : ["Ctrl-C closes viewer", "Read-only, server up"];
+  }
+  return [];
 }
 
 export function selectDashboardGlyphMode(input: {
@@ -335,6 +357,7 @@ export function startForegroundDashboard(input: {
   readonly server: DashboardServerIdentity;
   readonly terminal: DashboardTerminal;
   readonly renderer: DashboardRenderer;
+  readonly fallbackFooter?: DashboardFooter;
   readonly idleRefreshMs?: number;
   readonly eventCoalesceMs?: number;
   readonly resizeDebounceMs?: number;
@@ -403,6 +426,7 @@ export function startForegroundDashboard(input: {
         rankDashboardSnapshot(input.source.read(), input.server),
         input.terminal.dimensions().columns,
         input.terminal.dimensions().rows,
+        input.fallbackFooter,
       );
     } catch {
       // Preserve the original rendering failure.

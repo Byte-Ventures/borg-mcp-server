@@ -9,6 +9,7 @@ import {
   EMBEDDED_DASHBOARD_FOOTER,
   EMBEDDED_DASHBOARD_LIFECYCLE_FOOTER,
   rankDashboardSnapshot,
+  renderPlainDashboard,
   sanitizeTerminalText,
   selectDashboardGlyphMode,
   STANDALONE_DASHBOARD_FOOTER,
@@ -179,6 +180,22 @@ describe("dashboard renderer", () => {
     expect(tiny).not.toContain("┌");
     expect(tiny.split("\n")).toHaveLength(7);
     expect(tiny.split("\n").every((line) => [...line].length <= 39)).toBe(true);
+
+    const tinyViewer = createDashboardRenderer({
+      glyphMode: "box",
+      color: true,
+      footer: STANDALONE_DASHBOARD_FOOTER,
+    })(snapshot, 39, 9);
+    expect(tinyViewer).toContain("Ctrl-C closes this viewer.");
+    expect(tinyViewer).toContain("Server stays up. View is read-only.");
+    expect(tinyViewer).not.toContain("stops this server");
+    expect(tinyViewer.split("\n")).toHaveLength(7);
+    expect(tinyViewer.split("\n").every((line) => [...line].length <= 39)).toBe(true);
+
+    const oneShotViewer = renderPlainDashboard(snapshot, 39, 9);
+    expect(oneShotViewer).toContain("borgmcp-server online");
+    expect(oneShotViewer).not.toContain("Ctrl-C");
+    expect(oneShotViewer).not.toContain("read-only");
   });
 
   it("replaces isometric art with a flat bounded activity panel", () => {

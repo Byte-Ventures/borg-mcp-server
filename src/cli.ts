@@ -21,13 +21,11 @@ Commands:
   stop [--json]  Stop the managed local server
   recover-stale-lock [--json]  Preserve a safely identified stale runtime lock
   invite   Create a client enrollment invitation in an interactive terminal.
+           An enrolled client has no cube access until it is granted.
   client-rotate <client-id>  Rotate one client credential offline
   client-revoke <client-id>  Revoke one client and its credentials offline
   client-grant <client-id> <cube-id> <read|write|manage>  Set one offline cube grant
   client-ungrant <client-id> <cube-id>  Remove one offline cube grant
-  client-invite [<cube-name-or-id>] [--access <read|write|manage>]
-             Create a client invitation; scoped invitations default to write
-  owner-invite   Replace the unclaimed owner enrollment invitation using a hidden recovery prompt
   help     Show this help
 
 Start options:
@@ -295,6 +293,15 @@ export async function runCli(
       return 0;
     case "client-invite":
     case "owner-invite": {
+      if (!recoveryCredentialIsOperatorAvailable()) {
+        io.stderr(command === "client-invite"
+          ? "client-invite is not supported. Creating a scoped invitation requires a recovery credential, and this server does not issue one.\n" +
+            "To enroll an additional client or device, run `borgmcp-server invite` in an interactive terminal. An enrolled client has no cube access until the server operator grants it."
+          : "owner-invite is not supported. Replacing an owner enrollment invitation requires a recovery credential, and this server does not issue one.\n" +
+            "To enroll an additional client or device, run `borgmcp-server invite` in an interactive terminal.");
+        return 1;
+      }
+
       if (io.readSecret === undefined) return invalidArguments(io);
       const scoped = command === "client-invite" ? parseClientInviteArguments(extraArgs) : null;
       if ((command === "owner-invite" && extraArgs.length !== 0) || scoped === undefined) {
@@ -343,6 +350,10 @@ export async function runCli(
       io.stderr("Unknown command.");
       return 1;
   }
+}
+
+function recoveryCredentialIsOperatorAvailable(): boolean {
+  return false;
 }
 
 function renderUpdateFailure(failure: RuntimeUpdateFailure, io: CliIo, machine: boolean): void {

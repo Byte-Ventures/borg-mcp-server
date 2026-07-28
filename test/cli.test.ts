@@ -512,7 +512,7 @@ describe("runCli", () => {
     expect(listen).not.toHaveBeenCalled();
   });
 
-  it("administers invitations and grants without accepting recovery secrets in argv", async () => {
+  it("fails unsupported recovery invitation commands without prompting", async () => {
     const recovery = "r".repeat(43);
     const readSecret = vi.fn().mockResolvedValue(recovery);
     const createClientInvitation = vi.fn().mockResolvedValue("i".repeat(43));
@@ -526,28 +526,37 @@ describe("runCli", () => {
     const clientId = "00000000-0000-4000-8000-000000000001";
     const cubeId = "00000000-0000-4000-8000-000000000002";
 
-    expect(await runCli(["client-invite"], service, io)).toBe(0);
-    expect(await runCli(["owner-invite"], service, io)).toBe(0);
+    expect(await runCli(["client-invite"], service, io)).toBe(1);
+    expect(await runCli(["owner-invite"], service, io)).toBe(1);
     expect(await runCli(["client-grant", clientId, cubeId, "write"], service, io)).toBe(0);
     expect(await runCli(["client-ungrant", clientId, cubeId], service, io)).toBe(0);
-    expect(readSecret).toHaveBeenCalledTimes(2);
-    expect(readSecret).toHaveBeenNthCalledWith(1, "Recovery credential (hidden input): ");
-    expect(readSecret).toHaveBeenNthCalledWith(2, "Recovery credential (hidden input): ");
-    expect(createClientInvitation).toHaveBeenCalledWith(recovery);
-    expect(replaceOwnerInvitation).toHaveBeenCalledWith(recovery);
+    expect(readSecret).not.toHaveBeenCalled();
+    expect(createClientInvitation).not.toHaveBeenCalled();
+    expect(replaceOwnerInvitation).not.toHaveBeenCalled();
     expect(grantClient).toHaveBeenCalledWith(clientId, cubeId, "write");
     expect(ungrantClient).toHaveBeenCalledWith(clientId, cubeId);
-    expect(io.stdout).toHaveBeenCalledWith(
-      `Client enrollment invitation (single-use, shown once): ${"i".repeat(43)}`,
+    expect(io.stderr).toHaveBeenCalledWith(
+      "client-invite is not supported. Creating a scoped invitation requires a recovery credential, and this server does not issue one.\n" +
+      "To enroll an additional client or device, run `borgmcp-server invite` in an interactive terminal. An enrolled client has no cube access until the server operator grants it.",
     );
-    expect(io.stdout).toHaveBeenCalledWith(
-      `Owner enrollment invitation (single-use, shown once): ${"o".repeat(43)}`,
+    expect(io.stderr).toHaveBeenCalledWith(
+      "owner-invite is not supported. Replacing an owner enrollment invitation requires a recovery credential, and this server does not issue one.\n" +
+      "To enroll an additional client or device, run `borgmcp-server invite` in an interactive terminal.",
     );
-    expect(JSON.stringify(io.stdout.mock.calls)).not.toContain(recovery);
+    expect(JSON.stringify(io.stderr.mock.calls)).not.toContain(recovery);
     expect(await runCli(["owner-invite", recovery], service, io)).toBe(1);
+
+    const help = createIo();
+    expect(await runCli(["help"], service, help)).toBe(0);
+    expect(help.stdout).toHaveBeenCalledWith(expect.stringContaining(
+      "invite   Create a client enrollment invitation in an interactive terminal.\n" +
+      "           An enrolled client has no cube access until it is granted.",
+    ));
+    expect(help.stdout).toHaveBeenCalledWith(expect.not.stringContaining("client-invite"));
+    expect(help.stdout).toHaveBeenCalledWith(expect.not.stringContaining("owner-invite"));
   });
 
-  it("prints the resolved cube, full ID, effective grant, and capability summary", async () => {
+  it("keeps scoped invitation operations unreachable", async () => {
     const cubeId = "00000000-0000-4000-8000-000000000042";
     const createClientInvitation = vi.fn().mockResolvedValue({
       invitation: "i".repeat(43),
@@ -561,26 +570,16 @@ describe("runCli", () => {
     } satisfies CliIo;
     const service: ServerService = { start: vi.fn(), createClientInvitation };
 
-    expect(await runCli(["client-invite", "release-tooling"], service, io)).toBe(0);
-    expect(createClientInvitation).toHaveBeenCalledWith(
-      "r".repeat(43),
-      "release-tooling",
-      undefined,
-    );
-    expect(io.stdout).toHaveBeenCalledWith(
-      `Cube: "release-tooling" (${cubeId})\n` +
-      "Grant: write (coordinate - attach, read, post, acknowledge, and receive directed wakes)\n" +
-      `Client enrollment invitation (single-use, shown once): ${"i".repeat(43)}`,
-    );
-
+    expect(await runCli(["client-invite", "release-tooling"], service, io)).toBe(1);
     expect(await runCli(
       ["client-invite", cubeId, "--access", "manage"],
       service,
       io,
-    )).toBe(0);
-    expect(createClientInvitation).toHaveBeenLastCalledWith("r".repeat(43), cubeId, "manage");
+    )).toBe(1);
     expect(await runCli(["client-invite", "release-tooling", "--access", "owner"], service, io))
       .toBe(1);
+    expect(io.readSecret).not.toHaveBeenCalled();
+    expect(createClientInvitation).not.toHaveBeenCalled();
   });
 
   it("rejects malformed offline credential commands without exposing a service", async () => {

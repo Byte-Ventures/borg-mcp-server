@@ -1,7 +1,12 @@
 import { readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
 
-describe("server threat model", () => {
+/**
+ * These documentation-contract checks verify that required claims remain present
+ * in the threat model and release metadata. They do not observe runtime behavior
+ * or prove that the prose matches the implementation.
+ */
+describe("server threat-model document and release metadata", () => {
   it("documents every release acceptance boundary and preserves release authorization", async () => {
     const threatModel = await readFile("docs/threat-model.md", "utf8");
     const releaseWorkflow = await readFile(".github/workflows/release.yml", "utf8");
@@ -20,7 +25,7 @@ describe("server threat model", () => {
       "Rate, body, connection, and storage limits",
       "No remote tool or subprocess execution",
       "Negative bind/auth/CORS/log-secret tests",
-      "secret-output exceptions",
+      "secret-output exception",
       "move `ca.key` to offline storage",
       "Repository-cube adoption is an explicit client-confirmed operation",
       "stale, foreign, and inaccessible bindings are indistinguishable",

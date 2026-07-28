@@ -103,11 +103,10 @@ v1 scope.
   operators must investigate before using the explicit stale-lock recovery command. That command
   revalidates a private, structurally valid server lock with a conclusively absent PID and renames it
   to preserve evidence; it never deletes a lock or acts on ambiguous/live evidence.
-- Setup intentionally prints the recovery credential and owner enrollment invitation once to the invoking
-  terminal. Rotation intentionally prints the new client credential once. These are the only
-  secret-output exceptions: operators must use a private terminal and must not capture command output
-  in shared logs. Runtime request headers, request bodies, credentials, and internal errors are never
-  logged.
+- Rotation intentionally prints the new client credential once to the invoking terminal. This is the
+  only secret-output exception: operators must use a private terminal and must not capture command
+  output in shared logs. Runtime request headers, request bodies, credentials, and internal errors are
+  never logged.
 - Operator debug diagnostics are disabled by default and can be enabled only for one local process start.
   A central closed-schema projection writes structured records to stderr and accepts operational enums,
   counts, and canonical IDs only. Authorization headers, credentials, invitations, recovery material,

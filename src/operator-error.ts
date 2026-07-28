@@ -38,7 +38,9 @@ export type OperatorErrorCode =
   | "RECOVERY_INVALID"
   | "INVITATION_BUSY"
   | "INVITATION_CONTENTION"
-  | "INVITATION_SCHEMA_MISMATCH";
+  | "INVITATION_SCHEMA_MISMATCH"
+  | "CLIENT_NAME_CONFLICT"
+  | "INVITATION_NAME_CONFLICT";
 
 const publicMessages: Readonly<Record<OperatorErrorCode, string>> = Object.freeze({
   START_LAN_DUPLICATE: "Provide --lan only once.",
@@ -81,6 +83,8 @@ const publicMessages: Readonly<Record<OperatorErrorCode, string>> = Object.freez
   INVITATION_BUSY: "Confirm no invitation or offline administration command is running, then remove invitation-mint.lock.",
   INVITATION_CONTENTION: "Retry invitation minting after the current server database write completes.",
   INVITATION_SCHEMA_MISMATCH: "Invitation minting is unavailable while a server with an incompatible schema is running. Stop the server and rerun this command, or use the CLI version that matches the running server.",
+  CLIENT_NAME_CONFLICT: "A client with this name already exists. Choose another name, or revoke the existing client before reusing it.",
+  INVITATION_NAME_CONFLICT: "An unclaimed invitation with this label is outstanding. Choose another name, or wait for it to expire before reusing the label.",
 });
 
 const operatorErrorCodes = new WeakMap<object, OperatorErrorCode>();

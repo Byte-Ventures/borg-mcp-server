@@ -19,7 +19,9 @@ v1 scope.
   return stable non-secret identity. The one owner invitation grants only persisted `create_cube`.
   A client invitation enrolls a client without server capabilities or cube grants. Its
   allowlisted mint-time client name becomes the stored identity; the enrolling peer's
-  self-description remains a claim hint. Client credentials can access only explicitly granted cubes and mint narrower,
+  self-description remains a claim hint. Explicit names are atomically refused at mint while
+  held by an active client or a live unclaimed invitation; revoked client names and expired
+  invitation labels may be reused. Client credentials can access only explicitly granted cubes and mint narrower,
   expiring drone-session credentials for attached seats.
   Product role labels and cube owner metadata never grant authority.
 - A client with only `read` access attaches with an explicit observer posture derived from its current

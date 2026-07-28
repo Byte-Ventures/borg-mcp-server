@@ -2966,6 +2966,22 @@ class SqliteCredentialStore implements CredentialStore {
     if (clientName !== null) validatePresentationName(clientName);
     this.#database.exec("BEGIN IMMEDIATE");
     try {
+      if (input.purpose === "client" && input.clientName !== null) {
+        // Revoked client names and expired invitation labels are intentionally reusable.
+        if (this.#database.prepare(`
+          SELECT 1 FROM clients WHERE name = ? AND revoked_at IS NULL LIMIT 1
+        `).get(clientName) !== undefined) {
+          throw operatorErrors.CLIENT_NAME_CONFLICT;
+        }
+        if (this.#database.prepare(`
+          SELECT 1 FROM enrollment_invitations
+          WHERE purpose = 'client' AND client_name = ?
+            AND consumed_at IS NULL AND revoked_at IS NULL AND expires_at > ?
+          LIMIT 1
+        `).get(clientName, this.#now()) !== undefined) {
+          throw operatorErrors.INVITATION_NAME_CONFLICT;
+        }
+      }
       let ownerEpoch: number | null = null;
       if (input.purpose === "owner") {
         const state = this.#database.prepare(

@@ -46,6 +46,14 @@ describe("main operator errors", () => {
       "Next: check your Node.js and npm installation, then rerun setup.",
     ],
     ["DATABASE_LIMIT_INVALID", "Set BORG_SERVER_MAX_DATABASE_BYTES to a positive integer."],
+    [
+      "CLIENT_NAME_CONFLICT",
+      "A client with this name already exists. Choose another name, or revoke the existing client before reusing it.",
+    ],
+    [
+      "INVITATION_NAME_CONFLICT",
+      "An unclaimed invitation with this label is outstanding. Choose another name, or wait for it to expire before reusing the label.",
+    ],
   ] as const)("prints the actionable typed error: %s", async (code, publicMessage) => {
     const previousExitCode = process.exitCode;
     const stderr = vi.fn();

@@ -284,6 +284,8 @@ invitation with the supplied client name and prints it only in an interactive
 terminal. It never places a credential or invitation in argv or environment, and
 refuses non-interactive output. The invitation can then be exchanged through the
 existing enrollment protocol. It grants no server capability or cube access.
+An explicit name must not already belong to an active client or a live unclaimed
+invitation; choose another name when the mint is refused.
 
 Invitations and rotation output are secrets; do not paste them into issues, logs,
 or chat.

@@ -186,6 +186,35 @@ describe("credential authority", () => {
     }
   });
 
+  it("refuses a label already held by an active client at mint", () => {
+    const recovery = authority.createRecoveryCredential();
+    const invitation = authority.createInvitation(recovery, 60_000, "Alice laptop");
+    if (invitation === null) throw new Error("Recovery authorization failed.");
+    const enrolled = authority.exchangeInvitation(enrollmentRequest(invitation));
+    if (enrolled === null) throw new Error("Test enrollment failed.");
+
+    expect(() => authority.createInvitation(recovery, 60_000, "Alice laptop"))
+      .toThrow(
+        "A client with this name already exists. Choose another name, or revoke the existing client before reusing it.",
+      );
+
+    authority.revokeClient(enrolled.clientId);
+    expect(authority.createInvitation(recovery, 60_000, "Alice laptop")).not.toBeNull();
+  });
+
+  it("refuses a label held by an outstanding invitation at mint", () => {
+    const recovery = authority.createRecoveryCredential();
+    expect(authority.createInvitation(recovery, 1_000, "Alice laptop")).not.toBeNull();
+
+    expect(() => authority.createInvitation(recovery, 60_000, "Alice laptop"))
+      .toThrow(
+        "An unclaimed invitation with this label is outstanding. Choose another name, or wait for it to expire before reusing the label.",
+      );
+
+    now = new Date("2026-07-14T12:00:01.001Z");
+    expect(authority.createInvitation(recovery, 60_000, "Alice laptop")).not.toBeNull();
+  });
+
   it("rejects expired invitations with the same null result", () => {
     const recovery = authority.createRecoveryCredential();
     const invitation = authority.createInvitation(recovery, 1_000);

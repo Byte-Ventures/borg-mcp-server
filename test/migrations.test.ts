@@ -34,7 +34,7 @@ describe("SQLite migrations", () => {
     expect(first.diagnostics()).toEqual({
       journalMode: "wal",
       foreignKeys: true,
-      schemaVersions: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+      schemaVersions: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17],
     });
     expect((await stat(join(directory, "data"))).mode & 0o777).toBe(0o700);
     expect((await stat(databasePath)).mode & 0o777).toBe(0o600);
@@ -44,7 +44,7 @@ describe("SQLite migrations", () => {
 
     const second = await openStore({ path: databasePath });
     expect(second.diagnostics().schemaVersions)
-      .toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
+      .toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]);
     second.close();
     await expect(access(databasePath)).resolves.toBeUndefined();
   });
@@ -250,6 +250,53 @@ describe("SQLite migrations", () => {
       SELECT name FROM sqlite_master
       WHERE type = 'trigger' AND name LIKE 'enrollment_invitations_scope_%'
     `).all()).toEqual([]);
+    database.close();
+  });
+
+  it("adds nullable client names without changing populated invitation rows or dependencies", () => {
+    const database = new DatabaseSync(":memory:");
+    applyMigrations(database, STORE_MIGRATIONS.slice(0, 16));
+    const invitationId = "00000000-0000-4000-8000-000000000027";
+    database.prepare(`
+      INSERT INTO enrollment_invitations (
+        id, lookup_digest, verifier_digest, expires_at, created_at, purpose, owner_epoch
+      ) VALUES (?, ?, ?, ?, ?, 'client', NULL)
+    `).run(
+      invitationId,
+      Buffer.alloc(16, 7),
+      Buffer.alloc(32, 8),
+      "2026-07-16T01:00:00.000Z",
+      "2026-07-16T00:00:00.000Z",
+    );
+    const indexesBefore = database.prepare(`
+      SELECT name, sql FROM sqlite_master
+      WHERE type = 'index' AND tbl_name = 'enrollment_invitations'
+      ORDER BY name
+    `).all();
+
+    applyMigrations(database, STORE_MIGRATIONS);
+
+    expect(database.prepare(`
+      SELECT id, consumed_at, revoked_at, client_name
+      FROM enrollment_invitations WHERE id = ?
+    `).get(invitationId)).toEqual({
+      id: invitationId,
+      consumed_at: null,
+      revoked_at: null,
+      client_name: null,
+    });
+    expect(database.prepare(`
+      SELECT name, sql FROM sqlite_master
+      WHERE type = 'index' AND tbl_name = 'enrollment_invitations'
+      ORDER BY name
+    `).all()).toEqual(indexesBefore);
+    expect(database.prepare(`
+      SELECT name FROM sqlite_master
+      WHERE type = 'view' AND sql LIKE '%enrollment_invitations%'
+    `).all()).toEqual([]);
+    expect(() => database.prepare(`
+      UPDATE enrollment_invitations SET client_name = ? WHERE id = ?
+    `).run("\u001b]8;;unsafe", invitationId)).toThrow();
     database.close();
   });
 

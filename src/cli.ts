@@ -20,7 +20,7 @@ Commands:
   update [--json]  Verify the latest runtime and report any controller step
   stop [--json]  Stop the managed local server
   recover-stale-lock [--json]  Preserve a safely identified stale runtime lock
-  invite   Create a client enrollment invitation in an interactive terminal.
+  invite [<client-name>]  Create a named client enrollment invitation interactively.
            An enrolled client has no cube access until it is granted.
   client-rotate <client-id>  Rotate one client credential offline
   client-revoke <client-id>  Revoke one client and its credentials offline
@@ -316,12 +316,12 @@ export async function runCli(
       return 0;
     }
     case "invite": {
-      if (extraArgs.length !== 0 || service.invite === undefined) return invalidArguments(io);
+      if (extraArgs.length > 1 || service.invite === undefined) return invalidArguments(io);
       if (io.isTTY !== true) {
         io.stderr("Invitation creation requires an interactive terminal.");
         return 1;
       }
-      const invitation = await service.invite();
+      const invitation = await service.invite(extraArgs[0]);
       io.stdout(`Client enrollment invitation (single-use, shown once): ${invitation}\nShare it only with the intended recipient.`);
       return 0;
     }

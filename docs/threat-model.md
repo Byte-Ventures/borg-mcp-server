@@ -17,8 +17,9 @@ v1 scope.
 - The recovery credential creates short-lived purpose-bound enrollment invitations. Clients generate
   and persist their own credential and retry key before exchange; exact credential-proven retries
   return stable non-secret identity. The one owner invitation grants only persisted `create_cube`.
-  A client invitation enrolls a client without server capabilities or cube grants. Client
-  credentials can access only explicitly granted cubes and mint narrower,
+  A client invitation enrolls a client without server capabilities or cube grants. Its
+  allowlisted mint-time client name becomes the stored identity; the enrolling peer's
+  self-description remains a claim hint. Client credentials can access only explicitly granted cubes and mint narrower,
   expiring drone-session credentials for attached seats.
   Product role labels and cube owner metadata never grant authority.
 - A client with only `read` access attaches with an explicit observer posture derived from its current

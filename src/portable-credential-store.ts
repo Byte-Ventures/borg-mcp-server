@@ -69,6 +69,12 @@ export async function rebindPortableServerCredential(
   for (const origin of retained) validateRecord({ ...record, origin });
   if (!retained.has(record.origin)) throw new Error("Portable credential retained origins are invalid.");
   await updatePortableCredentialAccounts(path, lockOptions, (accounts) => {
+    const account = portableCredentialAccount(record.origin, record.trustIdentity);
+    const occupied = accounts[account];
+    if (occupied !== undefined &&
+        !isSameOwnerCredential(decodePortableCredential(occupied, account), record)) {
+      return accounts;
+    }
     const next = { ...accounts };
     let changed = false;
     for (const [account, value] of Object.entries(accounts)) {
@@ -79,7 +85,6 @@ export async function rebindPortableServerCredential(
         changed = true;
       }
     }
-    const account = portableCredentialAccount(record.origin, record.trustIdentity);
     const serialized = JSON.stringify(record);
     if (next[account] !== serialized) {
       next[account] = serialized;

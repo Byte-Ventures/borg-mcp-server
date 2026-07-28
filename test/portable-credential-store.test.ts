@@ -80,6 +80,19 @@ describe("portable parent credential store", () => {
 
     await expect(readPortableServerCredentialForTrustIdentity(target, record.trustIdentity))
       .resolves.toEqual(record);
+    const beforeRebind = await readFile(target);
+    await rebindPortableServerCredential(
+      target,
+      { ...record, origin: reenrolled.origin },
+      [record.origin, reenrolled.origin],
+    );
+    expect(await readFile(target)).toEqual(beforeRebind);
+    const afterRebind = JSON.parse(await readFile(target, "utf8")) as {
+      accounts: Record<string, string>;
+    };
+    expect(afterRebind.accounts[
+      portableCredentialAccount(reenrolled.origin, reenrolled.trustIdentity)
+    ]).toBe(JSON.stringify(reenrolled));
     await expect(readPortableServerCredentialForTrustIdentity(
       target,
       `spki-sha256:${"b".repeat(64)}`,

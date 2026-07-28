@@ -134,7 +134,7 @@ describe("coordination stream setup", () => {
       path: "/api/client/attach",
       principal,
       body: {
-        protocol_version: "5",
+        protocol_version: "6",
         request_id: requestId,
         payload: { cube_id: cubeId, role_id: roleId, session_credential: sessionCredential },
       },
@@ -198,7 +198,7 @@ describe("coordination stream setup", () => {
       path: `/api/cubes/${cubeId}/logs`,
       principal: observerSession,
       body: {
-        protocol_version: "5",
+        protocol_version: "6",
         request_id: "observer-post",
         payload: { message: "denied" },
       },
@@ -210,7 +210,7 @@ describe("coordination stream setup", () => {
       path: `/api/cubes/${cubeId}/roles`,
       principal: observerSession,
       body: {
-        protocol_version: "5",
+        protocol_version: "6",
         request_id: "observer-manage",
         payload: { name: "Denied" },
       },
@@ -245,7 +245,7 @@ describe("coordination stream setup", () => {
       path: `/api/cubes/${cubeId}/logs`,
       principal: participantSession,
       body: {
-        protocol_version: "5",
+        protocol_version: "6",
         request_id: "observer-target",
         payload: {
           message: "must-not-arrive",
@@ -261,7 +261,7 @@ describe("coordination stream setup", () => {
       path: `/api/cubes/${cubeId}/logs`,
       principal: participantSession,
       body: {
-        protocol_version: "5",
+        protocol_version: "6",
         request_id: "participant-target",
         payload: {
           message: "participant-work",
@@ -280,7 +280,7 @@ describe("coordination stream setup", () => {
         path: `/api/cubes/${cubeId}/acks`,
         principal: observerSession,
         body: {
-          protocol_version: "5",
+          protocol_version: "6",
           request_id: `observer-${kind}`,
           payload: { entry_id: directedEntryId, kind },
         },
@@ -293,7 +293,7 @@ describe("coordination stream setup", () => {
       path: `/api/cubes/${cubeId}/logs`,
       principal: participantSession,
       body: {
-        protocol_version: "5",
+        protocol_version: "6",
         request_id: "participant-broadcast",
         payload: { message: "shared-update" },
       },
@@ -309,7 +309,7 @@ describe("coordination stream setup", () => {
       path: `/api/cubes/${cubeId}/logs`,
       principal: observerSession,
       body: {
-        protocol_version: "5",
+        protocol_version: "6",
         request_id: "observer-read",
         payload: { cursor: null },
       },
@@ -416,7 +416,7 @@ describe("coordination stream setup", () => {
       path: "/api/cubes",
       principal,
       body: {
-        protocol_version: "2",
+        protocol_version: "5",
         request_id: "cube-version-old",
         payload: { retry_key: randomUUID(), name: "Must not exist", template: "default" },
       },
@@ -426,7 +426,7 @@ describe("coordination stream setup", () => {
     expect(response).toMatchObject({
       status: 426,
       body: {
-        protocol_version: "5",
+        protocol_version: "6",
         request_id: "cube-version-old",
         error: {
           code: "UNSUPPORTED_PROTOCOL_VERSION",
@@ -459,7 +459,7 @@ describe("coordination stream setup", () => {
       method: "POST",
       path: "/api/cubes",
       principal,
-      body: { protocol_version: "5", request_id: requestId, payload },
+      body: { protocol_version: "6", request_id: requestId, payload },
       signal: new AbortController().signal,
     });
     const retryKey = randomUUID();
@@ -473,7 +473,7 @@ describe("coordination stream setup", () => {
     expect(created).toMatchObject({
       status: 201,
       body: {
-        protocol_version: "5",
+        protocol_version: "6",
         request_id: "cube-create",
         payload: {
           result: "created",
@@ -527,7 +527,7 @@ describe("coordination stream setup", () => {
     expect(conflict).toEqual({
       status: 409,
       body: {
-        protocol_version: "5",
+        protocol_version: "6",
         request_id: "cube-conflict",
         error: {
           code: "INVALID_INPUT",
@@ -588,7 +588,7 @@ describe("coordination stream setup", () => {
       path: `/api/cubes/${cubeId}/logs`,
       principal,
       body: {
-        protocol_version: "5",
+        protocol_version: "6",
         request_id: "capacity-request",
         payload: { message: "secret-capacity-payload" },
       },
@@ -610,7 +610,7 @@ describe("coordination stream setup", () => {
       path: `/api/cubes/${cubeId}/roles`,
       principal,
       body: {
-        protocol_version: "5",
+        protocol_version: "6",
         request_id: "capacity-role-request",
         payload: { name: "secret-capacity-role" },
       },
@@ -667,7 +667,7 @@ describe("coordination stream setup", () => {
       path: `/api/cubes/${targetCubeId}/drones/self/metadata`,
       principal,
       body: {
-        protocol_version: "5",
+        protocol_version: "6",
         request_id: requestId,
         payload: { reported_model: marker },
       },
@@ -759,7 +759,7 @@ describe("coordination stream setup", () => {
       path: `/api/cubes/${cubeId}`,
       principal: manager,
       body: {
-        protocol_version: "5",
+        protocol_version: "6",
         request_id: "cube-context-update",
         payload: { cube_directive: "migrated directive", message_taxonomy: taxonomy },
       },
@@ -777,7 +777,7 @@ describe("coordination stream setup", () => {
       path: `/api/cubes/${cubeId}`,
       principal: clientPrincipal(readerId),
       body: {
-        protocol_version: "5",
+        protocol_version: "6",
         request_id: "cube-context-denied",
         payload: { cube_directive: "denied" },
       },
@@ -793,7 +793,7 @@ describe("coordination stream setup", () => {
       path: `/api/cubes/${cubeId}/logs`,
       principal: manager,
       body: {
-        protocol_version: "5",
+        protocol_version: "6",
         request_id: "taxonomy-route",
         payload: { message: "DONE: migrated" },
       },
@@ -810,7 +810,7 @@ describe("coordination stream setup", () => {
       path: `/api/cubes/${cubeId}/logs`,
       principal: manager,
       body: {
-        protocol_version: "5",
+        protocol_version: "6",
         request_id: "taxonomy-explicit-route",
         payload: { message: "manual completion", class: "completion", to: ["code-reviewer"] },
       },
@@ -828,7 +828,7 @@ describe("coordination stream setup", () => {
       path: `/api/cubes/${cubeId}/taxonomy-patch`,
       principal: manager,
       body: {
-        protocol_version: "5",
+        protocol_version: "6",
         request_id: "taxonomy-replace",
         payload: {
           action: "replace",
@@ -846,7 +846,7 @@ describe("coordination stream setup", () => {
       path: `/api/cubes/${cubeId}/logs`,
       principal: manager,
       body: {
-        protocol_version: "5",
+        protocol_version: "6",
         request_id: "taxonomy-broadcast",
         payload: { message: "DONE: all seats" },
       },
@@ -900,7 +900,7 @@ describe("coordination stream setup", () => {
         path: `/api/cubes/${cubeId}/roles/${malformedRoleId}${suffix}`,
         principal: manager,
         body: {
-          protocol_version: "5",
+          protocol_version: "6",
           request_id: "malformed-role-id",
           payload,
         },
@@ -921,7 +921,7 @@ describe("coordination stream setup", () => {
       can_broadcast: true,
       receives_all_direct: true,
     };
-    const body = { protocol_version: "5", request_id: "role-create-request", payload };
+    const body = { protocol_version: "6", request_id: "role-create-request", payload };
 
     const created = await api.handle({
       method: "POST",
@@ -948,7 +948,7 @@ describe("coordination stream setup", () => {
       path: `/api/cubes/${cubeId}/roles/${createdRoleId}`,
       principal: manager,
       body: {
-        protocol_version: "5",
+        protocol_version: "6",
         request_id: "role-demote-request",
         payload: { is_default: false },
       },
@@ -963,7 +963,7 @@ describe("coordination stream setup", () => {
       path: `/api/cubes/${cubeId}/roles/${createdRoleId}`,
       principal: manager,
       body: {
-        protocol_version: "5",
+        protocol_version: "6",
         request_id: "role-update-request",
         payload: { name: "Release Quality", is_mandatory: false },
       },
@@ -983,7 +983,7 @@ describe("coordination stream setup", () => {
       path: `/api/cubes/${cubeId}/roles/${createdRoleId}/section-patch`,
       principal: manager,
       body: {
-        protocol_version: "5",
+        protocol_version: "6",
         request_id: "role-section-request",
         payload: { action: "replace", heading: "Release workflow", body: "Review exact SHA." },
       },
@@ -1004,7 +1004,7 @@ describe("coordination stream setup", () => {
       path: `/api/cubes/${cubeId}/roles/${createdRoleId}/section-patch`,
       principal: manager,
       body: {
-        protocol_version: "5",
+        protocol_version: "6",
         request_id: "role-section-insert",
         payload: { action: "insert", heading: "Release workflow", body: "Review exact SHA." },
       },
@@ -1041,7 +1041,7 @@ describe("coordination stream setup", () => {
         path: `/api/cubes/${cubeId}/roles/${createdRoleId}/section-patch`,
         principal: manager,
         body: {
-          protocol_version: "5",
+          protocol_version: "6",
           request_id: requestId,
           payload: patchPayload,
         },
@@ -1062,7 +1062,7 @@ describe("coordination stream setup", () => {
       path: `/api/cubes/${cubeId}/roles/${createdRoleId}/section-patch`,
       principal: manager,
       body: {
-        protocol_version: "5",
+        protocol_version: "6",
         request_id: "role-section-invalid-heading",
         payload: { action: "delete", heading: "**Markdown**" },
       },
@@ -1266,7 +1266,7 @@ describe("coordination stream setup", () => {
       path: operation.path(targetCubeId),
       principal,
       body: {
-        protocol_version: "5",
+        protocol_version: "6",
         request_id: `manage-${operation.name.replaceAll(" ", "-")}`,
         payload: operation.payload,
       },
@@ -1348,7 +1348,7 @@ describe("coordination stream setup", () => {
       path: `/api/cubes/${cubeId}/logs`,
       principal,
       body: {
-        protocol_version: "5",
+        protocol_version: "6",
         request_id: "debug-append-request",
         payload: { message, visibility: "direct", recipientDroneIds: [droneId] },
       },
@@ -1360,7 +1360,7 @@ describe("coordination stream setup", () => {
       path: `/api/cubes/${cubeId}/logs`,
       principal,
       body: {
-        protocol_version: "5",
+        protocol_version: "6",
         request_id: "debug-replay-request",
         payload: { cursor: null },
       },
@@ -1371,7 +1371,7 @@ describe("coordination stream setup", () => {
       path: `/api/cubes/${cubeId}/acks`,
       principal,
       body: {
-        protocol_version: "5",
+        protocol_version: "6",
         request_id: "debug-ack-request",
         payload: { entry_id: entryId, kind: "ack" },
       },
@@ -1382,7 +1382,7 @@ describe("coordination stream setup", () => {
       path: `/api/cubes/${cubeId}/decisions`,
       principal,
       body: {
-        protocol_version: "5",
+        protocol_version: "6",
         request_id: "debug-decision-request",
         payload: { topic: "secret-topic", decision: decisionText, rationale: "secret-rationale" },
       },

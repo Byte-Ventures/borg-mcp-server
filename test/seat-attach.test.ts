@@ -422,7 +422,7 @@ describe("client seat attach", () => {
       path: "/api/client/attach",
       principal: authenticatedPrincipal(clientA.credential),
       body: {
-        protocol_version: "2",
+        protocol_version: "5",
         request_id: "attach-version-old",
         payload: {
           cube_id: ids.cubeA,
@@ -435,7 +435,7 @@ describe("client seat attach", () => {
     expect(response).toMatchObject({
       status: 426,
       body: {
-        protocol_version: "5",
+        protocol_version: "6",
         request_id: "attach-version-old",
         error: {
           code: "UNSUPPORTED_PROTOCOL_VERSION",
@@ -521,7 +521,7 @@ function authenticatedPrincipal(credential: string) {
 }
 
 function envelope(requestId: string, payload: Record<string, unknown>) {
-  return { protocol_version: "5", request_id: requestId, payload };
+  return { protocol_version: "6", request_id: requestId, payload };
 }
 
 function count(table: "drones" | "drone_sessions" | "drone_session_credentials"): number {

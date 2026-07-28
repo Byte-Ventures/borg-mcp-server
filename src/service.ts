@@ -29,6 +29,7 @@ import {
 import { resolveBindOptions } from "./network-policy.js";
 import {
   readPortableServerCredentialForTrustIdentity,
+  rebindPortableServerCredential,
   writePortableServerCredential,
 } from "./portable-credential-store.js";
 import {
@@ -1120,6 +1121,7 @@ export async function bindPortableOwnerCredentialPort(
     throw new Error("Server listener port is invalid.");
   }
   const origin = `https://${config.bind_host === "::1" ? "[::1]" : config.bind_host}:${port}`;
+  const legacyOrigin = `https://${config.bind_host === "::1" ? "[::1]" : config.bind_host}:7091`;
   const trustIdentity = `spki-sha256:${config.ca_spki_sha256}`;
   let record;
   try {
@@ -1131,8 +1133,11 @@ export async function bindPortableOwnerCredentialPort(
     }
     throw error;
   }
-  if (record.origin === origin) return;
-  await writePortableServerCredential(credentialRoot, { ...record, origin });
+  await rebindPortableServerCredential(
+    credentialRoot,
+    { ...record, origin },
+    [legacyOrigin, origin],
+  );
 }
 
 function runtimeOriginPort(origin: string): number {

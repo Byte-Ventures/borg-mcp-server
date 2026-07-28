@@ -174,6 +174,22 @@ describe("node server service", () => {
         }
         await expect(createOfflineCredentialService(directory, credentials).invite())
           .resolves.toMatch(/^[A-Za-z0-9_-]{43}$/u);
+        await bindPortableOwnerCredentialPort(directory, credentials, 7_392);
+        await expect(readPortableServerCredential(
+          credentials,
+          `https://${displayHost}:7391`,
+          `spki-sha256:${installation.caFingerprint}`,
+        )).rejects.toThrow("Local owner credential is unavailable.");
+        for (const port of [7_392, 7_091]) {
+          await expect(readPortableServerCredential(
+            credentials,
+            `https://${displayHost}:${port}`,
+            `spki-sha256:${installation.caFingerprint}`,
+          )).resolves.toMatchObject({
+            clientId: installation.ownerAccess.clientId,
+            serverCapabilities: ["create_cube"],
+          });
+        }
       }
     } finally {
       await rm(parent, { recursive: true, force: true });

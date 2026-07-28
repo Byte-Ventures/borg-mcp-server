@@ -221,93 +221,39 @@ describe("credential authority", () => {
     expect(authority.createInvitation(recovery, 60_000)).toMatch(/^[A-Za-z0-9_-]{43}$/u);
   });
 
-  it("atomically enrolls a client with exactly the invitation cube grant and retries stably", () => {
+  it("does not turn legacy invitation scope into a cube grant", () => {
     const cubeId = randomUUID();
-    runtime.maintenance.createCube({ id: cubeId, name: "release-tooling", directive: "" });
+    runtime.maintenance.createCube({ id: cubeId, name: "legacy-scope", directive: "" });
     const recovery = authority.createRecoveryCredential();
-    const minted = authority.createCubeInvitation(
-      recovery,
-      { kind: "name", value: "release-tooling" },
-      "write",
-      60_000,
-    );
-    if (minted === null) throw new Error("Scoped invitation creation failed.");
-    expect(minted).toEqual({
-      invitation: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/u),
-      cubeId,
-      cubeName: "release-tooling",
-      access: "write",
-    });
-    const request = enrollmentRequest(minted.invitation);
+    const invitation = authority.createInvitation(recovery, 60_000);
+    if (invitation === null) throw new Error("Invitation creation failed.");
 
+    const database = new DatabaseSync(join(directory, "borg.db"));
+    const columns = database.prepare("PRAGMA table_info(enrollment_invitations)").all()
+      .map((row) => (row as { name: string }).name);
+    if (!columns.includes("cube_id")) {
+      database.exec(`
+        ALTER TABLE enrollment_invitations ADD COLUMN cube_id TEXT;
+        ALTER TABLE enrollment_invitations ADD COLUMN access TEXT;
+      `);
+    }
+    database.prepare(`
+      UPDATE enrollment_invitations SET cube_id = ?, access = 'write'
+      WHERE id = (SELECT id FROM enrollment_invitations ORDER BY created_at DESC, id DESC LIMIT 1)
+    `).run(cubeId);
+    database.close();
+
+    const request = enrollmentRequest(invitation);
     const enrolled = authority.exchangeInvitation(request);
-
     expect(enrolled).toMatchObject({ purpose: "client", serverCapabilities: [] });
-    expect(authority.exchangeInvitation(request)).toEqual(enrolled);
     expect(runtime.maintenance.observeAuthorityState()).toMatchObject({
       enrolled_clients: 1,
       enrollment_claims: 1,
-      grants: 1,
-      server_capabilities: 0,
-    });
-    const principal = authority.authenticate(`Bearer ${request.clientCredential}`);
-    if (principal === null) throw new Error("Scoped client authentication failed.");
-    expect(runtime.forPrincipal(principal).listCubes()).toEqual([
-      expect.objectContaining({ id: cubeId, name: "release-tooling" }),
-    ]);
-    expect(() => runtime.forPrincipal(principal).appendActivity(cubeId, "ready")).not.toThrow();
-    expect(() => runtime.forPrincipal(principal).updateDirective(cubeId, "admin"))
-      .toThrow("Access denied.");
-  });
-
-  it("fails a scoped claim without enrollment mutation when its cube was deleted after mint", () => {
-    const cubeId = randomUUID();
-    runtime.maintenance.createCube({ id: cubeId, name: "temporary", directive: "" });
-    const recovery = authority.createRecoveryCredential();
-    const minted = authority.createCubeInvitation(
-      recovery,
-      { kind: "id", value: cubeId },
-      "write",
-      60_000,
-    );
-    if (minted === null) throw new Error("Scoped invitation creation failed.");
-    const deletion = new DatabaseSync(join(directory, "borg.db"));
-    deletion.prepare("DELETE FROM cubes WHERE id = ?").run(cubeId);
-    deletion.close();
-
-    expect(authority.exchangeInvitation(enrollmentRequest(minted.invitation))).toBeNull();
-    expect(runtime.maintenance.observeAuthorityState()).toMatchObject({
-      enrolled_clients: 0,
-      enrollment_claims: 0,
       grants: 0,
     });
-  });
-
-  it.each(["read", "manage"] as const)("preserves explicit %s invitation access", (access) => {
-    const cubeId = randomUUID();
-    runtime.maintenance.createCube({ id: cubeId, name: `scope-${access}`, directive: "" });
-    const recovery = authority.createRecoveryCredential();
-    const minted = authority.createCubeInvitation(
-      recovery,
-      { kind: "id", value: cubeId },
-      access,
-      60_000,
-    );
-    if (minted === null) throw new Error("Scoped invitation creation failed.");
-    const request = enrollmentRequest(minted.invitation);
-    const enrolled = authority.exchangeInvitation(request);
-    if (enrolled === null) throw new Error("Scoped enrollment failed.");
     const principal = authority.authenticate(`Bearer ${request.clientCredential}`);
-    if (principal === null) throw new Error("Scoped authentication failed.");
-    const scoped = runtime.forPrincipal(principal);
-
-    expect(scoped.listCubes()).toHaveLength(1);
-    if (access === "read") {
-      expect(() => scoped.appendActivity(cubeId, "denied"))
-        .toThrow("The requested resource was not found.");
-    } else {
-      expect(() => scoped.updateDirective(cubeId, "managed")).not.toThrow();
-    }
+    if (principal === null) throw new Error("Client authentication failed.");
+    expect(runtime.forPrincipal(principal).listCubes()).toEqual([]);
   });
 
   it("purpose-binds owner authority and revokes the prior owner epoch on replacement", () => {

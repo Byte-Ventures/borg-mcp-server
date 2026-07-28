@@ -14,7 +14,6 @@ import {
 import {
   CredentialAuthority,
   CredentialDigester,
-  type CubeInvitationResult,
 } from "./credentials.js";
 import { CoordinationApi } from "./coordination-api.js";
 import { createDebugLogger, disabledDebugLogger } from "./debug-log.js";
@@ -32,18 +31,12 @@ import {
   rebindPortableServerCredential,
   writePortableServerCredential,
 } from "./portable-credential-store.js";
-import {
-  invitationCubeAmbiguousError,
-  operatorErrors,
-  type OperatorErrorCode,
-} from "./operator-error.js";
+import { operatorErrors, type OperatorErrorCode } from "./operator-error.js";
 import { parseStartOptions } from "./start-options.js";
 import {
   DEFAULT_STORAGE_LIMITS,
   openStore,
   preparePrivateDataDirectory,
-  InvitationCubeAmbiguousError,
-  InvitationCubeNotFoundError,
   type LivenessStore,
   type StorageLimits,
 } from "./store.js";
@@ -97,11 +90,7 @@ export interface ServerService {
   readonly revokeClient?: (clientId: string) => Promise<void>;
   readonly grantClient?: (clientId: string, cubeId: string, access: CubeAccess) => Promise<void>;
   readonly ungrantClient?: (clientId: string, cubeId: string) => Promise<void>;
-  readonly createClientInvitation?: (
-    recoveryCredential: string,
-    cubeSelector?: string,
-    access?: CubeAccess,
-  ) => Promise<string | CubeInvitationResult>;
+  readonly createClientInvitation?: (recoveryCredential: string) => Promise<string>;
   readonly replaceOwnerInvitation?: (recoveryCredential: string) => Promise<string>;
   readonly invite?: () => Promise<string>;
 }
@@ -1246,22 +1235,10 @@ export function createOfflineCredentialService(
         throw operatorErrors.GRANT_NOT_FOUND;
       }
     }),
-    createClientInvitation: (recoveryCredential, cubeSelector, access) => withInvitationAuthority((authority) => {
-      if (cubeSelector === undefined && access !== undefined) {
-        throw operatorErrors.INVITATION_CUBE_SELECTOR_INVALID;
-      }
-      const selector = cubeSelector === undefined ? undefined : parseInvitationCubeSelector(cubeSelector);
-      const invitation = selector === undefined
-        ? authority.createInvitation(recoveryCredential, 15 * 60_000)
-        : authority.createCubeInvitation(recoveryCredential, selector, access ?? "write", 15 * 60_000);
+    createClientInvitation: (recoveryCredential) => withInvitationAuthority((authority) => {
+      const invitation = authority.createInvitation(recoveryCredential, 15 * 60_000);
       if (invitation === null) throw operatorErrors.RECOVERY_INVALID;
       return invitation;
-    }).catch((error: unknown) => {
-      if (error instanceof InvitationCubeNotFoundError) throw operatorErrors.INVITATION_CUBE_NOT_FOUND;
-      if (error instanceof InvitationCubeAmbiguousError) {
-        throw invitationCubeAmbiguousError(error.candidateIds);
-      }
-      throw error;
     }),
     replaceOwnerInvitation: (recoveryCredential) => withInvitationAuthority((authority) => {
       const invitation = authority.replaceOwnerInvitation(recoveryCredential, 15 * 60_000);
@@ -1286,19 +1263,7 @@ export function createOfflineCredentialService(
   };
 }
 
-const canonicalCubeUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const canonicalRuntimeLockNonce = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
-const uuidLikeCubeSelector = /^[0-9a-fA-F-]{32,36}$/u;
-
-function parseInvitationCubeSelector(
-  value: string,
-): { readonly kind: "id" | "name"; readonly value: string } {
-  if (canonicalCubeUuid.test(value)) return { kind: "id", value };
-  if (value.length === 0 || value.length > 120 || uuidLikeCubeSelector.test(value)) {
-    throw operatorErrors.INVITATION_CUBE_SELECTOR_INVALID;
-  }
-  return { kind: "name", value };
-}
 
 interface RuntimeLock {
   readonly release: () => Promise<void>;

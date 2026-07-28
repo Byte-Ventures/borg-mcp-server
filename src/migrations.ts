@@ -533,6 +533,16 @@ export const STORE_MIGRATIONS: readonly Migration[] = Object.freeze([
         ON repository_associations (cube_id);
     `,
   },
+  {
+    version: 16,
+    name: "remove_scoped_invitations",
+    sql: `
+      DROP TRIGGER enrollment_invitations_scope_insert;
+      DROP TRIGGER enrollment_invitations_scope_update;
+      ALTER TABLE enrollment_invitations DROP COLUMN cube_id;
+      ALTER TABLE enrollment_invitations DROP COLUMN access;
+    `,
+  },
 ]);
 
 interface AppliedMigrationRow {

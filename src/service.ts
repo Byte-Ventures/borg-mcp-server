@@ -27,9 +27,9 @@ import {
   type RunningServer,
 } from "./https-server.js";
 import { resolveBindOptions } from "./network-policy.js";
-import { DEFAULT_PORT } from "./network-policy.js";
 import {
-  readPortableServerCredential,
+  readPortableServerCredentialForTrustIdentity,
+  rebindPortableServerCredential,
   writePortableServerCredential,
 } from "./portable-credential-store.js";
 import {
@@ -217,6 +217,7 @@ interface ServiceDependencies {
   readonly readPrivateKey: (path: string) => Promise<Buffer>;
   readonly startServer: (options: HttpsServerOptions) => Promise<RunningServer>;
   readonly onStarted: (origin: string, identity: RuntimeBuildIdentity) => void;
+  readonly bindOwnerCredential?: (port: number) => Promise<void>;
   readonly startForegroundDashboard?: (input: {
     readonly source: DashboardSnapshotSource;
     readonly server: DashboardServerIdentity;
@@ -446,6 +447,8 @@ export function createNodeServerService(dependencies: ServiceDependencies): Serv
       let failure: unknown;
       try {
         throwIfShutdown(shutdown?.signal);
+        await dependencies.bindOwnerCredential?.(runtimeOriginPort(running.origin));
+        throwIfShutdown(shutdown?.signal);
         await runtimeLock?.updateOrigin?.(running.origin);
         dependencies.onStarted(running.origin, runtimeIdentity);
         if (authRuntime !== undefined) {
@@ -627,6 +630,8 @@ const startOnlyService = createNodeServerService({
     return handlers;
   },
   waitForShutdown,
+  bindOwnerCredential: (port) =>
+    bindPortableOwnerCredentialPort(dataDirectory, credentialFile, port),
   debugOutput: (line) => console.error(line),
 });
 export const nodeServerService: ServerService = {
@@ -1098,6 +1103,51 @@ export async function setupNodeServerInstallation(
   }
 }
 
+export async function bindPortableOwnerCredentialPort(
+  setupDataDirectory: string,
+  credentialRoot: string,
+  port: number,
+): Promise<void> {
+  const config = JSON.parse((await readFile(join(setupDataDirectory, "server.json"))).toString("utf8")) as {
+    bind_host?: unknown;
+    ca_spki_sha256?: unknown;
+  };
+  if (typeof config.bind_host !== "string" ||
+      typeof config.ca_spki_sha256 !== "string" ||
+      !/^[0-9a-f]{64}$/u.test(config.ca_spki_sha256)) {
+    throw new Error("Server identity is invalid.");
+  }
+  if (!Number.isSafeInteger(port) || port < 1 || port > 65_535) {
+    throw new Error("Server listener port is invalid.");
+  }
+  const origin = `https://${config.bind_host === "::1" ? "[::1]" : config.bind_host}:${port}`;
+  const legacyOrigin = `https://${config.bind_host === "::1" ? "[::1]" : config.bind_host}:7091`;
+  const trustIdentity = `spki-sha256:${config.ca_spki_sha256}`;
+  let record;
+  try {
+    record = await readPortableServerCredentialForTrustIdentity(credentialRoot, trustIdentity);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT" ||
+        (error instanceof Error && error.message === "Local owner credential is unavailable.")) {
+      return;
+    }
+    throw error;
+  }
+  await rebindPortableServerCredential(
+    credentialRoot,
+    { ...record, origin },
+    [legacyOrigin, origin],
+  );
+}
+
+function runtimeOriginPort(origin: string): number {
+  const port = Number(new URL(origin).port);
+  if (!Number.isSafeInteger(port) || port < 1 || port > 65_535) {
+    throw new Error("Runtime endpoint is invalid.");
+  }
+  return port;
+}
+
 async function inspectManagedInstallation(directory: string): Promise<string[]> {
   const existing: string[] = [];
   for (const name of managedInstallationFiles) {
@@ -1227,9 +1277,8 @@ export function createOfflineCredentialService(
       if (typeof config.bind_host !== "string" || typeof config.ca_spki_sha256 !== "string") {
         throw new Error("Server identity is invalid.");
       }
-      const origin = `https://${config.bind_host === "::1" ? "[::1]" : config.bind_host}:${DEFAULT_PORT}`;
       const trustIdentity = `spki-sha256:${config.ca_spki_sha256}`;
-      const record = await readPortableServerCredential(credentialRoot, origin, trustIdentity);
+      const record = await readPortableServerCredentialForTrustIdentity(credentialRoot, trustIdentity);
       const invitation = authority.createInvitationForOwnerCredential(record.credential, 15 * 60_000);
       if (invitation === null) throw new Error("Local owner credential is invalid.");
       return invitation;

@@ -13,6 +13,15 @@ export interface PortableServerCredential {
   readonly serverCapabilities: readonly ["create_cube"];
 }
 
+interface PortableCredentialRecord {
+  readonly version: 2;
+  readonly origin: string;
+  readonly trustIdentity: string;
+  readonly credential: string;
+  readonly clientId: string | null;
+  readonly serverCapabilities: readonly [] | readonly ["create_cube"];
+}
+
 interface PortableCredentialDocument {
   readonly version: 1;
   readonly accounts: Readonly<Record<string, string>>;
@@ -40,17 +49,111 @@ export async function writePortableServerCredential(
   lockOptions: PortableCredentialLockOptions = {},
 ): Promise<void> {
   validateRecord(record);
+  await updatePortableCredentialAccounts(path, lockOptions, (accounts) => {
+    const account = portableCredentialAccount(record.origin, record.trustIdentity);
+    return { ...accounts, [account]: JSON.stringify(record) };
+  });
+}
+
+export async function rebindPortableServerCredential(
+  path: string,
+  record: PortableServerCredential,
+  retainedOrigins: readonly string[],
+  lockOptions: PortableCredentialLockOptions = {},
+): Promise<void> {
+  validateRecord(record);
+  if (retainedOrigins.length < 1 || retainedOrigins.length > 2) {
+    throw new Error("Portable credential retained origins are invalid.");
+  }
+  const retained = new Set(retainedOrigins);
+  for (const origin of retained) validateRecord({ ...record, origin });
+  if (!retained.has(record.origin)) throw new Error("Portable credential retained origins are invalid.");
+  await updatePortableCredentialAccounts(path, lockOptions, (accounts) => {
+    const account = portableCredentialAccount(record.origin, record.trustIdentity);
+    const occupied = accounts[account];
+    if (occupied !== undefined &&
+        !isSameOwnerCredential(decodePortableCredential(occupied, account), record)) {
+      return accounts;
+    }
+    const next = { ...accounts };
+    let changed = false;
+    for (const [account, value] of Object.entries(accounts)) {
+      if (!account.startsWith("borg-server-credential:")) continue;
+      const parsed = decodePortableCredential(value, account);
+      if (isSameOwnerCredential(parsed, record) && !retained.has(parsed.origin)) {
+        delete next[account];
+        changed = true;
+      }
+    }
+    const serialized = JSON.stringify(record);
+    if (next[account] !== serialized) {
+      next[account] = serialized;
+      changed = true;
+    }
+    return changed ? next : accounts;
+  });
+}
+
+export async function readPortableServerCredential(
+  path: string,
+  origin: string,
+  trustIdentity: string,
+): Promise<PortableServerCredential> {
+  const target = await credentialPath(path);
+  await assertPrivateFile(target);
+  const document = parseDocument(await readPrivateBytes(target));
+  const value = document.accounts[portableCredentialAccount(origin, trustIdentity)];
+  if (value === undefined) throw new Error("Local owner credential is unavailable.");
+  const parsed: unknown = JSON.parse(value);
+  validateRecord(parsed);
+  if (parsed.origin !== origin || parsed.trustIdentity !== trustIdentity) {
+    throw new Error("Local owner credential binding is invalid.");
+  }
+  return Object.freeze(parsed);
+}
+
+export async function readPortableServerCredentialForTrustIdentity(
+  path: string,
+  trustIdentity: string,
+): Promise<PortableServerCredential> {
+  if (!trustPattern.test(trustIdentity)) throw new Error("Portable credential trust identity is invalid.");
+  const target = await credentialPath(path);
+  await assertPrivateFile(target);
+  const document = parseDocument(await readPrivateBytes(target));
+  const matches: PortableServerCredential[] = [];
+  for (const [account, value] of Object.entries(document.accounts)) {
+    if (!account.startsWith("borg-server-credential:")) continue;
+    const parsed = decodePortableCredential(value, account);
+    if (parsed.trustIdentity === trustIdentity && isOwnerCredential(parsed)) matches.push(parsed);
+  }
+  if (matches.length === 0) throw new Error("Local owner credential is unavailable.");
+  const first = matches[0]!;
+  if (matches.some((candidate) =>
+    candidate.credential !== first.credential ||
+    candidate.clientId !== first.clientId ||
+    candidate.serverCapabilities[0] !== first.serverCapabilities[0])) {
+    throw new Error("Local owner credential binding is ambiguous.");
+  }
+  return Object.freeze(first);
+}
+
+async function updatePortableCredentialAccounts(
+  path: string,
+  lockOptions: PortableCredentialLockOptions,
+  update: (
+    accounts: Readonly<Record<string, string>>,
+  ) => Readonly<Record<string, string>>,
+): Promise<void> {
   const target = await credentialPath(path);
   const canonicalRoot = dirname(target);
   const lock = `${target}.lock`;
   await withCredentialLock(lock, lockOptions, async () => {
     const original = await readPrivateBytesIfPresent(target);
     const document = parseDocument(original);
-    const account = portableCredentialAccount(record.origin, record.trustIdentity);
-    const next: PortableCredentialDocument = {
-      version: 1,
-      accounts: { ...document.accounts, [account]: JSON.stringify(record) },
-    };
+    const accounts = update(document.accounts);
+    if (accounts === document.accounts) return;
+    if (Object.keys(accounts).length > 1_024) throw new Error("Portable credential store is full.");
+    const next: PortableCredentialDocument = { version: 1, accounts };
     const temporary = join(canonicalRoot, `.credentials.json.${process.pid}.${Date.now()}.tmp`);
     const handle = await open(temporary, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, 0o600);
     try {
@@ -74,24 +177,6 @@ export async function writePortableServerCredential(
     try { await directory.sync(); } finally { await directory.close(); }
     await assertPrivateFile(target);
   });
-}
-
-export async function readPortableServerCredential(
-  path: string,
-  origin: string,
-  trustIdentity: string,
-): Promise<PortableServerCredential> {
-  const target = await credentialPath(path);
-  await assertPrivateFile(target);
-  const document = parseDocument(await readPrivateBytes(target));
-  const value = document.accounts[portableCredentialAccount(origin, trustIdentity)];
-  if (value === undefined) throw new Error("Local owner credential is unavailable.");
-  const parsed: unknown = JSON.parse(value);
-  validateRecord(parsed);
-  if (parsed.origin !== origin || parsed.trustIdentity !== trustIdentity) {
-    throw new Error("Local owner credential binding is invalid.");
-  }
-  return Object.freeze(parsed);
 }
 
 async function credentialPath(path: string): Promise<string> {
@@ -276,17 +361,75 @@ function parseDocument(bytes: Buffer | null): PortableCredentialDocument {
 }
 
 function validateRecord(value: unknown): asserts value is PortableServerCredential {
+  validatePortableCredentialRecord(value);
+  if (!isOwnerCredential(value)) throw new Error("Portable credential is invalid.");
+}
+
+function validatePortableCredentialRecord(
+  value: unknown,
+): asserts value is PortableCredentialRecord {
   if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error("Portable credential is invalid.");
   const record = value as Record<string, unknown>;
   if (Object.keys(record).sort().join(",") !== "clientId,credential,origin,serverCapabilities,trustIdentity,version" ||
       record["version"] !== 2 || typeof record["origin"] !== "string" ||
-      !isCanonicalHttpsIpOrigin(record["origin"]) ||
-      typeof record["trustIdentity"] !== "string" || !trustPattern.test(record["trustIdentity"]) ||
+      !isCanonicalHttpsOrigin(record["origin"]) ||
+      typeof record["trustIdentity"] !== "string" ||
+      record["trustIdentity"].length < 1 || record["trustIdentity"].length > 512 ||
+      /[\u0000-\u001f\u007f]/u.test(record["trustIdentity"]) ||
       typeof record["credential"] !== "string" || !credentialPattern.test(record["credential"]) ||
-      typeof record["clientId"] !== "string" || !uuidPattern.test(record["clientId"]) ||
-      !Array.isArray(record["serverCapabilities"]) || record["serverCapabilities"].length !== 1 ||
-      record["serverCapabilities"][0] !== "create_cube") {
+      (record["clientId"] !== null &&
+        (typeof record["clientId"] !== "string" || !uuidPattern.test(record["clientId"]))) ||
+      !Array.isArray(record["serverCapabilities"]) || record["serverCapabilities"].length > 1 ||
+      (record["serverCapabilities"].length === 1 &&
+        record["serverCapabilities"][0] !== "create_cube")) {
     throw new Error("Portable credential is invalid.");
+  }
+}
+
+function decodePortableCredential(
+  value: string,
+  account: string,
+): PortableCredentialRecord {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    throw new Error("Portable credential store is invalid.");
+  }
+  validatePortableCredentialRecord(parsed);
+  if (portableCredentialAccount(parsed.origin, parsed.trustIdentity) !== account) {
+    throw new Error("Portable credential binding is invalid.");
+  }
+  return parsed;
+}
+
+function isOwnerCredential(
+  record: PortableCredentialRecord,
+): record is PortableServerCredential {
+  return isCanonicalHttpsIpOrigin(record.origin) &&
+    trustPattern.test(record.trustIdentity) &&
+    typeof record.clientId === "string" &&
+    record.serverCapabilities.length === 1 &&
+    record.serverCapabilities[0] === "create_cube";
+}
+
+function isSameOwnerCredential(
+  candidate: PortableCredentialRecord,
+  owner: PortableServerCredential,
+): boolean {
+  return isOwnerCredential(candidate) &&
+    candidate.trustIdentity === owner.trustIdentity &&
+    candidate.credential === owner.credential &&
+    candidate.clientId === owner.clientId;
+}
+
+function isCanonicalHttpsOrigin(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && url.username === "" && url.password === "" &&
+      url.pathname === "/" && url.search === "" && url.hash === "" && url.origin === value;
+  } catch {
+    return false;
   }
 }
 
@@ -297,9 +440,8 @@ function isCanonicalHttpsIpOrigin(value: string): boolean {
       ? url.hostname.slice(1, -1)
       : url.hostname;
     const port = Number(url.port);
-    return url.protocol === "https:" && isIP(host) !== 0 && Number.isInteger(port) && port >= 1 &&
-      port <= 65_535 && url.username === "" && url.password === "" && url.pathname === "/" &&
-      url.search === "" && url.hash === "" && url.origin === value;
+    return isCanonicalHttpsOrigin(value) && isIP(host) !== 0 && Number.isInteger(port) &&
+      port >= 1 && port <= 65_535;
   } catch {
     return false;
   }

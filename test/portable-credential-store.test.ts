@@ -6,6 +6,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   portableCredentialAccount,
   readPortableServerCredential,
+  readPortableServerCredentialForTrustIdentity,
+  rebindPortableServerCredential,
   writePortableServerCredential,
   type PortableServerCredential,
 } from "../src/portable-credential-store.js";
@@ -46,6 +48,97 @@ describe("portable parent credential store", () => {
     expect(updated.accounts["unrelated-account"]).toBe("opaque unrelated value");
     await expect(readPortableServerCredential(target, record.origin, record.trustIdentity))
       .resolves.toEqual(second);
+  });
+
+  it("finds one owner credential by trust identity without guessing an origin", async () => {
+    const parent = await temporaryDirectory();
+    const target = join(parent, "credentials");
+    await writePortableServerCredential(target, record);
+    await writePortableServerCredential(target, { ...record, origin: "https://127.0.0.1:7391" });
+    const document = JSON.parse(await readFile(target, "utf8")) as {
+      version: number;
+      accounts: Record<string, string>;
+    };
+    const remote = {
+      version: 2,
+      origin: "https://server.example.com",
+      trustIdentity: "sha256:remote",
+      credential: "r".repeat(43),
+      clientId: "22222222-2222-4222-8222-222222222222",
+      serverCapabilities: [],
+    } as const;
+    const reenrolled = {
+      ...remote,
+      origin: "https://127.0.0.1:7391",
+      trustIdentity: record.trustIdentity,
+    };
+    document.accounts[portableCredentialAccount(remote.origin, remote.trustIdentity)] =
+      JSON.stringify(remote);
+    document.accounts[portableCredentialAccount(reenrolled.origin, reenrolled.trustIdentity)] =
+      JSON.stringify(reenrolled);
+    await writeFile(target, `${JSON.stringify(document)}\n`, { mode: 0o600 });
+
+    await expect(readPortableServerCredentialForTrustIdentity(target, record.trustIdentity))
+      .resolves.toEqual(record);
+    const beforeRebind = await readFile(target);
+    await rebindPortableServerCredential(
+      target,
+      { ...record, origin: reenrolled.origin },
+      [record.origin, reenrolled.origin],
+    );
+    expect(await readFile(target)).toEqual(beforeRebind);
+    const afterRebind = JSON.parse(await readFile(target, "utf8")) as {
+      accounts: Record<string, string>;
+    };
+    expect(afterRebind.accounts[
+      portableCredentialAccount(reenrolled.origin, reenrolled.trustIdentity)
+    ]).toBe(JSON.stringify(reenrolled));
+    await expect(readPortableServerCredentialForTrustIdentity(
+      target,
+      `spki-sha256:${"b".repeat(64)}`,
+    )).rejects.toThrow("Local owner credential is unavailable.");
+  });
+
+  it("bounds owner port aliases before writing a full shared store", async () => {
+    const parent = await temporaryDirectory();
+    const target = join(parent, "credentials");
+    const accounts: Record<string, string> = {};
+    accounts[portableCredentialAccount(record.origin, record.trustIdentity)] = JSON.stringify(record);
+    for (let offset = 0; offset < 1_022; offset += 1) {
+      const alias = { ...record, origin: `https://127.0.0.1:${8_000 + offset}` };
+      accounts[portableCredentialAccount(alias.origin, alias.trustIdentity)] = JSON.stringify(alias);
+    }
+    const ordinary = {
+      version: 2,
+      origin: "https://server.example.com",
+      trustIdentity: "sha256:remote",
+      credential: "r".repeat(43),
+      clientId: "22222222-2222-4222-8222-222222222222",
+      serverCapabilities: [],
+    } as const;
+    const ordinaryAccount = portableCredentialAccount(ordinary.origin, ordinary.trustIdentity);
+    accounts[ordinaryAccount] = JSON.stringify(ordinary);
+    expect(Object.keys(accounts)).toHaveLength(1_024);
+    await writeFile(target, `${JSON.stringify({ version: 1, accounts })}\n`, { mode: 0o600 });
+    const before = await readFile(target);
+
+    await expect(writePortableServerCredential(
+      target,
+      { ...record, origin: "https://127.0.0.1:7391" },
+    )).rejects.toThrow("Portable credential store is full.");
+    expect(await readFile(target)).toEqual(before);
+
+    const current = { ...record, origin: "https://127.0.0.1:7391" };
+    await rebindPortableServerCredential(target, current, [record.origin, current.origin]);
+    const bounded = JSON.parse(await readFile(target, "utf8")) as {
+      accounts: Record<string, string>;
+    };
+    expect(Object.keys(bounded.accounts)).toHaveLength(3);
+    expect(bounded.accounts[portableCredentialAccount(record.origin, record.trustIdentity)])
+      .toBe(JSON.stringify(record));
+    expect(bounded.accounts[portableCredentialAccount(current.origin, current.trustIdentity)])
+      .toBe(JSON.stringify(current));
+    expect(bounded.accounts[ordinaryAccount]).toBe(JSON.stringify(ordinary));
   });
 
   it("rejects symlinked and non-private roots or files", async () => {

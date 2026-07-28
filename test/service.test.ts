@@ -16,6 +16,7 @@ import {
   assertLanCaKeyOffline,
   acquireRuntimeLock,
   acquireInvitationMintLock,
+  bindPortableOwnerCredentialPort,
   createNodeDashboardTerminal,
   createNodeServerService,
   createOfflineCredentialService,
@@ -31,7 +32,10 @@ import {
   setupNodeServerInstallation,
 } from "../src/service.js";
 import { createRuntimeBuildIdentity } from "../src/runtime-identity.js";
-import { writePortableServerCredential } from "../src/portable-credential-store.js";
+import {
+  readPortableServerCredential,
+  writePortableServerCredential,
+} from "../src/portable-credential-store.js";
 import type { ForegroundDashboard } from "../src/dashboard.js";
 import { createManagedServiceDefinition } from "../src/managed-service.js";
 
@@ -136,6 +140,62 @@ describe("node server service", () => {
     }
   });
 
+  it("binds the portable owner credential to the actual listening origin", async () => {
+    const parent = await realpath(await mkdtemp(join(tmpdir(), "borg-owner-origin-")));
+    try {
+      for (const bindHost of ["127.0.0.1", "::1"]) {
+        const suffix = bindHost === "::1" ? "ipv6" : "ipv4";
+        const directory = join(parent, `server-${suffix}`);
+        const credentials = join(parent, `credentials-${suffix}`);
+        const installation = await bootstrapServer(
+          directory,
+          bindHost,
+          () => new Date(),
+          (record) => writePortableServerCredential(credentials, record),
+        );
+        const displayHost = bindHost === "::1" ? "[::1]" : bindHost;
+
+        await expect(bindPortableOwnerCredentialPort(
+          directory,
+          join(parent, `missing-credentials-${suffix}`),
+          7_391,
+        )).resolves.toBeUndefined();
+        await bindPortableOwnerCredentialPort(directory, credentials, 7_391);
+
+        for (const port of [7_391, 7_091]) {
+          await expect(readPortableServerCredential(
+            credentials,
+            `https://${displayHost}:${port}`,
+            `spki-sha256:${installation.caFingerprint}`,
+          )).resolves.toMatchObject({
+            clientId: installation.ownerAccess.clientId,
+            serverCapabilities: ["create_cube"],
+          });
+        }
+        await expect(createOfflineCredentialService(directory, credentials).invite())
+          .resolves.toMatch(/^[A-Za-z0-9_-]{43}$/u);
+        await bindPortableOwnerCredentialPort(directory, credentials, 7_392);
+        await expect(readPortableServerCredential(
+          credentials,
+          `https://${displayHost}:7391`,
+          `spki-sha256:${installation.caFingerprint}`,
+        )).rejects.toThrow("Local owner credential is unavailable.");
+        for (const port of [7_392, 7_091]) {
+          await expect(readPortableServerCredential(
+            credentials,
+            `https://${displayHost}:${port}`,
+            `spki-sha256:${installation.caFingerprint}`,
+          )).resolves.toMatchObject({
+            clientId: installation.ownerAccess.clientId,
+            serverCapabilities: ["create_cube"],
+          });
+        }
+      }
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
   it("preserves portable owner access across idempotent setup", async () => {
     const parent = await realpath(await mkdtemp(join(tmpdir(), "borg-owner-preserve-")));
     try {
@@ -167,6 +227,7 @@ describe("node server service", () => {
     try {
       await bootstrapServer(directory);
       const stop = vi.fn();
+      const bindOwnerCredential = vi.fn().mockResolvedValue(undefined);
       const startLivenessScheduler = vi.fn((_liveness: LivenessStore) => ({ stop }));
       const service = createNodeServerService({
         environment: { BORG_SERVER_DATA_DIR: directory },
@@ -178,12 +239,14 @@ describe("node server service", () => {
           close: vi.fn().mockResolvedValue(undefined),
         }),
         onStarted: vi.fn(),
+        bindOwnerCredential,
         waitForShutdown: vi.fn().mockResolvedValue(undefined),
         startLivenessScheduler,
       });
 
       await service.start([]);
 
+      expect(bindOwnerCredential).toHaveBeenCalledWith(7_091);
       expect(startLivenessScheduler).toHaveBeenCalledOnce();
       expect(startLivenessScheduler.mock.calls[0]![0]).toMatchObject({ scan: expect.any(Function) });
       expect(stop).toHaveBeenCalledOnce();

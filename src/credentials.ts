@@ -13,7 +13,6 @@ import {
 import type {
   CredentialStore,
   DigestPair,
-  InvitationCubeScope,
   ScopedStore,
   SeatAttachRecord,
 } from "./store.js";
@@ -36,10 +35,6 @@ export interface EnrollmentResponse {
   readonly purpose: "owner" | "client";
   readonly clientId: string;
   readonly serverCapabilities: readonly [] | readonly ["create_cube"];
-}
-
-export interface CubeInvitationResult extends InvitationCubeScope {
-  readonly invitation: string;
 }
 
 export type SeatAttachResponse = SeatAttachRecord;
@@ -179,18 +174,6 @@ export class CredentialAuthority {
     return this.#createInvitation("client", ttlMs);
   }
 
-  createCubeInvitation(
-    recoveryCredential: string,
-    cubeSelector: { readonly kind: "id" | "name"; readonly value: string },
-    access: "read" | "write" | "manage",
-    ttlMs: number,
-  ): CubeInvitationResult | null {
-    const digest = safeDigest(this.#digester, recoveryCredential, "recovery");
-    const stored = this.#store.findRecoveryCredential(digest.lookup);
-    if (!this.#digester.verify(recoveryCredential, "recovery", stored?.verifier)) return null;
-    return this.#createInvitation("client", ttlMs, { cubeSelector, access });
-  }
-
   replaceOwnerInvitation(recoveryCredential: string, ttlMs: number): string | null {
     const digest = safeDigest(this.#digester, recoveryCredential, "recovery");
     const stored = this.#store.findRecoveryCredential(digest.lookup);
@@ -198,41 +181,23 @@ export class CredentialAuthority {
     return this.#createInvitation("owner", ttlMs);
   }
 
-  #createInvitation(purpose: "owner" | "client", ttlMs: number): string;
-  #createInvitation(
-    purpose: "client",
-    ttlMs: number,
-    scoped: {
-      readonly cubeSelector: { readonly kind: "id" | "name"; readonly value: string };
-      readonly access: "read" | "write" | "manage";
-    },
-  ): CubeInvitationResult;
-  #createInvitation(
-    purpose: "owner" | "client",
-    ttlMs: number,
-    scoped?: {
-      readonly cubeSelector: { readonly kind: "id" | "name"; readonly value: string };
-      readonly access: "read" | "write" | "manage";
-    },
-  ): string | CubeInvitationResult {
+  #createInvitation(purpose: "owner" | "client", ttlMs: number): string {
     if (!Number.isSafeInteger(ttlMs) || ttlMs < 1_000 || ttlMs > 86_400_000) {
       throw new Error("Invitation TTL must be an integer from 1000 to 86400000 milliseconds.");
     }
     const secret = generateSecret();
-    const scope = this.#store.createInvitation({
+    this.#store.createInvitation({
       id: randomUUID(),
       digest: this.#digester.digest(secret, "invitation"),
       expiresAt: new Date(this.#clock().getTime() + ttlMs).toISOString(),
       purpose,
-      ...(scoped === undefined ? {} : scoped),
     });
     this.#debugLogger.emit({
       event: "credential",
       action: "invitation_created",
       purpose,
-      ...(scope === null ? {} : { cubeId: scope.cubeId }),
     });
-    return scope === null ? secret : { invitation: secret, ...scope };
+    return secret;
   }
 
   exchangeInvitation(request: EnrollmentRequest): EnrollmentResponse | null {

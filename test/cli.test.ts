@@ -558,12 +558,7 @@ describe("runCli", () => {
 
   it("keeps scoped invitation operations unreachable", async () => {
     const cubeId = "00000000-0000-4000-8000-000000000042";
-    const createClientInvitation = vi.fn().mockResolvedValue({
-      invitation: "i".repeat(43),
-      cubeId,
-      cubeName: "release-tooling",
-      access: "write",
-    });
+    const createClientInvitation = vi.fn().mockResolvedValue("i".repeat(43));
     const io = {
       ...createIo(),
       readSecret: vi.fn().mockResolvedValue("r".repeat(43)),

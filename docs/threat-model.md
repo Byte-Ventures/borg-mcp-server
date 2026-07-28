@@ -78,7 +78,7 @@ v1 scope.
   an offline database change.
 - Client and pre-claim owner invitation minting remain local CLI operations with no network route, but
   may execute beside a live server because they invalidate no live authority. Client minting adds one
-  purpose-bound digest row, optionally with a cube ID and access snapshot; owner replacement revokes prior
+  purpose-bound digest row; owner replacement revokes prior
   unclaimed owner invitations and advances the owner epoch. Cube selection and invitation insertion share
   one immediate transaction: full canonical IDs resolve directly, names require one exact case-sensitive
   match, and unknown or duplicate selectors create no invitation. A live-path connection never migrates:

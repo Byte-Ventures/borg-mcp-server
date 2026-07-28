@@ -34,7 +34,7 @@ describe("SQLite migrations", () => {
     expect(first.diagnostics()).toEqual({
       journalMode: "wal",
       foreignKeys: true,
-      schemaVersions: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+      schemaVersions: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
     });
     expect((await stat(join(directory, "data"))).mode & 0o777).toBe(0o700);
     expect((await stat(databasePath)).mode & 0o777).toBe(0o600);
@@ -44,7 +44,7 @@ describe("SQLite migrations", () => {
 
     const second = await openStore({ path: databasePath });
     expect(second.diagnostics().schemaVersions)
-      .toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
+      .toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
     second.close();
     await expect(access(databasePath)).resolves.toBeUndefined();
   });
@@ -175,7 +175,7 @@ describe("SQLite migrations", () => {
       "2026-07-16T00:00:00.000Z",
     );
 
-    applyMigrations(database, STORE_MIGRATIONS);
+    applyMigrations(database, STORE_MIGRATIONS.slice(0, 8));
 
     expect(database.prepare("SELECT cube_id, access FROM enrollment_invitations").get())
       .toEqual({ cube_id: null, access: null });
@@ -191,6 +191,65 @@ describe("SQLite migrations", () => {
       "00000000-0000-4000-8000-000000000022",
       "00000000-0000-4000-8000-000000000021",
     )).toThrow("invalid invitation cube scope");
+    database.close();
+  });
+
+  it("removes invitation scope from populated historical rows without changing their lifecycle state", () => {
+    const database = new DatabaseSync(":memory:");
+    applyMigrations(database, STORE_MIGRATIONS.slice(0, 15));
+    const insert = database.prepare(`
+      INSERT INTO enrollment_invitations (
+        id, lookup_digest, verifier_digest, expires_at, created_at, consumed_at,
+        purpose, owner_epoch, revoked_at, cube_id, access
+      ) VALUES (?, ?, ?, ?, ?, ?, 'client', NULL, ?, ?, ?)
+    `);
+    insert.run(
+      "00000000-0000-4000-8000-000000000023",
+      Buffer.alloc(16, 3),
+      Buffer.alloc(32, 4),
+      "2026-07-16T01:00:00.000Z",
+      "2026-07-16T00:00:00.000Z",
+      null,
+      null,
+      "00000000-0000-4000-8000-000000000024",
+      "write",
+    );
+    insert.run(
+      "00000000-0000-4000-8000-000000000025",
+      Buffer.alloc(16, 5),
+      Buffer.alloc(32, 6),
+      "2026-07-16T01:00:00.000Z",
+      "2026-07-16T00:00:00.000Z",
+      "2026-07-16T00:30:00.000Z",
+      "2026-07-16T00:31:00.000Z",
+      "00000000-0000-4000-8000-000000000026",
+      "manage",
+    );
+
+    applyMigrations(database, STORE_MIGRATIONS);
+
+    const columns = database.prepare("PRAGMA table_info(enrollment_invitations)").all()
+      .map((row) => (row as { name: string }).name);
+    expect(columns).not.toContain("cube_id");
+    expect(columns).not.toContain("access");
+    expect(database.prepare(`
+      SELECT id, consumed_at, revoked_at FROM enrollment_invitations ORDER BY id
+    `).all()).toEqual([
+      {
+        id: "00000000-0000-4000-8000-000000000023",
+        consumed_at: null,
+        revoked_at: null,
+      },
+      {
+        id: "00000000-0000-4000-8000-000000000025",
+        consumed_at: "2026-07-16T00:30:00.000Z",
+        revoked_at: "2026-07-16T00:31:00.000Z",
+      },
+    ]);
+    expect(database.prepare(`
+      SELECT name FROM sqlite_master
+      WHERE type = 'trigger' AND name LIKE 'enrollment_invitations_scope_%'
+    `).all()).toEqual([]);
     database.close();
   });
 

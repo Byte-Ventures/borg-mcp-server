@@ -303,31 +303,16 @@ export async function runCli(
       }
 
       if (io.readSecret === undefined) return invalidArguments(io);
-      const scoped = command === "client-invite" ? parseClientInviteArguments(extraArgs) : null;
-      if ((command === "owner-invite" && extraArgs.length !== 0) || scoped === undefined) {
-        return invalidArguments(io);
-      }
+      if (extraArgs.length !== 0) return invalidArguments(io);
       const operation = command === "client-invite"
         ? service.createClientInvitation
         : service.replaceOwnerInvitation;
       if (operation === undefined) return invalidArguments(io);
       const recovery = await io.readSecret("Recovery credential (hidden input): ");
-      const result = command === "client-invite"
-        ? scoped?.cubeSelector === undefined
-          ? await operation(recovery)
-          : await operation(recovery, scoped.cubeSelector, scoped.access)
-        : await operation(recovery);
-      if (typeof result === "string") {
-        io.stdout(command === "client-invite"
-          ? `Client enrollment invitation (single-use, shown once): ${result}`
-          : `Owner enrollment invitation (single-use, shown once): ${result}`);
-      } else {
-        io.stdout(
-          `Cube: ${JSON.stringify(result.cubeName)} (${result.cubeId})\n` +
-          `Grant: ${grantSummary(result.access)}\n` +
-          `Client enrollment invitation (single-use, shown once): ${result.invitation}`,
-        );
-      }
+      const result = await operation(recovery);
+      io.stdout(command === "client-invite"
+        ? `Client enrollment invitation (single-use, shown once): ${result}`
+        : `Owner enrollment invitation (single-use, shown once): ${result}`);
       return 0;
     }
     case "invite": {
@@ -500,25 +485,6 @@ function renderNextAction(
   return action.kind === "update-runtime"
     ? "borg-mcp-server update"
     : `npm install --global borgmcp-server@${action.version}`;
-}
-
-function parseClientInviteArguments(
-  args: readonly string[],
-): { readonly cubeSelector?: string; readonly access?: "read" | "write" | "manage" } | undefined {
-  if (args.length === 0) return {};
-  const cubeSelector = args[0];
-  if (cubeSelector === undefined || cubeSelector.startsWith("--")) return undefined;
-  if (args.length === 1) return { cubeSelector };
-  if (args.length !== 3 || args[1] !== "--access") return undefined;
-  const access = args[2];
-  if (access !== "read" && access !== "write" && access !== "manage") return undefined;
-  return { cubeSelector, access };
-}
-
-function grantSummary(access: "read" | "write" | "manage"): string {
-  if (access === "read") return "read (observe - discover, attach as observer, and read)";
-  if (access === "manage") return "manage (administer - coordinate plus cube administration)";
-  return "write (coordinate - attach, read, post, acknowledge, and receive directed wakes)";
 }
 
 function invalidArguments(io: CliIo): 1 {

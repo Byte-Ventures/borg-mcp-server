@@ -38,10 +38,7 @@ export type OperatorErrorCode =
   | "RECOVERY_INVALID"
   | "INVITATION_BUSY"
   | "INVITATION_CONTENTION"
-  | "INVITATION_SCHEMA_MISMATCH"
-  | "INVITATION_CUBE_NOT_FOUND"
-  | "INVITATION_CUBE_SELECTOR_INVALID"
-  | "INVITATION_CUBE_AMBIGUOUS";
+  | "INVITATION_SCHEMA_MISMATCH";
 
 const publicMessages: Readonly<Record<OperatorErrorCode, string>> = Object.freeze({
   START_LAN_DUPLICATE: "Provide --lan only once.",
@@ -84,9 +81,6 @@ const publicMessages: Readonly<Record<OperatorErrorCode, string>> = Object.freez
   INVITATION_BUSY: "Confirm no invitation or offline administration command is running, then remove invitation-mint.lock.",
   INVITATION_CONTENTION: "Retry invitation minting after the current server database write completes.",
   INVITATION_SCHEMA_MISMATCH: "Invitation minting is unavailable while a server with an incompatible schema is running. Stop the server and rerun this command, or use the CLI version that matches the running server.",
-  INVITATION_CUBE_NOT_FOUND: "Provide an existing cube name or full cube ID.",
-  INVITATION_CUBE_SELECTOR_INVALID: "Provide a full canonical cube UUID or an exact case-sensitive cube name.",
-  INVITATION_CUBE_AMBIGUOUS: "Cube name is ambiguous. Rerun with the full cube ID.",
 });
 
 const operatorErrorCodes = new WeakMap<object, OperatorErrorCode>();
@@ -132,16 +126,4 @@ export function operatorPublicMessage(error: unknown): string | null {
   if (code === undefined) return null;
   if (Object.getPrototypeOf(error) !== OperatorError.prototype || !Object.isFrozen(error)) return null;
   return operatorErrorMessages.get(error) ?? publicMessages[code];
-}
-
-export function invitationCubeAmbiguousError(candidateIds: readonly string[]): Error {
-  if (candidateIds.length < 2 || candidateIds.some((id) =>
-    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(id))) {
-    throw new Error("Ambiguous cube candidates must contain canonical cube IDs.");
-  }
-  return new OperatorError(
-    operatorErrorCapability,
-    "INVITATION_CUBE_AMBIGUOUS",
-    `Cube name is ambiguous. Rerun with the full cube ID. Candidate cube IDs: ${candidateIds.join(", ")}`,
-  );
 }

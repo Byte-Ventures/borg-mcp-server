@@ -180,7 +180,7 @@ describe("offline operator flow", () => {
         database.close();
       }
       expect(failure).toMatchObject({
-        message: "Client name is ambiguous. Use one of these handles: " +
+        message: "Client name is ambiguous. Use one of these selectors: " +
           "aaaaaaaa1, aaaaaaaa2.",
       });
     },
@@ -245,10 +245,63 @@ describe("offline operator flow", () => {
       }
       expect(failure).toMatchObject({
         message: "Client selector matches more than one client. " +
-          "Use one of these handles: aaaaaaaa, bbbbbbbb.",
+          (namespace === "handle"
+            ? "Use one of these selectors: aaaaaaaa, " +
+              "id:bbbbbbbb-2000-4000-8000-000000000002."
+            : "Use one of these selectors: aaaaaaaa, bbbbbbbb."),
       });
     },
   );
+
+  it("offers selectors that each resolve the intended cross-namespace candidate", async () => {
+    const parent = await realpath(await mkdtemp(join(
+      tmpdir(),
+      "borg-operator-actionable-collision-",
+    )));
+    directories.push(parent);
+    const dataDirectory = join(parent, "server");
+    const bootstrap = await bootstrapServer(dataDirectory);
+    const firstId = "aaaaaaaa-1000-4000-8000-000000000001";
+    const secondId = "bbbbbbbb-2000-4000-8000-000000000002";
+    const cubeId = "00000000-0000-4000-8000-000000000054";
+    const runtime = await openStore({ path: bootstrap.paths.database });
+    runtime.maintenance.createClient({ id: firstId, name: "bbbbbbbb" });
+    runtime.maintenance.createClient({ id: secondId, name: "Target client" });
+    runtime.maintenance.createCube({ id: cubeId, name: "Actionable selectors", directive: "" });
+    runtime.close();
+
+    const service = createOfflineCredentialService(dataDirectory);
+    let failure: unknown;
+    try {
+      await service.grantClient("bbbbbbbb", cubeId, "read");
+    } catch (error) {
+      failure = error;
+    }
+    const message = failure instanceof Error ? failure.message : "";
+    const offered = message
+      .replace("Client selector matches more than one client. Use one of these selectors: ", "")
+      .replace(/\.$/u, "")
+      .split(", ");
+    await service.grantClient(offered[0]!, cubeId, "read");
+    await service.grantClient(offered[1]!, cubeId, "manage");
+
+    const database = new DatabaseSync(bootstrap.paths.database);
+    try {
+      expect(database.prepare(`
+        SELECT client_id, access FROM client_cube_grants
+        WHERE cube_id = ? ORDER BY client_id
+      `).all(cubeId)).toEqual([
+        { client_id: firstId, access: "read" },
+        { client_id: secondId, access: "manage" },
+      ]);
+    } finally {
+      database.close();
+    }
+    expect(offered).toEqual([
+      "aaaaaaaa",
+      "id:bbbbbbbb-2000-4000-8000-000000000002",
+    ]);
+  });
 
   it("uses the current deterministic handle to grant exactly one duplicate-named client", async () => {
     const parent = await realpath(await mkdtemp(join(tmpdir(), "borg-operator-handle-client-")));
@@ -319,11 +372,11 @@ describe("offline operator flow", () => {
       "Client exists but is revoked.",
     );
     await expect(service.grantClient("aaaaaaaa", cubeId, "write")).rejects.toThrow(
-      "Client handle now matches more than one client. Use one of these handles: " +
+      "Client handle now matches more than one client. Use one of these selectors: " +
       "aaaaaaaa1, aaaaaaaa2.",
     );
     await expect(service.grantClient("Local client", cubeId, "write")).rejects.toThrow(
-      "Client name is ambiguous. Use one of these handles: aaaaaaaa1, aaaaaaaa2.",
+      "Client name is ambiguous. Use one of these selectors: aaaaaaaa1, aaaaaaaa2.",
     );
     await expect(service.grantClient("missing client", cubeId, "write")).rejects.toThrow(
       "Provide an existing client name, handle, or ID.",

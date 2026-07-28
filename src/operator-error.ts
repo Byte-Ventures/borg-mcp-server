@@ -1,3 +1,5 @@
+import { assertCanonicalUuid } from "./principal.js";
+
 export type OperatorErrorCode =
   | "START_LAN_DUPLICATE"
   | "START_HOST_DUPLICATE"
@@ -132,22 +134,34 @@ export const operatorErrors: Readonly<Record<OperatorErrorCode, Error>> = Object
 
 export function ambiguousClientSelector(
   kind: "name" | "handle" | "selector",
-  handles: readonly string[],
+  selectors: readonly string[],
 ): Error {
-  if (handles.length < 2 ||
-      handles.some((handle) => !/^[0-9a-f]{8,32}$/u.test(handle)) ||
-      new Set(handles).size !== handles.length) {
-    throw new Error("Ambiguous client handles are invalid.");
+  if (selectors.length < 2 ||
+      selectors.some((selector) => !isSafeClientDisambiguator(selector)) ||
+      new Set(selectors).size !== selectors.length) {
+    throw new Error("Ambiguous client selectors are invalid.");
   }
+  const choices = [...selectors].sort().join(", ");
   return new OperatorError(
     operatorErrorCapability,
     "CLIENT_SELECTOR_AMBIGUOUS",
     kind === "name"
-      ? `Client name is ambiguous. Use one of these handles: ${[...handles].sort().join(", ")}.`
+      ? `Client name is ambiguous. Use one of these selectors: ${choices}.`
       : kind === "handle"
-        ? `Client handle now matches more than one client. Use one of these handles: ${[...handles].sort().join(", ")}.`
-        : `Client selector matches more than one client. Use one of these handles: ${[...handles].sort().join(", ")}.`,
+        ? `Client handle now matches more than one client. Use one of these selectors: ${choices}.`
+        : `Client selector matches more than one client. Use one of these selectors: ${choices}.`,
   );
+}
+
+function isSafeClientDisambiguator(selector: string): boolean {
+  if (/^[0-9a-f]{8,32}$/u.test(selector)) return true;
+  if (!selector.startsWith("id:")) return false;
+  try {
+    assertCanonicalUuid(selector.slice(3), "Client id");
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function operatorPublicMessage(error: unknown): string | null {

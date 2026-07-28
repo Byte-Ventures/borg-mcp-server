@@ -291,10 +291,12 @@ invitation; choose another name when the mint is refused.
 `client-list` shows each client name beside its current ID-derived handle, its
 active or revoked state, and its cube grants. Names created before named
 invitations may be duplicated. A duplicated name is refused as a selector; use
-one of the listed handles. If a later client collides with an earlier short
+one of the offered selectors. If a later client collides with an earlier short
 handle, both handles lengthen and the stale shorter form fails closed with the
 current candidates. A name that also identifies another client's handle or UUID
-is likewise refused with both candidates. Existing client UUIDs remain accepted.
+is likewise refused with a working selector for each candidate. An explicit
+`id:<client-uuid>` selector disambiguates a client whose handle is shadowed by a
+name. Existing client UUIDs remain accepted.
 
 Invitations and rotation output are secrets; do not paste them into issues, logs,
 or chat.

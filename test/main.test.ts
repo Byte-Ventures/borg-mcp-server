@@ -69,18 +69,23 @@ describe("main operator errors", () => {
     }
   });
 
-  it("prints validated ambiguity handles from a dynamic operator error", async () => {
+  it("prints validated ambiguity selectors from a dynamic operator error", async () => {
     const error = operatorErrorModule.ambiguousClientSelector("name", [
       "aaaaaaaa2",
-      "aaaaaaaa1",
+      "id:aaaaaaaa-1000-4000-8000-000000000001",
     ]);
     expect(operatorErrorModule.operatorPublicMessage(error)).toBe(
-      "Client name is ambiguous. Use one of these handles: aaaaaaaa1, aaaaaaaa2.",
+      "Client name is ambiguous. Use one of these selectors: " +
+      "aaaaaaaa2, id:aaaaaaaa-1000-4000-8000-000000000001.",
     );
     expect(() => operatorErrorModule.ambiguousClientSelector("handle", [
       "aaaaaaaa1",
       "attacker\u001b[31m",
-    ])).toThrow("Ambiguous client handles are invalid.");
+    ])).toThrow("Ambiguous client selectors are invalid.");
+    expect(() => operatorErrorModule.ambiguousClientSelector("selector", [
+      "aaaaaaaa1",
+      "id:not-a-canonical-uuid",
+    ])).toThrow("Ambiguous client selectors are invalid.");
   });
 
   it("prints actionable output through the real CLI and service option parser", async () => {

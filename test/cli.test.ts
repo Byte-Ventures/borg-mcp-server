@@ -518,6 +518,39 @@ describe("runCli", () => {
     expect(listen).not.toHaveBeenCalled();
   });
 
+  it("lists sanitized client identities, states, handles, and grants", async () => {
+    const listClients = vi.fn().mockResolvedValue([
+      {
+        name: "Alice\u001b]8;;https://attacker.invalid\u0007 laptop",
+        handle: "aaaaaaaa1",
+        state: "active" as const,
+        grants: [{
+          cubeId: "00000000-0000-4000-8000-000000000051",
+          cubeName: "Release\u001b[31m cube",
+          access: "manage" as const,
+        }],
+      },
+      {
+        name: "Local client",
+        handle: "aaaaaaaa2",
+        state: "revoked" as const,
+        grants: [],
+      },
+    ]);
+    const service: ServerService = { start: vi.fn(), listClients };
+    const io = createIo();
+
+    expect(await runCli(["client-list"], service, io)).toBe(0);
+    expect(io.stdout).toHaveBeenCalledWith([
+      "Alice laptop [aaaaaaaa1] active",
+      "  manage  Release cube (00000000-0000-4000-8000-000000000051)",
+      "Local client [aaaaaaaa2] revoked",
+      "  No cube grants.",
+    ].join("\n"));
+    expect(JSON.stringify(io.stdout.mock.calls)).not.toContain("\u001b");
+    expect(listClients).toHaveBeenCalledTimes(1);
+  });
+
   it("fails unsupported recovery invitation commands without prompting", async () => {
     const recovery = "r".repeat(43);
     const readSecret = vi.fn().mockResolvedValue(recovery);

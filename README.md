@@ -273,10 +273,11 @@ before running those commands.
 
 ```sh
 borg-mcp-server client-rotate <client-id>
-borg-mcp-server client-revoke <client-id>
+borg-mcp-server client-list
+borg-mcp-server client-revoke <client-name-or-handle>
 borg-mcp-server invite "Alice laptop"
-borg-mcp-server client-grant <client-id> <cube-id> <read|write|manage>
-borg-mcp-server client-ungrant <client-id> <cube-id>
+borg-mcp-server client-grant <client-name-or-handle> <cube-id> <read|write|manage>
+borg-mcp-server client-ungrant <client-name-or-handle> <cube-id>
 ```
 
 `invite` uses the locally stored owner credential to create one single-use client
@@ -286,6 +287,14 @@ refuses non-interactive output. The invitation can then be exchanged through the
 existing enrollment protocol. It grants no server capability or cube access.
 An explicit name must not already belong to an active client or a live unclaimed
 invitation; choose another name when the mint is refused.
+
+`client-list` shows each client name beside its current ID-derived handle, its
+active or revoked state, and its cube grants. Names created before named
+invitations may be duplicated. A duplicated name is refused as a selector; use
+one of the listed handles. If a later client collides with an earlier short
+handle, both handles lengthen and the stale shorter form fails closed with the
+current candidates. A name that also identifies another client's handle or UUID
+is likewise refused with both candidates. Existing client UUIDs remain accepted.
 
 Invitations and rotation output are secrets; do not paste them into issues, logs,
 or chat.

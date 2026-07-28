@@ -18,7 +18,7 @@ import {
 import { getTemplate, type TemplateRole } from "borgmcp-shared/templates";
 
 import { applyMigrations, assertMigrationsCurrent } from "./migrations.js";
-import { operatorErrors } from "./operator-error.js";
+import { ambiguousClientSelector, operatorErrors } from "./operator-error.js";
 import {
   assertCanonicalUuid,
   assertServerDerivedPrincipal,
@@ -39,6 +39,17 @@ import type { DashboardSnapshotSource } from "./dashboard.js";
 import { createDashboardSnapshotReader } from "./dashboard-source.js";
 
 export type CubeAccess = "read" | "write" | "manage";
+
+export interface ClientAdministrationRecord {
+  readonly name: string;
+  readonly handle: string;
+  readonly state: "active" | "revoked";
+  readonly grants: readonly {
+    readonly cubeId: string;
+    readonly cubeName: string;
+    readonly access: CubeAccess;
+  }[];
+}
 
 export interface CubeRecord {
   readonly id: string;
@@ -275,6 +286,7 @@ export interface CredentialStore {
     readonly credentialDigest: DigestPair;
   }) => boolean;
   readonly revokeClientCredentials: (clientId: string) => void;
+  readonly revokeClientCredentialsBySelector: (selector: string) => string;
 }
 
 export interface ScopedStore {
@@ -424,6 +436,7 @@ export interface SeatAttachRecord {
 }
 
 export interface MaintenanceStore {
+  readonly listClients: () => ClientAdministrationRecord[];
   readonly createClient: (input: { readonly id: string; readonly name: string }) => void;
   readonly createCube: (input: {
     readonly id: string;
@@ -436,7 +449,13 @@ export interface MaintenanceStore {
     readonly cubeId: string;
     readonly access: CubeAccess;
   }) => void;
+  readonly grantClientCubeBySelector: (input: {
+    readonly selector: string;
+    readonly cubeId: string;
+    readonly access: CubeAccess;
+  }) => void;
   readonly removeClientCubeGrant: (clientId: string, cubeId: string) => boolean;
+  readonly removeClientCubeGrantBySelector: (selector: string, cubeId: string) => boolean;
   readonly prepareRepositoryCube: (input: {
     readonly cubeId: string;
     readonly name: string;
@@ -2420,6 +2439,10 @@ class SqliteMaintenanceStore implements MaintenanceStore {
     this.#clock = clock;
   }
 
+  listClients(): ClientAdministrationRecord[] {
+    return listClientAdministrationRecords(this.#database);
+  }
+
   createClient(input: { readonly id: string; readonly name: string }): void {
     assertCanonicalUuid(input.id, "Client id");
     validateName(input.name);
@@ -2462,20 +2485,51 @@ class SqliteMaintenanceStore implements MaintenanceStore {
     if (!(["read", "write", "manage"] as const).includes(input.access)) {
       throw new Error("Unknown cube access grant.");
     }
-    this.#database.prepare(`
-      INSERT INTO client_cube_grants (client_id, cube_id, access, created_at)
-      VALUES (?, ?, ?, ?)
-      ON CONFLICT (client_id, cube_id) DO UPDATE SET access = excluded.access
-    `).run(input.clientId, input.cubeId, input.access, this.#now());
+    this.#grantClientCube(input.clientId, input.cubeId, input.access);
+  }
+
+  grantClientCubeBySelector(input: {
+    readonly selector: string;
+    readonly cubeId: string;
+    readonly access: CubeAccess;
+  }): void {
+    validateClientSelector(input.selector);
+    assertCanonicalUuid(input.cubeId, "Cube id");
+    if (!(["read", "write", "manage"] as const).includes(input.access)) {
+      throw new Error("Unknown cube access grant.");
+    }
+    this.#database.exec("BEGIN IMMEDIATE");
+    try {
+      const client = resolveClientSelector(this.#database, input.selector);
+      if (client.revokedAt !== null) throw operatorErrors.CLIENT_REVOKED;
+      this.#grantClientCube(client.id, input.cubeId, input.access);
+      this.#database.exec("COMMIT");
+    } catch (error) {
+      try { this.#database.exec("ROLLBACK"); } catch { /* Preserve the original failure. */ }
+      throw error;
+    }
   }
 
   removeClientCubeGrant(clientId: string, cubeId: string): boolean {
     assertCanonicalUuid(clientId, "Client id");
     assertCanonicalUuid(cubeId, "Cube id");
-    const result = this.#database.prepare(
-      "DELETE FROM client_cube_grants WHERE client_id = ? AND cube_id = ?",
-    ).run(clientId, cubeId);
-    return result.changes === 1;
+    return this.#removeClientCubeGrant(clientId, cubeId);
+  }
+
+  removeClientCubeGrantBySelector(selector: string, cubeId: string): boolean {
+    validateClientSelector(selector);
+    assertCanonicalUuid(cubeId, "Cube id");
+    this.#database.exec("BEGIN IMMEDIATE");
+    try {
+      const client = resolveClientSelector(this.#database, selector);
+      if (client.revokedAt !== null) throw operatorErrors.CLIENT_REVOKED;
+      const removed = this.#removeClientCubeGrant(client.id, cubeId);
+      this.#database.exec("COMMIT");
+      return removed;
+    } catch (error) {
+      try { this.#database.exec("ROLLBACK"); } catch { /* Preserve the original failure. */ }
+      throw error;
+    }
   }
 
   grantCreateCubeCapability(clientId: string): void {
@@ -2720,6 +2774,21 @@ class SqliteMaintenanceStore implements MaintenanceStore {
     this.#database.prepare(
       "UPDATE clients SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL",
     ).run(this.#now(), clientId);
+  }
+
+  #grantClientCube(clientId: string, cubeId: string, access: CubeAccess): void {
+    this.#database.prepare(`
+      INSERT INTO client_cube_grants (client_id, cube_id, access, created_at)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT (client_id, cube_id) DO UPDATE SET access = excluded.access
+    `).run(clientId, cubeId, access, this.#now());
+  }
+
+  #removeClientCubeGrant(clientId: string, cubeId: string): boolean {
+    const result = this.#database.prepare(
+      "DELETE FROM client_cube_grants WHERE client_id = ? AND cube_id = ?",
+    ).run(clientId, cubeId);
+    return result.changes === 1;
   }
 
   revokeDroneSession(sessionId: string): void {
@@ -3298,14 +3367,7 @@ class SqliteCredentialStore implements CredentialStore {
     assertCanonicalUuid(clientId, "Client id");
     this.#database.exec("BEGIN IMMEDIATE");
     try {
-      const now = this.#now();
-      this.#database.prepare(
-        "UPDATE clients SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL",
-      ).run(now, clientId);
-      this.#database.prepare(`
-        UPDATE client_credentials SET revoked_at = ?
-        WHERE client_id = ? AND revoked_at IS NULL
-      `).run(now, clientId);
+      this.#revokeClientCredentials(clientId);
       this.#database.exec("COMMIT");
     } catch (error) {
       try {
@@ -3315,6 +3377,32 @@ class SqliteCredentialStore implements CredentialStore {
       }
       throw error;
     }
+  }
+
+  revokeClientCredentialsBySelector(selector: string): string {
+    validateClientSelector(selector);
+    this.#database.exec("BEGIN IMMEDIATE");
+    try {
+      const client = resolveClientSelector(this.#database, selector);
+      if (client.revokedAt !== null) throw operatorErrors.CLIENT_REVOKED;
+      this.#revokeClientCredentials(client.id);
+      this.#database.exec("COMMIT");
+      return client.id;
+    } catch (error) {
+      try { this.#database.exec("ROLLBACK"); } catch { /* Preserve the original failure. */ }
+      throw error;
+    }
+  }
+
+  #revokeClientCredentials(clientId: string): void {
+    const now = this.#now();
+    this.#database.prepare(
+      "UPDATE clients SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL",
+    ).run(now, clientId);
+    this.#database.prepare(`
+      UPDATE client_credentials SET revoked_at = ?
+      WHERE client_id = ? AND revoked_at IS NULL
+    `).run(now, clientId);
   }
 
   #now(): string {
@@ -3808,6 +3896,125 @@ function optionalNonNullText(row: Record<string, unknown>, key: string): string 
   if (value === undefined) return undefined;
   if (typeof value === "string") return value;
   throw new Error(`Database contains invalid ${key}.`);
+}
+
+interface ClientIdentity {
+  readonly id: string;
+  readonly name: string;
+  readonly revokedAt: string | null;
+}
+
+function validateClientSelector(value: string): void {
+  if (typeof value !== "string" || Buffer.byteLength(value) < 1 ||
+      Buffer.byteLength(value) > 120) {
+    throw new Error("Client selector must contain 1 to 120 bytes.");
+  }
+}
+
+function clientIdentities(database: DatabaseSync): readonly ClientIdentity[] {
+  return database.prepare(`
+    SELECT id, name, revoked_at
+    FROM clients
+    ORDER BY name COLLATE BINARY, id
+  `).all().map((value) => {
+    const row = value as Record<string, unknown>;
+    const id = requiredText(row, "id");
+    assertCanonicalUuid(id, "Client id");
+    return {
+      id,
+      name: requiredText(row, "name"),
+      revokedAt: optionalText(row, "revoked_at") ?? null,
+    };
+  });
+}
+
+function clientHandles(clients: readonly ClientIdentity[]): ReadonlyMap<string, string> {
+  const compactIds = new Map(clients.map((client) => [
+    client.id,
+    client.id.replaceAll("-", ""),
+  ]));
+  const handles = new Map<string, string>();
+  for (const client of clients) {
+    const compact = compactIds.get(client.id)!;
+    let length = 8;
+    while (length < compact.length && clients.some((candidate) =>
+      candidate.id !== client.id &&
+      compactIds.get(candidate.id)!.startsWith(compact.slice(0, length)))) {
+      length += 1;
+    }
+    const handle = compact.slice(0, length);
+    if ([...handles.values()].includes(handle)) {
+      throw new Error("Client ids do not yield distinct handles.");
+    }
+    handles.set(client.id, handle);
+  }
+  return handles;
+}
+
+function resolveClientSelector(database: DatabaseSync, selector: string): ClientIdentity {
+  validateClientSelector(selector);
+  const clients = clientIdentities(database);
+  const handles = clientHandles(clients);
+  const named = clients.filter((client) => client.name === selector);
+  const handled = /^[0-9a-f]{8,32}$/u.test(selector)
+    ? clients.filter((client) => client.id.replaceAll("-", "").startsWith(selector))
+    : [];
+  const identified = clients.find((client) => client.id === selector);
+  const matches = new Map<string, ClientIdentity>();
+  for (const client of named) matches.set(client.id, client);
+  for (const client of handled) matches.set(client.id, client);
+  if (identified !== undefined) matches.set(identified.id, identified);
+  if (matches.size > 1) {
+    const matched = [...matches.values()];
+    const allNamed = matched.every((client) => named.some((candidate) => candidate.id === client.id));
+    const allHandled = matched.every((client) =>
+      handled.some((candidate) => candidate.id === client.id));
+    throw ambiguousClientSelector(
+      allNamed ? "name" : allHandled ? "handle" : "selector",
+      matched.map((client) => handles.get(client.id)!),
+    );
+  }
+  if (matches.size === 1) return matches.values().next().value!;
+  throw operatorErrors.CLIENT_SELECTOR_NOT_FOUND;
+}
+
+function requiredCubeAccess(row: Record<string, unknown>, key: string): CubeAccess {
+  const value = requiredText(row, key);
+  if (value === "read" || value === "write" || value === "manage") return value;
+  throw new Error("Database contains invalid client cube access.");
+}
+
+function listClientAdministrationRecords(
+  database: DatabaseSync,
+): ClientAdministrationRecord[] {
+  const clients = clientIdentities(database);
+  const handles = clientHandles(clients);
+  const grants = database.prepare(`
+    SELECT grant_row.client_id, grant_row.cube_id, cube.name AS cube_name, grant_row.access
+    FROM client_cube_grants AS grant_row
+    JOIN cubes AS cube ON cube.id = grant_row.cube_id
+    ORDER BY grant_row.client_id, cube.name COLLATE BINARY, grant_row.cube_id
+  `).all().map((value) => {
+    const row = value as Record<string, unknown>;
+    const clientId = requiredText(row, "client_id");
+    const cubeId = requiredText(row, "cube_id");
+    assertCanonicalUuid(clientId, "Client id");
+    assertCanonicalUuid(cubeId, "Cube id");
+    return {
+      clientId,
+      cubeId,
+      cubeName: requiredText(row, "cube_name"),
+      access: requiredCubeAccess(row, "access"),
+    };
+  });
+  return clients.map((client) => ({
+    name: client.name,
+    handle: handles.get(client.id)!,
+    state: client.revokedAt === null ? "active" : "revoked",
+    grants: grants
+      .filter((grant) => grant.clientId === client.id)
+      .map(({ cubeId, cubeName, access }) => ({ cubeId, cubeName, access })),
+  }));
 }
 
 function validateName(value: string): void {

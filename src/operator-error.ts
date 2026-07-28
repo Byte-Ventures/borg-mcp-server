@@ -34,13 +34,16 @@ export type OperatorErrorCode =
   | "DATABASE_LIMIT_INVALID"
   | "DISK_RESERVE_INVALID"
   | "CLIENT_NOT_FOUND"
+  | "CLIENT_SELECTOR_NOT_FOUND"
+  | "CLIENT_REVOKED"
   | "GRANT_NOT_FOUND"
   | "RECOVERY_INVALID"
   | "INVITATION_BUSY"
   | "INVITATION_CONTENTION"
   | "INVITATION_SCHEMA_MISMATCH"
   | "CLIENT_NAME_CONFLICT"
-  | "INVITATION_NAME_CONFLICT";
+  | "INVITATION_NAME_CONFLICT"
+  | "CLIENT_SELECTOR_AMBIGUOUS";
 
 const publicMessages: Readonly<Record<OperatorErrorCode, string>> = Object.freeze({
   START_LAN_DUPLICATE: "Provide --lan only once.",
@@ -78,6 +81,8 @@ const publicMessages: Readonly<Record<OperatorErrorCode, string>> = Object.freez
   DATABASE_LIMIT_INVALID: "Set BORG_SERVER_MAX_DATABASE_BYTES to a positive integer.",
   DISK_RESERVE_INVALID: "Set BORG_SERVER_MIN_FREE_DISK_BYTES to a positive integer.",
   CLIENT_NOT_FOUND: "Provide an existing active client ID.",
+  CLIENT_SELECTOR_NOT_FOUND: "Provide an existing client name, handle, or ID.",
+  CLIENT_REVOKED: "Client exists but is revoked.",
   GRANT_NOT_FOUND: "Provide an existing client cube grant.",
   RECOVERY_INVALID: "Provide the active recovery credential through the private prompt.",
   INVITATION_BUSY: "Confirm no invitation or offline administration command is running, then remove invitation-mint.lock.",
@@ -85,6 +90,7 @@ const publicMessages: Readonly<Record<OperatorErrorCode, string>> = Object.freez
   INVITATION_SCHEMA_MISMATCH: "Invitation minting is unavailable while a server with an incompatible schema is running. Stop the server and rerun this command, or use the CLI version that matches the running server.",
   CLIENT_NAME_CONFLICT: "A client with this name already exists. Choose another name, or revoke the existing client before reusing it.",
   INVITATION_NAME_CONFLICT: "An unclaimed invitation with this label is outstanding. Choose another name, or wait for it to expire before reusing the label.",
+  CLIENT_SELECTOR_AMBIGUOUS: "Client name is ambiguous. Use a listed client handle.",
 });
 
 const operatorErrorCodes = new WeakMap<object, OperatorErrorCode>();
@@ -123,6 +129,26 @@ export const operatorErrors: Readonly<Record<OperatorErrorCode, Error>> = Object
     ]),
   ) as unknown as Record<OperatorErrorCode, Error>,
 );
+
+export function ambiguousClientSelector(
+  kind: "name" | "handle" | "selector",
+  handles: readonly string[],
+): Error {
+  if (handles.length < 2 ||
+      handles.some((handle) => !/^[0-9a-f]{8,32}$/u.test(handle)) ||
+      new Set(handles).size !== handles.length) {
+    throw new Error("Ambiguous client handles are invalid.");
+  }
+  return new OperatorError(
+    operatorErrorCapability,
+    "CLIENT_SELECTOR_AMBIGUOUS",
+    kind === "name"
+      ? `Client name is ambiguous. Use one of these handles: ${[...handles].sort().join(", ")}.`
+      : kind === "handle"
+        ? `Client handle now matches more than one client. Use one of these handles: ${[...handles].sort().join(", ")}.`
+        : `Client selector matches more than one client. Use one of these handles: ${[...handles].sort().join(", ")}.`,
+  );
+}
 
 export function operatorPublicMessage(error: unknown): string | null {
   if (typeof error !== "object" || error === null) return null;

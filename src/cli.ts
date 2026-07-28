@@ -1,4 +1,5 @@
 import type { ServerService } from "./service.js";
+import { sanitizeTerminalText } from "./dashboard.js";
 import { RuntimeUpdateFailure } from "./runtime-operator.js";
 import { SERVER_PACKAGE_VERSION } from "./runtime-identity.js";
 
@@ -23,9 +24,10 @@ Commands:
   invite [<client-name>]  Create a named client enrollment invitation interactively.
            An enrolled client has no cube access until it is granted.
   client-rotate <client-id>  Rotate one client credential offline
-  client-revoke <client-id>  Revoke one client and its credentials offline
-  client-grant <client-id> <cube-id> <read|write|manage>  Set one offline cube grant
-  client-ungrant <client-id> <cube-id>  Remove one offline cube grant
+  client-list  List clients, ID-derived handles, states, and cube grants offline
+  client-revoke <client-name-or-handle>  Revoke one client and its credentials offline
+  client-grant <client-name-or-handle> <cube-id> <read|write|manage>  Set one offline cube grant
+  client-ungrant <client-name-or-handle> <cube-id>  Remove one offline cube grant
   help     Show this help
 
 Start options:
@@ -273,6 +275,10 @@ export async function runCli(
       if (extraArgs.length !== 1 || service.rotateClient === undefined) return invalidArguments(io);
       io.stdout(`Client credential rotated (shown once): ${await service.rotateClient(extraArgs[0]!)}`);
       return 0;
+    case "client-list":
+      if (extraArgs.length !== 0 || service.listClients === undefined) return invalidArguments(io);
+      io.stdout(renderClientList(await service.listClients()));
+      return 0;
     case "client-revoke":
       if (extraArgs.length !== 1 || service.revokeClient === undefined) return invalidArguments(io);
       await service.revokeClient(extraArgs[0]!);
@@ -485,6 +491,19 @@ function renderNextAction(
   return action.kind === "update-runtime"
     ? "borg-mcp-server update"
     : `npm install --global borgmcp-server@${action.version}`;
+}
+
+function renderClientList(
+  clients: Awaited<ReturnType<NonNullable<ServerService["listClients"]>>>,
+): string {
+  if (clients.length === 0) return "No clients.";
+  return clients.flatMap((client) => [
+    `${sanitizeTerminalText(client.name)} [${client.handle}] ${client.state}`,
+    ...(client.grants.length === 0
+      ? ["  No cube grants."]
+      : client.grants.map((grant) =>
+        `  ${grant.access}  ${sanitizeTerminalText(grant.cubeName)} (${grant.cubeId})`)),
+  ]).join("\n");
 }
 
 function invalidArguments(io: CliIo): 1 {

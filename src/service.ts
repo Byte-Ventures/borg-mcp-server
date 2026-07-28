@@ -612,6 +612,7 @@ const startOnlyService = createNodeServerService({
           environment: process.env,
         }),
         color: dashboardColorEnabled(process.env),
+        footer: EMBEDDED_DASHBOARD_FOOTER,
         navigation,
       }),
       fallbackFooter: EMBEDDED_DASHBOARD_FOOTER,

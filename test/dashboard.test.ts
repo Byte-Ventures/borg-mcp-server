@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
-  createDashboardRenderer,
+  createDashboardRenderer as createRenderer,
   dashboardColorEnabled,
   EMBEDDED_DASHBOARD_FOOTER,
   EMBEDDED_DASHBOARD_LIFECYCLE_FOOTER,
@@ -16,12 +16,20 @@ import {
   startForegroundDashboard,
   type DashboardDataSnapshot,
   type DashboardFooter,
+  type DashboardRenderOptions,
+  type DashboardRenderer,
   type DashboardServerIdentity,
   type DashboardSnapshotSource,
   type DashboardTerminal,
 } from "../src/dashboard.js";
 import { droneSessionPrincipal } from "../src/principal.js";
 import { openStore, type StoreRuntime } from "../src/store.js";
+
+function createDashboardRenderer(
+  options: Omit<DashboardRenderOptions, "footer">,
+): DashboardRenderer {
+  return createRenderer({ ...options, footer: EMBEDDED_DASHBOARD_FOOTER });
+}
 
 const server: DashboardServerIdentity = Object.freeze({
   name: "borgmcp-server",
@@ -181,7 +189,7 @@ describe("dashboard renderer", () => {
     expect(tiny.split("\n")).toHaveLength(7);
     expect(tiny.split("\n").every((line) => [...line].length <= 39)).toBe(true);
 
-    const tinyViewer = createDashboardRenderer({
+    const tinyViewer = createRenderer({
       glyphMode: "box",
       color: true,
       footer: STANDALONE_DASHBOARD_FOOTER,
@@ -244,7 +252,7 @@ describe("dashboard renderer", () => {
     expect(frame.split("\n").find((line) => line.includes("cube-02"))).toContain("O");
   });
 
-  it("keeps the embedded footer by default and accepts a sanitized caller footer", () => {
+  it("keeps the explicit embedded footer and accepts a sanitized caller footer", () => {
     const snapshot = rankDashboardSnapshot(snapshotData(1), server);
     const defaultFrame = createDashboardRenderer({ glyphMode: "ascii", color: false })(
       snapshot,
@@ -256,7 +264,7 @@ describe("dashboard renderer", () => {
       expect(defaultFrame).toContain(sentence);
     }
 
-    const viewerFrame = createDashboardRenderer({
+    const viewerFrame = createRenderer({
       glyphMode: "ascii",
       color: false,
       footer: "^C close viewer\u001b]0;unsafe\u0007  |  read-only" as DashboardFooter,

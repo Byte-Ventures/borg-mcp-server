@@ -68,7 +68,7 @@ export type DashboardFooter =
 export interface DashboardRenderOptions {
   readonly glyphMode: DashboardGlyphMode;
   readonly color: boolean;
-  readonly footer?: DashboardFooter;
+  readonly footer: DashboardFooter;
   readonly navigation?: boolean;
 }
 
@@ -180,7 +180,7 @@ export function rankDashboardSnapshot(
 
 export function createDashboardRenderer(options: DashboardRenderOptions): DashboardRenderer {
   const glyphs = options.glyphMode === "ascii" ? ASCII_GLYPHS : BOX_GLYPHS;
-  const baseFooter = sanitizeTerminalLabel(options.footer ?? EMBEDDED_DASHBOARD_FOOTER);
+  const baseFooter = sanitizeTerminalLabel(options.footer);
   return (snapshot, columns, rows, view = {
     autoFollow: true,
     focusedCubeId: null,
@@ -197,10 +197,10 @@ export function createDashboardRenderer(options: DashboardRenderOptions): Dashbo
         snapshot,
         width,
         height,
-        options.footer ?? EMBEDDED_DASHBOARD_FOOTER,
+        options.footer,
       );
     }
-    const lifecycleFooter = options.footer === undefined
+    const lifecycleFooter = options.footer === EMBEDDED_DASHBOARD_FOOTER
       ? wrapDashboardFooter(EMBEDDED_DASHBOARD_LIFECYCLE_FOOTER, width)
       : [];
     const footer = options.navigation === true

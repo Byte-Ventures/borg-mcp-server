@@ -75,8 +75,17 @@ describe("release identity automation", () => {
   it("keeps current-state claims out of the historical release record", async () => {
     const releases = await readFile("RELEASES.md", "utf8");
 
-    expect(releases).not.toMatch(/\bcurrent(?:ly)?\b/iu);
-    expect(releases).not.toMatch(/\bis the .*install target\b/iu);
+    expectHistoricalReleaseRecord(releases);
+  });
+
+  it.each([
+    ["current target", "The current public preview and install target is borgmcp-server."],
+    ["current lock behavior", "Current lock verification remains entirely offline."],
+    ["setup behavior", "Setup prepares local identity and storage and creates no cube."],
+  ])("rejects the known %s claim from release history", async (_case, claim) => {
+    const releases = await readFile("RELEASES.md", "utf8");
+
+    expect(() => expectHistoricalReleaseRecord(`${releases}\n${claim}\n`)).toThrow();
   });
 
   it("prepares the exact generated surfaces and verifies their Git tree", async () => {
@@ -369,6 +378,12 @@ function commitAll(root: string, message: string): string {
   git(root, ["add", "."]);
   git(root, ["commit", "-q", "-m", message]);
   return git(root, ["rev-parse", "HEAD"]);
+}
+
+function expectHistoricalReleaseRecord(releases: string): void {
+  expect(releases).not.toMatch(/\bcurrent(?:ly)?\b/iu);
+  expect(releases).not.toMatch(/\bis the .*install target\b/iu);
+  expect(releases).not.toContain("Setup prepares local identity and storage");
 }
 
 function git(root: string, args: string[]): string {

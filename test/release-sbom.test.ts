@@ -37,7 +37,7 @@ describe("release SBOM", () => {
     };
     expect(report).toMatchObject({
       name: "borgmcp-server",
-      version: "0.7.1",
+      version: "0.7.2",
       format: "CycloneDX-1.5",
     });
     expect(report.components).toBeGreaterThan(0);
@@ -47,9 +47,9 @@ describe("release SBOM", () => {
     };
     expect(normalized.metadata.component).toMatchObject({
       name: "borgmcp-server",
-      version: "0.7.1",
-      "bom-ref": "borgmcp-server@0.7.1",
-      purl: "pkg:npm/borgmcp-server@0.7.1",
+      version: "0.7.2",
+      "bom-ref": "borgmcp-server@0.7.2",
+      purl: "pkg:npm/borgmcp-server@0.7.2",
     });
   });
 

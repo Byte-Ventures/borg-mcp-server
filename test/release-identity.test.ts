@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -61,15 +61,36 @@ describe("release identity automation", () => {
     }
   });
 
-  it("keeps exactly one README install target aligned with the manifest", async () => {
+  it("keeps the visitor-first README and generated install target release-safe", async () => {
     const manifest = JSON.parse(await readFile("package.json", "utf8")) as { version: string };
     const readme = await readFile("README.md", "utf8");
-    const versions = [...readme.matchAll(
-      /^The current public preview and install target is `borgmcp-server@(\d+\.\d+\.\d+)`\.$/gmu,
-    )].map((match) => match[1]);
+    const installTarget =
+      /^The current public preview and install target is `borgmcp-server@(\d+\.\d+\.\d+)`\.$/gmu;
+    const versions = [...readme.matchAll(installTarget)].map((match) => match[1]);
+    const withoutInstallTarget = readme.replace(installTarget, "");
+    const headings = [...readme.matchAll(/^## (.+)$/gmu)].map((match) => match[1]);
+    const quickstart = readme.slice(0, readme.indexOf("## How it fits together"))
+      .replaceAll(/\s+/gu, " ");
 
     expect(versions).toEqual([manifest.version]);
     expect(readme).not.toMatch(/sha512-[A-Za-z0-9+/]{86}==/u);
+    expect(withoutInstallTarget).not.toMatch(/(?<![\d.])\d+\.\d+\.\d+(?![\d.])/u);
+    expect(headings).toEqual([
+      "Current install",
+      "Requirements",
+      "Install and quickstart",
+      "How it fits together",
+      "Security posture",
+      "Reference and support",
+    ]);
+    expect(quickstart).toContain("borg-mcp-server setup");
+    expect(quickstart).toContain("borg-mcp-server start");
+    expect(quickstart).toContain("Setup prints no credential, invitation, or credential path, and creates no cube.");
+    expect(quickstart).toContain("foreground start never installs or loads it.");
+    expect(quickstart).toContain("https://127.0.0.1:7091");
+    for (const [, path] of readme.matchAll(/\]\(([^):]+\.md)\)/gu)) {
+      await expect(access(path!)).resolves.toBeUndefined();
+    }
   });
 
   it("keeps current-state claims out of the historical release record", async () => {

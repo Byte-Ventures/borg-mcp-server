@@ -6,7 +6,7 @@ HTTPS.
 
 ## Release status
 
-The current public preview and install target is `borgmcp-server@0.7.0`.
+The current public preview and install target is `borgmcp-server@0.7.1`.
 Verify current package metadata through [npm](https://www.npmjs.com/package/borgmcp-server).
 Historical release notes are preserved in [`RELEASES.md`](RELEASES.md).
 

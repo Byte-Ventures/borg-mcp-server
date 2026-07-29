@@ -147,7 +147,7 @@ describe("runCli", () => {
   it("renders approved exact runtime evidence and bounded non-TTY JSON without guessing", async () => {
     const status = vi.fn().mockResolvedValue({
       status: "running",
-      controllerVersion: "0.7.2",
+      controllerVersion: "0.7.3",
       preparedArtifact: { version: "0.1.8", integrity: `sha512-${"A".repeat(86)}==` },
       runningArtifact: null,
       buildIdentity: null,
@@ -170,7 +170,7 @@ describe("runCli", () => {
     expect(await runCli(["status"], service, machine)).toBe(0);
     expect(JSON.parse(machine.stdout.mock.calls[0]![0])).toEqual({
       status: "running",
-      installed_controller: "borgmcp-server@0.7.2",
+      installed_controller: "borgmcp-server@0.7.3",
       prepared_runtime: "borgmcp-server@0.1.8",
       prepared_integrity: `sha512-${"A".repeat(86)}==`,
       running_runtime: null,
@@ -191,9 +191,9 @@ describe("runCli", () => {
   it("returns typed stale-lock and inactive-service recovery evidence instead of a generic failure", async () => {
     const status = vi.fn().mockResolvedValue({
       status: "stopped",
-      controllerVersion: "0.7.2",
+      controllerVersion: "0.7.3",
       preparedArtifact: {
-        version: "0.7.2",
+        version: "0.7.3",
         integrity: `sha512-${"A".repeat(86)}==`,
       },
       runningArtifact: null,
@@ -213,7 +213,7 @@ describe("runCli", () => {
         pid: 77_814,
         processState: "absent",
         identity: {
-          package_version: "0.7.2",
+          package_version: "0.7.3",
           artifact_integrity: `sha512-${"A".repeat(86)}==`,
           source_sha: "a".repeat(40),
           protocol_version: "6",
@@ -248,7 +248,7 @@ describe("runCli", () => {
         state: "stale",
         pid: 77_814,
         process_state: "absent",
-        runtime: "borgmcp-server@0.7.2",
+        runtime: "borgmcp-server@0.7.3",
         recovery_action: "borg-mcp-server recover-stale-lock",
       },
     });
@@ -267,7 +267,7 @@ describe("runCli", () => {
       stale: {
         pid: 77_814,
         identity: {
-          package_version: "0.7.2",
+          package_version: "0.7.3",
           artifact_integrity: `sha512-${"A".repeat(86)}==`,
           source_sha: "a".repeat(40),
           protocol_version: "6",
@@ -299,11 +299,11 @@ describe("runCli", () => {
       status: "running",
       controllerVersion: "0.2.0",
       preparedArtifact: {
-        version: "0.7.2",
+        version: "0.7.3",
         integrity: `sha512-${"A".repeat(86)}==`,
       },
       runningArtifact: {
-        version: "0.7.2",
+        version: "0.7.3",
         integrity: `sha512-${"A".repeat(86)}==`,
       },
       buildIdentity: "a".repeat(40),
@@ -311,7 +311,7 @@ describe("runCli", () => {
       mode: "managed",
       serviceAdapter: "launchd",
       dataIdentity: "available",
-      nextAction: { kind: "install-controller", version: "0.7.2" },
+      nextAction: { kind: "install-controller", version: "0.7.3" },
     });
     const service: ServerService = { start: vi.fn(), status };
     const tty = { ...createIo(), isTTY: true };
@@ -319,20 +319,20 @@ describe("runCli", () => {
 
     expect(await runCli(["status"], service, tty)).toBe(0);
     expect(tty.stdout).toHaveBeenCalledWith(expect.stringContaining(
-      "Next: npm install --global borgmcp-server@0.7.2.",
+      "Next: npm install --global borgmcp-server@0.7.3.",
     ));
     expect(await runCli(["status", "--json"], service, machine)).toBe(0);
     expect(JSON.parse(machine.stdout.mock.calls[0]![0])).toMatchObject({
       installed_controller: "borgmcp-server@0.2.0",
-      running_runtime: "borgmcp-server@0.7.2",
-      next_action: "npm install --global borgmcp-server@0.7.2",
+      running_runtime: "borgmcp-server@0.7.3",
+      next_action: "npm install --global borgmcp-server@0.7.3",
     });
   });
 
   it("reports the installed controller version and stops managed service idempotently", async () => {
     const versionIo = { ...createIo(), isTTY: true };
     expect(await runCli(["--version"], { start: vi.fn() }, versionIo)).toBe(0);
-    expect(versionIo.stdout).toHaveBeenCalledWith("borgmcp-server@0.7.2");
+    expect(versionIo.stdout).toHaveBeenCalledWith("borgmcp-server@0.7.3");
 
     const stop = vi.fn()
       .mockResolvedValueOnce({ outcome: "stopped" })
@@ -380,19 +380,19 @@ describe("runCli", () => {
       artifact: {
         artifactDirectory: "/private/runtime/artifacts/secret",
         packageDirectory: "/private/runtime/artifacts/secret/package",
-        version: "0.7.2",
+        version: "0.7.3",
         integrity: `sha512-${"A".repeat(86)}==`,
         sourceSha: "a".repeat(40),
       },
       runningIdentity: {
-        package_version: "0.7.2",
+        package_version: "0.7.3",
         artifact_integrity: `sha512-${"A".repeat(86)}==`,
         source_sha: "a".repeat(40),
         protocol_version: "6",
         started_at: "2026-07-21T12:00:00.000Z",
       },
       dataIdentity: "preserved",
-      controllerVersion: "0.7.2",
+      controllerVersion: "0.7.3",
       nextAction: null,
     });
     const service: ServerService = { start: vi.fn(), update };
@@ -416,14 +416,14 @@ describe("runCli", () => {
       artifact: {
         artifactDirectory: "/runtime/artifacts/candidate",
         packageDirectory: "/runtime/artifacts/candidate/package",
-        version: "0.7.2",
+        version: "0.7.3",
         integrity: `sha512-${"A".repeat(86)}==`,
         sourceSha: "a".repeat(40),
         treeSha256: "b".repeat(64),
       },
       runningIdentity: null,
       dataIdentity: "preserved",
-      controllerVersion: "0.7.2",
+      controllerVersion: "0.7.3",
       serviceAdapter: "launchd",
       serviceState: "inactive",
       serviceRecoveryCommand: recoveryCommand,
@@ -460,13 +460,13 @@ describe("runCli", () => {
       artifact: {
         artifactDirectory: "/runtime/artifacts/candidate",
         packageDirectory: "/runtime/artifacts/candidate/package",
-        version: "0.7.2",
+        version: "0.7.3",
         integrity: `sha512-${"A".repeat(86)}==`,
         sourceSha: "a".repeat(40),
         treeSha256: "b".repeat(64),
       },
       runningIdentity: {
-        package_version: "0.7.2",
+        package_version: "0.7.3",
         artifact_integrity: `sha512-${"A".repeat(86)}==`,
         source_sha: "a".repeat(40),
         protocol_version: "6",
@@ -474,7 +474,7 @@ describe("runCli", () => {
       },
       dataIdentity: "preserved",
       controllerVersion: "0.2.0",
-      nextAction: { kind: "install-controller", version: "0.7.2" },
+      nextAction: { kind: "install-controller", version: "0.7.3" },
     });
     const service: ServerService = { start: vi.fn(), update };
     const tty = { ...createIo(), isTTY: true };
@@ -485,16 +485,16 @@ describe("runCli", () => {
       "Installed controller remains: borgmcp-server@0.2.0",
     ));
     expect(tty.stdout).toHaveBeenCalledWith(expect.stringContaining(
-      "Next: npm install --global borgmcp-server@0.7.2",
+      "Next: npm install --global borgmcp-server@0.7.3",
     ));
 
     expect(await runCli(["update"], service, machine)).toBe(0);
     expect(JSON.parse(machine.stdout.mock.calls[0]![0])).toMatchObject({
       status: "updated",
       installed_controller: "borgmcp-server@0.2.0",
-      artifact: "borgmcp-server@0.7.2",
-      running_runtime: "borgmcp-server@0.7.2",
-      next_action: "npm install --global borgmcp-server@0.7.2",
+      artifact: "borgmcp-server@0.7.3",
+      running_runtime: "borgmcp-server@0.7.3",
+      next_action: "npm install --global borgmcp-server@0.7.3",
     });
   });
 

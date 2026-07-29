@@ -34,7 +34,7 @@ describe("SQLite migrations", () => {
     expect(first.diagnostics()).toEqual({
       journalMode: "wal",
       foreignKeys: true,
-      schemaVersions: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17],
+      schemaVersions: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18],
     });
     expect((await stat(join(directory, "data"))).mode & 0o777).toBe(0o700);
     expect((await stat(databasePath)).mode & 0o777).toBe(0o600);
@@ -44,7 +44,7 @@ describe("SQLite migrations", () => {
 
     const second = await openStore({ path: databasePath });
     expect(second.diagnostics().schemaVersions)
-      .toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]);
+      .toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18]);
     second.close();
     await expect(access(databasePath)).resolves.toBeUndefined();
   });
@@ -496,6 +496,70 @@ describe("SQLite migrations", () => {
       otherCubeId,
       createdAt,
     )).not.toThrow();
+    database.close();
+  });
+
+  it("replaces populated template constraints without losing cube dependencies", () => {
+    const database = new DatabaseSync(":memory:");
+    database.exec("PRAGMA foreign_keys = ON");
+    applyMigrations(database, STORE_MIGRATIONS.slice(0, 17));
+    const clientId = "00000000-0000-4000-8000-000000000061";
+    const cubeId = "00000000-0000-4000-8000-000000000062";
+    const humanRoleId = "00000000-0000-4000-8000-000000000063";
+    const workerRoleId = "00000000-0000-4000-8000-000000000064";
+    const createdAt = "2026-07-29T00:00:00.000Z";
+    database.prepare("INSERT INTO clients (id, name, created_at) VALUES (?, 'client', ?)")
+      .run(clientId, createdAt);
+    database.prepare(`
+      INSERT INTO cubes (
+        id, name, directive, created_at, updated_at, owner_id, selected_template
+      ) VALUES (?, 'cube', '', ?, ?, ?, 'starter')
+    `).run(cubeId, createdAt, createdAt, clientId);
+    const insertRole = database.prepare(`
+      INSERT INTO roles (
+        id, cube_id, name, created_at, is_human_seat, is_default, role_class
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+    `);
+    insertRole.run(humanRoleId, cubeId, "Coordinator", createdAt, 1, 0, "queen");
+    insertRole.run(workerRoleId, cubeId, "Builder", createdAt, 0, 1, "worker");
+    database.prepare(`
+      INSERT INTO cube_create_bindings (
+        client_id, retry_key, name, template, cube_id,
+        human_seat_role_id, default_worker_role_id, created_at,
+        working_repo_name, repository_kind, repository_value
+      ) VALUES (?, ?, 'cube', 'starter', ?, ?, ?, ?, 'repository', 'local', ?)
+    `).run(
+      clientId,
+      "00000000-0000-4000-8000-000000000065",
+      cubeId,
+      humanRoleId,
+      workerRoleId,
+      createdAt,
+      "00000000-0000-4000-8000-000000000066",
+    );
+
+    applyMigrations(database, STORE_MIGRATIONS);
+
+    expect(database.prepare(`
+      SELECT cube.selected_template, binding.template, binding.cube_id,
+             binding.human_seat_role_id, binding.default_worker_role_id
+      FROM cubes AS cube
+      JOIN cube_create_bindings AS binding ON binding.cube_id = cube.id
+      WHERE cube.id = ?
+    `).get(cubeId)).toEqual({
+      selected_template: "starter",
+      template: "starter",
+      cube_id: cubeId,
+      human_seat_role_id: humanRoleId,
+      default_worker_role_id: workerRoleId,
+    });
+    expect(database.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+    expect(() => database.prepare(
+      "UPDATE cubes SET selected_template = 'local-model' WHERE id = ?",
+    ).run(cubeId)).not.toThrow();
+    expect(() => database.prepare(
+      "UPDATE cube_create_bindings SET template = 'local-model' WHERE cube_id = ?",
+    ).run(cubeId)).not.toThrow();
     database.close();
   });
 

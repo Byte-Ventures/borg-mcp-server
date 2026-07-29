@@ -1,0 +1,47 @@
+{
+  "borgmcp-server@0.7.0": {
+    "integrity": "sha512-nCNX2G8il/tg3OH/O2hBK5En1xMEoACFaD9uUQ96rAwaynCJEdBh0hqaS41MN+MK75JZ04DSYfhBoxTU9O/tfg==",
+    "rows": [
+      [1, "initial_scoped_store", "b4f963273dabb3cf23a6c096c2b2e61f793e57ae05a1783ae98af1db71dc287b"],
+      [2, "credential_authority", "9c793825d13e0b1a9ac7bea8ffd5dc275c94a13062c708c1c030835c56c99d00"],
+      [3, "coordination_protocol", "5c84ed883d65a136a7a75adadd2acb31cc5c2e499ab9f92aefc73b35b3487c45"],
+      [4, "seat_attach_credentials", "015311cd578e5ea887051b3b5fef062f9157af83d9c18817e8f09b09b1c5a40f"],
+      [5, "owner_enrollment_and_cube_creation", "aae82cd4d7de4508f61acafb9a1b6d710b93b0694f0e17792d1e40d85fe2c66f"],
+      [6, "seat_reattach_bindings", "71928794fc3012750200611b712aa31aa3c9cb7652a38fb2c2f0390b528e2ac5"],
+      [7, "role_management_foundation", "f808335d9f4c15e831abda830a9a8c524f9e716be91f630298f4418a3a5a6d1b"],
+      [8, "cube_scoped_invitations", "b5c38b3c3df24063828687b246318c9f35b846fb28064b847dc9929d88f1a025"],
+      [9, "digest_correlated_seat_attach", "0c35559ed0cf459e4859dc02af9c82be00cfa9e0bf982d23b73744893cc7aecb"],
+      [10, "cube_message_taxonomy", "a893207fc4be385132275ac2378d282eb63c68a9f7660e8e86cb5304ab818534"],
+      [11, "fleet_liveness", "da687141abc57f27ff87dcd9c38fdd6a15028c0c503407f793f3969d8989eaee"],
+      [12, "drone_session_supersession", "5ce665dc6317a34014d6ee7bc537c43d1a6ed578ac910159edda5c7e78df0536"],
+      [13, "non_expiring_drone_sessions", "e8f007a20f5816357c83856682bef4acc9e6789514a74295b23b16186a82ea87"],
+      [14, "drone_runtime_metadata", "5e78f86534cb1937add1a8682b181c3d4f67510ca332d4034c6d38f4288c6de5"],
+      [15, "repository_associated_cube_creation", "679caa4baa9df1fad26b65ec3dcdbd809e825253821a207a0a4a7b415996d6bd"],
+      [16, "remove_scoped_invitations", "701e1a8ff131f21d724e96bc21af15ac8650c5b16b83720938e4e2dc10e2df83"],
+      [17, "invitation_client_names", "dd997a65f9d2c740974153c0458703bd8f5e41843927e9444ff71fe9910da4f7"]
+    ]
+  },
+  "borgmcp-server@0.7.1": {
+    "integrity": "sha512-KBxmgx2kIQvJZ2Iq1rSt7YPNQqLqHmI+6ioBRzFqkOJPRZdUWk6CYtfW5BcC40gjizkROc+UkVpzKNvzNNERNg==",
+    "rows": [
+      [1, "initial_scoped_store", "b4f963273dabb3cf23a6c096c2b2e61f793e57ae05a1783ae98af1db71dc287b"],
+      [2, "credential_authority", "9c793825d13e0b1a9ac7bea8ffd5dc275c94a13062c708c1c030835c56c99d00"],
+      [3, "coordination_protocol", "5c84ed883d65a136a7a75adadd2acb31cc5c2e499ab9f92aefc73b35b3487c45"],
+      [4, "seat_attach_credentials", "015311cd578e5ea887051b3b5fef062f9157af83d9c18817e8f09b09b1c5a40f"],
+      [5, "owner_enrollment_and_cube_creation", "aae82cd4d7de4508f61acafb9a1b6d710b93b0694f0e17792d1e40d85fe2c66f"],
+      [6, "seat_reattach_bindings", "71928794fc3012750200611b712aa31aa3c9cb7652a38fb2c2f0390b528e2ac5"],
+      [7, "role_management_foundation", "f808335d9f4c15e831abda830a9a8c524f9e716be91f630298f4418a3a5a6d1b"],
+      [8, "cube_scoped_invitations", "b5c38b3c3df24063828687b246318c9f35b846fb28064b847dc9929d88f1a025"],
+      [9, "digest_correlated_seat_attach", "0c35559ed0cf459e4859dc02af9c82be00cfa9e0bf982d23b73744893cc7aecb"],
+      [10, "cube_message_taxonomy", "a893207fc4be385132275ac2378d282eb63c68a9f7660e8e86cb5304ab818534"],
+      [11, "fleet_liveness", "da687141abc57f27ff87dcd9c38fdd6a15028c0c503407f793f3969d8989eaee"],
+      [12, "drone_session_supersession", "5ce665dc6317a34014d6ee7bc537c43d1a6ed578ac910159edda5c7e78df0536"],
+      [13, "non_expiring_drone_sessions", "e8f007a20f5816357c83856682bef4acc9e6789514a74295b23b16186a82ea87"],
+      [14, "drone_runtime_metadata", "5e78f86534cb1937add1a8682b181c3d4f67510ca332d4034c6d38f4288c6de5"],
+      [15, "repository_associated_cube_creation", "679caa4baa9df1fad26b65ec3dcdbd809e825253821a207a0a4a7b415996d6bd"],
+      [16, "remove_scoped_invitations", "701e1a8ff131f21d724e96bc21af15ac8650c5b16b83720938e4e2dc10e2df83"],
+      [17, "invitation_client_names", "9bf330533001d2caf36503ebc915a45643a27dff38314bf096a67dff051feb92"],
+      [18, "shared_cube_templates", "8ee4ca35cc62fb00426a3d05ae490435d4f22a5965ef461c37fd0c8a8a8cab23"]
+    ]
+  }
+}

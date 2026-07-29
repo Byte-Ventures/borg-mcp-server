@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 
+import { MIGRATION_CHECKSUM_MANIFEST } from "./migration-checksums.js";
+
 export interface Migration {
   readonly version: number;
   readonly name: string;
@@ -555,7 +557,7 @@ export const STORE_MIGRATIONS: readonly Migration[] = Object.freeze([
             AND client_name NOT GLOB '*[^A-Za-z0-9 ._-]*'
           )
         );
-      `,
+    `,
   },
   {
     version: 18,
@@ -654,14 +656,25 @@ export function applyMigrations(
     "SELECT version, name, checksum FROM schema_migrations ORDER BY version",
   ).all().map(appliedMigrationRow);
   const knownVersions = new Set(migrations.map((migration) => migration.version));
+  let publishedV17Alias: AppliedMigrationRow | undefined;
   for (const row of applied) {
     const migration = migrations.find((candidate) => candidate.version === row.version);
     if (migration === undefined || !knownVersions.has(row.version)) {
       throw new Error(`Database contains unknown migration ${row.version}.`);
     }
-    if (row.name !== migration.name || row.checksum !== checksum(migration)) {
+    const expectedChecksum = migrationChecksum(migration);
+    if (row.name !== migration.name) {
       throw new Error(`Migration ${row.version} does not match its recorded checksum.`);
     }
+    if (row.checksum === expectedChecksum) continue;
+    if (isPublishedV17Alias(row, migration, expectedChecksum)) {
+      publishedV17Alias = row;
+      continue;
+    }
+    throw new Error(`Migration ${row.version} does not match its recorded checksum.`);
+  }
+  if (publishedV17Alias !== undefined) {
+    reconcilePublishedV17Alias(database, publishedV17Alias, CANONICAL_V17_CHECKSUM);
   }
 
   const appliedVersions = new Set(applied.map((row) => row.version));
@@ -676,7 +689,7 @@ export function applyMigrations(
       record.run(
         migration.version,
         migration.name,
-        checksum(migration),
+        migrationChecksum(migration),
         new Date().toISOString(),
       );
       database.exec("COMMIT");
@@ -714,7 +727,7 @@ export function assertMigrationsCurrent(
     }
     const expected = migrations[index]!;
     if (applied.version !== expected.version || applied.name !== expected.name ||
-        applied.checksum !== checksum(expected)) throw new MigrationCompatibilityError();
+        applied.checksum !== migrationChecksum(expected)) throw new MigrationCompatibilityError();
   }
 }
 
@@ -726,10 +739,52 @@ function validateMigrationOrder(migrations: readonly Migration[]): void {
   });
 }
 
-function checksum(migration: Migration): string {
+export function migrationChecksum(migration: Migration): string {
   return createHash("sha256")
     .update(`${migration.version}\0${migration.name}\0${migration.sql}`)
     .digest("hex");
+}
+
+const PUBLISHED_V17_ALIAS = "9bf330533001d2caf36503ebc915a45643a27dff38314bf096a67dff051feb92";
+const CANONICAL_V17_CHECKSUM = MIGRATION_CHECKSUM_MANIFEST[16]!.checksum;
+
+function isPublishedV17Alias(
+  row: AppliedMigrationRow,
+  migration: Migration,
+  expectedChecksum: string,
+): boolean {
+  return row.version === 17 &&
+    row.name === "invitation_client_names" &&
+    row.checksum === PUBLISHED_V17_ALIAS &&
+    migration.version === 17 &&
+    migration.name === "invitation_client_names" &&
+    expectedChecksum === CANONICAL_V17_CHECKSUM;
+}
+
+function reconcilePublishedV17Alias(
+  database: DatabaseSync,
+  row: AppliedMigrationRow,
+  canonicalChecksum: string,
+): void {
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    const result = database.prepare(`
+      UPDATE schema_migrations SET checksum = ?
+      WHERE version = 17 AND name = 'invitation_client_names' AND checksum = ?
+    `).run(canonicalChecksum, row.checksum);
+    if (result.changes !== 1) {
+      throw new Error("Migration 17 checksum reconciliation did not update exactly one record.");
+    }
+    database.exec("COMMIT");
+  } catch (error) {
+    try {
+      database.exec("ROLLBACK");
+    } catch {
+      // The reconciliation error is the actionable failure.
+    }
+    throw error;
+  }
+  console.error("Reconciled migration 17 checksum from borgmcp-server@0.7.1 to canonical.");
 }
 
 function appliedMigrationRow(row: Record<string, unknown>): AppliedMigrationRow {

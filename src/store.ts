@@ -11,7 +11,6 @@ import type {
   DroneRuntimeMetadataPatch,
 } from "borgmcp-shared/protocol";
 import {
-  CUBE_TEMPLATES,
   decodeAssociateRepositoryCubeRequest,
   decodeCreateCubeRequest,
   decodeResolveRepositoryCubeRequest,
@@ -3707,11 +3706,7 @@ function requiredRepositoryKind(
 }
 
 function requiredCubeTemplate(row: Record<string, unknown>, key: string): CubeTemplate {
-  const value = requiredText(row, key);
-  if (!(CUBE_TEMPLATES as readonly string[]).includes(value)) {
-    throw new Error(`Database column ${key} is not a cube template.`);
-  }
-  return value as CubeTemplate;
+  return requiredText(row, key) as CubeTemplate;
 }
 
 function droneRecord(row: Record<string, unknown>): DroneRecord {

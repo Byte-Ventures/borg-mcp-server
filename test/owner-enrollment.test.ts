@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it } from "vitest";
 import { ProtocolContractError } from "borgmcp-shared/protocol";
 import { getTemplate, NEW_CUBE_TEMPLATE_PRESENTATIONS } from "borgmcp-shared/templates";
@@ -368,6 +369,50 @@ describe("owner enrollment and multi-cube creation", () => {
     });
     fixture.runtime.close();
     fixture.digester.destroy();
+  });
+
+  it("resolves a cube whose stored template comes from a newer shared registry", async () => {
+    const fixture = await authorityFixture();
+    const credential = generateSecret();
+    const enrolled = fixture.authority.exchangeInvitation({
+      invitation: fixture.authority.createBootstrapInvitation(60_000),
+      retryKey: randomUUID(),
+      clientCredential: credential,
+    });
+    if (enrolled === null) throw new Error("Owner enrollment failed.");
+    const principal = fixture.authority.authenticate(`Bearer ${credential}`);
+    if (principal === null) throw new Error("Owner authentication failed.");
+    const request = {
+      retryKey: randomUUID(),
+      name: "Forward-compatible template",
+      workingRepoName: "forward-compatible-template",
+      repository: { kind: "local" as const, value: randomUUID() },
+      template: "starter" as const,
+    };
+    const created = fixture.runtime.forPrincipal(principal).createCube(request);
+    fixture.runtime.close();
+    fixture.digester.destroy();
+
+    const database = new DatabaseSync(fixture.path);
+    database.prepare("UPDATE cubes SET selected_template = 'future-template' WHERE id = ?")
+      .run(created.cubeId);
+    database.prepare("UPDATE cube_create_bindings SET template = 'future-template' WHERE cube_id = ?")
+      .run(created.cubeId);
+    database.close();
+
+    const reopened = await openStore({ path: fixture.path });
+    const digester = new CredentialDigester(Buffer.alloc(32, 7));
+    const authority = new CredentialAuthority(reopened.credentials, digester);
+    const reopenedPrincipal = authority.authenticate(`Bearer ${credential}`);
+    if (reopenedPrincipal === null) throw new Error("Owner authentication failed after reopen.");
+    expect(reopened.forPrincipal(reopenedPrincipal).resolveRepositoryCube({
+      workingRepoName: request.workingRepoName,
+      repository: request.repository,
+    })).toMatchObject({
+      template: "future-template",
+    });
+    reopened.close();
+    digester.destroy();
   });
 
   it("recovers an ambiguous enrollment response after reopen without storing plaintext secrets", async () => {

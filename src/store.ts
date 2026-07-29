@@ -985,8 +985,8 @@ class SqliteScopedStore implements ScopedStore {
           is_default: true,
         },
       ];
-      const humanSeatRoles = roles.filter((role) => role.is_human_seat === true);
-      const defaultWorkerRoles = roles.filter((role) => role.is_default === true);
+      const humanSeatRoles = roles.filter(isRepositoryHumanSeatRole);
+      const defaultWorkerRoles = roles.filter(isRepositoryDefaultWorkerRole);
       if (humanSeatRoles.length !== 1 || defaultWorkerRoles.length !== 1) {
         throw new Error("Cube template must define one human seat and one default worker.");
       }
@@ -1168,31 +1168,7 @@ class SqliteScopedStore implements ScopedStore {
         }
       }
 
-      const cubeState = this.#database.prepare(`
-        SELECT cube.id AS cube_id, cube.name, cube.selected_template AS template,
-               SUM(CASE
-                 WHEN role.is_human_seat = 1 THEN 1
-                 ELSE 0
-               END) AS human_role_count,
-               MAX(CASE
-                 WHEN role.is_human_seat = 1 AND role.role_class = 'queen' THEN role.id
-                 ELSE NULL
-               END) AS human_seat_role_id,
-               SUM(CASE
-                 WHEN role.is_default = 1 THEN 1
-                 ELSE 0
-               END) AS worker_role_count,
-               MAX(CASE
-                 WHEN role.is_default = 1 AND role.role_class = 'worker' THEN role.id
-                 ELSE NULL
-               END) AS default_worker_role_id
-        FROM cubes AS cube
-        LEFT JOIN roles AS role ON role.cube_id = cube.id
-        WHERE cube.id = ?
-        GROUP BY cube.id
-      `).get(input.cubeId);
-      if (cubeState === undefined) throw new AccessDeniedError();
-      assertRepositoryCubeRoles(cubeState);
+      repositoryCubeRoleIds(this.#database, input.cubeId);
 
       if (cubeBinding !== undefined) {
         const existing = this.#resolveRepositoryCube(validated.repository);
@@ -2208,37 +2184,22 @@ class SqliteScopedStore implements ScopedStore {
     const row = this.#database.prepare(`
       SELECT association.cube_id, cube.name, association.working_repo_name,
              association.repository_kind, association.repository_value,
-             cube.selected_template AS template,
-             SUM(CASE
-               WHEN role.is_human_seat = 1 THEN 1
-               ELSE 0
-             END) AS human_role_count,
-             MAX(CASE
-               WHEN role.is_human_seat = 1 AND role.role_class = 'queen' THEN role.id
-               ELSE NULL
-             END) AS human_seat_role_id,
-             SUM(CASE
-               WHEN role.is_default = 1 THEN 1
-               ELSE 0
-             END) AS worker_role_count,
-             MAX(CASE
-               WHEN role.is_default = 1 AND role.role_class = 'worker' THEN role.id
-               ELSE NULL
-             END) AS default_worker_role_id
+             cube.selected_template AS template
       FROM repository_associations AS association
       JOIN cubes AS cube ON cube.id = association.cube_id
       JOIN client_cube_grants AS grant_row
         ON grant_row.client_id = association.client_id
        AND grant_row.cube_id = association.cube_id
        AND grant_row.access = 'manage'
-      LEFT JOIN roles AS role ON role.cube_id = cube.id
       WHERE association.client_id = ?
         AND association.repository_kind = ?
         AND association.repository_value = ?
-      GROUP BY association.client_id, association.repository_kind,
-               association.repository_value, association.cube_id
     `).get(this.#principal.id, repository.kind, repository.value);
-    return row === undefined ? null : repositoryCubeRecord(row);
+    if (row === undefined) return null;
+    return repositoryCubeRecord(
+      row,
+      repositoryCubeRoleIds(this.#database, requiredText(row, "cube_id")),
+    );
   }
 
   #requireCube(cubeId: string, access: CubeAccess): void {
@@ -2594,12 +2555,11 @@ class SqliteMaintenanceStore implements MaintenanceStore {
     const roles = requiredInteger(this.#database.prepare(
       "SELECT COUNT(*) AS count FROM roles WHERE cube_id = ?",
     ).get(record.cubeId)!, "count");
-    const human = this.#database.prepare(`
-      SELECT 1 FROM roles WHERE id = ? AND cube_id = ? AND is_human_seat = 1 AND role_class = 'queen'
-    `).get(record.humanSeatRoleId, record.cubeId);
-    const worker = this.#database.prepare(`
-      SELECT 1 FROM roles WHERE id = ? AND cube_id = ? AND is_default = 1 AND role_class = 'worker'
-    `).get(record.defaultWorkerRoleId, record.cubeId);
+    const roleCandidates = repositoryCubeRoleCandidates(this.#database, record.cubeId);
+    const human = roleCandidates.find((role) =>
+      role.id === record.humanSeatRoleId && isRepositoryHumanSeatRole(role));
+    const worker = roleCandidates.find((role) =>
+      role.id === record.defaultWorkerRoleId && isRepositoryDefaultWorkerRole(role));
     const grants = requiredInteger(this.#database.prepare(
       "SELECT COUNT(*) AS count FROM client_cube_grants WHERE cube_id = ?",
     ).get(record.cubeId)!, "count");
@@ -2673,10 +2633,8 @@ class SqliteMaintenanceStore implements MaintenanceStore {
     validatePresentationName(input.name);
     const template = getTemplate(input.template);
     if (template === null) throw new Error("Unknown repository cube template.");
-    const humanRole = template.roles.find((role) => role.is_human_seat);
-    const defaultWorkerRole = template.roles.find(
-      (role) => role.is_default && !role.is_human_seat,
-    );
+    const humanRole = template.roles.find(isRepositoryHumanSeatRole);
+    const defaultWorkerRole = template.roles.find(isRepositoryDefaultWorkerRole);
     if (humanRole === undefined || defaultWorkerRole === undefined) {
       throw new Error("Template does not define repository adoption roles.");
     }
@@ -3666,8 +3624,10 @@ function createCubeRecord(
   };
 }
 
-function repositoryCubeRecord(row: Record<string, unknown>): RepositoryCubeRecord {
-  assertRepositoryCubeRoles(row);
+function repositoryCubeRecord(
+  row: Record<string, unknown>,
+  roleIds: RepositoryCubeRoleIds,
+): RepositoryCubeRecord {
   return {
     cubeId: requiredText(row, "cube_id"),
     name: requiredText(row, "name"),
@@ -3677,21 +3637,62 @@ function repositoryCubeRecord(row: Record<string, unknown>): RepositoryCubeRecor
       value: requiredText(row, "repository_value"),
     },
     template: requiredCubeTemplate(row, "template"),
-    humanSeatRoleId: requiredText(row, "human_seat_role_id"),
-    defaultWorkerRoleId: requiredText(row, "default_worker_role_id"),
+    humanSeatRoleId: roleIds.humanSeatRoleId,
+    defaultWorkerRoleId: roleIds.defaultWorkerRoleId,
     access: "manage",
   };
 }
 
-function assertRepositoryCubeRoles(row: Record<string, unknown>): void {
-  if (
-    requiredInteger(row, "human_role_count") !== 1
-    || requiredInteger(row, "worker_role_count") !== 1
-    || nullableText(row, "human_seat_role_id") === null
-    || nullableText(row, "default_worker_role_id") === null
-  ) {
+interface RepositoryRoleCandidate {
+  readonly id: string;
+  readonly is_human_seat: boolean;
+  readonly is_default: boolean;
+}
+
+interface RepositoryCubeRoleIds {
+  readonly humanSeatRoleId: string;
+  readonly defaultWorkerRoleId: string;
+}
+
+function isRepositoryHumanSeatRole(
+  role: Pick<TemplateRole, "is_human_seat">,
+): boolean {
+  return role.is_human_seat === true;
+}
+
+function isRepositoryDefaultWorkerRole(
+  role: Pick<TemplateRole, "is_default">,
+): boolean {
+  return role.is_default === true;
+}
+
+function repositoryCubeRoleCandidates(
+  database: DatabaseSync,
+  cubeId: string,
+): RepositoryRoleCandidate[] {
+  return database.prepare(`
+    SELECT id, is_human_seat, is_default FROM roles WHERE cube_id = ?
+  `).all(cubeId).map((role) => ({
+    id: requiredText(role, "id"),
+    is_human_seat: requiredInteger(role, "is_human_seat") === 1,
+    is_default: requiredInteger(role, "is_default") === 1,
+  }));
+}
+
+function repositoryCubeRoleIds(
+  database: DatabaseSync,
+  cubeId: string,
+): RepositoryCubeRoleIds {
+  const roles = repositoryCubeRoleCandidates(database, cubeId);
+  const humanSeatRoles = roles.filter(isRepositoryHumanSeatRole);
+  const defaultWorkerRoles = roles.filter(isRepositoryDefaultWorkerRole);
+  if (humanSeatRoles.length !== 1 || defaultWorkerRoles.length !== 1) {
     throw new RepositoryAssociationConflictError("roles_invalid");
   }
+  return {
+    humanSeatRoleId: humanSeatRoles[0]!.id,
+    defaultWorkerRoleId: defaultWorkerRoles[0]!.id,
+  };
 }
 
 function requiredRepositoryKind(

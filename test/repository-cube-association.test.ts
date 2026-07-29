@@ -25,7 +25,7 @@ afterEach(async () => {
 });
 
 describe("repository cube association", () => {
-  it("adopts and resolves a valid legacy cube without creating a duplicate", async () => {
+  it("adopts and resolves a worker-class legacy human seat without creating a duplicate", async () => {
     const fixture = await legacyCubeFixture();
     const store = fixture.runtime.forPrincipal(clientPrincipal(fixture.clientId));
     const repository = {
@@ -366,8 +366,9 @@ function addRequiredRoles(runtime: StoreRuntime, clientId: string, cubeId: strin
   const humanRoleId = store.createRole(cubeId, {
     name: "Coordinator",
     isHumanSeat: true,
-    roleClass: "queen",
+    roleClass: "worker",
   }).id;
+  store.createRole(cubeId, { name: "Queen", roleClass: "queen" });
   const workerRoleId = store.createRole(cubeId, {
     name: "Builder",
     isDefault: true,

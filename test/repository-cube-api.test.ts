@@ -36,7 +36,7 @@ afterEach(async () => {
 });
 
 describe("repository cube API", () => {
-  it("strictly resolves none without mutation, then atomically adopts and resolves legacy state", async () => {
+  it("adopts and resolves a worker-class legacy human seat through the API", async () => {
     const fixture = await apiFixture();
     const repository = {
       kind: "origin",
@@ -359,8 +359,9 @@ function addRequiredRoles(runtime: StoreRuntime, clientId: string, cubeId: strin
   const humanRoleId = store.createRole(cubeId, {
     name: "Coordinator",
     isHumanSeat: true,
-    roleClass: "queen",
+    roleClass: "worker",
   }).id;
+  store.createRole(cubeId, { name: "Queen", roleClass: "queen" });
   const workerRoleId = store.createRole(cubeId, {
     name: "Builder",
     isDefault: true,

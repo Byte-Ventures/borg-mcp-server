@@ -3,7 +3,8 @@ import { mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { getTemplate } from "borgmcp-shared/templates";
+import { ProtocolContractError } from "borgmcp-shared/protocol";
+import { getTemplate, NEW_CUBE_TEMPLATE_PRESENTATIONS } from "borgmcp-shared/templates";
 
 import { CredentialAuthority, CredentialDigester, generateSecret } from "../src/credentials.js";
 import {
@@ -268,7 +269,7 @@ describe("owner enrollment and multi-cube creation", () => {
     fixture.digester.destroy();
   });
 
-  it.each(["software-dev", "starter"] as const)(
+  it.each(NEW_CUBE_TEMPLATE_PRESENTATIONS.map(({ name }) => name))(
     "seeds every shared %s template surface atomically without creating a seat",
     async (templateName) => {
       const fixture = await authorityFixture();
@@ -333,6 +334,41 @@ describe("owner enrollment and multi-cube creation", () => {
       fixture.digester.destroy();
     },
   );
+
+  it("rejects unknown template names with the protocol's typed input error", async () => {
+    const fixture = await authorityFixture();
+    const credential = generateSecret();
+    const enrolled = fixture.authority.exchangeInvitation({
+      invitation: fixture.authority.createBootstrapInvitation(60_000),
+      retryKey: randomUUID(),
+      clientCredential: credential,
+    });
+    if (enrolled === null) throw new Error("Owner enrollment failed.");
+    const principal = fixture.authority.authenticate(`Bearer ${credential}`);
+    if (principal === null) throw new Error("Owner authentication failed.");
+
+    let error: unknown;
+    try {
+      fixture.runtime.forPrincipal(principal).createCube({
+        retryKey: randomUUID(),
+        name: "Unknown template",
+        workingRepoName: "unknown-template",
+        repository: { kind: "local", value: randomUUID() },
+        template: "custom" as never,
+      });
+    } catch (caught) {
+      error = caught;
+    }
+
+    expect(error).toBeInstanceOf(ProtocolContractError);
+    expect(error).toMatchObject({
+      code: "INVALID_INPUT",
+      path: ["template"],
+      message: "Unsupported cube template.",
+    });
+    fixture.runtime.close();
+    fixture.digester.destroy();
+  });
 
   it("recovers an ambiguous enrollment response after reopen without storing plaintext secrets", async () => {
     const fixture = await authorityFixture();

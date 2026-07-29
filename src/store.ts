@@ -3706,11 +3706,7 @@ function requiredRepositoryKind(
 }
 
 function requiredCubeTemplate(row: Record<string, unknown>, key: string): CubeTemplate {
-  const value = requiredText(row, key);
-  if (value !== "default" && value !== "software-dev" && value !== "starter") {
-    throw new Error(`Database column ${key} is not a cube template.`);
-  }
-  return value;
+  return requiredText(row, key) as CubeTemplate;
 }
 
 function droneRecord(row: Record<string, unknown>): DroneRecord {

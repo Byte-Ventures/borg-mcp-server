@@ -5,6 +5,13 @@ The tag-triggered workflow in `.github/workflows/release.yml` supports the exist
 package, but committing or merging release preparation does not authorize a tag, protected
 environment approval, package publication, or deployment.
 
+### Dependency lock verification
+
+Current lock verification remains
+entirely offline: exact versions, canonical npm tarball URLs, SHA-512 integrity,
+root identity, duplicate consistency, and install-script boundaries are
+checked without querying registry metadata.
+
 ## Hard blockers
 
 Every item below must be complete before a release tag is authorized:

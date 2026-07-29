@@ -2,6 +2,7 @@ import {
   access,
   mkdir,
   mkdtemp,
+  readFile,
   realpath,
   rm,
   stat,
@@ -11,14 +12,30 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { applyMigrations, STORE_MIGRATIONS, type Migration } from "../src/migrations.js";
+import { MIGRATION_CHECKSUM_MANIFEST } from "../src/migration-checksums.js";
+import {
+  applyMigrations,
+  migrationChecksum,
+  STORE_MIGRATIONS,
+  type Migration,
+} from "../src/migrations.js";
 import { openStore } from "../src/store.js";
 
 const temporaryDirectories: string[] = [];
+type PublishedMigrationRow = readonly [version: number, name: string, checksum: string];
+interface PublishedMigrationFixture {
+  readonly integrity: string;
+  readonly rows: readonly PublishedMigrationRow[];
+}
+const publishedMigrationFixtures = readFile(
+  new URL("fixtures/published-migration-records.json", import.meta.url),
+  "utf8",
+).then((content) => JSON.parse(content) as Record<string, PublishedMigrationFixture>);
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   await Promise.all(temporaryDirectories.splice(0).map((path) => rm(path, {
     recursive: true,
     force: true,
@@ -26,6 +43,79 @@ afterEach(async () => {
 });
 
 describe("SQLite migrations", () => {
+  it("matches the committed evaluated-tuple checksum manifest", async () => {
+    const fixtures = await publishedMigrationFixtures;
+    const publishedV070 = fixtures["borgmcp-server@0.7.0"]!;
+    expect(STORE_MIGRATIONS.map((migration) => ({
+      version: migration.version,
+      name: migration.name,
+      checksum: migrationChecksum(migration),
+    }))).toEqual(MIGRATION_CHECKSUM_MANIFEST);
+    expect(migrationChecksum(STORE_MIGRATIONS[16]!)).toBe(publishedV070.rows[16]![2]);
+  });
+
+  it("replays a published 0.7.0 migration ledger and upgrades it to v18", async () => {
+    const fixtures = await publishedMigrationFixtures;
+    const database = new DatabaseSync(":memory:");
+    applyMigrations(database, STORE_MIGRATIONS.slice(0, 17));
+    replaceMigrationRows(database, fixtures["borgmcp-server@0.7.0"]!.rows);
+
+    expect(() => applyMigrations(database)).not.toThrow();
+    expect(database.prepare(
+      "SELECT version, name, checksum FROM schema_migrations ORDER BY version",
+    ).all()).toEqual(MIGRATION_CHECKSUM_MANIFEST);
+    database.close();
+  });
+
+  it("reconciles the published 0.7.1 v17 alias to canonical exactly once", async () => {
+    const fixtures = await publishedMigrationFixtures;
+    const database = new DatabaseSync(":memory:");
+    applyMigrations(database);
+    replaceMigrationRows(database, fixtures["borgmcp-server@0.7.1"]!.rows);
+    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    expect(() => applyMigrations(database)).not.toThrow();
+    expect(database.prepare(
+      "SELECT checksum FROM schema_migrations WHERE version = 17",
+    ).get()).toEqual({ checksum: MIGRATION_CHECKSUM_MANIFEST[16]!.checksum });
+    expect(log).toHaveBeenCalledOnce();
+    expect(log).toHaveBeenCalledWith(
+      "Reconciled migration 17 checksum from borgmcp-server@0.7.1 to canonical.",
+    );
+
+    applyMigrations(database);
+    expect(log).toHaveBeenCalledOnce();
+    database.close();
+  });
+
+  it("rejects a non-alias checksum in the published predecessor fixture", async () => {
+    const fixtures = await publishedMigrationFixtures;
+    const database = new DatabaseSync(":memory:");
+    applyMigrations(database);
+    const rows = fixtures["borgmcp-server@0.7.1"]!.rows.map((row) =>
+      row[0] === 17 ? [row[0], row[1], "0".repeat(64)] as const : row);
+    replaceMigrationRows(database, rows);
+
+    expect(() => applyMigrations(database)).toThrow(
+      "Migration 17 does not match its recorded checksum.",
+    );
+    database.close();
+  });
+
+  it("does not accept the published v17 alias for any other migration", async () => {
+    const fixtures = await publishedMigrationFixtures;
+    const database = new DatabaseSync(":memory:");
+    applyMigrations(database);
+    const publishedAlias = fixtures["borgmcp-server@0.7.1"]!.rows[16]![2];
+    database.prepare("UPDATE schema_migrations SET checksum = ? WHERE version = 16")
+      .run(publishedAlias);
+
+    expect(() => applyMigrations(database)).toThrow(
+      "Migration 16 does not match its recorded checksum.",
+    );
+    database.close();
+  });
+
   it("creates a private WAL database and reopens at the same ordered schema", async () => {
     const directory = await temporaryDirectory();
     const databasePath = join(directory, "data", "borg.db");
@@ -609,4 +699,17 @@ async function temporaryDirectory(): Promise<string> {
   const canonicalDirectory = await realpath(directory);
   temporaryDirectories.push(canonicalDirectory);
   return canonicalDirectory;
+}
+
+function replaceMigrationRows(
+  database: DatabaseSync,
+  rows: readonly PublishedMigrationRow[],
+): void {
+  database.exec("DELETE FROM schema_migrations");
+  const insert = database.prepare(
+    "INSERT INTO schema_migrations (version, name, checksum, applied_at) VALUES (?, ?, ?, ?)",
+  );
+  for (const [version, name, checksum] of rows) {
+    insert.run(version, name, checksum, "2026-07-29T00:00:00.000Z");
+  }
 }

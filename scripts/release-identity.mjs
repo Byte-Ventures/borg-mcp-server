@@ -12,6 +12,7 @@ const ALLOWLIST_PATH = "scripts/release-identity-allowlist.json";
 const RECORDS_PATH = "docs/release-records.json";
 const PACKAGE_PATH = "package.json";
 const LOCK_PATH = "npm-shrinkwrap.json";
+const README_PATH = "README.md";
 const VERSION_CONSTANT_PATH = "src/runtime-identity.ts";
 const stableVersionPattern = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/u;
 const shaPattern = /^[0-9a-f]{40}$/u;
@@ -147,6 +148,21 @@ function transformVersionConstant(raw, oldVersion, newVersion) {
   return raw.replace(expected, `export const SERVER_PACKAGE_VERSION = "${newVersion}";`);
 }
 
+function transformReadme(raw, oldVersion, newVersion) {
+  const documentedInstallTargets = [
+    ...raw.matchAll(
+      /^The current public preview and install target is `borgmcp-server@([^`]+)`\.$/gmu,
+    ),
+  ].map((match) => match[1]);
+  if (JSON.stringify(documentedInstallTargets) !== JSON.stringify([oldVersion])) {
+    fail(`${README_PATH} must document exactly the current manifest version as its install target.`);
+  }
+  return raw.replace(
+    /^The current public preview and install target is `borgmcp-server@[^`]+`\.$/mu,
+    `The current public preview and install target is \`borgmcp-server@${newVersion}\`.`,
+  );
+}
+
 function decodeRecord(record) {
   if (record === null || typeof record !== "object" || Array.isArray(record)) {
     fail("Release record is not an object.");
@@ -270,6 +286,9 @@ export function buildReleaseTransform(baseFiles, oldVersion, newVersion, recordI
   transformed.set(LOCK_PATH, transformLock(
     requireFile(baseFiles, LOCK_PATH), oldVersion, newVersion,
   ));
+  transformed.set(README_PATH, transformReadme(
+    requireFile(baseFiles, README_PATH), oldVersion, newVersion,
+  ));
   transformed.set(VERSION_CONSTANT_PATH, transformVersionConstant(
     requireFile(baseFiles, VERSION_CONSTANT_PATH), oldVersion, newVersion,
   ));
@@ -296,6 +315,7 @@ function transformPaths(allowlistRaw) {
   return [...new Set([
     PACKAGE_PATH,
     LOCK_PATH,
+    README_PATH,
     VERSION_CONSTANT_PATH,
     RECORDS_PATH,
     ...decodeAllowlist(allowlistRaw),
@@ -322,6 +342,12 @@ function verifyIndependentShapes(baseFiles, candidateFiles, oldVersion, newVersi
   expectedLock.packages[""].version = newVersion;
   if (canonicalJson(candidateLock) !== canonicalJson(expectedLock)) {
     fail(`${LOCK_PATH} diff is not exactly the two root identity fields.`);
+  }
+
+  const baseReadme = requireFile(baseFiles, README_PATH);
+  const candidateReadme = requireFile(candidateFiles, README_PATH);
+  if (candidateReadme !== transformReadme(baseReadme, oldVersion, newVersion)) {
+    fail(`${README_PATH} diff is not exactly the generated install target.`);
   }
 
   const baseConstant = requireFile(baseFiles, VERSION_CONSTANT_PATH);

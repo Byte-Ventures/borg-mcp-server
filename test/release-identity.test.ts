@@ -61,6 +61,33 @@ describe("release identity automation", () => {
     }
   });
 
+  it("keeps exactly one README install target aligned with the manifest", async () => {
+    const manifest = JSON.parse(await readFile("package.json", "utf8")) as { version: string };
+    const readme = await readFile("README.md", "utf8");
+    const versions = [...readme.matchAll(
+      /^The current public preview and install target is `borgmcp-server@(\d+\.\d+\.\d+)`\.$/gmu,
+    )].map((match) => match[1]);
+
+    expect(versions).toEqual([manifest.version]);
+    expect(readme).not.toMatch(/sha512-[A-Za-z0-9+/]{86}==/u);
+  });
+
+  it("keeps current-state claims out of the historical release record", async () => {
+    const releases = await readFile("RELEASES.md", "utf8");
+
+    expectHistoricalReleaseRecord(releases);
+  });
+
+  it.each([
+    ["current target", "The current public preview and install target is borgmcp-server."],
+    ["current lock behavior", "Current lock verification remains entirely offline."],
+    ["setup behavior", "Setup prepares local identity and storage and creates no cube."],
+  ])("rejects the known %s claim from release history", async (_case, claim) => {
+    const releases = await readFile("RELEASES.md", "utf8");
+
+    expect(() => expectHistoricalReleaseRecord(`${releases}\n${claim}\n`)).toThrow();
+  });
+
   it("prepares the exact generated surfaces and verifies their Git tree", async () => {
     const fixture = await createFixture();
     const prepared = await prepareRelease(fixture.root, newVersion, {
@@ -71,12 +98,16 @@ describe("release identity automation", () => {
 
     expect(prepared).toMatchObject({ oldVersion, newVersion });
     expect(prepared.paths).toEqual([
+      "README.md",
       "docs/release-records.json",
       "npm-shrinkwrap.json",
       "package.json",
       "src/runtime-identity.ts",
       fixturePinPath,
     ]);
+    expect(await readFile(join(fixture.root, "README.md"), "utf8")).toContain(
+      `The current public preview and install target is \`borgmcp-server@${newVersion}\`.`,
+    );
     const candidate = commitAll(fixture.root, "prepare release");
 
     expect(verifyReleaseIdentity(
@@ -90,6 +121,27 @@ describe("release identity automation", () => {
       oldVersion,
       newVersion,
     });
+  });
+
+  it.each([
+    ["zero", "# Server fixture\n"],
+    [
+      "multiple",
+      `The current public preview and install target is \`borgmcp-server@${oldVersion}\`.\n` +
+      `The current public preview and install target is \`borgmcp-server@${oldVersion}\`.\n`,
+    ],
+  ])("rejects %s README install targets before release preparation", async (_case, readme) => {
+    const fixture = await createFixture();
+    await writeFile(join(fixture.root, "README.md"), readme);
+    commitAll(fixture.root, "break README install target");
+
+    await expect(prepareRelease(fixture.root, newVersion, {
+      workflowRunId: 123,
+      workflowRunAttempt: 1,
+      artifactIntegrity: integrity,
+    }, fixture.authorities)).rejects.toThrow(
+      "README.md must document exactly the current manifest version as its install target.",
+    );
   });
 
   it("runs trusted-base bytes green on the transform and red on a self-bypassing candidate", async () => {
@@ -240,6 +292,11 @@ async function createFixture(): Promise<Omit<Fixture, "candidate">> {
   const allowlist = { versionPins: [fixturePinPath] };
   await writeFixture(root, "scripts/release-identity-allowlist.json", `${JSON.stringify(allowlist, null, 2)}\n`);
   await writeFixture(root, "docs/release-records.json", "[]\n");
+  await writeFixture(
+    root,
+    "README.md",
+    `The current public preview and install target is \`borgmcp-server@${oldVersion}\`.\n`,
+  );
   await writeFixture(root, "package.json", `${JSON.stringify({
     name: "borgmcp-server",
     version: oldVersion,
@@ -321,6 +378,12 @@ function commitAll(root: string, message: string): string {
   git(root, ["add", "."]);
   git(root, ["commit", "-q", "-m", message]);
   return git(root, ["rev-parse", "HEAD"]);
+}
+
+function expectHistoricalReleaseRecord(releases: string): void {
+  expect(releases).not.toMatch(/\bcurrent(?:ly)?\b/iu);
+  expect(releases).not.toMatch(/\bis the .*install target\b/iu);
+  expect(releases).not.toContain("Setup prepares local identity and storage");
 }
 
 function git(root: string, args: string[]): string {

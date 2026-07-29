@@ -50,7 +50,7 @@ reviewed registry release. Neither consumer uses Git or SSH dependencies.
 ## Security posture
 
 Loopback is the safe default. Binding to a private LAN address requires both an
-explicit address and `--lan` consent:
+explicit address and `--lan` consent.
 
 Before LAN startup, move `ca.key` out of the runtime data directory. Keep the
 CA private key offline; the running service does not need it.

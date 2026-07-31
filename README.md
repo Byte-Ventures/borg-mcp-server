@@ -4,10 +4,10 @@
 stores cube state locally and serves the Borg protocol over authenticated
 HTTPS.
 
-## Current install
+## Install
 
-The current public preview and install target is `borgmcp-server@0.8.0`.
-Verify current package metadata through [npm](https://www.npmjs.com/package/borgmcp-server).
+Verify current package metadata through
+[npm](https://www.npmjs.com/package/borgmcp-server).
 
 ## Requirements
 
@@ -17,19 +17,26 @@ Verify current package metadata through [npm](https://www.npmjs.com/package/borg
 
 ## Install and quickstart
 
-Install the current public preview from npm:
+Install from npm:
 
 ```sh
 npm install --global borgmcp-server
 borg-mcp-server setup
 borg-mcp-server start
-borg assimilate
 ```
 
-Setup prints no credential, invitation, or credential path,
-and creates no cube. `borg-mcp-server start` remains a foreground command.
-Managed persistence is an explicit, separately reviewed
-handoff; foreground start never installs or loads it.
+Setup initializes local storage and identity, but does not start the server or
+create a cube. The server runs in the foreground; Ctrl-C stops it without
+deleting stored data.
+
+With the server running, open another terminal and change to the Git repository
+you want Borg to coordinate. Then use the installed
+[`borg` client](https://github.com/Byte-Ventures/borg-mcp-client) to connect:
+
+```sh
+cd /path/to/your/project
+borg assimilate
+```
 
 The server listens on `https://127.0.0.1:7091` by default. Use
 `BORG_SERVER_DATA_DIR` to select another data directory.
@@ -41,11 +48,7 @@ The server listens on `https://127.0.0.1:7091` by default. Use
 - [`borg-mcp-server`](https://github.com/Byte-Ventures/borg-mcp-server) is this
   self-hosted coordination authority.
 - [`borg-mcp-shared`](https://github.com/Byte-Ventures/borg-mcp-shared) defines
-  the portable protocol contract and conformance suite used by both sides.
-
-The repositories release independently. Protocol changes land and pass portable
-conformance in `borg-mcp-shared` first; client and server then update to an exact,
-reviewed registry release. Neither consumer uses Git or SSH dependencies.
+  the protocol types used by the client and server.
 
 ## Security posture
 
@@ -59,14 +62,14 @@ Read [SECURITY.md](SECURITY.md) before exposing the service beyond loopback.
 
 ## Reference and support
 
-- [Operator reference](docs/operator-reference.md): setup, dashboard, networking,
-  debugging, credential administration, and capacity controls.
-- [Lifecycle specification](docs/design/sprint-6-server-lifecycle.md): status,
-  update, managed-service, stop, and stale-lock semantics.
-- [Protocol reference](docs/protocol-reference.md): advisory runtime metadata.
-- [Release runbook](docs/releasing.md): dependency-lock and release verification.
+- [Operator reference](https://github.com/Byte-Ventures/borg-mcp-server/blob/main/docs/operator-reference.md):
+  setup, dashboard, networking, debugging, credential administration, and
+  capacity controls.
+- [Protocol reference](https://github.com/Byte-Ventures/borg-mcp-server/blob/main/docs/protocol-reference.md):
+  API and runtime metadata details.
 
-Historical release notes are preserved in [`RELEASES.md`](RELEASES.md).
+Historical release notes are available in
+[`RELEASES.md`](https://github.com/Byte-Ventures/borg-mcp-server/blob/main/RELEASES.md).
 
 Run `borg-mcp-server help` for the complete command summary.
 

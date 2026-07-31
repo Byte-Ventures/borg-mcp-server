@@ -650,6 +650,8 @@ export const STORE_MIGRATIONS: readonly Migration[] = Object.freeze([
         client_id TEXT NOT NULL,
         lookup_digest BLOB PRIMARY KEY,
         verifier_digest BLOB NOT NULL,
+        terminal_cause TEXT NOT NULL
+          CHECK (terminal_cause IN ('cube_deleted', 'drone_evicted')),
         FOREIGN KEY (cube_id, client_id)
           REFERENCES deleted_cube_client_grants(cube_id, client_id) ON DELETE CASCADE
       ) STRICT, WITHOUT ROWID;

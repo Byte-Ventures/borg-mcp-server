@@ -275,17 +275,26 @@ describe("Principal to ScopedStore isolation", () => {
       { name: "client_id" },
       { name: "lookup_digest" },
       { name: "verifier_digest" },
+      { name: "terminal_cause" },
     ]);
     database.close();
     unsubscribe();
   });
 
-  it("keeps an active deleted-cube session typed after the database reopens", async () => {
+  it("promotes active and revoked sessions to CUBE_DELETED after the database reopens", async () => {
     const roleB = "00000000-0000-4000-8000-000000000009";
     runtime.maintenance.createRole({ id: roleB, cubeId: ids.cubeB, name: "Worker" });
     const key = Buffer.alloc(32, 19);
     let digester = new CredentialDigester(key);
     let authority = new CredentialAuthority(runtime.credentials, digester);
+    const revokedCredential = generateSecret();
+    const revoked = authority.attachSeat(runtime.forPrincipal(clientPrincipal(ids.clientB)), {
+      cubeId: ids.cubeB,
+      roleId: roleB,
+      sessionCredential: revokedCredential,
+    });
+    runtime.maintenance.revokeDroneSession(revoked.sessionId);
+    expect(authority.authenticateStatus(`Bearer ${revokedCredential}`)).toBe("revoked");
     const sessionCredential = generateSecret();
     authority.attachSeat(runtime.forPrincipal(clientPrincipal(ids.clientB)), {
       cubeId: ids.cubeB,
@@ -295,6 +304,7 @@ describe("Principal to ScopedStore isolation", () => {
 
     runtime.forPrincipal(clientPrincipal(ids.clientB)).deleteCube(ids.cubeB);
     expect(authority.authenticateStatus(`Bearer ${sessionCredential}`)).toBe("cube-deleted");
+    expect(authority.authenticateStatus(`Bearer ${revokedCredential}`)).toBe("cube-deleted");
 
     runtime.close();
     digester.destroy();
@@ -302,6 +312,7 @@ describe("Principal to ScopedStore isolation", () => {
     digester = new CredentialDigester(key);
     authority = new CredentialAuthority(runtime.credentials, digester);
     expect(authority.authenticateStatus(`Bearer ${sessionCredential}`)).toBe("cube-deleted");
+    expect(authority.authenticateStatus(`Bearer ${revokedCredential}`)).toBe("cube-deleted");
     digester.destroy();
   });
 

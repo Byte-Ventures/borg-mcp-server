@@ -1,6 +1,9 @@
 import { Agent, request as httpsRequest } from "node:https";
 import type { IncomingHttpHeaders } from "node:http";
+import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { connect as connectTcp, type Socket } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { connect as connectTls, type TLSSocket } from "node:tls";
 import { generate } from "selfsigned";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
@@ -16,8 +19,11 @@ import {
   type RunningServer,
 } from "../src/https-server.js";
 import { clientPrincipal, droneSessionPrincipal } from "../src/principal.js";
+import { CoordinationApi } from "../src/coordination-api.js";
+import { CredentialAuthority, CredentialDigester, generateSecret } from "../src/credentials.js";
 import { createDebugLogger, disabledDebugLogger } from "../src/debug-log.js";
 import { createRuntimeBuildIdentity } from "../src/runtime-identity.js";
+import { openStore } from "../src/store.js";
 
 interface TestResponse {
   readonly status: number;
@@ -303,6 +309,75 @@ describe("HTTPS service", () => {
       });
     }
     expect(coordinationCalls).toBe(0);
+  });
+
+  it("preserves an evicted credential across cube deletion and authority restart", async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-evicted-delete-")));
+    const databasePath = join(directory, "borg.db");
+    const digester = new CredentialDigester(Buffer.alloc(32, 27));
+    let runtime = await openStore({ path: databasePath });
+    let authority = new CredentialAuthority(runtime.credentials, digester);
+    let api = new CoordinationApi(runtime, authority);
+    const clientId = "00000000-0000-4000-8000-0000000002a1";
+    const cubeId = "00000000-0000-4000-8000-0000000002a2";
+    const roleId = "00000000-0000-4000-8000-0000000002a3";
+    const sessionCredential = generateSecret();
+    runtime.maintenance.createClient({ id: clientId, name: "Evicted deletion client" });
+    runtime.maintenance.createCube({ id: cubeId, name: "Evicted deletion cube", directive: "" });
+    runtime.maintenance.createRole({ id: roleId, cubeId, name: "Worker" });
+    runtime.maintenance.grantClientCube({ clientId, cubeId, access: "manage" });
+    const attachment = authority.attachSeat(runtime.forPrincipal(clientPrincipal(clientId)), {
+      cubeId,
+      roleId,
+      sessionCredential,
+    });
+    runtime.forPrincipal(clientPrincipal(clientId)).evictDrone(cubeId, attachment.drone.id);
+    expect(authority.authenticateStatus(`Bearer ${sessionCredential}`)).toBe("evicted");
+    runtime.forPrincipal(clientPrincipal(clientId)).deleteCube(cubeId);
+
+    const fixture = await startHttpsServer({
+      bind: { port: 0 },
+      tls: { key, cert: certificate },
+      authorizeCoordination: async (authorization) => authority.authenticateStatus(authorization),
+      handleCoordination: (coordinationRequest) => api.handle(coordinationRequest),
+    });
+    const assertEvictedResponses = async (): Promise<void> => {
+      for (const [method, path, body] of [
+        ["PUT", `/api/cubes/${cubeId}/logs`, JSON.stringify({
+          protocol_version: "7",
+          request_id: "evicted-read-after-delete",
+          payload: { cursor: null },
+        })],
+        ["DELETE", `/api/cubes/${cubeId}`, JSON.stringify({
+          protocol_version: "7",
+          request_id: "evicted-delete-after-delete",
+          payload: {},
+        })],
+      ] as const) {
+        const response = await request(fixture.origin, certificate, path, {
+          authorization: `Bearer ${sessionCredential}`,
+        }, body, method);
+        expect(response.status).toBe(410);
+        expect(JSON.parse(response.body)).toEqual({
+          protocol_version: "7",
+          error: { code: "DRONE_EVICTED", message: "Authentication failed." },
+        });
+      }
+    };
+
+    try {
+      await assertEvictedResponses();
+      runtime.close();
+      runtime = await openStore({ path: databasePath, migrationMode: "require-current" });
+      authority = new CredentialAuthority(runtime.credentials, digester);
+      api = new CoordinationApi(runtime, authority);
+      await assertEvictedResponses();
+    } finally {
+      await fixture.close();
+      runtime.close();
+      digester.destroy();
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
   it.each([

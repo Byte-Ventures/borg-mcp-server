@@ -258,8 +258,7 @@ interface StoredActiveDroneSessionDigest extends StoredSecretDigest {
 }
 
 interface StoredDeletedCubeSessionDigest extends DigestPair {
-  readonly clientId: string;
-  readonly revokedAt: string | null;
+  readonly evicted: boolean;
   readonly cubeDeleted: true;
 }
 
@@ -1281,22 +1280,17 @@ class SqliteScopedStore implements ScopedStore {
       `).run(cubeId);
       this.#database.prepare(`
         INSERT INTO deleted_cube_session_credentials (
-          cube_id, client_id, lookup_digest, verifier_digest
+          cube_id, client_id, lookup_digest, verifier_digest, terminal_cause
         )
         SELECT session.cube_id, session.client_id,
-               credential.lookup_digest, credential.verifier_digest
+               credential.lookup_digest, credential.verifier_digest,
+               CASE WHEN drone.evicted_at IS NULL THEN 'cube_deleted' ELSE 'drone_evicted' END
         FROM drone_session_credentials AS credential
         JOIN drone_sessions AS session ON session.id = credential.session_id
-        JOIN clients AS client ON client.id = session.client_id
         JOIN drones AS drone ON drone.id = session.drone_id
           AND drone.client_id = session.client_id
           AND drone.cube_id = session.cube_id
         WHERE session.cube_id = ?
-          AND credential.revoked_at IS NULL
-          AND session.revoked_at IS NULL
-          AND session.superseded_at IS NULL
-          AND client.revoked_at IS NULL
-          AND drone.evicted_at IS NULL
       `).run(cubeId);
       const deleted = this.#database.prepare("DELETE FROM cubes WHERE id = ?").run(cubeId);
       if (deleted.changes !== 1) throw new ScopedStoreError();
@@ -3421,9 +3415,8 @@ class SqliteCredentialStore implements CredentialStore {
     if (active !== undefined) return storedDroneSessionDigest(active);
     const deleted = this.#database.prepare(`
       SELECT credential.lookup_digest, credential.verifier_digest,
-             credential.client_id, client.revoked_at, 1 AS cube_deleted
+             credential.terminal_cause, 1 AS cube_deleted
       FROM deleted_cube_session_credentials AS credential
-      JOIN clients AS client ON client.id = credential.client_id
       WHERE credential.lookup_digest = ?
     `).get(lookup);
     return deleted === undefined ? null : storedDeletedCubeSessionDigest(deleted);
@@ -4042,11 +4035,14 @@ function storedDroneSessionDigest(row: Record<string, unknown>): StoredDroneSess
 function storedDeletedCubeSessionDigest(
   row: Record<string, unknown>,
 ): StoredDeletedCubeSessionDigest {
+  const terminalCause = requiredText(row, "terminal_cause");
+  if (terminalCause !== "cube_deleted" && terminalCause !== "drone_evicted") {
+    throw new Error("Database contains invalid deleted credential terminal cause.");
+  }
   return {
     lookup: requiredBuffer(row, "lookup_digest"),
     verifier: requiredBuffer(row, "verifier_digest"),
-    clientId: requiredText(row, "client_id"),
-    revokedAt: nullableText(row, "revoked_at"),
+    evicted: terminalCause === "drone_evicted",
     cubeDeleted: true,
   };
 }

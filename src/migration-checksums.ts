@@ -23,5 +23,5 @@ export const MIGRATION_CHECKSUM_MANIFEST = Object.freeze([
   { version: 16, name: "remove_scoped_invitations", checksum: "701e1a8ff131f21d724e96bc21af15ac8650c5b16b83720938e4e2dc10e2df83" },
   { version: 17, name: "invitation_client_names", checksum: "dd997a65f9d2c740974153c0458703bd8f5e41843927e9444ff71fe9910da4f7" },
   { version: 18, name: "shared_cube_templates", checksum: "8ee4ca35cc62fb00426a3d05ae490435d4f22a5965ef461c37fd0c8a8a8cab23" },
-  { version: 19, name: "deleted_cube_tombstones", checksum: "bde974639b7f19c4f2ebe92ec8c23f00ec3740e00d01992f34d60059eab33807" },
+  { version: 19, name: "deleted_cube_tombstones", checksum: "8f13c05d7083b33cfef77d82b347a1eec48b022fe3ab4218c05a88280ea147c0" },
 ] satisfies readonly MigrationChecksumEntry[]);

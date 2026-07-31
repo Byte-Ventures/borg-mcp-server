@@ -262,9 +262,9 @@ export class CredentialAuthority {
       return clientPrincipal(client!.clientId!);
     }
     if (droneValid) {
-      if (!drone!.cubeDeleted && drone.evictedAt !== null) return "evicted";
-      if (drone!.revokedAt != null) return "revoked";
+      if (drone!.cubeDeleted ? drone.evicted : drone.evictedAt !== null) return "evicted";
       if (drone!.cubeDeleted) return "cube-deleted";
+      if (drone!.revokedAt != null) return "revoked";
       if (drone!.takenOver) return "rejected";
       return droneSessionPrincipal({
         id: drone!.sessionId,

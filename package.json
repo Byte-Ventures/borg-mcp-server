@@ -56,7 +56,7 @@
     "vitest": "4.1.10"
   },
   "dependencies": {
-    "borgmcp-shared": "0.7.0",
+    "borgmcp-shared": "0.7.1",
     "selfsigned": "5.5.0"
   }
 }

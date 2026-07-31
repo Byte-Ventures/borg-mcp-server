@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
@@ -12,6 +13,7 @@ import {
 import { CredentialAuthority, CredentialDigester, generateSecret } from "../src/credentials.js";
 import {
   AccessDeniedError,
+  CubeDeletedError,
   CursorExpiredError,
   DefaultRoleRequiredError,
   RoleConflictError,
@@ -216,6 +218,153 @@ describe("Principal to ScopedStore isolation", () => {
 
     runtime.maintenance.revokeClient(ids.clientA);
     expect(client.listCubes()).toEqual([]);
+  });
+
+  it("hard-deletes a managed cube while retaining only access-scoped deletion tombstones", () => {
+    const manager = runtime.forPrincipal(clientPrincipal(ids.clientA));
+    const outsiderId = "00000000-0000-4000-8000-000000000009";
+    runtime.maintenance.createClient({ id: outsiderId, name: "Outsider" });
+    expect(() => manager.deleteCube(ids.cubeB)).toThrow(AccessDeniedError);
+    expect(() => runtime.forPrincipal(clientPrincipal(ids.clientB)).deleteCube(ids.cubeA))
+      .toThrow(ScopedStoreError);
+    expect(() => runtime.forPrincipal(clientPrincipal(outsiderId)).deleteCube(ids.cubeA))
+      .toThrow(ScopedStoreError);
+    const entry = manager.appendLog(ids.cubeA, { message: "deleted activity" });
+    manager.acknowledge(ids.cubeA, entry.id, "ack");
+    manager.recordDecision(ids.cubeA, { topic: "deleted-topic", decision: "deleted decision" });
+    let deletionSignals = 0;
+    const unsubscribe = manager.subscribeActivity(
+      ids.cubeA,
+      () => undefined,
+      () => { deletionSignals += 1; },
+    );
+
+    manager.deleteCube(ids.cubeA);
+
+    expect(deletionSignals).toBe(1);
+    expect(manager.listCubes().map((cube) => cube.id)).toEqual([ids.cubeB]);
+    expect(() => manager.getCube(ids.cubeA)).toThrow(CubeDeletedError);
+    expect(() => runtime.forPrincipal(operatorPrincipal(outsiderId)).getCube(ids.cubeA))
+      .toThrow(CubeDeletedError);
+    expect(runtime.forPrincipal(clientPrincipal(outsiderId)).getCube(ids.cubeA)).toBeNull();
+    expect(runtime.maintenance.observeAuthorityState()).toMatchObject({
+      cubes: 1,
+      roles: 0,
+      grants: 2,
+      drones: 0,
+      drone_sessions: 0,
+      drone_session_credentials: 0,
+    });
+    const database = new DatabaseSync(join(directory, "borg.db"), { readOnly: true });
+    for (const table of [
+      "client_cube_grants", "roles", "drones", "drone_sessions",
+      "activity_log", "activity_acks", "decisions", "expired_activity_cursors",
+      "cube_create_bindings", "repository_associations",
+    ]) {
+      expect(database.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get())
+        .toEqual({ count: table === "client_cube_grants" ? 2 : 0 });
+    }
+    expect(database.prepare("SELECT id FROM deleted_cubes").all()).toEqual([{ id: ids.cubeA }]);
+    expect(database.prepare(
+      "SELECT cube_id, client_id FROM deleted_cube_client_grants",
+    ).all()).toEqual([{ cube_id: ids.cubeA, client_id: ids.clientA }]);
+    expect(database.prepare(
+      "SELECT name FROM pragma_table_info('deleted_cube_session_credentials') ORDER BY cid",
+    ).all()).toEqual([
+      { name: "cube_id" },
+      { name: "client_id" },
+      { name: "lookup_digest" },
+      { name: "verifier_digest" },
+      { name: "terminal_cause" },
+    ]);
+    database.close();
+    unsubscribe();
+  });
+
+  it("promotes active and revoked sessions to CUBE_DELETED after the database reopens", async () => {
+    const roleB = "00000000-0000-4000-8000-000000000009";
+    const outsiderId = "00000000-0000-4000-8000-00000000000a";
+    runtime.maintenance.createClient({ id: outsiderId, name: "Never authorized" });
+    runtime.maintenance.createRole({ id: roleB, cubeId: ids.cubeB, name: "Worker" });
+    const key = Buffer.alloc(32, 19);
+    let digester = new CredentialDigester(key);
+    let authority = new CredentialAuthority(runtime.credentials, digester);
+    const revokedCredential = generateSecret();
+    const revoked = authority.attachSeat(runtime.forPrincipal(clientPrincipal(ids.clientB)), {
+      cubeId: ids.cubeB,
+      roleId: roleB,
+      sessionCredential: revokedCredential,
+    });
+    runtime.maintenance.revokeDroneSession(revoked.sessionId);
+    expect(authority.authenticateStatus(`Bearer ${revokedCredential}`)).toBe("revoked");
+    const sessionCredential = generateSecret();
+    authority.attachSeat(runtime.forPrincipal(clientPrincipal(ids.clientB)), {
+      cubeId: ids.cubeB,
+      roleId: roleB,
+      sessionCredential,
+    });
+    runtime.maintenance.grantClientCube({
+      clientId: ids.clientA,
+      cubeId: ids.cubeB,
+      access: "manage",
+    });
+    runtime.maintenance.removeClientCubeGrant(ids.clientB, ids.cubeB);
+    expect(runtime.forPrincipal(clientPrincipal(ids.clientB)).getCube(ids.cubeB)).toBeNull();
+    expect(runtime.forPrincipal(clientPrincipal(outsiderId)).getCube(ids.cubeB)).toBeNull();
+
+    runtime.forPrincipal(clientPrincipal(ids.clientA)).deleteCube(ids.cubeB);
+    expect(authority.authenticateStatus(`Bearer ${sessionCredential}`)).toBe("cube-deleted");
+    expect(authority.authenticateStatus(`Bearer ${revokedCredential}`)).toBe("cube-deleted");
+    expect(() => runtime.forPrincipal(clientPrincipal(ids.clientB)).getCube(ids.cubeB))
+      .toThrow(CubeDeletedError);
+    expect(runtime.forPrincipal(clientPrincipal(outsiderId)).getCube(ids.cubeB)).toBeNull();
+
+    runtime.close();
+    digester.destroy();
+    runtime = await openStore({ path: join(directory, "borg.db") });
+    digester = new CredentialDigester(key);
+    authority = new CredentialAuthority(runtime.credentials, digester);
+    expect(authority.authenticateStatus(`Bearer ${sessionCredential}`)).toBe("cube-deleted");
+    expect(authority.authenticateStatus(`Bearer ${revokedCredential}`)).toBe("cube-deleted");
+    expect(() => runtime.forPrincipal(clientPrincipal(ids.clientB)).getCube(ids.cubeB))
+      .toThrow(CubeDeletedError);
+    expect(runtime.forPrincipal(clientPrincipal(outsiderId)).getCube(ids.cubeB)).toBeNull();
+    digester.destroy();
+  });
+
+  it("does not expose a parent client's sibling cube tombstone to its drone", async () => {
+    const parent = runtime.forPrincipal(clientPrincipal(ids.clientA));
+    const drone = runtime.forPrincipal(droneSessionPrincipal({
+      id: ids.sessionA,
+      clientId: ids.clientA,
+      cubeId: ids.cubeA,
+      droneId: ids.droneA,
+    }));
+    runtime.maintenance.grantClientCube({
+      clientId: ids.clientA,
+      cubeId: ids.cubeB,
+      access: "manage",
+    });
+    expect(drone.getCube(ids.cubeB)).toBeNull();
+    expect(() => drone.deleteCube(ids.cubeB)).toThrow(ScopedStoreError);
+
+    parent.deleteCube(ids.cubeB);
+    expect(() => parent.getCube(ids.cubeB)).toThrow(CubeDeletedError);
+    expect(drone.getCube(ids.cubeB)).toBeNull();
+    expect(() => drone.deleteCube(ids.cubeB)).toThrow(ScopedStoreError);
+
+    runtime.close();
+    runtime = await openStore({ path: join(directory, "borg.db") });
+    const reopenedParent = runtime.forPrincipal(clientPrincipal(ids.clientA));
+    const reopenedDrone = runtime.forPrincipal(droneSessionPrincipal({
+      id: ids.sessionA,
+      clientId: ids.clientA,
+      cubeId: ids.cubeA,
+      droneId: ids.droneA,
+    }));
+    expect(() => reopenedParent.getCube(ids.cubeB)).toThrow(CubeDeletedError);
+    expect(reopenedDrone.getCube(ids.cubeB)).toBeNull();
+    expect(() => reopenedDrone.deleteCube(ids.cubeB)).toThrow(ScopedStoreError);
   });
 
   it("executes authorized writes atomically and persists migrated cube context", async () => {

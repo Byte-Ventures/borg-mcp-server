@@ -6,7 +6,7 @@ HTTPS.
 
 ## Current install
 
-The current public preview and install target is `borgmcp-server@0.7.3`.
+The current public preview and install target is `borgmcp-server@0.8.0`.
 Verify current package metadata through [npm](https://www.npmjs.com/package/borgmcp-server).
 
 ## Requirements

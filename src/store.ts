@@ -1277,7 +1277,9 @@ class SqliteScopedStore implements ScopedStore {
       this.#database.prepare(`
         INSERT INTO deleted_cube_client_grants (cube_id, client_id)
         SELECT cube_id, client_id FROM client_cube_grants WHERE cube_id = ?
-      `).run(cubeId);
+        UNION
+        SELECT cube_id, client_id FROM drone_sessions WHERE cube_id = ?
+      `).run(cubeId, cubeId);
       this.#database.prepare(`
         INSERT INTO deleted_cube_session_credentials (
           cube_id, client_id, lookup_digest, verifier_digest, terminal_cause

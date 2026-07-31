@@ -283,6 +283,8 @@ describe("Principal to ScopedStore isolation", () => {
 
   it("promotes active and revoked sessions to CUBE_DELETED after the database reopens", async () => {
     const roleB = "00000000-0000-4000-8000-000000000009";
+    const outsiderId = "00000000-0000-4000-8000-00000000000a";
+    runtime.maintenance.createClient({ id: outsiderId, name: "Never authorized" });
     runtime.maintenance.createRole({ id: roleB, cubeId: ids.cubeB, name: "Worker" });
     const key = Buffer.alloc(32, 19);
     let digester = new CredentialDigester(key);
@@ -301,10 +303,21 @@ describe("Principal to ScopedStore isolation", () => {
       roleId: roleB,
       sessionCredential,
     });
+    runtime.maintenance.grantClientCube({
+      clientId: ids.clientA,
+      cubeId: ids.cubeB,
+      access: "manage",
+    });
+    runtime.maintenance.removeClientCubeGrant(ids.clientB, ids.cubeB);
+    expect(runtime.forPrincipal(clientPrincipal(ids.clientB)).getCube(ids.cubeB)).toBeNull();
+    expect(runtime.forPrincipal(clientPrincipal(outsiderId)).getCube(ids.cubeB)).toBeNull();
 
-    runtime.forPrincipal(clientPrincipal(ids.clientB)).deleteCube(ids.cubeB);
+    runtime.forPrincipal(clientPrincipal(ids.clientA)).deleteCube(ids.cubeB);
     expect(authority.authenticateStatus(`Bearer ${sessionCredential}`)).toBe("cube-deleted");
     expect(authority.authenticateStatus(`Bearer ${revokedCredential}`)).toBe("cube-deleted");
+    expect(() => runtime.forPrincipal(clientPrincipal(ids.clientB)).getCube(ids.cubeB))
+      .toThrow(CubeDeletedError);
+    expect(runtime.forPrincipal(clientPrincipal(outsiderId)).getCube(ids.cubeB)).toBeNull();
 
     runtime.close();
     digester.destroy();
@@ -313,6 +326,9 @@ describe("Principal to ScopedStore isolation", () => {
     authority = new CredentialAuthority(runtime.credentials, digester);
     expect(authority.authenticateStatus(`Bearer ${sessionCredential}`)).toBe("cube-deleted");
     expect(authority.authenticateStatus(`Bearer ${revokedCredential}`)).toBe("cube-deleted");
+    expect(() => runtime.forPrincipal(clientPrincipal(ids.clientB)).getCube(ids.cubeB))
+      .toThrow(CubeDeletedError);
+    expect(runtime.forPrincipal(clientPrincipal(outsiderId)).getCube(ids.cubeB)).toBeNull();
     digester.destroy();
   });
 

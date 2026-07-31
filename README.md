@@ -4,10 +4,10 @@
 stores cube state locally and serves the Borg protocol over authenticated
 HTTPS.
 
-## Current install
+## Install
 
-The current public preview and install target is `borgmcp-server@0.8.0`.
-Verify current package metadata through [npm](https://www.npmjs.com/package/borgmcp-server).
+Verify current package metadata through
+[npm](https://www.npmjs.com/package/borgmcp-server).
 
 ## Requirements
 
@@ -17,7 +17,7 @@ Verify current package metadata through [npm](https://www.npmjs.com/package/borg
 
 ## Install and quickstart
 
-Install the current public preview from npm:
+Install from npm:
 
 ```sh
 npm install --global borgmcp-server

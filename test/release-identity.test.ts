@@ -61,22 +61,16 @@ describe("release identity automation", () => {
     }
   });
 
-  it("keeps the visitor-first README and generated install target release-safe", async () => {
-    const manifest = JSON.parse(await readFile("package.json", "utf8")) as { version: string };
+  it("keeps the visitor-first README unpinned and release-safe", async () => {
     const readme = await readFile("README.md", "utf8");
-    const installTarget =
-      /^The current public preview and install target is `borgmcp-server@(\d+\.\d+\.\d+)`\.$/gmu;
-    const versions = [...readme.matchAll(installTarget)].map((match) => match[1]);
-    const withoutInstallTarget = readme.replace(installTarget, "");
     const headings = [...readme.matchAll(/^## (.+)$/gmu)].map((match) => match[1]);
     const quickstart = readme.slice(0, readme.indexOf("## How it fits together"))
       .replaceAll(/\s+/gu, " ");
 
-    expect(versions).toEqual([manifest.version]);
     expect(readme).not.toMatch(/sha512-[A-Za-z0-9+/]{86}==/u);
-    expect(withoutInstallTarget).not.toMatch(/(?<![\d.])\d+\.\d+\.\d+(?![\d.])/u);
+    expect(readme).not.toMatch(/(?<![\d.])\d+\.\d+\.\d+(?![\d.])/u);
     expect(headings).toEqual([
-      "Current install",
+      "Install",
       "Requirements",
       "Install and quickstart",
       "How it fits together",
@@ -120,16 +114,13 @@ describe("release identity automation", () => {
 
     expect(prepared).toMatchObject({ oldVersion, newVersion });
     expect(prepared.paths).toEqual([
-      "README.md",
       "docs/release-records.json",
       "npm-shrinkwrap.json",
       "package.json",
       "src/runtime-identity.ts",
       fixturePinPath,
     ]);
-    expect(await readFile(join(fixture.root, "README.md"), "utf8")).toContain(
-      `The current public preview and install target is \`borgmcp-server@${newVersion}\`.`,
-    );
+    expect(await readFile(join(fixture.root, "README.md"), "utf8")).toBe("# Server fixture\n");
     const candidate = commitAll(fixture.root, "prepare release");
 
     expect(verifyReleaseIdentity(
@@ -143,27 +134,6 @@ describe("release identity automation", () => {
       oldVersion,
       newVersion,
     });
-  });
-
-  it.each([
-    ["zero", "# Server fixture\n"],
-    [
-      "multiple",
-      `The current public preview and install target is \`borgmcp-server@${oldVersion}\`.\n` +
-      `The current public preview and install target is \`borgmcp-server@${oldVersion}\`.\n`,
-    ],
-  ])("rejects %s README install targets before release preparation", async (_case, readme) => {
-    const fixture = await createFixture();
-    await writeFile(join(fixture.root, "README.md"), readme);
-    commitAll(fixture.root, "break README install target");
-
-    await expect(prepareRelease(fixture.root, newVersion, {
-      workflowRunId: 123,
-      workflowRunAttempt: 1,
-      artifactIntegrity: integrity,
-    }, fixture.authorities)).rejects.toThrow(
-      "README.md must document exactly the current manifest version as its install target.",
-    );
   });
 
   it("runs trusted-base bytes green on the transform and red on a self-bypassing candidate", async () => {
@@ -256,6 +226,9 @@ describe("release identity automation", () => {
       const path = join(fixture.root, "scripts/release-identity-allowlist.json");
       await writeFile(path, `${await readFile(path, "utf8")}\n`);
     }],
+    ["a README edit outside the transform", async (fixture: Fixture) => {
+      await writeFile(join(fixture.root, "README.md"), "# Changed during release prep\n");
+    }],
     ["a hand edit outside the transform", async (fixture: Fixture) => {
       await writeFile(join(fixture.root, "manual-edit.txt"), "not release identity\n");
     }],
@@ -314,11 +287,7 @@ async function createFixture(): Promise<Omit<Fixture, "candidate">> {
   const allowlist = { versionPins: [fixturePinPath] };
   await writeFixture(root, "scripts/release-identity-allowlist.json", `${JSON.stringify(allowlist, null, 2)}\n`);
   await writeFixture(root, "docs/release-records.json", "[]\n");
-  await writeFixture(
-    root,
-    "README.md",
-    `The current public preview and install target is \`borgmcp-server@${oldVersion}\`.\n`,
-  );
+  await writeFixture(root, "README.md", "# Server fixture\n");
   await writeFixture(root, "package.json", `${JSON.stringify({
     name: "borgmcp-server",
     version: oldVersion,

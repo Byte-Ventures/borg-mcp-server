@@ -29,11 +29,12 @@ Setup initializes local storage and identity, but does not start the server or
 create a cube. The server runs in the foreground; Ctrl-C stops it without
 deleting stored data.
 
-With the server running, use the
-[`borg` client](https://github.com/Byte-Ventures/borg-mcp-client) in another
-terminal to connect:
+With the server running, open another terminal and change to the Git repository
+you want Borg to coordinate. Then use the installed
+[`borg` client](https://github.com/Byte-Ventures/borg-mcp-client) to connect:
 
 ```sh
+cd /path/to/your/project
 borg assimilate
 ```
 

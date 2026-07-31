@@ -81,7 +81,8 @@ describe("release identity automation", () => {
     expect(quickstart).toContain("borg-mcp-server start");
     expect(quickstart).toContain("Setup initializes local storage and identity, but does not start the server or create a cube.");
     expect(quickstart).toContain("The server runs in the foreground");
-    expect(quickstart).toContain("in another terminal to connect");
+    expect(quickstart).toContain("change to the Git repository you want Borg to coordinate");
+    expect(quickstart).toContain("cd /path/to/your/project");
     expect(quickstart).toContain("https://127.0.0.1:7091");
     for (const [, path] of readme.matchAll(/\]\(([^):]+\.md)\)/gu)) {
       await expect(access(path!)).resolves.toBeUndefined();

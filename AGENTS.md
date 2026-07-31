@@ -19,6 +19,7 @@
 ## Invariants
 
 - Preserve loopback-only defaults. Private-LAN binding requires both an explicit non-loopback host and `--lan`; HTTPS is TLS 1.3.
+- Keep `borg-mcp-server start` foreground-only; it must not install or load a managed service.
 - Keep runtime bootstrap offline. `test/no-egress.test.ts` permits outbound fetch only in `src/registry-artifact.ts` and subprocess creation only in runtime/service lifecycle code.
 - Authorization changes require accepted-path and rejected-path tests, including cross-cube isolation where scope can change. `test/conformance.test.ts` runs the shared adapter contract.
 - Migrations are the ordered `STORE_MIGRATIONS` array in `src/migrations.ts`. Never edit a migration that appeared in a published version; append a new version and append its evaluated checksum to `src/migration-checksums.ts`. Run `npm test -- test/migrations.test.ts` for migration work.

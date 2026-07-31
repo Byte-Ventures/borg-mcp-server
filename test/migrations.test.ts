@@ -54,7 +54,7 @@ describe("SQLite migrations", () => {
     expect(migrationChecksum(STORE_MIGRATIONS[16]!)).toBe(publishedV070.rows[16]![2]);
   });
 
-  it("replays a published 0.7.0 migration ledger and upgrades it to v18", async () => {
+  it("replays a published 0.7.0 migration ledger and upgrades it to v19", async () => {
     const fixtures = await publishedMigrationFixtures;
     const database = new DatabaseSync(":memory:");
     applyMigrations(database, STORE_MIGRATIONS.slice(0, 17));
@@ -70,7 +70,7 @@ describe("SQLite migrations", () => {
   it("reconciles the published 0.7.1 v17 alias to canonical exactly once", async () => {
     const fixtures = await publishedMigrationFixtures;
     const database = new DatabaseSync(":memory:");
-    applyMigrations(database);
+    applyMigrations(database, STORE_MIGRATIONS.slice(0, 18));
     replaceMigrationRows(database, fixtures["borgmcp-server@0.7.1"]!.rows);
     const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
 
@@ -124,7 +124,7 @@ describe("SQLite migrations", () => {
     expect(first.diagnostics()).toEqual({
       journalMode: "wal",
       foreignKeys: true,
-      schemaVersions: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18],
+      schemaVersions: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19],
     });
     expect((await stat(join(directory, "data"))).mode & 0o777).toBe(0o700);
     expect((await stat(databasePath)).mode & 0o777).toBe(0o600);
@@ -134,7 +134,7 @@ describe("SQLite migrations", () => {
 
     const second = await openStore({ path: databasePath });
     expect(second.diagnostics().schemaVersions)
-      .toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18]);
+      .toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]);
     second.close();
     await expect(access(databasePath)).resolves.toBeUndefined();
   });

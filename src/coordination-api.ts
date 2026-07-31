@@ -10,6 +10,7 @@ import {
   decodeAssociateRepositoryCubeRequestEnvelope,
   decodeAttachRequestEnvelope,
   decodeCreateCubeRequestEnvelope,
+  decodeDeleteCubeRequestEnvelope,
   decodeDroneRuntimeMetadataPatch,
   decodeEvictDroneRequestEnvelope,
   decodeProtocolEnvelope,
@@ -27,6 +28,7 @@ import {
 import type { CredentialAuthority } from "./credentials.js";
 import {
   CursorExpiredError,
+  CubeDeletedError,
   AttachDroneEvictedError,
   AttachSessionRejectedError,
   AttachSessionRevokedError,
@@ -316,6 +318,11 @@ export class CoordinationApi {
         });
         return success(200, envelope.requestId, { cube: cubePayload(cube) });
       }
+      if (resource === undefined && request.method === "DELETE") {
+        const envelope = decodeDeleteCubeRequestEnvelope(request.body);
+        store.deleteCube(cubeId);
+        return success(200, envelope.request_id, { cube_id: cubeId, deleted: true });
+      }
       if (resource === "taxonomy-patch" && request.method === "POST") {
         const envelope = decodeEnvelope(request.body);
         const action = envelope.payload["action"];
@@ -553,6 +560,9 @@ export class CoordinationApi {
       }
       return failure(405, "INVALID_INPUT", "Method not allowed.");
     } catch (error) {
+      if (error instanceof CubeDeletedError) {
+        return failure(410, ErrorCode.CUBE_DELETED, error.message, safeRequestId(request.body));
+      }
       if (error instanceof CursorExpiredError) {
         return failure(410, "CURSOR_EXPIRED", error.message);
       }
@@ -623,13 +633,11 @@ export class CoordinationApi {
     let live = false;
     try {
       unsubscribe = store.subscribeActivity(cubeId, (entry) => {
-        if (store.getCube(cubeId) === null) {
-          queue.close();
-          return;
-        }
         if (live) queue.push(encodeLogEvent(entry));
         else if ("kind" in entry) pendingNotifications.push(entry);
         else replayDirty = true;
+      }, () => {
+        queue.terminate(encodeCubeDeletedEvent());
       });
       subscribed = true;
       signal.addEventListener("abort", () => queue.close(), { once: true });
@@ -774,6 +782,12 @@ class AsyncStringQueue implements AsyncIterable<string> {
     this.#cleanup();
     for (const waiter of this.#waiters.splice(0)) waiter({ value: undefined, done: true });
     for (const waiter of this.#spaceWaiters.splice(0)) waiter(false);
+  }
+
+  terminate(value: string): void {
+    if (this.#closed) return;
+    this.#enqueue(value);
+    this.close();
   }
 
   [Symbol.asyncIterator](): AsyncIterator<string> {
@@ -995,6 +1009,11 @@ function encodeLogEvent(entry: ActivityStreamRecord): string {
 
 function encodeHeartbeat(): string {
   return `event: heartbeat\ndata: ${JSON.stringify({ ts: new Date().toISOString() })}\n\n`;
+}
+
+function encodeCubeDeletedEvent(): string {
+  const envelope = failure(410, ErrorCode.CUBE_DELETED, "The cube was deleted.").body;
+  return `event: error\ndata: ${JSON.stringify(envelope)}\n\n`;
 }
 
 function cubePayload(cube: CubeRecord) {

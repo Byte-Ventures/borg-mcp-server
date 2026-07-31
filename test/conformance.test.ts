@@ -56,7 +56,7 @@ describe("borgmcp-shared server adapter", () => {
           observations: {},
         },
       ]);
-      expect(report.results).toHaveLength(27);
+      expect(report.results).toHaveLength(28);
     } finally {
       await fixture.server.close();
       fixture.digester.destroy();
@@ -73,11 +73,12 @@ async function conformanceEnvironment(): Promise<{
 }> {
   const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-conformance-")));
   directories.push(directory);
-  const runtime = await openStore({ path: join(directory, "borg.db") });
+  const databasePath = join(directory, "borg.db");
+  let runtime = await openStore({ path: databasePath });
   const digester = new CredentialDigester(Buffer.alloc(32, 7));
-  const authority = new CredentialAuthority(runtime.credentials, digester);
-  const api = new CoordinationApi(runtime, authority);
-  const exchangeEnrollment = createEnrollmentExchange(authority);
+  let authority = new CredentialAuthority(runtime.credentials, digester);
+  let api = new CoordinationApi(runtime, authority);
+  let exchangeEnrollment = createEnrollmentExchange(authority);
   const principalCubes = new Map<string, Map<string, "read" | "write" | "manage">>();
   const invitations = new Map<string, string>();
   const enrolledClients = new Map<string, string>();
@@ -100,7 +101,7 @@ async function conformanceEnvironment(): Promise<{
     bind: { port: 0 },
     tls: { key: material.private, cert: material.cert },
     authorizeCoordination: async (authorization) => authority.authenticateStatus(authorization),
-    exchangeEnrollment,
+    exchangeEnrollment: (request) => exchangeEnrollment(request),
     handleCoordination: (request) => api.handle(request),
   });
   const transport = new HttpsConformanceTransport(
@@ -120,6 +121,13 @@ async function conformanceEnvironment(): Promise<{
         createdByPrincipal.clear();
         pendingCreateCapability.clear();
         managedSessions.clear();
+      },
+      restartAuthority: async () => {
+        runtime.close();
+        runtime = await openStore({ path: databasePath, migrationMode: "require-current" });
+        authority = new CredentialAuthority(runtime.credentials, digester);
+        api = new CoordinationApi(runtime, authority);
+        exchangeEnrollment = createEnrollmentExchange(authority);
       },
       createPrincipal: async () => ({ id: randomUUID() }),
       createCube: async (name) => {
@@ -236,6 +244,7 @@ async function conformanceEnvironment(): Promise<{
           access: response.access,
         });
       },
+      inspectDeletedCube: async (cube) => runtime.maintenance.inspectDeletedCube(cube.id),
       prepareRepositoryCube: async (cube, input) => {
         const prepared = runtime.maintenance.prepareRepositoryCube({
           cubeId: cube.id,
@@ -348,6 +357,8 @@ async function conformanceEnvironment(): Promise<{
         transport.request("POST", `/api/cubes/${cube.id}/acks`, JSON.stringify(request), credential),
       updateCube: async (credential, cube, request) =>
         transport.request("PATCH", `/api/cubes/${cube.id}`, JSON.stringify(request), credential),
+      deleteCube: async (credential, cube, request) =>
+        transport.request("DELETE", `/api/cubes/${cube.id}`, JSON.stringify(request), credential),
       createRole: async (credential, cube, request) =>
         transport.request("POST", `/api/cubes/${cube.id}/roles`, JSON.stringify(request), credential),
       patchTaxonomy: async (credential, cube, request) => {
@@ -398,7 +409,12 @@ async function conformanceEnvironment(): Promise<{
       ),
     },
   };
-  return { environment, runtime, digester, server };
+  return {
+    environment,
+    get runtime() { return runtime; },
+    digester,
+    server,
+  };
 }
 
 function opaqueCursor(cursor: LogCursor): string {

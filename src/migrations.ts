@@ -630,6 +630,31 @@ export const STORE_MIGRATIONS: readonly Migration[] = Object.freeze([
       END;
     `,
   },
+  {
+    version: 19,
+    name: "deleted_cube_tombstones",
+    sql: `
+      CREATE TABLE deleted_cubes (
+        id TEXT PRIMARY KEY,
+        deleted_at TEXT NOT NULL
+      ) STRICT;
+
+      CREATE TABLE deleted_cube_client_grants (
+        cube_id TEXT NOT NULL REFERENCES deleted_cubes(id) ON DELETE CASCADE,
+        client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+        PRIMARY KEY (cube_id, client_id)
+      ) STRICT, WITHOUT ROWID;
+
+      CREATE TABLE deleted_cube_session_credentials (
+        cube_id TEXT NOT NULL,
+        client_id TEXT NOT NULL,
+        lookup_digest BLOB PRIMARY KEY,
+        verifier_digest BLOB NOT NULL,
+        FOREIGN KEY (cube_id, client_id)
+          REFERENCES deleted_cube_client_grants(cube_id, client_id) ON DELETE CASCADE
+      ) STRICT, WITHOUT ROWID;
+    `,
+  },
 ]);
 
 interface AppliedMigrationRow {

@@ -49,16 +49,17 @@ describe("HTTPS service", () => {
       bind: { port: 0 },
       tls: { key, cert: certificate },
       authorizeCoordination: async (authorization) => authorization === "Bearer accepted-test-token"
-        ? clientPrincipal("00000000-0000-4000-8000-000000000200")
-        : authorization === "Bearer revoked-test-token" ? "revoked"
-        : authorization === "Bearer rejected-test-token" ? "rejected"
-        : authorization === undefined ? "missing" : "invalid",
+         ? clientPrincipal("00000000-0000-4000-8000-000000000200")
+         : authorization === "Bearer revoked-test-token" ? "revoked"
+         : authorization === "Bearer rejected-test-token" ? "rejected"
+         : authorization === "Bearer deleted-cube-test-token" ? "cube-deleted"
+         : authorization === undefined ? "missing" : "invalid",
       exchangeEnrollment: async (body) => {
         if (body === undefined) {
           return {
             status: 400,
             body: {
-              protocol_version: "6",
+              protocol_version: "7",
               error: { code: "INVALID_INPUT", message: "Invalid enrollment request." },
             },
           };
@@ -67,7 +68,7 @@ describe("HTTPS service", () => {
           return {
             status: 401,
             body: {
-              protocol_version: "6",
+              protocol_version: "7",
               request_id: "request-1234",
               error: { code: "AUTH_INVALID", message: "Enrollment authentication failed." },
             },
@@ -75,7 +76,7 @@ describe("HTTPS service", () => {
         }
         return {
           status: 201,
-          body: { protocol_version: "6", request_id: "request-1234", payload: { ok: true } },
+          body: { protocol_version: "7", request_id: "request-1234", payload: { ok: true } },
         };
       },
       handleCoordination: async (coordinationRequest) => {
@@ -84,7 +85,7 @@ describe("HTTPS service", () => {
           ...(coordinationRequest.cursor === undefined ? {} : { cursor: coordinationRequest.cursor }),
           ...(coordinationRequest.since === undefined ? {} : { since: coordinationRequest.since }),
         };
-        return { status: 200, body: { protocol_version: "6", request_id: "unexpected" } };
+        return { status: 200, body: { protocol_version: "7", request_id: "unexpected" } };
       },
       runtimeIdentity: createRuntimeBuildIdentity({
         sourceSha: "a".repeat(40),
@@ -131,8 +132,8 @@ describe("HTTPS service", () => {
       authorization: "Bearer invalid-test-token",
     });
 
-    expect(missing).toMatchObject({ status: 200, body: '{"protocol_version":"6"}' });
-    expect(invalid).toMatchObject({ status: 200, body: '{"protocol_version":"6"}' });
+    expect(missing).toMatchObject({ status: 200, body: '{"protocol_version":"7"}' });
+    expect(invalid).toMatchObject({ status: 200, body: '{"protocol_version":"7"}' });
   });
 
   it("serves build identity only to an authenticated principal without coordination mutation", async () => {
@@ -152,7 +153,7 @@ describe("HTTPS service", () => {
       package_version: "0.7.3",
       source_sha: "a".repeat(40),
       artifact_integrity: `sha512-${"A".repeat(86)}==`,
-      protocol_version: "6",
+      protocol_version: "7",
       started_at: "2026-07-21T12:00:00.000Z",
     });
     expect(coordinationCalls).toBe(before);
@@ -227,7 +228,7 @@ describe("HTTPS service", () => {
     const response = await request(server.origin, certificate, "/api/protocol");
 
     expect(response.status).toBe(200);
-    expect(JSON.parse(response.body)).toEqual({ protocol_version: "6" });
+    expect(JSON.parse(response.body)).toEqual({ protocol_version: "7" });
     expect(response.headers["cache-control"]).toBe("no-store");
   });
 
@@ -255,7 +256,7 @@ describe("HTTPS service", () => {
       );
       expect(response.status).toBe(401);
       expect(JSON.parse(response.body)).toEqual({
-        protocol_version: "6",
+        protocol_version: "7",
         error: { code: "SESSION_REVOKED", message: "Authentication failed." },
       });
     }
@@ -276,8 +277,29 @@ describe("HTTPS service", () => {
       );
       expect(response.status).toBe(401);
       expect(JSON.parse(response.body)).toEqual({
-        protocol_version: "6",
+        protocol_version: "7",
         error: { code: "SESSION_REJECTED", message: "Authentication failed." },
+      });
+    }
+    expect(coordinationCalls).toBe(0);
+  });
+
+  it("reports a deleted-cube session distinctly before routing", async () => {
+    coordinationCalls = 0;
+    for (const path of [
+      "/api/cubes",
+      "/api/cubes/00000000-0000-4000-8000-000000000001/stream",
+    ]) {
+      const response = await request(
+        server.origin,
+        certificate,
+        path,
+        { authorization: "Bearer deleted-cube-test-token" },
+      );
+      expect(response.status).toBe(410);
+      expect(JSON.parse(response.body)).toEqual({
+        protocol_version: "7",
+        error: { code: "CUBE_DELETED", message: "The cube was deleted." },
       });
     }
     expect(coordinationCalls).toBe(0);
@@ -325,13 +347,13 @@ describe("HTTPS service", () => {
       certificate,
       "/api/enrollment/exchange",
       { "content-type": "application/json" },
-      JSON.stringify({ protocol_version: "6", request_id: "request-1234", payload: {} }),
+      JSON.stringify({ protocol_version: "7", request_id: "request-1234", payload: {} }),
       "POST",
     );
 
     expect(response.status).toBe(201);
     expect(JSON.parse(response.body)).toEqual({
-      protocol_version: "6",
+      protocol_version: "7",
       request_id: "request-1234",
       payload: { ok: true },
     });
@@ -349,7 +371,7 @@ describe("HTTPS service", () => {
 
     expect(response.status).toBe(400);
     expect(JSON.parse(response.body)).toEqual({
-      protocol_version: "6",
+      protocol_version: "7",
       error: { code: "INVALID_INPUT", message: "Invalid enrollment request." },
     });
   });
@@ -366,7 +388,7 @@ describe("HTTPS service", () => {
 
     expect(response.status).toBe(401);
     expect(JSON.parse(response.body)).toEqual({
-      protocol_version: "6",
+      protocol_version: "7",
       request_id: "request-1234",
       error: { code: "AUTH_INVALID", message: "Enrollment authentication failed." },
     });
@@ -961,7 +983,7 @@ describe("HTTPS service", () => {
         return {
           status: 200,
           body: {
-            protocol_version: "6",
+            protocol_version: "7",
             request_id: `read-${expectedCursor}`,
             payload: {
               entries: [{ sequence: expectedCursor }],
@@ -1022,13 +1044,13 @@ describe("HTTPS service", () => {
           messages.push(message);
           if (messages.length === 30) releaseAppends();
           await allAppendsAdmitted;
-          return { status: 201, body: { protocol_version: "6", payload: { accepted: true } } };
+          return { status: 201, body: { protocol_version: "7", payload: { accepted: true } } };
         }
         if (coordinationRequest.path === path && coordinationRequest.method === "PUT") {
           return {
             status: 200,
             body: {
-              protocol_version: "6",
+              protocol_version: "7",
               payload: { entries: messages.map((message) => ({ message })) },
             },
           };
@@ -1043,7 +1065,7 @@ describe("HTTPS service", () => {
         certificate,
         path,
         { authorization: "Bearer burst-client" },
-        JSON.stringify({ protocol_version: "6", request_id: `append-${index}`, payload: { message } }),
+        JSON.stringify({ protocol_version: "7", request_id: `append-${index}`, payload: { message } }),
         "POST",
       )));
       expect(responses.map((response) => response.status)).toEqual(Array.from({ length: 30 }, () => 201));
@@ -1053,7 +1075,7 @@ describe("HTTPS service", () => {
         certificate,
         path,
         { authorization: "Bearer burst-client" },
-        JSON.stringify({ protocol_version: "6", request_id: "drain", payload: {} }),
+        JSON.stringify({ protocol_version: "7", request_id: "drain", payload: {} }),
         "PUT",
       );
       expect(drained.status).toBe(200);
@@ -1089,7 +1111,7 @@ describe("HTTPS service", () => {
         messages.push(message);
         if (messages.length === 30) markAppendsAdmitted();
         await releaseHeldAppends;
-        return { status: 201, body: { protocol_version: "6", payload: { accepted: true } } };
+        return { status: 201, body: { protocol_version: "7", payload: { accepted: true } } };
       },
     });
     const submitted = Array.from({ length: 31 }, (_, index) => `append-${index}`);
@@ -1099,7 +1121,7 @@ describe("HTTPS service", () => {
         certificate,
         path,
         { authorization: "Bearer burst-client" },
-        JSON.stringify({ protocol_version: "6", request_id: `over-cap-${index}`, payload: { message } }),
+        JSON.stringify({ protocol_version: "7", request_id: `over-cap-${index}`, payload: { message } }),
         "POST",
       ));
       await allAppendsAdmitted;
@@ -1108,7 +1130,7 @@ describe("HTTPS service", () => {
         certificate,
         path,
         { authorization: "Bearer burst-client" },
-        JSON.stringify({ protocol_version: "6", request_id: "over-cap-30", payload: { message: submitted[30] } }),
+        JSON.stringify({ protocol_version: "7", request_id: "over-cap-30", payload: { message: submitted[30] } }),
         "POST",
       );
       expect(rejected.status).toBe(429);

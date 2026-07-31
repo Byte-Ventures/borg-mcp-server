@@ -66,7 +66,7 @@ export interface RequestHandlerContext {
   readonly authorizeCoordination?: (
     authorization: string | undefined,
     signal: AbortSignal,
-  ) => Promise<Principal | "missing" | "invalid" | "revoked" | "evicted" | "rejected">;
+  ) => Promise<Principal | "missing" | "invalid" | "revoked" | "evicted" | "rejected" | "cube-deleted">;
   readonly handleCoordination?: (request: CoordinationRequest) => Promise<CoordinationResponse>;
   readonly debugLogger: DebugLogger;
   readonly runtimeIdentity?: RuntimeBuildIdentity;
@@ -366,6 +366,10 @@ async function handleRequest(
     trace.authentication = typeof authentication === "string" ? authentication : "accepted";
     if (signal.aborted) return;
     if (typeof authentication === "string") {
+      if (authentication === "cube-deleted") {
+        sendJson(response, 410, protocolError(ErrorCode.CUBE_DELETED, "The cube was deleted."));
+        return;
+      }
       if (authentication === "evicted") {
         sendJson(response, 410, protocolError(ErrorCode.DRONE_EVICTED, "Authentication failed."));
         return;
@@ -434,7 +438,8 @@ async function handleRequest(
 interface RequestTrace {
   readonly route: DebugRoute;
   readonly method: string;
-  authentication: "not_required" | "missing" | "invalid" | "revoked" | "evicted" | "rejected" | "accepted";
+  authentication: "not_required" | "missing" | "invalid" | "revoked" | "evicted" | "rejected" |
+    "cube-deleted" | "accepted";
   principal?: Principal;
 }
 

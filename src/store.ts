@@ -247,14 +247,25 @@ export interface EnrollmentClaimResult {
   readonly serverCapabilities: readonly [] | readonly ["create_cube"];
 }
 
-export interface StoredDroneSessionDigest extends StoredSecretDigest {
+interface StoredActiveDroneSessionDigest extends StoredSecretDigest {
   readonly sessionId: string;
   readonly clientId: string;
   readonly cubeId: string;
   readonly droneId: string;
   readonly evictedAt: string | null;
   readonly takenOver: boolean;
+  readonly cubeDeleted: false;
 }
+
+interface StoredDeletedCubeSessionDigest extends DigestPair {
+  readonly clientId: string;
+  readonly revokedAt: string | null;
+  readonly cubeDeleted: true;
+}
+
+export type StoredDroneSessionDigest =
+  | StoredActiveDroneSessionDigest
+  | StoredDeletedCubeSessionDigest;
 
 export interface CredentialStore {
   readonly createRecoveryCredential: (id: string, digest: DigestPair) => void;
@@ -299,6 +310,7 @@ export interface ScopedStore {
   ) => RepositoryCubeRecord;
   readonly listCubes: () => CubeRecord[];
   readonly getCube: (cubeId: string) => CubeRecord | null;
+  readonly deleteCube: (cubeId: string) => void;
   readonly updateCube: (cubeId: string, input: UpdateCubeInput) => CubeRecord;
   readonly updateDirective: (cubeId: string, directive: string) => void;
   readonly appendActivity: (cubeId: string, message: string) => ActivityRecord;
@@ -330,6 +342,7 @@ export interface ScopedStore {
   readonly subscribeActivity: (
     cubeId: string,
     listener: (entry: ActivityStreamRecord) => void,
+    onCubeDeleted?: () => void,
   ) => (() => void);
   readonly attachSeat: (input: SeatAttachInput) => SeatAttachRecord;
   readonly updateOwnRuntimeMetadata: (
@@ -498,6 +511,19 @@ export interface MaintenanceStore {
     readonly human_seat_role_matches: boolean;
     readonly default_worker_role_matches: boolean;
   };
+  readonly inspectDeletedCube: (cubeId: string) => {
+    readonly cube_exists: boolean;
+    readonly role_count: number;
+    readonly drone_count: number;
+    readonly log_count: number;
+    readonly claim_count: number;
+    readonly decision_count: number;
+    readonly grant_count: number;
+    readonly cube_create_binding_count: number;
+    readonly repository_association_count: number;
+    readonly active_stream_count: number;
+    readonly terminal_credential_count: number;
+  };
   readonly inspectEnrollmentPrincipal: (clientId: string) => {
     readonly active_credential_bindings: number;
   };
@@ -578,6 +604,15 @@ export class ScopedStoreError extends Error {
   constructor() {
     super("The requested resource was not found.");
     this.name = "ScopedStoreError";
+  }
+}
+
+export class CubeDeletedError extends Error {
+  readonly code = "CUBE_DELETED";
+
+  constructor() {
+    super("The cube was deleted.");
+    this.name = "CubeDeletedError";
   }
 }
 
@@ -823,7 +858,7 @@ export async function openStore(options: OpenStoreOptions): Promise<StoreRuntime
     requiredInteger(pageRow, "page_size"),
   );
   const activityHub = new ActivityHub();
-  const maintenance = new SqliteMaintenanceStore(database, clock);
+  const maintenance = new SqliteMaintenanceStore(database, clock, activityHub);
   const liveness = new IdleLivenessStore();
   const dashboard = createDashboardSnapshotSource(database, clock, activityHub);
   const credentials = new SqliteCredentialStore(database, clock, capacityGuard, options.mutationHook);
@@ -1226,7 +1261,51 @@ class SqliteScopedStore implements ScopedStore {
       FROM cubes AS c
       WHERE c.id = ? AND ${scope.sql}
     `).get(cubeId, ...scope.parameters);
+    if (row === undefined && this.#wasDeletedForPrincipal(cubeId)) throw new CubeDeletedError();
     return row === undefined ? null : cubeRecord(cubeRow(row));
+  }
+
+  deleteCube(cubeId: string): void {
+    assertCanonicalUuid(cubeId, "Cube id");
+    this.#requireCube(cubeId, "manage");
+    this.#database.exec("BEGIN IMMEDIATE");
+    try {
+      this.#requireCube(cubeId, "manage");
+      const deletedAt = this.#now();
+      this.#database.prepare(
+        "INSERT INTO deleted_cubes (id, deleted_at) VALUES (?, ?)",
+      ).run(cubeId, deletedAt);
+      this.#database.prepare(`
+        INSERT INTO deleted_cube_client_grants (cube_id, client_id)
+        SELECT cube_id, client_id FROM client_cube_grants WHERE cube_id = ?
+      `).run(cubeId);
+      this.#database.prepare(`
+        INSERT INTO deleted_cube_session_credentials (
+          cube_id, client_id, lookup_digest, verifier_digest
+        )
+        SELECT session.cube_id, session.client_id,
+               credential.lookup_digest, credential.verifier_digest
+        FROM drone_session_credentials AS credential
+        JOIN drone_sessions AS session ON session.id = credential.session_id
+        JOIN clients AS client ON client.id = session.client_id
+        JOIN drones AS drone ON drone.id = session.drone_id
+          AND drone.client_id = session.client_id
+          AND drone.cube_id = session.cube_id
+        WHERE session.cube_id = ?
+          AND credential.revoked_at IS NULL
+          AND session.revoked_at IS NULL
+          AND session.superseded_at IS NULL
+          AND client.revoked_at IS NULL
+          AND drone.evicted_at IS NULL
+      `).run(cubeId);
+      const deleted = this.#database.prepare("DELETE FROM cubes WHERE id = ?").run(cubeId);
+      if (deleted.changes !== 1) throw new ScopedStoreError();
+      this.#database.exec("COMMIT");
+    } catch (error) {
+      try { this.#database.exec("ROLLBACK"); } catch { /* Preserve the original failure. */ }
+      throw error;
+    }
+    this.#activityHub.publishCubeDeletion(cubeId);
   }
 
   updateDirective(cubeId: string, directive: string): void {
@@ -2134,7 +2213,11 @@ class SqliteScopedStore implements ScopedStore {
     return runtimeMetadataState(row);
   }
 
-  subscribeActivity(cubeId: string, listener: (entry: ActivityStreamRecord) => void): () => void {
+  subscribeActivity(
+    cubeId: string,
+    listener: (entry: ActivityStreamRecord) => void,
+    onCubeDeleted: () => void = () => undefined,
+  ): () => void {
     this.#requireCube(cubeId, "read");
     return this.#activityHub.subscribe(cubeId, (entry) => {
       if ("kind" in entry) {
@@ -2143,7 +2226,7 @@ class SqliteScopedStore implements ScopedStore {
         return;
       }
       if (entry.visibility === "broadcast" || this.#allowsDirectedWork(cubeId)) listener(entry);
-    });
+    }, onCubeDeleted);
   }
 
   #claimAudience(cubeId: string, entryId: string, visibility: string): string[] {
@@ -2209,6 +2292,7 @@ class SqliteScopedStore implements ScopedStore {
       SELECT 1 AS present FROM cubes AS c WHERE c.id = ? AND ${scope.sql}
     `).get(cubeId, ...scope.parameters);
     if (row !== undefined) return;
+    if (this.#wasDeletedForPrincipal(cubeId)) throw new CubeDeletedError();
     if (access === "manage") {
       const visibleScope = this.#scope("read");
       const visible = this.#database.prepare(`
@@ -2217,6 +2301,20 @@ class SqliteScopedStore implements ScopedStore {
       if (visible !== undefined) throw new AccessDeniedError();
     }
     throw new ScopedStoreError();
+  }
+
+  #wasDeletedForPrincipal(cubeId: string): boolean {
+    if (this.#principal.kind === "operator") {
+      return this.#database.prepare(
+        "SELECT 1 FROM deleted_cubes WHERE id = ?",
+      ).get(cubeId) !== undefined;
+    }
+    const clientId = this.#principal.kind === "client"
+      ? this.#principal.id
+      : this.#principal.clientId;
+    return this.#database.prepare(`
+      SELECT 1 FROM deleted_cube_client_grants WHERE cube_id = ? AND client_id = ?
+    `).get(cubeId, clientId) !== undefined;
   }
 
   #nextActivityTimestamp(cubeId: string): string {
@@ -2394,10 +2492,12 @@ class SqliteScopedStore implements ScopedStore {
 class SqliteMaintenanceStore implements MaintenanceStore {
   readonly #database: DatabaseSync;
   readonly #clock: () => Date;
+  readonly #activityHub: ActivityHub;
 
-  constructor(database: DatabaseSync, clock: () => Date) {
+  constructor(database: DatabaseSync, clock: () => Date, activityHub: ActivityHub) {
     this.#database = database;
     this.#clock = clock;
+    this.#activityHub = activityHub;
   }
 
   listClients(): ClientAdministrationRecord[] {
@@ -2505,6 +2605,7 @@ class SqliteMaintenanceStore implements MaintenanceStore {
     this.#database.exec("BEGIN IMMEDIATE");
     try {
       for (const table of [
+        "deleted_cube_session_credentials", "deleted_cube_client_grants", "deleted_cubes",
         "repository_associations", "cube_create_bindings",
         "activity_acks", "activity_log_recipients", "activity_log",
         "decisions", "expired_activity_cursors", "drone_session_credentials", "drone_sessions",
@@ -2586,6 +2687,31 @@ class SqliteMaintenanceStore implements MaintenanceStore {
       default_worker_role_id: record.defaultWorkerRoleId,
       human_seat_role_matches: human !== undefined,
       default_worker_role_matches: worker !== undefined,
+    };
+  }
+
+  inspectDeletedCube(cubeId: string) {
+    assertCanonicalUuid(cubeId, "Cube id");
+    const count = (table: string, predicate = "cube_id = ?"): number => requiredInteger(
+      this.#database.prepare(`SELECT COUNT(*) AS count FROM ${table} WHERE ${predicate}`).get(cubeId)!,
+      "count",
+    );
+    return {
+      cube_exists: count("cubes", "id = ?") !== 0,
+      role_count: count("roles"),
+      drone_count: count("drones"),
+      log_count: count("activity_log"),
+      claim_count: count(
+        "activity_acks AS ack JOIN activity_log AS entry ON entry.id = ack.entry_id",
+        "entry.cube_id = ? AND ack.kind = 'claim'",
+      ),
+      decision_count: count("decisions"),
+      grant_count: count("client_cube_grants"),
+      cube_create_binding_count: count("cube_create_bindings"),
+      repository_association_count: count("repository_associations"),
+      active_stream_count: this.#activityHub.listenerCount(cubeId),
+      terminal_credential_count:
+        count("deleted_cube_client_grants") + count("deleted_cube_session_credentials"),
     };
   }
 
@@ -2893,16 +3019,41 @@ class SqliteMaintenanceStore implements MaintenanceStore {
 
 class ActivityHub {
   readonly #listeners = new Map<string, Set<(entry: ActivityStreamRecord) => void>>();
+  readonly #cubeDeletionListeners = new Map<string, Set<() => void>>();
   readonly #allListeners = new Set<() => void>();
 
-  subscribe(cubeId: string, listener: (entry: ActivityStreamRecord) => void): () => void {
+  subscribe(
+    cubeId: string,
+    listener: (entry: ActivityStreamRecord) => void,
+    onCubeDeleted: () => void,
+  ): () => void {
     const listeners = this.#listeners.get(cubeId) ?? new Set();
     listeners.add(listener);
     this.#listeners.set(cubeId, listeners);
+    const deletionListeners = this.#cubeDeletionListeners.get(cubeId) ?? new Set();
+    deletionListeners.add(onCubeDeleted);
+    this.#cubeDeletionListeners.set(cubeId, deletionListeners);
     return () => {
       listeners.delete(listener);
       if (listeners.size === 0) this.#listeners.delete(cubeId);
+      deletionListeners.delete(onCubeDeleted);
+      if (deletionListeners.size === 0) this.#cubeDeletionListeners.delete(cubeId);
     };
+  }
+
+  publishCubeDeletion(cubeId: string): void {
+    for (const listener of this.#cubeDeletionListeners.get(cubeId) ?? []) {
+      try {
+        listener();
+      } catch {
+        // A subscriber cannot roll back or alter a committed cube deletion.
+      }
+    }
+    this.#notifyAll();
+  }
+
+  listenerCount(cubeId: string): number {
+    return this.#listeners.get(cubeId)?.size ?? 0;
   }
 
   publish(cubeId: string, entry: ActivityStreamRecord): void {
@@ -2913,6 +3064,10 @@ class ActivityHub {
         // A live subscriber cannot roll back or alter a committed append.
       }
     }
+    this.#notifyAll();
+  }
+
+  #notifyAll(): void {
     for (const listener of this.#allListeners) {
       try {
         listener();
@@ -3250,11 +3405,11 @@ class SqliteCredentialStore implements CredentialStore {
 
   findDroneSessionCredential(lookup: Buffer): StoredDroneSessionDigest | null {
     validateLookup(lookup);
-    const row = this.#database.prepare(`
+    const active = this.#database.prepare(`
       SELECT credential.id, credential.lookup_digest, credential.verifier_digest,
              credential.session_id, session.client_id, session.cube_id, session.drone_id,
              COALESCE(credential.revoked_at, session.revoked_at, client.revoked_at) AS revoked_at,
-             drone.evicted_at, session.superseded_at
+             drone.evicted_at, session.superseded_at, 0 AS cube_deleted
       FROM drone_session_credentials AS credential
       JOIN drone_sessions AS session ON session.id = credential.session_id
       JOIN clients AS client ON client.id = session.client_id
@@ -3263,7 +3418,15 @@ class SqliteCredentialStore implements CredentialStore {
         AND drone.cube_id = session.cube_id
       WHERE credential.lookup_digest = ?
     `).get(lookup);
-    return row === undefined ? null : storedDroneSessionDigest(row);
+    if (active !== undefined) return storedDroneSessionDigest(active);
+    const deleted = this.#database.prepare(`
+      SELECT credential.lookup_digest, credential.verifier_digest,
+             credential.client_id, client.revoked_at, 1 AS cube_deleted
+      FROM deleted_cube_session_credentials AS credential
+      JOIN clients AS client ON client.id = credential.client_id
+      WHERE credential.lookup_digest = ?
+    `).get(lookup);
+    return deleted === undefined ? null : storedDeletedCubeSessionDigest(deleted);
   }
 
   rotateClientCredential(input: {
@@ -3872,6 +4035,19 @@ function storedDroneSessionDigest(row: Record<string, unknown>): StoredDroneSess
     droneId: requiredText(row, "drone_id"),
     evictedAt: nullableText(row, "evicted_at"),
     takenOver: nullableText(row, "superseded_at") !== null,
+    cubeDeleted: false,
+  };
+}
+
+function storedDeletedCubeSessionDigest(
+  row: Record<string, unknown>,
+): StoredDeletedCubeSessionDigest {
+  return {
+    lookup: requiredBuffer(row, "lookup_digest"),
+    verifier: requiredBuffer(row, "verifier_digest"),
+    clientId: requiredText(row, "client_id"),
+    revokedAt: nullableText(row, "revoked_at"),
+    cubeDeleted: true,
   };
 }
 

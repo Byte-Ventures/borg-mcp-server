@@ -2305,6 +2305,9 @@ class SqliteScopedStore implements ScopedStore {
         "SELECT 1 FROM deleted_cubes WHERE id = ?",
       ).get(cubeId) !== undefined;
     }
+    if (this.#principal.kind === "drone-session" && this.#principal.cubeId !== cubeId) {
+      return false;
+    }
     const clientId = this.#principal.kind === "client"
       ? this.#principal.id
       : this.#principal.clientId;

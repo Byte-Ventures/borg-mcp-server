@@ -332,6 +332,41 @@ describe("Principal to ScopedStore isolation", () => {
     digester.destroy();
   });
 
+  it("does not expose a parent client's sibling cube tombstone to its drone", async () => {
+    const parent = runtime.forPrincipal(clientPrincipal(ids.clientA));
+    const drone = runtime.forPrincipal(droneSessionPrincipal({
+      id: ids.sessionA,
+      clientId: ids.clientA,
+      cubeId: ids.cubeA,
+      droneId: ids.droneA,
+    }));
+    runtime.maintenance.grantClientCube({
+      clientId: ids.clientA,
+      cubeId: ids.cubeB,
+      access: "manage",
+    });
+    expect(drone.getCube(ids.cubeB)).toBeNull();
+    expect(() => drone.deleteCube(ids.cubeB)).toThrow(ScopedStoreError);
+
+    parent.deleteCube(ids.cubeB);
+    expect(() => parent.getCube(ids.cubeB)).toThrow(CubeDeletedError);
+    expect(drone.getCube(ids.cubeB)).toBeNull();
+    expect(() => drone.deleteCube(ids.cubeB)).toThrow(ScopedStoreError);
+
+    runtime.close();
+    runtime = await openStore({ path: join(directory, "borg.db") });
+    const reopenedParent = runtime.forPrincipal(clientPrincipal(ids.clientA));
+    const reopenedDrone = runtime.forPrincipal(droneSessionPrincipal({
+      id: ids.sessionA,
+      clientId: ids.clientA,
+      cubeId: ids.cubeA,
+      droneId: ids.droneA,
+    }));
+    expect(() => reopenedParent.getCube(ids.cubeB)).toThrow(CubeDeletedError);
+    expect(reopenedDrone.getCube(ids.cubeB)).toBeNull();
+    expect(() => reopenedDrone.deleteCube(ids.cubeB)).toThrow(ScopedStoreError);
+  });
+
   it("executes authorized writes atomically and persists migrated cube context", async () => {
     const path = join(directory, "borg.db");
     const client = runtime.forPrincipal(clientPrincipal(ids.clientA));

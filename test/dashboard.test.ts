@@ -182,12 +182,20 @@ describe("dashboard renderer", () => {
       9,
     );
     expect(tiny).toContain("borgmcp-server online");
-    expect(tiny).toContain("Ctrl-C stops this server process.");
-    expect(tiny).toContain("Cube data is saved.");
+    expect(tiny).toContain("Ctrl-C or close terminal stops server.");
+    expect(tiny).toContain("Data and identity remain saved.");
     expect(tiny).not.toContain("\u001b[");
     expect(tiny).not.toContain("┌");
     expect(tiny.split("\n")).toHaveLength(7);
     expect(tiny.split("\n").every((line) => [...line].length <= 39)).toBe(true);
+
+    const narrow = createDashboardRenderer({ glyphMode: "box", color: true })(snapshot, 20, 9);
+    expect(narrow).toContain("Data saved.");
+    expect(narrow.split("\n").every((line) => [...line].length <= 20)).toBe(true);
+    for (let width = 20; width <= 60; width += 1) {
+      const rendered = createDashboardRenderer({ glyphMode: "box", color: true })(snapshot, width, 9);
+      expect(rendered.split("\n").every((line) => [...line].length <= width)).toBe(true);
+    }
 
     const tinyViewer = createRenderer({
       glyphMode: "box",

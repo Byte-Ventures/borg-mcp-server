@@ -58,7 +58,7 @@ export interface DashboardSnapshot {
 export type DashboardGlyphMode = "box" | "ascii";
 
 export const EMBEDDED_DASHBOARD_LIFECYCLE_FOOTER =
-  "Ctrl-C stops this server process. Cube data is saved on disk and is not affected.";
+  "Press Ctrl-C or close this terminal to stop the server. Your server data and identity remain saved.";
 export const EMBEDDED_DASHBOARD_FOOTER = "^C stop server  |  read-only";
 export const STANDALONE_DASHBOARD_FOOTER = "^C close viewer  |  read-only";
 export type DashboardFooter =
@@ -302,8 +302,12 @@ export function renderPlainDashboard(
 function renderPlainDashboardFooter(footer: DashboardFooter | undefined, width: number): string[] {
   if (footer === EMBEDDED_DASHBOARD_FOOTER) {
     return [
-      width >= 33 ? "Ctrl-C stops this server process." : "Ctrl-C stops server.",
-      "Cube data is saved.",
+      width >= 60
+        ? "Press Ctrl-C or close this terminal to stop the server."
+        : width >= 38 ? "Ctrl-C or close terminal stops server." : "Ctrl-C stops server.",
+      width >= 44
+        ? "Your server data and identity remain saved."
+        : width >= 33 ? "Data and identity remain saved." : "Data saved.",
     ];
   }
   if (footer === STANDALONE_DASHBOARD_FOOTER) {

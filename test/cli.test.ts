@@ -34,7 +34,7 @@ describe("runCli", () => {
     expect(service.setup).toHaveBeenCalledWith({ reinitialize: false });
     expect(listen).not.toHaveBeenCalled();
     expect(io.stdout).toHaveBeenCalledWith(
-      "Local server setup completed.\nArtifact: unavailable\nThis machine's owner credential is ready, so you do not need an invitation to attach from this machine.\nThe server is a separate long-running process, and setup did not start it.\nStart the server in its own terminal and leave it running:\n  borgmcp-server start\nThen, in another terminal, attach a drone:\n  borg assimilate",
+      "Local server setup completed.\nYour server data and identity are ready.\nNext, run:\n  borg-mcp-server start\nLeave that terminal open while the server is running.\nAfter installing the borg client, open a second terminal in your Git repository and run:\n  borg assimilate",
     );
   });
 
@@ -55,9 +55,44 @@ describe("runCli", () => {
     expect(await runCli(["setup"], service, io)).toBe(0);
     const output = io.stdout.mock.calls[0]![0];
     expect(output).toBe(
-      `Local server is already prepared.\nArtifact: borgmcp-server@0.1.8 (sha512-${"A".repeat(86)}==)\nBuild identity: ${"a".repeat(40)}\nYour data and identity are unchanged, and setup did not start the server.\nStart the server in its own terminal and leave it running:\n  borgmcp-server start`,
+      "Your local server is already prepared.\nYour server data and identity are unchanged.\nSetup did not start the server.\nNext, run:\n  borg-mcp-server start\nLeave that terminal open while the server is running.",
     );
     expect(output).not.toMatch(/credential|invitation/iu);
+  });
+
+  it("suppresses standalone next steps for client-owned onboarding", async () => {
+    const service: ServerService = {
+      start: vi.fn(),
+      setup: vi.fn().mockResolvedValue({
+        recoveryCredential: "a".repeat(43),
+        initialInvitation: "b".repeat(43),
+      }),
+    };
+    const io = createIo();
+    const previous = process.env["BORG_CLIENT_ONBOARDING"];
+    process.env["BORG_CLIENT_ONBOARDING"] = "1";
+    try {
+      expect(await runCli(["setup"], service, io)).toBe(0);
+      expect(io.stdout).toHaveBeenCalledWith(
+        "Local server setup completed.\nYour server data and identity are ready.",
+      );
+
+      const existingIo = createIo();
+      const existingService: ServerService = {
+        start: vi.fn(),
+        setup: vi.fn().mockResolvedValue({
+          existing: true,
+          artifact: { version: "0.8.0", integrity: "sha512-safe", sourceSha: "abc123" },
+        }),
+      };
+      expect(await runCli(["setup"], existingService, existingIo)).toBe(0);
+      expect(existingIo.stdout).toHaveBeenCalledWith(
+        "Your local server is already prepared.\nYour server data and identity are unchanged.\nSetup did not start the server.",
+      );
+    } finally {
+      if (previous === undefined) delete process.env["BORG_CLIENT_ONBOARDING"];
+      else process.env["BORG_CLIENT_ONBOARDING"] = previous;
+    }
   });
 
   it("renders the bounded non-interactive setup record without secrets", async () => {

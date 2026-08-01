@@ -88,9 +88,7 @@ export async function runCli(
       const artifactIdentity = result.artifact === undefined
         ? "borgmcp-server@unavailable"
         : `borgmcp-server@${result.artifact.version}`;
-      const artifact = result.artifact === undefined
-        ? "Artifact: unavailable"
-        : `Artifact: ${artifactIdentity} (${result.artifact.integrity})`;
+      const clientOnboarding = process.env["BORG_CLIENT_ONBOARDING"] === "1";
       if (io.isTTY === false) {
         io.stdout(JSON.stringify({
           status: "prepared",
@@ -102,26 +100,35 @@ export async function runCli(
         return 0;
       }
       if ("existing" in result) {
-        io.stdout([
-          "Local server is already prepared.",
-          artifact,
-          `Build identity: ${result.artifact?.sourceSha ?? "unavailable"}`,
-          "Your data and identity are unchanged, and setup did not start the server.",
-          "Start the server in its own terminal and leave it running:",
-          "  borgmcp-server start",
-        ].join("\n"));
+        const lines = [
+          "Your local server is already prepared.",
+          "Your server data and identity are unchanged.",
+          "Setup did not start the server.",
+        ];
+        if (!clientOnboarding) {
+          lines.push(
+            "Next, run:",
+            "  borg-mcp-server start",
+            "Leave that terminal open while the server is running.",
+          );
+        }
+        io.stdout(lines.join("\n"));
         return 0;
       }
-      io.stdout([
+      const lines = [
         "Local server setup completed.",
-        artifact,
-        "This machine's owner credential is ready, so you do not need an invitation to attach from this machine.",
-        "The server is a separate long-running process, and setup did not start it.",
-        "Start the server in its own terminal and leave it running:",
-        "  borgmcp-server start",
-        "Then, in another terminal, attach a drone:",
-        "  borg assimilate",
-      ].join("\n"));
+        "Your server data and identity are ready.",
+      ];
+      if (!clientOnboarding) {
+        lines.push(
+          "Next, run:",
+          "  borg-mcp-server start",
+          "Leave that terminal open while the server is running.",
+          "After installing the borg client, open a second terminal in your Git repository and run:",
+          "  borg assimilate",
+        );
+      }
+      io.stdout(lines.join("\n"));
       return 0;
     case "start":
       await service.start(extraArgs);

@@ -304,7 +304,7 @@ function renderPlainDashboardFooter(footer: DashboardFooter | undefined, width: 
     return [
       width >= 60
         ? "Press Ctrl-C or close this terminal to stop the server."
-        : width >= 33 ? "Ctrl-C or close terminal stops server." : "Ctrl-C stops server.",
+        : width >= 38 ? "Ctrl-C or close terminal stops server." : "Ctrl-C stops server.",
       width >= 44
         ? "Your server data and identity remain saved."
         : width >= 33 ? "Data and identity remain saved." : "Data saved.",

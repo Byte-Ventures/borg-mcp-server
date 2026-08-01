@@ -192,6 +192,10 @@ describe("dashboard renderer", () => {
     const narrow = createDashboardRenderer({ glyphMode: "box", color: true })(snapshot, 20, 9);
     expect(narrow).toContain("Data saved.");
     expect(narrow.split("\n").every((line) => [...line].length <= 20)).toBe(true);
+    for (let width = 20; width <= 60; width += 1) {
+      const rendered = createDashboardRenderer({ glyphMode: "box", color: true })(snapshot, width, 9);
+      expect(rendered.split("\n").every((line) => [...line].length <= width)).toBe(true);
+    }
 
     const tinyViewer = createRenderer({
       glyphMode: "box",

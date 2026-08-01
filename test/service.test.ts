@@ -121,16 +121,16 @@ describe("node server service", () => {
         () => new Date(),
         (record) => writePortableServerCredential(credentials, record),
       );
-      const invitation = await createOfflineCredentialService(directory, credentials)
-        .invite("Alice laptop");
-      expect(invitation).toMatch(/^[A-Za-z0-9_-]{43}$/u);
+       const invitation = await createOfflineCredentialService(directory, credentials)
+         .invite("Alice laptop");
+       expect(invitation.invitation).toMatch(/^[A-Za-z0-9_-]{43,1024}$/u);
       const runtime = await openStore({ path: join(directory, "borg.db") });
       try {
         const key = await loadDigestKey(join(directory, "credential-digest.key"));
         const authority = new CredentialAuthority(runtime.credentials, new CredentialDigester(key));
         key.fill(0);
         const enrolled = authority.exchangeInvitation({
-          invitation,
+           invitation: invitation.invitation,
           retryKey: randomUUID(),
           clientCredential: generateSecret(),
           clientName: "Far end self description",
@@ -189,7 +189,7 @@ describe("node server service", () => {
           });
         }
         await expect(createOfflineCredentialService(directory, credentials).invite())
-          .resolves.toMatch(/^[A-Za-z0-9_-]{43}$/u);
+          .resolves.toMatchObject({ invitation: expect.stringMatching(/^[A-Za-z0-9_-]{43,1024}$/u) });
         await bindPortableOwnerCredentialPort(directory, credentials, 7_392);
         await expect(readPortableServerCredential(
           credentials,

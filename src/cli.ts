@@ -347,8 +347,14 @@ export async function runCli(
         io.stderr("Invitation creation requires an interactive terminal.");
         return 1;
       }
-      const invitation = await service.invite(extraArgs[0]);
-      io.stdout(`Client enrollment invitation (single-use, shown once): ${invitation}\nShare it only with the intended recipient.`);
+      const result = await service.invite(extraArgs[0]);
+      io.stdout(
+        `Client enrollment invitation (single-use, shown once): ${result.invitation}\n` +
+        "Share it only with the intended recipient." +
+        (result.loopbackOnly
+          ? "\nThis invitation works only on this machine. For another machine, run cert-reissue, restart, then mint again."
+          : ""),
+      );
       return 0;
     }
     case "help":

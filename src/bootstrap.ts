@@ -92,12 +92,12 @@ export async function bootstrapServer(
       const recoveryCredential = authority.createRecoveryCredential();
       const invitation = authority.createBootstrapInvitation(15 * 60_000);
       const credential = generateSecret();
-      const enrollment = authority.exchangeInvitation({
-        invitation,
-        retryKey: randomUUID(),
-        clientCredential: credential,
-        clientName: "Local owner",
-      });
+       const enrollment = authority.exchangeInvitation({
+         invitation,
+         retryKey: randomUUID(),
+         clientCredential: credential,
+         clientName: "Local owner",
+       }, true);
       if (enrollment?.purpose !== "owner" || enrollment.serverCapabilities[0] !== "create_cube") {
         throw new Error("Local owner provisioning failed.");
       }

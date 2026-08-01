@@ -93,6 +93,20 @@ describe("enrollment wire adapter", () => {
     expect(JSON.stringify(result)).not.toContain(clientCredential);
   });
 
+  it("rejects a legacy opaque invitation on the production exchange path", async () => {
+    const exchange = createEnrollmentExchange({ exchangeInvitation: vi.fn().mockReturnValue(null) } as never, false);
+    const result = await exchange({
+      protocol_version: "7",
+      request_id: "request-legacy",
+      payload,
+    });
+
+    expect(result).toMatchObject({
+      status: 401,
+      body: { error: { code: "AUTH_INVALID" } },
+    });
+  });
+
   it("retains a valid request ID in malformed-request errors", async () => {
     const exchange = createEnrollmentExchange({ exchangeInvitation: vi.fn() } as never);
     await expect(exchange({

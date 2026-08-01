@@ -115,12 +115,18 @@ describe("runCli", () => {
   });
 
   it("creates an invitation only in an interactive terminal with the approved copy", async () => {
-    const invite = vi.fn().mockResolvedValue("i".repeat(43));
+    const invite = vi.fn().mockResolvedValue({
+      invitation: "i".repeat(180),
+      endpoint: "https://127.0.0.1:7091",
+      loopbackOnly: true,
+    });
     const interactive = { ...createIo(), isTTY: true };
     expect(await runCli(["invite", "Alice laptop"], { start: vi.fn(), invite }, interactive)).toBe(0);
     expect(invite).toHaveBeenCalledWith("Alice laptop");
     expect(interactive.stdout).toHaveBeenCalledWith(
-      `Client enrollment invitation (single-use, shown once): ${"i".repeat(43)}\nShare it only with the intended recipient.`,
+      `Client enrollment invitation (single-use, shown once): ${"i".repeat(180)}\n` +
+      "Share it only with the intended recipient.\n" +
+      "This invitation works only on this machine. For another machine, run cert-reissue, restart, then mint again.",
     );
 
     const nonInteractive = { ...createIo(), isTTY: false };

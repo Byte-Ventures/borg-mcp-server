@@ -88,6 +88,7 @@ export async function runCli(
       const artifactIdentity = result.artifact === undefined
         ? "borgmcp-server@unavailable"
         : `borgmcp-server@${result.artifact.version}`;
+      const clientOnboarding = process.env["BORG_CLIENT_ONBOARDING"] === "1";
       if (io.isTTY === false) {
         io.stdout(JSON.stringify({
           status: "prepared",
@@ -99,25 +100,35 @@ export async function runCli(
         return 0;
       }
       if ("existing" in result) {
-        io.stdout([
+        const lines = [
           "Your local server is already prepared.",
           "Your server data and identity are unchanged.",
           "Setup did not start the server.",
+        ];
+        if (!clientOnboarding) {
+          lines.push(
+            "Next, run:",
+            "  borg-mcp-server start",
+            "Leave that terminal open while the server is running.",
+          );
+        }
+        io.stdout(lines.join("\n"));
+        return 0;
+      }
+      const lines = [
+        "Local server setup completed.",
+        "Your server data and identity are ready.",
+      ];
+      if (!clientOnboarding) {
+        lines.push(
           "Next, run:",
           "  borg-mcp-server start",
           "Leave that terminal open while the server is running.",
-        ].join("\n"));
-        return 0;
+          "After installing the borg client, open a second terminal in your Git repository and run:",
+          "  borg assimilate",
+        );
       }
-      io.stdout([
-        "Local server setup completed.",
-        "Your server data and identity are ready.",
-        "Next, run:",
-        "  borg-mcp-server start",
-        "Leave that terminal open while the server is running.",
-        "After installing the borg client, open a second terminal in your Git repository and run:",
-        "  borg assimilate",
-      ].join("\n"));
+      io.stdout(lines.join("\n"));
       return 0;
     case "start":
       await service.start(extraArgs);

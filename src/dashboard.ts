@@ -305,7 +305,9 @@ function renderPlainDashboardFooter(footer: DashboardFooter | undefined, width: 
       width >= 60
         ? "Press Ctrl-C or close this terminal to stop the server."
         : width >= 33 ? "Ctrl-C or close terminal stops server." : "Ctrl-C stops server.",
-      width >= 60 ? "Your server data and identity remain saved." : "Data and identity remain saved.",
+      width >= 44
+        ? "Your server data and identity remain saved."
+        : width >= 33 ? "Data and identity remain saved." : "Data saved.",
     ];
   }
   if (footer === STANDALONE_DASHBOARD_FOOTER) {

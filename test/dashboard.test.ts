@@ -189,6 +189,10 @@ describe("dashboard renderer", () => {
     expect(tiny.split("\n")).toHaveLength(7);
     expect(tiny.split("\n").every((line) => [...line].length <= 39)).toBe(true);
 
+    const narrow = createDashboardRenderer({ glyphMode: "box", color: true })(snapshot, 20, 9);
+    expect(narrow).toContain("Data saved.");
+    expect(narrow.split("\n").every((line) => [...line].length <= 20)).toBe(true);
+
     const tinyViewer = createRenderer({
       glyphMode: "box",
       color: true,

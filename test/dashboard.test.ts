@@ -182,8 +182,8 @@ describe("dashboard renderer", () => {
       9,
     );
     expect(tiny).toContain("borgmcp-server online");
-    expect(tiny).toContain("Ctrl-C stops this server process.");
-    expect(tiny).toContain("Cube data is saved.");
+    expect(tiny).toContain("Ctrl-C or close terminal stops server.");
+    expect(tiny).toContain("Data and identity remain saved.");
     expect(tiny).not.toContain("\u001b[");
     expect(tiny).not.toContain("┌");
     expect(tiny.split("\n")).toHaveLength(7);

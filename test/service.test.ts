@@ -32,11 +32,13 @@ import {
 } from "../src/service.js";
 import { createRuntimeBuildIdentity } from "../src/runtime-identity.js";
 import {
+  portableCredentialAccount,
   readPortableServerCredential,
   writePortableServerCredential,
 } from "../src/portable-credential-store.js";
 import type { ForegroundDashboard } from "../src/dashboard.js";
 import { createManagedServiceDefinition } from "../src/managed-service.js";
+import { operatorErrors } from "../src/operator-error.js";
 
 function requireFreshSetup(
   result: Awaited<ReturnType<typeof setupNodeServerInstallation>>,
@@ -231,6 +233,50 @@ describe("node server service", () => {
       );
       expect(second).toEqual({ existing: true });
       expect(await readFile(credentials)).toEqual(before);
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects setup and startup when an ordinary enrollment occupies the default owner account", async () => {
+    const parent = await realpath(await mkdtemp(join(tmpdir(), "borg-owner-collision-")));
+    try {
+      const directory = join(parent, "server");
+      const credentials = join(parent, "credentials");
+      const installation = requireFreshSetup(await setupNodeServerInstallation(
+        directory,
+        "127.0.0.1",
+        { reinitialize: false },
+        credentials,
+      ));
+      const origin = "https://127.0.0.1:7091";
+      const trustIdentity = `spki-sha256:${installation.caFingerprint}`;
+      const ordinary = {
+        version: 2,
+        origin,
+        trustIdentity,
+        credential: "o".repeat(43),
+        clientId: "00000000-0000-4000-8000-000000000002",
+        serverCapabilities: [],
+      } as const;
+      const before = JSON.parse(await readFile(credentials, "utf8")) as {
+        version: number;
+        accounts: Record<string, string>;
+      };
+      before.accounts[portableCredentialAccount(origin, trustIdentity)] = JSON.stringify(ordinary);
+      await writeFile(credentials, `${JSON.stringify(before)}\n`, { mode: 0o600 });
+      const occupied = await readFile(credentials);
+
+      await expect(setupNodeServerInstallation(
+        directory,
+        "127.0.0.1",
+        { reinitialize: false },
+        credentials,
+      )).rejects.toBe(operatorErrors.OWNER_CREDENTIAL_UNAVAILABLE);
+      expect(await readFile(credentials)).toEqual(occupied);
+      await expect(bindPortableOwnerCredentialPort(directory, credentials, 7_091))
+        .rejects.toBe(operatorErrors.OWNER_CREDENTIAL_UNAVAILABLE);
+      expect(await readFile(credentials)).toEqual(occupied);
     } finally {
       await rm(parent, { recursive: true, force: true });
     }

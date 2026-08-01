@@ -137,6 +137,20 @@ export async function readPortableServerCredentialForTrustIdentity(
   return Object.freeze(first);
 }
 
+export async function portableCredentialAccountHasNonOwner(
+  path: string,
+  origin: string,
+  trustIdentity: string,
+): Promise<boolean> {
+  if (!trustPattern.test(trustIdentity)) throw new Error("Portable credential trust identity is invalid.");
+  const target = await credentialPath(path);
+  await assertPrivateFile(target);
+  const document = parseDocument(await readPrivateBytes(target));
+  const account = portableCredentialAccount(origin, trustIdentity);
+  const value = document.accounts[account];
+  return value === undefined ? false : !isOwnerCredential(decodePortableCredential(value, account));
+}
+
 async function updatePortableCredentialAccounts(
   path: string,
   lockOptions: PortableCredentialLockOptions,

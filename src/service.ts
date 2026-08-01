@@ -27,6 +27,7 @@ import {
 } from "./https-server.js";
 import { resolveBindOptions } from "./network-policy.js";
 import {
+  portableCredentialAccountHasNonOwner,
   readPortableServerCredentialForTrustIdentity,
   rebindPortableServerCredential,
   writePortableServerCredential,
@@ -1075,6 +1076,9 @@ export async function setupNodeServerInstallation(
         "server.json",
       ].every((name) => names.has(name));
       if (!complete) throw operatorErrors.INSTALLATION_EXISTS;
+      if (credentialRoot !== undefined) {
+        await readPortableOwnerCredentialForInstallation(directory, credentialRoot, 7_091);
+      }
       return Object.freeze({ existing: true });
     }
     if (options.reinitialize) {
@@ -1099,6 +1103,33 @@ export async function bindPortableOwnerCredentialPort(
   credentialRoot: string,
   port: number,
 ): Promise<void> {
+  if (!Number.isSafeInteger(port) || port < 1 || port > 65_535) {
+    throw new Error("Server listener port is invalid.");
+  }
+  const portableOwner = await readPortableOwnerCredentialForInstallation(
+    setupDataDirectory,
+    credentialRoot,
+    port,
+  );
+  if (portableOwner === null) return;
+  const { config, record } = portableOwner;
+  const origin = `https://${config.bind_host === "::1" ? "[::1]" : config.bind_host}:${port}`;
+  const legacyOrigin = `https://${config.bind_host === "::1" ? "[::1]" : config.bind_host}:7091`;
+  await rebindPortableServerCredential(
+    credentialRoot,
+    { ...record, origin },
+    [legacyOrigin, origin],
+  );
+}
+
+async function readPortableOwnerCredentialForInstallation(
+  setupDataDirectory: string,
+  credentialRoot: string,
+  port: number,
+): Promise<{
+  readonly config: { readonly bind_host: string; readonly ca_spki_sha256: string };
+  readonly record: Awaited<ReturnType<typeof readPortableServerCredentialForTrustIdentity>>;
+} | null> {
   const config = JSON.parse((await readFile(join(setupDataDirectory, "server.json"))).toString("utf8")) as {
     bind_host?: unknown;
     ca_spki_sha256?: unknown;
@@ -1108,27 +1139,27 @@ export async function bindPortableOwnerCredentialPort(
       !/^[0-9a-f]{64}$/u.test(config.ca_spki_sha256)) {
     throw new Error("Server identity is invalid.");
   }
-  if (!Number.isSafeInteger(port) || port < 1 || port > 65_535) {
-    throw new Error("Server listener port is invalid.");
-  }
-  const origin = `https://${config.bind_host === "::1" ? "[::1]" : config.bind_host}:${port}`;
-  const legacyOrigin = `https://${config.bind_host === "::1" ? "[::1]" : config.bind_host}:7091`;
   const trustIdentity = `spki-sha256:${config.ca_spki_sha256}`;
-  let record;
   try {
-    record = await readPortableServerCredentialForTrustIdentity(credentialRoot, trustIdentity);
+    return {
+      config: { bind_host: config.bind_host, ca_spki_sha256: config.ca_spki_sha256 },
+      record: await readPortableServerCredentialForTrustIdentity(credentialRoot, trustIdentity),
+    };
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT" ||
-        (error instanceof Error && error.message === "Local owner credential is unavailable.")) {
-      return;
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    if (error instanceof Error && error.message === "Local owner credential is unavailable.") {
+      const displayHost = config.bind_host === "::1" ? "[::1]" : config.bind_host;
+      for (const candidatePort of new Set([7_091, port])) {
+        if (await portableCredentialAccountHasNonOwner(
+          credentialRoot,
+          `https://${displayHost}:${candidatePort}`,
+          trustIdentity,
+        )) throw operatorErrors.OWNER_CREDENTIAL_UNAVAILABLE;
+      }
+      return null;
     }
     throw error;
   }
-  await rebindPortableServerCredential(
-    credentialRoot,
-    { ...record, origin },
-    [legacyOrigin, origin],
-  );
 }
 
 function runtimeOriginPort(origin: string): number {

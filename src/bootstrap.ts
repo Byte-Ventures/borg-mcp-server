@@ -61,7 +61,7 @@ export async function bootstrapServer(
       { name: "basicConstraints", cA: false, critical: true },
       { name: "keyUsage", digitalSignature: true, keyAgreement: true, critical: true },
       { name: "extKeyUsage", serverAuth: true },
-      { name: "subjectAltName", altNames: [{ type: 7, ip: bindHost }] },
+      { name: "subjectAltName", altNames: certificateHosts(bindHost).map((ip) => ({ type: 7, ip })) },
     ],
   });
   const serverId = randomUUID();
@@ -148,7 +148,7 @@ export async function reissueServerCertificate(
     bind_host?: unknown;
   };
   if (typeof config.bind_host !== "string") throw new Error("Server identity is invalid.");
-  const hosts = [...new Set([config.bind_host, additionalHost])];
+  const hosts = [...new Set([...certificateHosts(config.bind_host), additionalHost])];
   const caPrivate = await loadTlsPrivateKey(join(directory, "ca.key"));
   const caCertificate = await readFile(join(directory, "ca.crt"));
   const ca = new X509Certificate(caCertificate);
@@ -184,6 +184,11 @@ export async function reissueServerCertificate(
     caPrivate.fill(0);
   }
   return { caFingerprint, hosts };
+}
+
+function certificateHosts(bindHost: string): readonly string[] {
+  const loopback = bindHost.includes(":") ? "::1" : "127.0.0.1";
+  return [...new Set([loopback, bindHost])];
 }
 
 async function writePrivate(path: string, value: string | Buffer): Promise<void> {

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { rmSync, writeFileSync } from "node:fs";
-import { access, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
+import { access, mkdtemp, readFile, readdir, realpath, rm, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -306,10 +306,49 @@ describe("node server service", () => {
 
       await service.start([]);
 
-      expect(bindOwnerCredential).toHaveBeenCalledWith(7_091);
+      expect(bindOwnerCredential).toHaveBeenCalledWith("https://127.0.0.1:7091");
       expect(startLivenessScheduler).toHaveBeenCalledOnce();
       expect(startLivenessScheduler.mock.calls[0]![0]).toMatchObject({ scan: expect.any(Function) });
       expect(stop).toHaveBeenCalledOnce();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps loopback reachable alongside a private-LAN listener", async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-dual-listener-service-")));
+    try {
+      await bootstrapServer(directory, "192.168.1.20");
+      await unlink(join(directory, "ca.key"));
+      const starts: Array<{ readonly bind?: { readonly host?: string; readonly port?: number } }> = [];
+      const closes = [vi.fn().mockResolvedValue(undefined), vi.fn().mockResolvedValue(undefined)];
+      const startServer = vi.fn().mockImplementation(async (options) => {
+        starts.push(options);
+        const index = starts.length - 1;
+        return {
+          origin: index === 0 ? "https://192.168.1.20:7091" : "https://127.0.0.1:7091",
+          limits: {} as never,
+          close: closes[index],
+        };
+      });
+      const service = createNodeServerService({
+        environment: { BORG_SERVER_DATA_DIR: directory },
+        readFile: vi.fn().mockResolvedValue(Buffer.from("certificate")),
+        readPrivateKey: vi.fn().mockResolvedValue(Buffer.from("private-key")),
+        startServer,
+        onStarted: vi.fn(),
+        waitForShutdown: vi.fn().mockResolvedValue(undefined),
+      });
+
+      await service.start(["--host", "192.168.1.20", "--lan"]);
+
+      expect(startServer).toHaveBeenCalledTimes(2);
+      expect(starts.map((entry) => entry.bind)).toEqual([
+        { host: "192.168.1.20", lanConsent: true },
+        { host: "127.0.0.1", port: 7091 },
+      ]);
+      expect(closes[0]).toHaveBeenCalledOnce();
+      expect(closes[1]).toHaveBeenCalledOnce();
     } finally {
       await rm(directory, { recursive: true, force: true });
     }

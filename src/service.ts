@@ -216,7 +216,7 @@ interface ServiceDependencies {
   readonly readPrivateKey: (path: string) => Promise<Buffer>;
   readonly startServer: (options: HttpsServerOptions) => Promise<RunningServer>;
   readonly onStarted: (origin: string, identity: RuntimeBuildIdentity) => void;
-  readonly bindOwnerCredential?: (port: number) => Promise<void>;
+  readonly bindOwnerCredential?: (origin: string) => Promise<void>;
   readonly startForegroundDashboard?: (input: {
     readonly source: DashboardSnapshotSource;
     readonly server: DashboardServerIdentity;
@@ -396,7 +396,7 @@ export function createNodeServerService(dependencies: ServiceDependencies): Serv
         }
         await dependencies.onStartupPhase?.("pre-listen");
         throwIfShutdown(shutdown?.signal);
-        running = await dependencies.startServer({
+        const serverOptions = {
           bind,
           tls: { key, cert, ...(ca === undefined ? {} : { ca }) },
           limits: DEFAULT_SERVICE_LIMITS,
@@ -415,7 +415,25 @@ export function createNodeServerService(dependencies: ServiceDependencies): Serv
             : { handleCoordination: (request) => coordinationApi.handle(request) }),
           debugLogger,
           runtimeIdentity,
-        });
+        } satisfies HttpsServerOptions;
+        running = await dependencies.startServer(serverOptions);
+        if (resolveBindOptions(bind).mode === "lan") {
+          const primary = running;
+          const loopback = await dependencies.startServer({
+            ...serverOptions,
+            bind: {
+              host: bind.host?.includes(":") === true ? "::1" : "127.0.0.1",
+              port: runtimeOriginPort(primary.origin),
+            },
+          });
+          running = {
+            origin: primary.origin,
+            limits: primary.limits,
+            close: async () => {
+              await Promise.all([primary.close(), loopback.close()]);
+            },
+          };
+        }
         throwIfShutdown(shutdown?.signal);
         if (authRuntime !== undefined) {
           livenessScheduler = (dependencies.startLivenessScheduler ?? startLivenessScheduler)(
@@ -446,7 +464,7 @@ export function createNodeServerService(dependencies: ServiceDependencies): Serv
       let failure: unknown;
       try {
         throwIfShutdown(shutdown?.signal);
-        await dependencies.bindOwnerCredential?.(runtimeOriginPort(running.origin));
+        await dependencies.bindOwnerCredential?.(running.origin);
         throwIfShutdown(shutdown?.signal);
         await runtimeLock?.updateOrigin?.(running.origin);
         dependencies.onStarted(running.origin, runtimeIdentity);
@@ -629,8 +647,8 @@ const startOnlyService = createNodeServerService({
     return handlers;
   },
   waitForShutdown,
-  bindOwnerCredential: (port) =>
-    bindPortableOwnerCredentialPort(dataDirectory, credentialFile, port),
+  bindOwnerCredential: (origin) =>
+    bindPortableOwnerCredentialPort(dataDirectory, credentialFile, runtimeOriginPort(origin), origin),
   debugOutput: (line) => console.error(line),
 });
 export const nodeServerService: ServerService = {
@@ -1123,6 +1141,7 @@ export async function bindPortableOwnerCredentialPort(
   setupDataDirectory: string,
   credentialRoot: string,
   port: number,
+  runningOrigin?: string,
 ): Promise<void> {
   if (!Number.isSafeInteger(port) || port < 1 || port > 65_535) {
     throw new Error("Server listener port is invalid.");
@@ -1134,7 +1153,7 @@ export async function bindPortableOwnerCredentialPort(
   );
   if (portableOwner === null) return;
   const { config, record } = portableOwner;
-  const origin = `https://${config.bind_host === "::1" ? "[::1]" : config.bind_host}:${port}`;
+  const origin = runningOrigin ?? `https://${config.bind_host === "::1" ? "[::1]" : config.bind_host}:${port}`;
   const legacyOrigin = `https://${config.bind_host === "::1" ? "[::1]" : config.bind_host}:7091`;
   await rebindPortableServerCredential(
     credentialRoot,

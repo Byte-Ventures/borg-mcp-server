@@ -9,6 +9,7 @@ import {
   bootstrapServer,
   loadDigestKey,
   loadTlsPrivateKey,
+  reissueServerCertificate,
   type BootstrapResult,
 } from "./bootstrap.js";
 import {
@@ -96,6 +97,7 @@ export interface ServerService {
   readonly createClientInvitation?: (recoveryCredential: string) => Promise<string>;
   readonly replaceOwnerInvitation?: (recoveryCredential: string) => Promise<string>;
   readonly invite?: (clientName?: string) => Promise<string>;
+  readonly reissueCertificate?: (additionalHost: string) => Promise<CertificateReissueResult>;
 }
 
 export interface DashboardCommandOptions {
@@ -104,6 +106,11 @@ export interface DashboardCommandOptions {
 
 export interface SetupOptions {
   readonly reinitialize: boolean;
+}
+
+export interface CertificateReissueResult {
+  readonly caFingerprint: string;
+  readonly hosts: readonly string[];
 }
 
 export type ServerSetupResult =
@@ -671,6 +678,7 @@ export const nodeServerService: ServerService = {
   ),
   stop: () => nodeRuntimeController.stopRuntime(20_000),
   recoverStaleLock: () => recoverStaleRuntimeLock(dataDirectory),
+  reissueCertificate: (additionalHost) => reissueNodeServerCertificate(dataDirectory, additionalHost),
   ...createOfflineCredentialService(dataDirectory, credentialFile),
 };
 
@@ -1095,6 +1103,19 @@ export async function setupNodeServerInstallation(
   } finally {
     if (invitationLock === undefined) await runtimeLock.release();
     else await invitationLock.release().finally(() => runtimeLock.release());
+  }
+}
+
+async function reissueNodeServerCertificate(
+  dataDirectory: string,
+  additionalHost: string,
+): Promise<CertificateReissueResult> {
+  const host = resolveBindOptions({ host: additionalHost, lanConsent: true }).host;
+  const runtimeLock = await acquireRuntimeLock(dataDirectory);
+  try {
+    return await reissueServerCertificate(dataDirectory, host);
+  } finally {
+    await runtimeLock.release();
   }
 }
 

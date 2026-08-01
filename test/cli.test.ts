@@ -136,6 +136,28 @@ describe("runCli", () => {
     )).toBe(1);
   });
 
+  it("reissues a certificate for a private-LAN host without exposing reinitialize", async () => {
+    const reissueCertificate = vi.fn().mockResolvedValue({
+      caFingerprint: "a".repeat(64),
+      hosts: ["127.0.0.1", "192.168.1.20"],
+    });
+    const io = createIo();
+
+    expect(await runCli(["cert-reissue", "--host", "192.168.1.20"], {
+      start: vi.fn(),
+      reissueCertificate,
+    }, io)).toBe(0);
+    expect(reissueCertificate).toHaveBeenCalledWith("192.168.1.20");
+    expect(io.stdout).toHaveBeenCalledWith(
+      "Server certificate reissued for 127.0.0.1, 192.168.1.20.\n" +
+      "Next: restart the server with `borg server start --host 192.168.1.20 --lan`.",
+    );
+    expect(await runCli(["cert-reissue", "--reinitialize"], {
+      start: vi.fn(),
+      reissueCertificate,
+    }, createIo())).toBe(1);
+  });
+
   it("requires an explicit unambiguous setup reinitialization flag", async () => {
     const setup = vi.fn().mockResolvedValue({
       recoveryCredential: "a".repeat(43),

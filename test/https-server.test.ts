@@ -746,6 +746,42 @@ describe("HTTPS service", () => {
     )).toThrow("TLS certificate is not signed by the configured trust anchor.");
   });
 
+  it("presents the configured CA after the leaf certificate", async () => {
+    const material = await signedCertificateMaterial("127.0.0.1");
+    const fixture = await startHttpsServer({
+      bind: { port: 0 },
+      tls: { key: material.server.private, cert: material.server.cert, ca: material.ca.cert },
+    });
+    try {
+      const socket = await openObservedSecureSocket(fixture.origin);
+      try {
+        const peer = socket.getPeerCertificate(true);
+        expect(peer.subject?.CN).toBe("test-server");
+        expect(peer.issuerCertificate?.subject?.CN).toBe("test-ca");
+        expect(peer.issuerCertificate?.raw.equals(peer.raw)).toBe(false);
+      } finally {
+        socket.destroy();
+      }
+    } finally {
+      await fixture.close();
+    }
+
+    const leafOnly = await startHttpsServer({
+      bind: { port: 0 },
+      tls: { key: material.server.private, cert: material.server.cert },
+    });
+    try {
+      const socket = await openObservedSecureSocket(leafOnly.origin);
+      try {
+        expect(socket.getPeerCertificate(true).issuerCertificate).toBeUndefined();
+      } finally {
+        socket.destroy();
+      }
+    } finally {
+      await leafOnly.close();
+    }
+  });
+
   it("rejects an intermediate beneath a root with pathLenConstraint zero", async () => {
     const root = await generate([{ name: "commonName", value: "constrained-root" }], {
       algorithm: "sha256",
@@ -1680,6 +1716,19 @@ function openSecureSocket(
       ca,
       rejectUnauthorized: true,
       ...(localAddress === undefined ? {} : { localAddress }),
+    });
+    socket.once("secureConnect", () => resolve(socket));
+    socket.once("error", reject);
+  });
+}
+
+function openObservedSecureSocket(origin: string): Promise<TLSSocket> {
+  const url = new URL(origin);
+  return new Promise((resolve, reject) => {
+    const socket = connectTls({
+      host: url.hostname,
+      port: Number(url.port),
+      rejectUnauthorized: false,
     });
     socket.once("secureConnect", () => resolve(socket));
     socket.once("error", reject);

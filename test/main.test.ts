@@ -39,6 +39,7 @@ describe("main operator errors", () => {
     ["BIND_LAN_CONSENT", "Add --lan to consent to this private-LAN start."],
     ["SERVER_FILES_MISSING", "Configure BORG_SERVER_DATA_DIR or the required TLS file variables."],
     ["INSTALLATION_EXISTS", "An installation already exists in BORG_SERVER_DATA_DIR. To destroy and recreate it, stop the server and run borg-mcp-server setup --reinitialize."],
+    ["OWNER_CREDENTIAL_UNAVAILABLE", "The local owner credential is unavailable. Restore the local credential store from backup, or preserve any needed server data and run borg-mcp-server setup --reinitialize to create a new server identity."],
     ["RUNTIME_ACTIVE", "Stop the server before running setup or offline administration."],
     [
       "RUNTIME_ARTIFACT_INSTALL_FAILED",

@@ -611,11 +611,11 @@ describe("runCli", () => {
     expect(ungrantClient).toHaveBeenCalledWith(clientId, cubeId);
     expect(io.stderr).toHaveBeenCalledWith(
       "client-invite is not supported. Creating a scoped invitation requires a recovery credential, and this server does not issue one.\n" +
-      "To enroll an additional client or device, run `borgmcp-server invite` in an interactive terminal. An enrolled client has no cube access until the server operator grants it.",
+      "To enroll an additional client or device, run `borg server invite` in an interactive terminal. An enrolled client has no cube access until the server operator grants it.",
     );
     expect(io.stderr).toHaveBeenCalledWith(
       "owner-invite is not supported. Replacing an owner enrollment invitation requires a recovery credential, and this server does not issue one.\n" +
-      "To enroll an additional client or device, run `borgmcp-server invite` in an interactive terminal.",
+      "To enroll an additional client or device, run `borg server invite` in an interactive terminal.",
     );
     expect(JSON.stringify(io.stderr.mock.calls)).not.toContain(recovery);
     expect(await runCli(["owner-invite", recovery], service, io)).toBe(1);

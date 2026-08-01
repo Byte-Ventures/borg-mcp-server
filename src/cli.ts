@@ -309,9 +309,9 @@ export async function runCli(
       if (!recoveryCredentialIsOperatorAvailable()) {
         io.stderr(command === "client-invite"
           ? "client-invite is not supported. Creating a scoped invitation requires a recovery credential, and this server does not issue one.\n" +
-            "To enroll an additional client or device, run `borgmcp-server invite` in an interactive terminal. An enrolled client has no cube access until the server operator grants it."
+            "To enroll an additional client or device, run `borg server invite` in an interactive terminal. An enrolled client has no cube access until the server operator grants it."
           : "owner-invite is not supported. Replacing an owner enrollment invitation requires a recovery credential, and this server does not issue one.\n" +
-            "To enroll an additional client or device, run `borgmcp-server invite` in an interactive terminal.");
+            "To enroll an additional client or device, run `borg server invite` in an interactive terminal.");
         return 1;
       }
 

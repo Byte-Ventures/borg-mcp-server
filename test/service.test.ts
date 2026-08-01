@@ -315,10 +315,17 @@ describe("node server service", () => {
     }
   });
 
-  it("keeps loopback reachable alongside a private-LAN listener", async () => {
+  it.each([
+    { originalHost: "127.0.0.1", lanHost: "fd00::20", loopbackHost: "127.0.0.1" },
+    { originalHost: "::1", lanHost: "192.168.1.20", loopbackHost: "::1" },
+  ])("keeps the original loopback family reachable during a $originalHost to $lanHost retrofit", async ({
+    originalHost,
+    lanHost,
+    loopbackHost,
+  }) => {
     const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-dual-listener-service-")));
     try {
-      await bootstrapServer(directory, "192.168.1.20");
+      await bootstrapServer(directory, originalHost);
       await unlink(join(directory, "ca.key"));
       const starts: Array<{ readonly bind?: { readonly host?: string; readonly port?: number } }> = [];
       const closes = [vi.fn().mockResolvedValue(undefined), vi.fn().mockResolvedValue(undefined)];
@@ -326,29 +333,64 @@ describe("node server service", () => {
         starts.push(options);
         const index = starts.length - 1;
         return {
-          origin: index === 0 ? "https://192.168.1.20:7091" : "https://127.0.0.1:7091",
+          origin: index === 0
+            ? `https://${lanHost.includes(":") ? `[${lanHost}]` : lanHost}:7091`
+            : `https://${loopbackHost === "::1" ? "[::1]" : loopbackHost}:7091`,
           limits: {} as never,
           close: closes[index],
         };
       });
       const service = createNodeServerService({
         environment: { BORG_SERVER_DATA_DIR: directory },
-        readFile: vi.fn().mockResolvedValue(Buffer.from("certificate")),
+        readFile: vi.fn(async (path: string) => path.endsWith("server.json")
+          ? Buffer.from(JSON.stringify({ bind_host: originalHost }))
+          : Buffer.from("certificate")),
         readPrivateKey: vi.fn().mockResolvedValue(Buffer.from("private-key")),
         startServer,
         onStarted: vi.fn(),
         waitForShutdown: vi.fn().mockResolvedValue(undefined),
       });
 
-      await service.start(["--host", "192.168.1.20", "--lan"]);
+      await service.start(["--host", lanHost, "--lan"]);
 
       expect(startServer).toHaveBeenCalledTimes(2);
       expect(starts.map((entry) => entry.bind)).toEqual([
-        { host: "192.168.1.20", lanConsent: true },
-        { host: "127.0.0.1", port: 7091 },
+        { host: lanHost, lanConsent: true },
+        { host: loopbackHost, port: 7091 },
       ]);
       expect(closes[0]).toHaveBeenCalledOnce();
       expect(closes[1]).toHaveBeenCalledOnce();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("closes the LAN primary when the original-family compatibility listener fails", async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-dual-listener-cleanup-")));
+    try {
+      await bootstrapServer(directory, "::1");
+      await unlink(join(directory, "ca.key"));
+      const closePrimary = vi.fn().mockResolvedValue(undefined);
+      const startServer = vi.fn()
+        .mockResolvedValueOnce({
+          origin: "https://192.168.1.20:7091",
+          limits: {} as never,
+          close: closePrimary,
+        })
+        .mockRejectedValueOnce(new Error("loopback bind failed"));
+      const service = createNodeServerService({
+        environment: { BORG_SERVER_DATA_DIR: directory },
+        readFile: vi.fn(async (path: string) => path.endsWith("server.json")
+          ? Buffer.from(JSON.stringify({ bind_host: "::1" }))
+          : Buffer.from("certificate")),
+        readPrivateKey: vi.fn().mockResolvedValue(Buffer.from("private-key")),
+        startServer,
+        onStarted: vi.fn(),
+        waitForShutdown: vi.fn().mockResolvedValue(undefined),
+      });
+
+      await expect(service.start(["--host", "192.168.1.20", "--lan"])).rejects.toThrow("loopback bind failed");
+      expect(closePrimary).toHaveBeenCalledOnce();
     } finally {
       await rm(directory, { recursive: true, force: true });
     }

@@ -287,6 +287,7 @@ export function createNodeServerService(dependencies: ServiceDependencies): Serv
       let dataDirectory: string | undefined;
       let storageLimits: StorageLimits;
       let asciiRequested = false;
+      let compatibilityLoopbackHost: "127.0.0.1" | "::1" | undefined;
       try {
         throwIfShutdown(shutdown?.signal);
         await dependencies.onStartupPhase?.("pre-lock");
@@ -306,6 +307,13 @@ export function createNodeServerService(dependencies: ServiceDependencies): Serv
           dataDirectory: dataDirectory === undefined ? "tls_only" : "configured",
         });
         if (bindMode === "lan" && dataDirectory !== undefined) {
+          const installationConfig = JSON.parse(
+            (await dependencies.readFile(join(dataDirectory, "server.json"))).toString("utf8"),
+          ) as { readonly bind_host?: unknown };
+          if (typeof installationConfig.bind_host !== "string") {
+            throw new Error("Server identity is invalid.");
+          }
+          compatibilityLoopbackHost = installationConfig.bind_host.includes(":") ? "::1" : "127.0.0.1";
           await assertLanCaKeyOffline(dataDirectory);
           throwIfShutdown(shutdown?.signal);
         }
@@ -428,7 +436,7 @@ export function createNodeServerService(dependencies: ServiceDependencies): Serv
           const loopback = await dependencies.startServer({
             ...serverOptions,
             bind: {
-              host: bind.host?.includes(":") === true ? "::1" : "127.0.0.1",
+              host: compatibilityLoopbackHost ?? (bind.host?.includes(":") === true ? "::1" : "127.0.0.1"),
               port: runtimeOriginPort(primary.origin),
             },
           });

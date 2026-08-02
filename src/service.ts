@@ -9,6 +9,7 @@ import {
   bootstrapServer,
   loadDigestKey,
   loadTlsPrivateKey,
+  reissueServerCertificate,
   type BootstrapResult,
 } from "./bootstrap.js";
 import {
@@ -95,7 +96,8 @@ export interface ServerService {
   readonly ungrantClient?: (clientSelector: string, cubeId: string) => Promise<void>;
   readonly createClientInvitation?: (recoveryCredential: string) => Promise<string>;
   readonly replaceOwnerInvitation?: (recoveryCredential: string) => Promise<string>;
-  readonly invite?: (clientName?: string) => Promise<string>;
+  readonly invite?: (clientName?: string) => Promise<InvitationResult>;
+  readonly reissueCertificate?: (additionalHost: string) => Promise<CertificateReissueResult>;
 }
 
 export interface DashboardCommandOptions {
@@ -104,6 +106,17 @@ export interface DashboardCommandOptions {
 
 export interface SetupOptions {
   readonly reinitialize: boolean;
+}
+
+export interface CertificateReissueResult {
+  readonly caFingerprint: string;
+  readonly hosts: readonly string[];
+}
+
+export interface InvitationResult {
+  readonly invitation: string;
+  readonly endpoint: string;
+  readonly loopbackOnly: boolean;
 }
 
 export type ServerSetupResult =
@@ -209,7 +222,7 @@ interface ServiceDependencies {
   readonly readPrivateKey: (path: string) => Promise<Buffer>;
   readonly startServer: (options: HttpsServerOptions) => Promise<RunningServer>;
   readonly onStarted: (origin: string, identity: RuntimeBuildIdentity) => void;
-  readonly bindOwnerCredential?: (port: number) => Promise<void>;
+  readonly bindOwnerCredential?: (origin: string) => Promise<void>;
   readonly startForegroundDashboard?: (input: {
     readonly source: DashboardSnapshotSource;
     readonly server: DashboardServerIdentity;
@@ -274,6 +287,7 @@ export function createNodeServerService(dependencies: ServiceDependencies): Serv
       let dataDirectory: string | undefined;
       let storageLimits: StorageLimits;
       let asciiRequested = false;
+      let compatibilityLoopbackHost: "127.0.0.1" | "::1" | undefined;
       try {
         throwIfShutdown(shutdown?.signal);
         await dependencies.onStartupPhase?.("pre-lock");
@@ -293,6 +307,13 @@ export function createNodeServerService(dependencies: ServiceDependencies): Serv
           dataDirectory: dataDirectory === undefined ? "tls_only" : "configured",
         });
         if (bindMode === "lan" && dataDirectory !== undefined) {
+          const installationConfig = JSON.parse(
+            (await dependencies.readFile(join(dataDirectory, "server.json"))).toString("utf8"),
+          ) as { readonly bind_host?: unknown };
+          if (typeof installationConfig.bind_host !== "string") {
+            throw new Error("Server identity is invalid.");
+          }
+          compatibilityLoopbackHost = installationConfig.bind_host.includes(":") ? "::1" : "127.0.0.1";
           await assertLanCaKeyOffline(dataDirectory);
           throwIfShutdown(shutdown?.signal);
         }
@@ -389,13 +410,13 @@ export function createNodeServerService(dependencies: ServiceDependencies): Serv
         }
         await dependencies.onStartupPhase?.("pre-listen");
         throwIfShutdown(shutdown?.signal);
-        running = await dependencies.startServer({
+        const serverOptions = {
           bind,
           tls: { key, cert, ...(ca === undefined ? {} : { ca }) },
           limits: DEFAULT_SERVICE_LIMITS,
           ...(authority === undefined
             ? {}
-            : { exchangeEnrollment: createEnrollmentExchange(authority) }),
+             : { exchangeEnrollment: createEnrollmentExchange(authority, false) }),
           ...(authority === undefined
             ? {}
             : {
@@ -408,7 +429,25 @@ export function createNodeServerService(dependencies: ServiceDependencies): Serv
             : { handleCoordination: (request) => coordinationApi.handle(request) }),
           debugLogger,
           runtimeIdentity,
-        });
+        } satisfies HttpsServerOptions;
+        running = await dependencies.startServer(serverOptions);
+        if (resolveBindOptions(bind).mode === "lan") {
+          const primary = running;
+          const loopback = await dependencies.startServer({
+            ...serverOptions,
+            bind: {
+              host: compatibilityLoopbackHost ?? (bind.host?.includes(":") === true ? "::1" : "127.0.0.1"),
+              port: runtimeOriginPort(primary.origin),
+            },
+          });
+          running = {
+            origin: primary.origin,
+            limits: primary.limits,
+            close: async () => {
+              await Promise.all([primary.close(), loopback.close()]);
+            },
+          };
+        }
         throwIfShutdown(shutdown?.signal);
         if (authRuntime !== undefined) {
           livenessScheduler = (dependencies.startLivenessScheduler ?? startLivenessScheduler)(
@@ -439,7 +478,7 @@ export function createNodeServerService(dependencies: ServiceDependencies): Serv
       let failure: unknown;
       try {
         throwIfShutdown(shutdown?.signal);
-        await dependencies.bindOwnerCredential?.(runtimeOriginPort(running.origin));
+        await dependencies.bindOwnerCredential?.(running.origin);
         throwIfShutdown(shutdown?.signal);
         await runtimeLock?.updateOrigin?.(running.origin);
         dependencies.onStarted(running.origin, runtimeIdentity);
@@ -622,8 +661,8 @@ const startOnlyService = createNodeServerService({
     return handlers;
   },
   waitForShutdown,
-  bindOwnerCredential: (port) =>
-    bindPortableOwnerCredentialPort(dataDirectory, credentialFile, port),
+  bindOwnerCredential: (origin) =>
+    bindPortableOwnerCredentialPort(dataDirectory, credentialFile, runtimeOriginPort(origin), origin),
   debugOutput: (line) => console.error(line),
 });
 export const nodeServerService: ServerService = {
@@ -671,6 +710,7 @@ export const nodeServerService: ServerService = {
   ),
   stop: () => nodeRuntimeController.stopRuntime(20_000),
   recoverStaleLock: () => recoverStaleRuntimeLock(dataDirectory),
+  reissueCertificate: (additionalHost) => reissueNodeServerCertificate(dataDirectory, additionalHost),
   ...createOfflineCredentialService(dataDirectory, credentialFile),
 };
 
@@ -1098,10 +1138,24 @@ export async function setupNodeServerInstallation(
   }
 }
 
+async function reissueNodeServerCertificate(
+  dataDirectory: string,
+  additionalHost: string,
+): Promise<CertificateReissueResult> {
+  const host = resolveBindOptions({ host: additionalHost, lanConsent: true }).host;
+  const runtimeLock = await acquireRuntimeLock(dataDirectory);
+  try {
+    return await reissueServerCertificate(dataDirectory, host);
+  } finally {
+    await runtimeLock.release();
+  }
+}
+
 export async function bindPortableOwnerCredentialPort(
   setupDataDirectory: string,
   credentialRoot: string,
   port: number,
+  runningOrigin?: string,
 ): Promise<void> {
   if (!Number.isSafeInteger(port) || port < 1 || port > 65_535) {
     throw new Error("Server listener port is invalid.");
@@ -1113,7 +1167,7 @@ export async function bindPortableOwnerCredentialPort(
   );
   if (portableOwner === null) return;
   const { config, record } = portableOwner;
-  const origin = `https://${config.bind_host === "::1" ? "[::1]" : config.bind_host}:${port}`;
+  const origin = runningOrigin ?? `https://${config.bind_host === "::1" ? "[::1]" : config.bind_host}:${port}`;
   const legacyOrigin = `https://${config.bind_host === "::1" ? "[::1]" : config.bind_host}:7091`;
   await rebindPortableServerCredential(
     credentialRoot,
@@ -1275,26 +1329,39 @@ export function createOfflineCredentialService(
       if (invitation === null) throw operatorErrors.RECOVERY_INVALID;
       return invitation;
     }),
-    invite: (clientName) => withInvitationAuthority(async (authority) => {
-      if (credentialRoot === undefined) throw new Error("Local owner credential store is unavailable.");
-      const config = JSON.parse((await readFile(join(offlineDataDirectory, "server.json"))).toString("utf8")) as {
-        bind_host?: unknown;
-        ca_spki_sha256?: unknown;
-      };
-      if (typeof config.bind_host !== "string" || typeof config.ca_spki_sha256 !== "string") {
-        throw new Error("Server identity is invalid.");
-      }
-      const trustIdentity = `spki-sha256:${config.ca_spki_sha256}`;
-      const record = await readPortableServerCredentialForTrustIdentity(credentialRoot, trustIdentity);
-      const invitation = authority.createInvitationForOwnerCredential(
-        record.credential,
-        15 * 60_000,
-        clientName,
-      );
-      if (invitation === null) throw new Error("Local owner credential is invalid.");
-      return invitation;
-    }),
+    invite: async (clientName) => {
+      const runtime = await inspectRuntimeLock(offlineDataDirectory);
+      return withInvitationAuthority(async (authority) => {
+        if (credentialRoot === undefined) throw new Error("Local owner credential store is unavailable.");
+        const config = JSON.parse((await readFile(join(offlineDataDirectory, "server.json"))).toString("utf8")) as {
+          bind_host?: unknown;
+          ca_spki_sha256?: unknown;
+        };
+        if (typeof config.bind_host !== "string" || typeof config.ca_spki_sha256 !== "string") {
+          throw new Error("Server identity is invalid.");
+        }
+        const trustIdentity = `spki-sha256:${config.ca_spki_sha256}`;
+        const record = await readPortableServerCredentialForTrustIdentity(credentialRoot, trustIdentity);
+        const endpoint = runtime.running && runtime.endpoint !== null
+          ? runtime.endpoint
+          : `https://${config.bind_host === "::1" ? "[::1]" : config.bind_host}:7091`;
+        const invitation = authority.createInvitationArtifactForOwnerCredential(
+          record.credential,
+          15 * 60_000,
+          endpoint,
+          config.ca_spki_sha256,
+          clientName,
+        );
+        if (invitation === null) throw new Error("Local owner credential is invalid.");
+        return { invitation, endpoint, loopbackOnly: isLoopbackEndpoint(endpoint) };
+      });
+    },
   };
+}
+
+function isLoopbackEndpoint(endpoint: string): boolean {
+  const host = new URL(endpoint).hostname;
+  return host === "127.0.0.1" || host === "[::1]" || host === "::1" || /^127\./u.test(host);
 }
 
 const canonicalRuntimeLockNonce = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;

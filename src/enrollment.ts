@@ -12,7 +12,7 @@ import { StorageCapacityError } from "./store.js";
 
 type EnrollmentEnvelope = ProtocolEnvelope<EnrollmentExchangeRequest>;
 
-export function createEnrollmentExchange(authority: CredentialAuthority) {
+export function createEnrollmentExchange(authority: CredentialAuthority, allowLegacy = true) {
   return async (body: unknown): Promise<{
     readonly status: 201 | 400 | 401 | 426 | 507;
     readonly body?: unknown;
@@ -50,7 +50,7 @@ export function createEnrollmentExchange(authority: CredentialAuthority) {
         ...(envelope.payload.client_name === undefined
           ? {}
           : { clientName: envelope.payload.client_name }),
-      });
+      }, allowLegacy);
     } catch (error) {
       if (!(error instanceof StorageCapacityError)) throw error;
       return {

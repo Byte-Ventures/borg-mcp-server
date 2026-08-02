@@ -115,12 +115,18 @@ describe("runCli", () => {
   });
 
   it("creates an invitation only in an interactive terminal with the approved copy", async () => {
-    const invite = vi.fn().mockResolvedValue("i".repeat(43));
+    const invite = vi.fn().mockResolvedValue({
+      invitation: "i".repeat(180),
+      endpoint: "https://127.0.0.1:7091",
+      loopbackOnly: true,
+    });
     const interactive = { ...createIo(), isTTY: true };
     expect(await runCli(["invite", "Alice laptop"], { start: vi.fn(), invite }, interactive)).toBe(0);
     expect(invite).toHaveBeenCalledWith("Alice laptop");
     expect(interactive.stdout).toHaveBeenCalledWith(
-      `Client enrollment invitation (single-use, shown once): ${"i".repeat(43)}\nShare it only with the intended recipient.`,
+      `Client enrollment invitation (single-use, shown once): ${"i".repeat(180)}\n` +
+      "Share it only with the intended recipient.\n" +
+      "This invitation works only on this machine. For another machine, run cert-reissue, restart, then mint again.",
     );
 
     const nonInteractive = { ...createIo(), isTTY: false };
@@ -134,6 +140,28 @@ describe("runCli", () => {
       { start: vi.fn(), invite },
       { ...createIo(), isTTY: true },
     )).toBe(1);
+  });
+
+  it("reissues a certificate for a private-LAN host without exposing reinitialize", async () => {
+    const reissueCertificate = vi.fn().mockResolvedValue({
+      caFingerprint: "a".repeat(64),
+      hosts: ["127.0.0.1", "192.168.1.20"],
+    });
+    const io = createIo();
+
+    expect(await runCli(["cert-reissue", "--host", "192.168.1.20"], {
+      start: vi.fn(),
+      reissueCertificate,
+    }, io)).toBe(0);
+    expect(reissueCertificate).toHaveBeenCalledWith("192.168.1.20");
+    expect(io.stdout).toHaveBeenCalledWith(
+      "Server certificate reissued for 127.0.0.1, 192.168.1.20.\n" +
+      "Next: restart the server with `borg server start --host 192.168.1.20 --lan`.",
+    );
+    expect(await runCli(["cert-reissue", "--reinitialize"], {
+      start: vi.fn(),
+      reissueCertificate,
+    }, createIo())).toBe(1);
   });
 
   it("requires an explicit unambiguous setup reinitialization flag", async () => {

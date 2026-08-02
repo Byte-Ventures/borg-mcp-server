@@ -4,7 +4,12 @@ import { join } from "node:path";
 import { X509Certificate } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { bootstrapServer, loadDigestKey, loadTlsPrivateKey } from "../src/bootstrap.js";
+import {
+  bootstrapServer,
+  loadDigestKey,
+  loadTlsPrivateKey,
+  reissueServerCertificate,
+} from "../src/bootstrap.js";
 import type { PortableServerCredential } from "../src/portable-credential-store.js";
 import { openStore } from "../src/store.js";
 
@@ -98,6 +103,30 @@ describe("offline bootstrap", () => {
     await bootstrapServer(dataDirectory);
 
     await expect(bootstrapServer(dataDirectory)).rejects.toThrow();
+  });
+
+  it("reissues only the leaf certificate while preserving the server identity", async () => {
+    const parent = await temporaryDirectory();
+    const dataDirectory = join(parent, "server");
+    const result = await bootstrapServer(dataDirectory, "127.0.0.1");
+    const caBefore = await readFile(result.paths.caCertificate);
+    const caKeyBefore = await readFile(result.paths.caKey);
+    const databaseBefore = await readFile(result.paths.database);
+    const digestKeyBefore = await readFile(result.paths.digestKey);
+
+    const reissued = await reissueServerCertificate(dataDirectory, "192.168.1.20");
+
+    expect(reissued.hosts).toEqual(["127.0.0.1", "192.168.1.20"]);
+    expect(reissued.caFingerprint).toBe(result.caFingerprint);
+    expect(await readFile(result.paths.caCertificate)).toEqual(caBefore);
+    expect(await readFile(result.paths.caKey)).toEqual(caKeyBefore);
+    expect(await readFile(result.paths.database)).toEqual(databaseBefore);
+    expect(await readFile(result.paths.digestKey)).toEqual(digestKeyBefore);
+    const ca = new X509Certificate(caBefore);
+    const server = new X509Certificate(await readFile(result.paths.serverCertificate));
+    expect(server.checkIP("127.0.0.1")).toBe("127.0.0.1");
+    expect(server.checkIP("192.168.1.20")).toBe("192.168.1.20");
+    expect(server.checkIssued(ca)).toBe(true);
   });
 
   it("refuses a digest key file with group or world access", async () => {

@@ -1,5 +1,5 @@
 import { createHash, randomBytes, randomUUID, X509Certificate } from "node:crypto";
-import { lstat, readFile, stat, unlink, writeFile } from "node:fs/promises";
+import { lstat, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { generate } from "selfsigned";
 
@@ -61,7 +61,7 @@ export async function bootstrapServer(
       { name: "basicConstraints", cA: false, critical: true },
       { name: "keyUsage", digitalSignature: true, keyAgreement: true, critical: true },
       { name: "extKeyUsage", serverAuth: true },
-      { name: "subjectAltName", altNames: [{ type: 7, ip: bindHost }] },
+      { name: "subjectAltName", altNames: certificateHosts(bindHost).map((ip) => ({ type: 7, ip })) },
     ],
   });
   const serverId = randomUUID();
@@ -92,12 +92,12 @@ export async function bootstrapServer(
       const recoveryCredential = authority.createRecoveryCredential();
       const invitation = authority.createBootstrapInvitation(15 * 60_000);
       const credential = generateSecret();
-      const enrollment = authority.exchangeInvitation({
-        invitation,
-        retryKey: randomUUID(),
-        clientCredential: credential,
-        clientName: "Local owner",
-      });
+       const enrollment = authority.exchangeInvitation({
+         invitation,
+         retryKey: randomUUID(),
+         clientCredential: credential,
+         clientName: "Local owner",
+       }, true);
       if (enrollment?.purpose !== "owner" || enrollment.serverCapabilities[0] !== "create_cube") {
         throw new Error("Local owner provisioning failed.");
       }
@@ -137,6 +137,58 @@ export async function bootstrapServer(
       ].map((path) => unlink(path).catch(() => undefined)));
     }
   }
+}
+
+export async function reissueServerCertificate(
+  dataDirectory: string,
+  additionalHost: string,
+): Promise<{ readonly caFingerprint: string; readonly hosts: readonly string[] }> {
+  const directory = resolve(dataDirectory);
+  const config = JSON.parse((await readFile(join(directory, "server.json"))).toString("utf8")) as {
+    bind_host?: unknown;
+  };
+  if (typeof config.bind_host !== "string") throw new Error("Server identity is invalid.");
+  const hosts = [...new Set([...certificateHosts(config.bind_host), additionalHost])];
+  const caPrivate = await loadTlsPrivateKey(join(directory, "ca.key"));
+  const caCertificate = await readFile(join(directory, "ca.crt"));
+  const ca = new X509Certificate(caCertificate);
+  if (!ca.ca) throw new Error("Server CA certificate is invalid.");
+  const caFingerprint = createHash("sha256")
+    .update(ca.publicKey.export({ type: "spki", format: "der" }))
+    .digest("hex");
+  const server = await generate([{ name: "commonName", value: "Borg Local Server" }], {
+    algorithm: "sha256",
+    keyType: "ec",
+    ca: { key: caPrivate.toString("utf8"), cert: caCertificate.toString("utf8") },
+    extensions: [
+      { name: "basicConstraints", cA: false, critical: true },
+      { name: "keyUsage", digitalSignature: true, keyAgreement: true, critical: true },
+      { name: "extKeyUsage", serverAuth: true },
+      { name: "subjectAltName", altNames: hosts.map((ip) => ({ type: 7, ip })) },
+    ],
+  });
+  const serverKeyPath = join(directory, "server.key");
+  const serverCertificatePath = join(directory, "server.crt");
+  const temporaryKeyPath = join(directory, `.server.key.${randomUUID()}.tmp`);
+  const temporaryCertificatePath = join(directory, `.server.crt.${randomUUID()}.tmp`);
+  try {
+    await writePrivate(temporaryKeyPath, server.private);
+    await writePrivate(temporaryCertificatePath, server.cert);
+    await rename(temporaryKeyPath, serverKeyPath);
+    await rename(temporaryCertificatePath, serverCertificatePath);
+  } finally {
+    await Promise.all([
+      unlink(temporaryKeyPath).catch(() => undefined),
+      unlink(temporaryCertificatePath).catch(() => undefined),
+    ]);
+    caPrivate.fill(0);
+  }
+  return { caFingerprint, hosts };
+}
+
+function certificateHosts(bindHost: string): readonly string[] {
+  const loopback = bindHost.includes(":") ? "::1" : "127.0.0.1";
+  return [...new Set([loopback, bindHost])];
 }
 
 async function writePrivate(path: string, value: string | Buffer): Promise<void> {

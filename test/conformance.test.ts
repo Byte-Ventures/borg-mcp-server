@@ -56,7 +56,7 @@ describe("borgmcp-shared server adapter", () => {
           observations: {},
         },
       ]);
-      expect(report.results).toHaveLength(28);
+      expect(report.results).toHaveLength(29);
     } finally {
       await fixture.server.close();
       fixture.digester.destroy();

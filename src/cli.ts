@@ -14,6 +14,7 @@ const usage = `Usage: borg-mcp-server <command> [options]
 
 Commands:
   setup [--reinitialize]  Prepare an offline server installation
+  cert-reissue --host <ip>  Add a private-LAN address to the server certificate
   start    Start the server process
   dashboard [--ascii]  View the running local server without stopping it
   status [--json]  Report exact local runtime evidence
@@ -130,6 +131,18 @@ export async function runCli(
       }
       io.stdout(lines.join("\n"));
       return 0;
+    case "cert-reissue": {
+      if (extraArgs.length !== 2 || extraArgs[0] !== "--host" ||
+          extraArgs[1] === undefined || service.reissueCertificate === undefined) {
+        return invalidArguments(io);
+      }
+      const result = await service.reissueCertificate(extraArgs[1]);
+      io.stdout(
+        `Server certificate reissued for ${result.hosts.join(", ")}.\n` +
+        `Next: restart the server with \`borg server start --host ${extraArgs[1]} --lan\`.`,
+      );
+      return 0;
+    }
     case "start":
       await service.start(extraArgs);
       return 0;
@@ -334,8 +347,14 @@ export async function runCli(
         io.stderr("Invitation creation requires an interactive terminal.");
         return 1;
       }
-      const invitation = await service.invite(extraArgs[0]);
-      io.stdout(`Client enrollment invitation (single-use, shown once): ${invitation}\nShare it only with the intended recipient.`);
+      const result = await service.invite(extraArgs[0]);
+      io.stdout(
+        `Client enrollment invitation (single-use, shown once): ${result.invitation}\n` +
+        "Share it only with the intended recipient." +
+        (result.loopbackOnly
+          ? "\nThis invitation works only on this machine. For another machine, run cert-reissue, restart, then mint again."
+          : ""),
+      );
       return 0;
     }
     case "help":

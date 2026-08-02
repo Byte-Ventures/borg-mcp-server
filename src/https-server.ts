@@ -121,7 +121,7 @@ export async function startHttpsServer(options: HttpsServerOptions): Promise<Run
   const server = createServer(
     {
       key: options.tls.key,
-      cert: options.tls.cert,
+      cert: presentedCertificateChain(options.tls.cert, options.tls.ca),
       minVersion: "TLSv1.3",
       maxHeaderSize: limits.maxHeaderBytes,
       requestTimeout: limits.requestTimeoutMs,
@@ -175,6 +175,16 @@ export async function startHttpsServer(options: HttpsServerOptions): Promise<Run
       return closePromise;
     },
   };
+}
+
+function presentedCertificateChain(
+  certificate: string | Buffer,
+  ca: string | Buffer | undefined,
+): string | Buffer {
+  if (ca === undefined) return certificate;
+  const leaf = typeof certificate === "string" ? Buffer.from(certificate) : certificate;
+  const issuer = typeof ca === "string" ? Buffer.from(ca) : ca;
+  return Buffer.concat([leaf, Buffer.from("\n"), issuer]);
 }
 
 export function createRequestHandlerContext(

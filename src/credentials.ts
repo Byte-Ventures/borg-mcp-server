@@ -16,13 +16,34 @@ import type {
   ScopedStore,
   SeatAttachRecord,
 } from "./store.js";
-import type { DroneRuntimeMetadata } from "borgmcp-shared/protocol";
+import {
+  decodeInvitationArtifact,
+  encodeInvitationArtifact,
+  getInvitationArtifactIntegrityInput,
+  type DroneRuntimeMetadata,
+  type InvitationArtifact,
+} from "borgmcp-shared/protocol";
 import { operatorErrors } from "./operator-error.js";
 import { disabledDebugLogger, type DebugLogger } from "./debug-log.js";
 
 const tokenPattern = /^[A-Za-z0-9_-]{43,1024}$/u;
 const dummyVerifier = Buffer.alloc(32);
 type CredentialPurpose = "recovery" | "invitation" | "client" | "drone-session";
+
+function createInvitationArtifactIntegrity(
+  artifact: Pick<InvitationArtifact, "endpoint" | "ca_spki_sha256" | "authority" | "secret">,
+): string {
+  return createHmac("sha256", artifact.secret)
+    .update(getInvitationArtifactIntegrityInput({
+      version: 2,
+      endpoint: artifact.endpoint,
+      ca_spki_sha256: artifact.ca_spki_sha256,
+      authority: artifact.authority,
+      secret: artifact.secret,
+      integrity: "p".repeat(43),
+    }))
+    .digest("base64url");
+}
 
 export interface EnrollmentRequest {
   readonly invitation: string;
@@ -178,6 +199,29 @@ export class CredentialAuthority {
     return this.#createInvitation("client", ttlMs, clientName);
   }
 
+  createInvitationArtifactForOwnerCredential(
+    clientCredential: string,
+    ttlMs: number,
+    endpoint: string,
+    caSpkiSha256: string,
+    clientName?: string,
+  ): string | null {
+    const secret = this.createInvitationForOwnerCredential(clientCredential, ttlMs, clientName);
+    if (secret === null) return null;
+    const artifact = {
+      version: 2 as const,
+      endpoint,
+      ca_spki_sha256: caSpkiSha256,
+      authority: "client" as const,
+      secret,
+      integrity: "p".repeat(43),
+    };
+    return encodeInvitationArtifact({
+      ...artifact,
+      integrity: createInvitationArtifactIntegrity(artifact),
+    });
+  }
+
   replaceOwnerInvitation(recoveryCredential: string, ttlMs: number): string | null {
     const digest = safeDigest(this.#digester, recoveryCredential, "recovery");
     const stored = this.#store.findRecoveryCredential(digest.lookup);
@@ -206,11 +250,22 @@ export class CredentialAuthority {
     return secret;
   }
 
-  exchangeInvitation(request: EnrollmentRequest): EnrollmentResponse | null {
-    const invitationDigest = safeDigest(this.#digester, request.invitation, "invitation");
+  exchangeInvitation(request: EnrollmentRequest, allowLegacy = true): EnrollmentResponse | null {
+    let invitation = request.invitation;
+    let artifact: InvitationArtifact | undefined;
+    try {
+      artifact = decodeInvitationArtifact(request.invitation);
+    } catch {
+      if (!allowLegacy) return null;
+    }
+    if (artifact !== undefined) {
+      if (createInvitationArtifactIntegrity(artifact) !== artifact.integrity) return null;
+      invitation = artifact.secret;
+    }
+    const invitationDigest = safeDigest(this.#digester, invitation, "invitation");
     const stored = this.#store.findInvitation(invitationDigest.lookup);
     const verified = this.#digester.verify(
-      request.invitation,
+      invitation,
       "invitation",
       stored?.verifier,
     );

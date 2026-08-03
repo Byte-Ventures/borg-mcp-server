@@ -124,7 +124,7 @@ describe("SQLite migrations", () => {
     expect(first.diagnostics()).toEqual({
       journalMode: "wal",
       foreignKeys: true,
-      schemaVersions: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19],
+      schemaVersions: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20],
     });
     expect((await stat(join(directory, "data"))).mode & 0o777).toBe(0o700);
     expect((await stat(databasePath)).mode & 0o777).toBe(0o600);
@@ -134,7 +134,7 @@ describe("SQLite migrations", () => {
 
     const second = await openStore({ path: databasePath });
     expect(second.diagnostics().schemaVersions)
-      .toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]);
+      .toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]);
     second.close();
     await expect(access(databasePath)).resolves.toBeUndefined();
   });
@@ -579,13 +579,100 @@ describe("SQLite migrations", () => {
       "00000000-0000-4000-8000-000000000057",
       cubeId,
       createdAt,
-    )).toThrow();
+    )).not.toThrow();
     expect(() => insertAssociation.run(
       otherClientId,
       "00000000-0000-4000-8000-000000000057",
       otherCubeId,
       createdAt,
+    )).toThrow();
+    expect(database.prepare(`
+      SELECT COUNT(*) AS count FROM repository_associations WHERE cube_id = ?
+    `).get(cubeId)).toEqual({ count: 2 });
+    database.close();
+  });
+
+  it("preserves every association while widening cube cardinality", () => {
+    const database = new DatabaseSync(":memory:");
+    database.exec("PRAGMA foreign_keys = ON");
+    applyMigrations(database, STORE_MIGRATIONS.slice(0, 19));
+    const clientId = "00000000-0000-4000-8000-000000000071";
+    const otherClientId = "00000000-0000-4000-8000-000000000072";
+    const cubeId = "00000000-0000-4000-8000-000000000073";
+    const otherCubeId = "00000000-0000-4000-8000-000000000074";
+    const createdAt = "2026-07-30T01:00:00.000Z";
+    const insertClient = database.prepare(
+      "INSERT INTO clients (id, name, created_at) VALUES (?, ?, ?)",
+    );
+    insertClient.run(clientId, "client", createdAt);
+    insertClient.run(otherClientId, "other", createdAt);
+    database.prepare(`
+      INSERT INTO cubes (id, name, directive, created_at, updated_at, owner_id)
+      VALUES (?, 'shared cube', '', ?, ?, ?)
+    `).run(cubeId, createdAt, createdAt, clientId);
+    database.prepare(`
+      INSERT INTO cubes (id, name, directive, created_at, updated_at, owner_id)
+      VALUES (?, 'other cube', '', ?, ?, ?)
+    `).run(otherCubeId, createdAt, createdAt, otherClientId);
+    const insertAssociation = database.prepare(`
+      INSERT INTO repository_associations (
+        client_id, repository_kind, repository_value, cube_id, working_repo_name, created_at
+      ) VALUES (?, 'origin', ?, ?, ?, ?)
+    `);
+    const repositoryValue = "https://github.com/example/shared.git";
+    insertAssociation.run(clientId, repositoryValue, cubeId, "first", createdAt);
+    const secondRepositoryValue = "https://github.com/example/second.git";
+    insertAssociation.run(otherClientId, secondRepositoryValue, otherCubeId, "second", createdAt);
+
+    const selectiveCopy = STORE_MIGRATIONS[19]!.sql.replace(
+      "FROM legacy_repository_associations;",
+      "FROM legacy_repository_associations LIMIT 1;",
+    );
+    expect(selectiveCopy).not.toBe(STORE_MIGRATIONS[19]!.sql);
+    database.exec("BEGIN IMMEDIATE");
+    expect(() => database.exec(selectiveCopy)).toThrow();
+    database.exec("ROLLBACK");
+    expect(database.prepare(
+      "SELECT COUNT(*) AS count FROM repository_associations",
+    ).get()).toEqual({ count: 2 });
+
+    applyMigrations(database, STORE_MIGRATIONS);
+
+    expect(database.prepare(`
+      SELECT client_id, repository_kind, repository_value, cube_id, working_repo_name
+      FROM repository_associations
+    `).all()).toEqual([{
+      client_id: clientId,
+      repository_kind: "origin",
+      repository_value: repositoryValue,
+      cube_id: cubeId,
+      working_repo_name: "first",
+    }, {
+      client_id: otherClientId,
+      repository_kind: "origin",
+      repository_value: secondRepositoryValue,
+      cube_id: otherCubeId,
+      working_repo_name: "second",
+    }]);
+    const table = database.prepare(
+      "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'repository_associations'",
+    ).get();
+    expect(table?.["sql"]).not.toContain("cube_id TEXT NOT NULL UNIQUE");
+    expect(database.prepare("PRAGMA index_list('repository_associations')").all())
+      .toEqual(expect.arrayContaining([
+        expect.objectContaining({ name: "repository_associations_cube_idx", unique: 0 }),
+      ]));
+    expect(database.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+    expect(() => insertAssociation.run(
+      otherClientId,
+      "https://github.com/example/third.git",
+      cubeId,
+      "third",
+      createdAt,
     )).not.toThrow();
+    expect(database.prepare(`
+      SELECT COUNT(*) AS count FROM repository_associations WHERE cube_id = ?
+    `).get(cubeId)).toEqual({ count: 2 });
     database.close();
   });
 

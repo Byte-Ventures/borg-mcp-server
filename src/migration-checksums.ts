@@ -24,4 +24,5 @@ export const MIGRATION_CHECKSUM_MANIFEST = Object.freeze([
   { version: 17, name: "invitation_client_names", checksum: "dd997a65f9d2c740974153c0458703bd8f5e41843927e9444ff71fe9910da4f7" },
   { version: 18, name: "shared_cube_templates", checksum: "8ee4ca35cc62fb00426a3d05ae490435d4f22a5965ef461c37fd0c8a8a8cab23" },
   { version: 19, name: "deleted_cube_tombstones", checksum: "8f13c05d7083b33cfef77d82b347a1eec48b022fe3ab4218c05a88280ea147c0" },
+  { version: 20, name: "widen_repository_cube_associations", checksum: "104920d1cf26b3d721c4b16ecfa8028cbdd6628f9f9a375aa2d3f1e2eeb1b8ff" },
 ] satisfies readonly MigrationChecksumEntry[]);

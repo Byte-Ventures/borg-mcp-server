@@ -1156,6 +1156,7 @@ class SqliteScopedStore implements ScopedStore {
         WHERE c.id = ? AND ${manageScope.sql}
       `).get(input.cubeId, ...manageScope.parameters);
       if (target === undefined) throw new AccessDeniedError();
+      this.#mutationHook?.("repository-association.target-authorized");
 
       const repositoryBinding = this.#database.prepare(`
         SELECT association.cube_id,
@@ -1185,26 +1186,12 @@ class SqliteScopedStore implements ScopedStore {
         throw new RepositoryAssociationConflictError("repository_conflict");
       }
 
-      const cubeBinding = this.#database.prepare(`
-        SELECT client_id, repository_kind, repository_value
-        FROM repository_associations
-        WHERE cube_id = ?
-      `).get(input.cubeId);
-      if (cubeBinding !== undefined) {
-        if (requiredText(cubeBinding, "client_id") !== this.#principal.id) {
-          throw new AccessDeniedError();
-        }
-        if (
-          requiredRepositoryKind(cubeBinding, "repository_kind") !== validated.repository.kind
-          || requiredText(cubeBinding, "repository_value") !== validated.repository.value
-        ) {
-          throw new RepositoryAssociationConflictError("cube_conflict");
-        }
-      }
-
       repositoryCubeRoleIds(this.#database, input.cubeId);
 
-      if (cubeBinding !== undefined) {
+      if (repositoryBinding !== undefined) {
+        if (requiredText(repositoryBinding, "cube_id") !== input.cubeId) {
+          throw new RepositoryAssociationConflictError("repository_conflict");
+        }
         const existing = this.#resolveRepositoryCube(validated.repository);
         if (existing === null) throw new AccessDeniedError();
         this.#database.exec("COMMIT");
@@ -2266,6 +2253,9 @@ class SqliteScopedStore implements ScopedStore {
              cube.selected_template AS template
       FROM repository_associations AS association
       JOIN cubes AS cube ON cube.id = association.cube_id
+      JOIN clients AS association_client
+        ON association_client.id = association.client_id
+       AND association_client.revoked_at IS NULL
       JOIN client_cube_grants AS grant_row
         ON grant_row.client_id = association.client_id
        AND grant_row.cube_id = association.cube_id
@@ -2648,7 +2638,13 @@ class SqliteMaintenanceStore implements MaintenanceStore {
       FROM cubes AS cube
       JOIN repository_associations AS association ON association.cube_id = cube.id
       WHERE cube.id = ? AND association.client_id = ?
-    `).get(record.cubeId, clientId);
+        AND association.repository_kind = ? AND association.repository_value = ?
+    `).get(
+      record.cubeId,
+      clientId,
+      record.repository.kind,
+      record.repository.value,
+    );
     const grant = this.#database.prepare(`
       SELECT access FROM client_cube_grants WHERE client_id = ? AND cube_id = ?
     `).get(clientId, record.cubeId);

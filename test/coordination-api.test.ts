@@ -1470,6 +1470,46 @@ describe("coordination stream setup", () => {
   });
 });
 
+describe("decision removal API", () => {
+  it("removes by topic or id and returns the retained audit record", async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-api-remove-decision-")));
+    directories.push(directory);
+    runtime = await openStore({ path: join(directory, "borg.db") });
+    digester = new CredentialDigester(Buffer.alloc(32, 27));
+    const authority = new CredentialAuthority(runtime.credentials, digester);
+    const cubeId = "00000000-0000-4000-8000-0000000000f6";
+    const clientId = "00000000-0000-4000-8000-0000000000f7";
+    runtime.maintenance.createClient({ id: clientId, name: "Decision manager" });
+    runtime.maintenance.createCube({ id: cubeId, name: "Decision removal", directive: "" });
+    runtime.maintenance.grantClientCube({ clientId, cubeId, access: "manage" });
+    const principal = clientPrincipal(clientId);
+    const store = runtime.forPrincipal(principal);
+    const api = new CoordinationApi(runtime, authority);
+    const byTopic = store.recordDecision(cubeId, { topic: "topic-api-removal", decision: "remove by topic" });
+    const byId = store.recordDecision(cubeId, { topic: "id-api-removal", decision: "remove by id" });
+    const request = (payload: Record<string, string>) => api.handle({
+      method: "DELETE",
+      path: `/api/cubes/${cubeId}/decisions`,
+      principal,
+      body: { protocol_version: "7", request_id: "remove-decision", payload },
+      signal: new AbortController().signal,
+    });
+
+    await expect(request({ topic: byTopic.topic })).resolves.toMatchObject({
+      status: 200,
+      body: { payload: { decision: { id: byTopic.id, status: "removed" } } },
+    });
+    await expect(request({ id: byId.id })).resolves.toMatchObject({
+      status: 200,
+      body: { payload: { decision: { id: byId.id, status: "removed" } } },
+    });
+    await expect(request({ id: byId.id })).resolves.toMatchObject({
+      status: 404,
+      body: { error: { code: "NOT_FOUND" } },
+    });
+  });
+});
+
 describe("cross-cube drone management", () => {
   it("lets a non-member parent client with a manage grant evict a target cube drone", async () => {
     const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-api-cross-cube-evict-")));

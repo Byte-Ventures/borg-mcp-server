@@ -337,6 +337,10 @@ export interface ScopedStore {
     readonly decision: string;
     readonly rationale?: string;
   }) => DecisionRecord;
+  readonly removeDecision: (cubeId: string, selector: {
+    readonly id?: string;
+    readonly topic?: string;
+  }) => DecisionRecord;
   readonly listDecisions: (cubeId: string) => DecisionRecord[];
   readonly subscribeActivity: (
     cubeId: string,
@@ -1943,6 +1947,48 @@ class SqliteScopedStore implements ScopedStore {
       throw error;
     }
     return this.#decision(id);
+  }
+
+  removeDecision(cubeId: string, selector: {
+    readonly id?: string;
+    readonly topic?: string;
+  }): DecisionRecord {
+    this.#requireCube(cubeId, "manage");
+    const hasId = selector.id !== undefined;
+    const hasTopic = selector.topic !== undefined;
+    if (hasId === hasTopic) throw new TypeError("Exactly one decision selector is required.");
+    if (hasId) assertCanonicalUuid(selector.id!, "Decision id");
+    else validateBoundedText(selector.topic!, "Decision topic", 120);
+
+    this.#database.exec("BEGIN IMMEDIATE");
+    try {
+      const result = hasId
+        ? this.#database.prepare(`
+            UPDATE decisions SET status = 'removed'
+            WHERE cube_id = ? AND id = ? AND status = 'active'
+          `).run(cubeId, selector.id!)
+        : this.#database.prepare(`
+            UPDATE decisions SET status = 'removed'
+            WHERE cube_id = ? AND topic = ? AND status = 'active'
+          `).run(cubeId, selector.topic!);
+      if (result.changes !== 1) throw new ScopedStoreError();
+      const row = hasId
+        ? this.#database.prepare(`
+            SELECT id, cube_id, topic, decision, rationale, ratified_by, status, supersedes, created_at
+            FROM decisions WHERE cube_id = ? AND id = ?
+          `).get(cubeId, selector.id!)
+        : this.#database.prepare(`
+            SELECT id, cube_id, topic, decision, rationale, ratified_by, status, supersedes, created_at
+            FROM decisions WHERE cube_id = ? AND topic = ? AND status = 'removed'
+            ORDER BY created_at DESC, id DESC LIMIT 1
+          `).get(cubeId, selector.topic!);
+      if (row === undefined) throw new ScopedStoreError();
+      this.#database.exec("COMMIT");
+      return decisionRecord(row);
+    } catch (error) {
+      try { this.#database.exec("ROLLBACK"); } catch { /* Preserve the original failure. */ }
+      throw error;
+    }
   }
 
   listDecisions(cubeId: string): DecisionRecord[] {

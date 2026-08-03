@@ -533,17 +533,17 @@ export class CoordinationApi {
       }
       if (resource === "decisions" && request.method === "DELETE") {
         const envelope = decodeEnvelope(request.body);
-        exactKeys(envelope.payload, [], ["id", "topic"]);
-        const id = envelope.payload["id"] === undefined
+        exactKeys(envelope.payload, [], ["decision_id", "topic"]);
+        const decisionId = envelope.payload["decision_id"] === undefined
           ? undefined
-          : requiredUuid(envelope.payload, "id");
+          : requiredUuid(envelope.payload, "decision_id");
         const topic = envelope.payload["topic"] === undefined
           ? undefined
           : requiredString(envelope.payload, "topic", 120);
-        if ((id === undefined) === (topic === undefined)) throw new InputError();
-        const decision = id === undefined
+        if ((decisionId === undefined) === (topic === undefined)) throw new InputError();
+        const decision = decisionId === undefined
           ? store.removeDecision(cubeId, { topic: topic! })
-          : store.removeDecision(cubeId, { id });
+          : store.removeDecision(cubeId, { decisionId });
         return success(200, envelope.requestId, { decision });
       }
       if (resource === "decisions" && request.method === "POST") {

@@ -1499,11 +1499,11 @@ describe("decision removal API", () => {
       status: 200,
       body: { payload: { decision: { id: byTopic.id, status: "removed" } } },
     });
-    await expect(request({ id: byId.id })).resolves.toMatchObject({
+    await expect(request({ decision_id: byId.id })).resolves.toMatchObject({
       status: 200,
       body: { payload: { decision: { id: byId.id, status: "removed" } } },
     });
-    await expect(request({ id: byId.id })).resolves.toMatchObject({
+    await expect(request({ decision_id: byId.id })).resolves.toMatchObject({
       status: 404,
       body: { error: { code: "NOT_FOUND" } },
     });

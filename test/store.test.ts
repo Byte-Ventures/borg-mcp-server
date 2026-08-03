@@ -1125,8 +1125,8 @@ describe("Principal to ScopedStore isolation", () => {
     expect(client.listDecisions(ids.cubeA)).toEqual([]);
 
     const byId = client.recordDecision(ids.cubeA, { topic: "id-removal", decision: "remove me too" });
-    const removedById = client.removeDecision(ids.cubeA, { id: byId.id });
+    const removedById = client.removeDecision(ids.cubeA, { decisionId: byId.id });
     expect(removedById).toMatchObject({ id: byId.id, status: "removed" });
-    expect(() => client.removeDecision(ids.cubeA, { id: byId.id })).toThrow(ScopedStoreError);
+    expect(() => client.removeDecision(ids.cubeA, { decisionId: byId.id })).toThrow(ScopedStoreError);
   });
 });

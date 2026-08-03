@@ -338,7 +338,7 @@ export interface ScopedStore {
     readonly rationale?: string;
   }) => DecisionRecord;
   readonly removeDecision: (cubeId: string, selector: {
-    readonly id?: string;
+    readonly decisionId?: string;
     readonly topic?: string;
   }) => DecisionRecord;
   readonly listDecisions: (cubeId: string) => DecisionRecord[];
@@ -1950,14 +1950,14 @@ class SqliteScopedStore implements ScopedStore {
   }
 
   removeDecision(cubeId: string, selector: {
-    readonly id?: string;
+    readonly decisionId?: string;
     readonly topic?: string;
   }): DecisionRecord {
     this.#requireCube(cubeId, "manage");
-    const hasId = selector.id !== undefined;
+    const hasId = selector.decisionId !== undefined;
     const hasTopic = selector.topic !== undefined;
     if (hasId === hasTopic) throw new TypeError("Exactly one decision selector is required.");
-    if (hasId) assertCanonicalUuid(selector.id!, "Decision id");
+    if (hasId) assertCanonicalUuid(selector.decisionId!, "Decision id");
     else validateBoundedText(selector.topic!, "Decision topic", 120);
 
     this.#database.exec("BEGIN IMMEDIATE");
@@ -1966,7 +1966,7 @@ class SqliteScopedStore implements ScopedStore {
         ? this.#database.prepare(`
             UPDATE decisions SET status = 'removed'
             WHERE cube_id = ? AND id = ? AND status = 'active'
-          `).run(cubeId, selector.id!)
+          `).run(cubeId, selector.decisionId!)
         : this.#database.prepare(`
             UPDATE decisions SET status = 'removed'
             WHERE cube_id = ? AND topic = ? AND status = 'active'
@@ -1976,7 +1976,7 @@ class SqliteScopedStore implements ScopedStore {
         ? this.#database.prepare(`
             SELECT id, cube_id, topic, decision, rationale, ratified_by, status, supersedes, created_at
             FROM decisions WHERE cube_id = ? AND id = ?
-          `).get(cubeId, selector.id!)
+          `).get(cubeId, selector.decisionId!)
         : this.#database.prepare(`
             SELECT id, cube_id, topic, decision, rationale, ratified_by, status, supersedes, created_at
             FROM decisions WHERE cube_id = ? AND topic = ? AND status = 'removed'

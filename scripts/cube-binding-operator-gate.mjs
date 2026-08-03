@@ -1,6 +1,6 @@
 import { createHash, randomUUID, X509Certificate } from "node:crypto";
 import { execFileSync, spawn } from "node:child_process";
-import { access, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { DatabaseSync } from "node:sqlite";
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
@@ -13,11 +13,26 @@ const serverRoot = resolve(process.env.BORG_242_SERVER_ROOT ?? repositoryRoot);
 const clientSpec = process.env.BORG_CLIENT_SPEC ?? "borgmcp@2.10.2";
 const pythonExecutable = process.env.PYTHON ?? "python3";
 const expectGuardPresent = process.argv.includes("--expect-guard-present");
+const identityFailurePrefix = "--expect-identity-state-failure=";
+const identityFailureArgument = process.argv.slice(2).find(
+  (argument) => argument.startsWith(identityFailurePrefix),
+);
+const identityStateFailureMode = identityFailureArgument?.slice(identityFailurePrefix.length) ?? null;
+const validIdentityFailureModes = new Set(["malformed", "unreadable", "wrong-shape"]);
 const unexpectedArguments = process.argv.slice(2).filter(
-  (argument) => argument !== "--expect-guard-present",
+  (argument) => argument !== "--expect-guard-present" && argument !== identityFailureArgument,
 );
 if (unexpectedArguments.length > 0) {
-  throw new Error("Usage: node scripts/cube-binding-operator-gate.mjs [--expect-guard-present]");
+  throw new Error(
+    "Usage: node scripts/cube-binding-operator-gate.mjs " +
+    "[--expect-guard-present | --expect-identity-state-failure=<malformed|unreadable|wrong-shape>]",
+  );
+}
+if (identityStateFailureMode !== null && !validIdentityFailureModes.has(identityStateFailureMode)) {
+  throw new Error("Identity-state failure mode must be malformed, unreadable, or wrong-shape");
+}
+if (expectGuardPresent && identityStateFailureMode !== null) {
+  throw new Error("Guard-present and identity-state failure modes are mutually exclusive");
 }
 
 const ptyRunner = join(scriptDirectory, "cube-binding-operator-pty-runner.py");
@@ -158,6 +173,53 @@ async function runRealClientLog(clientPackageRoot, cwd, home) {
   });
 }
 
+async function readSavedAssociationCount(identityStatePath) {
+  try {
+    const state = JSON.parse(await readFile(identityStatePath, "utf8"));
+    if (
+      state === null || typeof state !== "object" || Array.isArray(state) ||
+      state.version !== 1 ||
+      state.localIdentities === null || typeof state.localIdentities !== "object" ||
+      Array.isArray(state.localIdentities) ||
+      state.associations === null || typeof state.associations !== "object" ||
+      Array.isArray(state.associations)
+    ) {
+      throw new Error("repository identity state has an unexpected shape");
+    }
+    return Object.keys(state.associations).length;
+  } catch (error) {
+    if (error?.code === "ENOENT") return 0;
+    if (error instanceof Error && error.message === "repository identity state has an unexpected shape") {
+      throw error;
+    }
+    throw new Error("repository identity state could not be read or decoded", { cause: error });
+  }
+}
+
+async function writeIdentityStateFailureFixture(identityStatePath, mode) {
+  await mkdir(dirname(identityStatePath), { recursive: true });
+  if (mode === "malformed") {
+    await writeFile(identityStatePath, "{\n");
+    return;
+  }
+  if (mode === "wrong-shape") {
+    await writeFile(identityStatePath, `${JSON.stringify({
+      version: 1,
+      localIdentities: [],
+      associations: {},
+    })}\n`);
+    return;
+  }
+  await writeFile(identityStatePath, `${JSON.stringify({
+    version: 1,
+    localIdentities: {},
+    associations: {},
+  })}\n`);
+  await chmod(identityStatePath, 0o000);
+}
+
+class ExpectedHarnessOutcome extends Error {}
+
 let root;
 let clientInstallation;
 let runtime;
@@ -250,29 +312,29 @@ try {
     throw new Error("first real client enrollment did not reach the ordinary-client result");
   }
   const identityStatePath = join(home, ".config", "borgmcp", "repository-identities.json");
-  let savedAssociationsBeforeSecond = 0;
-  try {
-    const state = JSON.parse(await readFile(identityStatePath, "utf8"));
-    if (
-      state === null || typeof state !== "object" || Array.isArray(state) ||
-      state.version !== 1 ||
-      state.localIdentities === null || typeof state.localIdentities !== "object" ||
-      Array.isArray(state.localIdentities) ||
-      state.associations === null || typeof state.associations !== "object" ||
-      Array.isArray(state.associations)
-    ) {
-      throw new Error("repository identity state has an unexpected shape");
+  if (identityStateFailureMode !== null) {
+    await writeIdentityStateFailureFixture(identityStatePath, identityStateFailureMode);
+    let observedFailure;
+    try {
+      await readSavedAssociationCount(identityStatePath);
+    } catch (error) {
+      observedFailure = error;
     }
-    savedAssociationsBeforeSecond = Object.keys(state.associations ?? {}).length;
-  } catch (error) {
-    if (error?.code === "ENOENT") {
-      savedAssociationsBeforeSecond = 0;
-    } else if (error instanceof Error && error.message === "repository identity state has an unexpected shape") {
-      throw error;
-    } else {
-      throw new Error("repository identity state could not be read or decoded", { cause: error });
+    if (!(observedFailure instanceof Error) || !observedFailure.message.startsWith("repository identity state")) {
+      throw new Error("identity-state failure control did not observe a loud failure");
     }
+    if (first.output.includes(invitation)) {
+      throw new Error("invitation appeared in the full captured enrollment stream");
+    }
+    console.log(JSON.stringify({
+      mode: `identity-state-${identityStateFailureMode}-control`,
+      first_enrollment_reached: true,
+      expected_failure_observed: true,
+      invitation_absent_from_full_capture: true,
+    }));
+    throw new ExpectedHarnessOutcome();
   }
+  const savedAssociationsBeforeSecond = await readSavedAssociationCount(identityStatePath);
   if (savedAssociationsBeforeSecond !== 0) {
     throw new Error("saved repository association existed before the second invocation");
   }
@@ -354,6 +416,8 @@ try {
       invitation_absent_from_full_captures: true,
     }));
   }
+} catch (error) {
+  if (!(error instanceof ExpectedHarnessOutcome)) throw error;
 } finally {
   if (database !== undefined) database.close();
   if (server !== undefined) await server.close();

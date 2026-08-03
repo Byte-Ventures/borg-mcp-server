@@ -23,6 +23,16 @@ It fails unless the real path reaches the link prompt, creates the second associ
 
 Set `BORG_CLIENT_SPEC` to exercise another explicitly published client version. Set `BORG_242_SERVER_ROOT` to run the client path against a different clean server build.
 
+The identity-state precondition has explicit mutation controls. Each command exits successfully only after the gate observes the named failure; if the failure path is removed or fails open, the command exits nonzero:
+
+```sh
+node scripts/cube-binding-operator-gate.mjs --expect-identity-state-failure=malformed
+node scripts/cube-binding-operator-gate.mjs --expect-identity-state-failure=unreadable
+node scripts/cube-binding-operator-gate.mjs --expect-identity-state-failure=wrong-shape
+```
+
+These controls use the same fresh enrollment fixture and temporary `HOME`. The unreadable fixture is POSIX permission-based and is suitable for the documented macOS/Linux gate environment.
+
 ## Guard-present control
 
 The guard-present control is the same harness against a clean build of the pre-change base, with an explicit expected-refusal mode:

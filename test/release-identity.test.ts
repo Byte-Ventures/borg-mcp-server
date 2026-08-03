@@ -7,8 +7,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   classifyReleasePullRequest,
   prepareRelease,
+  verifyReleaseProvenance,
   verifyReleaseIdentity,
   type ReleaseAuthorities,
+  type ReleaseRecord,
 } from "../scripts/release-identity.mjs";
 
 // Synthetic versions exercise the verifier without coupling fixtures to the live package identity.
@@ -16,6 +18,9 @@ const oldVersion = "1.2.3";
 const newVersion = "1.3.0";
 const integrity = `sha512-${"A".repeat(86)}==`;
 const fixturePinPath = "test/version-pin.test.ts";
+const failedRunId = 456;
+const failedVerifyJobId = 789;
+const failedPublishJobId = 790;
 const directories: string[] = [];
 
 // Git-backed fixture tests are correctness checks, not performance gates on busy dev machines.
@@ -137,6 +142,126 @@ describe("release identity automation", () => {
     });
   });
 
+  it("prepares failed-superseded recovery from the exact failed workflow and earlier anchor", async () => {
+    const fixture = await createFailedFixture();
+    const prepared = await prepareRelease(
+      fixture.root,
+      newVersion,
+      fixture.evidence,
+      fixture.authorities,
+    );
+
+    expect(prepared.record).toMatchObject({
+      outcome: "failed-superseded",
+      version: oldVersion,
+      workflow_conclusion: "failure",
+      verify_job_id: failedVerifyJobId,
+      publish_job_id: failedPublishJobId,
+      artifact_integrity: null,
+    });
+    expect(prepared.provenanceAnchor).toMatchObject({
+      outcome: "published",
+      version: fixture.anchorRecord.version,
+    });
+    expect(new Set(fixture.artifactRequests)).toEqual(new Set([fixture.anchorRecord.version]));
+
+    const candidate = commitAll(fixture.root, "prepare recovery release");
+    expect(verifyReleaseIdentity(
+      fixture.root,
+      fixture.base,
+      candidate,
+      fixture.authorities,
+    )).toMatchObject({ oldVersion, newVersion, candidate });
+    expect(new Set(fixture.artifactRequests)).toEqual(new Set([fixture.anchorRecord.version]));
+  });
+
+  it("rejects an otherwise-valid failed-superseded rerun attempt", async () => {
+    const fixture = await createFailedFixture();
+    const attemptTwoAuthorities: ReleaseAuthorities = {
+      ...fixture.authorities,
+      githubRun: (root, runId, attempt) => ({
+        ...fixture.authorities.githubRun(root, runId, attempt),
+        run_attempt: 2,
+      }),
+      githubRunJobs: (root, runId, attempt) => {
+        const response = fixture.authorities.githubRunJobs(root, runId, attempt) as {
+          jobs: Array<Record<string, unknown>>;
+        };
+        return {
+          ...response,
+          jobs: response.jobs.map((job) => ({ ...job, run_attempt: 2 })),
+        };
+      },
+    };
+
+    const attemptTwoRecord: ReleaseRecord = {
+      outcome: "failed-superseded",
+      version: oldVersion,
+      tag: `v${oldVersion}`,
+      tag_object: git(fixture.root, ["rev-parse", `v${oldVersion}^{tag}`]),
+      commit: fixture.base,
+      tree: git(fixture.root, ["rev-parse", `${fixture.base}^{tree}`]),
+      workflow_run_id: failedRunId,
+      workflow_run_attempt: 2,
+      workflow_conclusion: "failure",
+      verify_job_id: failedVerifyJobId,
+      publish_job_id: failedPublishJobId,
+      artifact_integrity: null,
+    };
+    expect(() => verifyReleaseProvenance(
+      fixture.root,
+      attemptTwoRecord,
+      attemptTwoAuthorities,
+    )).toThrow(/exactly workflow attempt 1/);
+
+    await expect(prepareRelease(fixture.root, newVersion, {
+      ...fixture.evidence,
+      workflowRunAttempt: 2,
+    }, attemptTwoAuthorities)).rejects.toThrow(/exactly workflow attempt 1/);
+  });
+
+  it("rejects failed recovery when artifact or publication phases were reached", async () => {
+    const jobs = failedRunJobs("base") as {
+      jobs: Array<{
+        name: string;
+        conclusion: string;
+        steps: Array<{ name: string; number: number; status: string; conclusion: string }>;
+      }>;
+    };
+    jobs.jobs[0]!.steps.find((step) => step.name === "Upload same-run release artifact")!.conclusion = "success";
+    const fixture = await createFailedFixture();
+    await expect(prepareRelease(fixture.root, newVersion, fixture.evidence, {
+      ...fixture.authorities,
+      githubRunJobs: () => jobs,
+    })).rejects.toThrow(/pre-publication job evidence|step was not skipped/);
+
+    const publishedJobs = failedRunJobs(fixture.base) as typeof jobs;
+    publishedJobs.jobs[1]!.conclusion = "success";
+    publishedJobs.jobs[1]!.steps = [{
+      name: "Publish package",
+      number: 1,
+      status: "completed",
+      conclusion: "success",
+    }];
+    await expect(prepareRelease(fixture.root, newVersion, fixture.evidence, {
+      ...fixture.authorities,
+      githubRunJobs: () => publishedJobs,
+    })).rejects.toThrow(/pre-publication job evidence/);
+  });
+
+  it("rejects a failed record with an SRI or a registry-present version", async () => {
+    const fixture = await createFailedFixture();
+    await expect(prepareRelease(fixture.root, newVersion, {
+      ...fixture.evidence,
+      artifactIntegrity: integrity,
+    }, fixture.authorities)).rejects.toThrow(/invalid or non-canonical shape/);
+
+    await expect(prepareRelease(fixture.root, newVersion, fixture.evidence, {
+      ...fixture.authorities,
+      publishedVersions: () => [fixture.anchorRecord.version, oldVersion],
+    })).rejects.toThrow(/version exists in the npm registry/);
+  });
+
   it("runs trusted-base bytes green on the transform and red on a self-bypassing candidate", async () => {
     const fixture = await preparedFixture();
     git(fixture.root, ["checkout", "--detach", "-q", fixture.base]);
@@ -248,6 +373,7 @@ describe("release identity automation", () => {
 });
 
 interface ReleaseRecordFixture {
+  outcome?: "published" | "failed-superseded";
   version: string;
   tag: string;
   tag_object: string;
@@ -255,7 +381,10 @@ interface ReleaseRecordFixture {
   tree: string;
   workflow_run_id: number;
   workflow_run_attempt: number;
-  artifact_integrity: string;
+  workflow_conclusion?: "success" | "failure";
+  verify_job_id?: number | null;
+  publish_job_id?: number | null;
+  artifact_integrity: string | null;
 }
 
 interface Fixture {
@@ -263,6 +392,19 @@ interface Fixture {
   readonly base: string;
   readonly candidate: string;
   readonly authorities: ReleaseAuthorities;
+}
+
+interface FailedFixture {
+  readonly root: string;
+  readonly base: string;
+  readonly evidence: {
+    readonly workflowRunId: number;
+    readonly workflowRunAttempt: number;
+    readonly workflowConclusion: "failure";
+  };
+  readonly authorities: ReleaseAuthorities;
+  readonly anchorRecord: ReleaseRecordFixture;
+  readonly artifactRequests: string[];
 }
 
 async function preparedFixture(): Promise<Fixture> {
@@ -347,8 +489,145 @@ async function createFixture(): Promise<Omit<Fixture, "candidate">> {
       path: ".github/workflows/release.yml",
     }),
     artifactIntegrity: () => integrity,
+    githubRunJobs: () => ({ jobs: [] }),
+    publishedVersions: () => [],
   };
   return { root, base, authorities };
+}
+
+async function createFailedFixture(): Promise<FailedFixture> {
+  const root = await mkdtemp(join(tmpdir(), "borg-release-identity-failed-"));
+  directories.push(root);
+  const anchorVersion = "1.0.0";
+  await writeFixture(root, "scripts/release-identity-allowlist.json", `${JSON.stringify({
+    versionPins: [fixturePinPath],
+  }, null, 2)}\n`);
+  await writeFixture(root, "docs/release-records.json", "[]\n");
+  await writeFixture(root, "README.md", "# Server fixture\n");
+  await writeFixture(root, "package.json", `${JSON.stringify({
+    name: "borgmcp-server",
+    version: anchorVersion,
+    private: false,
+    scripts: { "verify:release-identity": "node scripts/release-identity.mjs verify" },
+  }, null, 2)}\n`);
+  await writeFixture(root, "npm-shrinkwrap.json", `${JSON.stringify({
+    name: "borgmcp-server",
+    version: anchorVersion,
+    lockfileVersion: 3,
+    packages: { "": { name: "borgmcp-server", version: anchorVersion } },
+  }, null, 2)}\n`);
+  await writeFixture(root, "src/runtime-identity.ts", `export const SERVER_PACKAGE_VERSION = "${anchorVersion}";\n`);
+  await writeFixture(root, fixturePinPath, `expect(packageVersion).toBe("${anchorVersion}");\n`);
+  await writeFixture(root, ".github/workflows/release-identity.yml", "name: trusted fixture classifier\n");
+  await writeFixture(root, "scripts/release-identity.mjs", "// trusted fixture verifier\n");
+  git(root, ["init", "-q"]);
+  git(root, ["config", "user.name", "Release Test"]);
+  git(root, ["config", "user.email", "release-test@example.invalid"]);
+  const anchorCommit = commitAll(root, "published anchor");
+  git(root, ["tag", "-a", `v${anchorVersion}`, "-m", `release ${anchorVersion}`]);
+  const anchorRecord: ReleaseRecordFixture = {
+    version: anchorVersion,
+    tag: `v${anchorVersion}`,
+    tag_object: git(root, ["rev-parse", `v${anchorVersion}^{tag}`]),
+    commit: anchorCommit,
+    tree: git(root, ["rev-parse", `${anchorCommit}^{tree}`]),
+    workflow_run_id: 122,
+    workflow_run_attempt: 1,
+    artifact_integrity: integrity,
+  };
+  await writeFixture(root, "docs/release-records.json", `${JSON.stringify([anchorRecord], null, 2)}\n`);
+  await writeFixture(root, "package.json", `${JSON.stringify({
+    name: "borgmcp-server",
+    version: oldVersion,
+    private: false,
+    scripts: { "verify:release-identity": "node scripts/release-identity.mjs verify" },
+  }, null, 2)}\n`);
+  await writeFixture(root, "npm-shrinkwrap.json", `${JSON.stringify({
+    name: "borgmcp-server",
+    version: oldVersion,
+    lockfileVersion: 3,
+    packages: { "": { name: "borgmcp-server", version: oldVersion } },
+  }, null, 2)}\n`);
+  await writeFixture(root, "src/runtime-identity.ts", `export const SERVER_PACKAGE_VERSION = "${oldVersion}";\n`);
+  await writeFixture(root, fixturePinPath, `expect(packageVersion).toBe("${oldVersion}");\n`);
+  const base = commitAll(root, "failed release base");
+  git(root, ["tag", "-a", `v${oldVersion}`, "-m", `release ${oldVersion}`]);
+  const artifactRequests: string[] = [];
+  const authorities: ReleaseAuthorities = {
+    githubRun: (_root, runId) => runId === anchorRecord.workflow_run_id
+      ? {
+          id: anchorRecord.workflow_run_id,
+          run_attempt: 1,
+          head_sha: anchorRecord.commit,
+          head_branch: anchorRecord.tag,
+          event: "push",
+          status: "completed",
+          conclusion: "success",
+          path: ".github/workflows/release.yml",
+        }
+      : {
+          id: failedRunId,
+          run_attempt: 1,
+          head_sha: base,
+          head_branch: `v${oldVersion}`,
+          event: "push",
+          status: "completed",
+          conclusion: "failure",
+          path: ".github/workflows/release.yml",
+        },
+    githubRunJobs: () => failedRunJobs(base),
+    artifactIntegrity: (_root, version) => {
+      artifactRequests.push(version);
+      return integrity;
+    },
+    publishedVersions: () => [anchorVersion],
+  };
+  return {
+    root,
+    base,
+    evidence: {
+      workflowRunId: failedRunId,
+      workflowRunAttempt: 1,
+      workflowConclusion: "failure",
+    },
+    authorities,
+    anchorRecord,
+    artifactRequests,
+  };
+}
+
+function failedRunJobs(commit: string): Record<string, unknown> {
+  return {
+    total_count: 2,
+    jobs: [
+      {
+        id: failedVerifyJobId,
+        run_id: failedRunId,
+        run_attempt: 1,
+        head_sha: commit,
+        name: "verify",
+        status: "completed",
+        conclusion: "failure",
+        steps: [
+          { name: "Check, test, and build once", number: 9, status: "completed", conclusion: "failure" },
+          { name: "Build exact release tarball once", number: 10, status: "completed", conclusion: "skipped" },
+          { name: "Verify exact release tarball once", number: 11, status: "completed", conclusion: "skipped" },
+          { name: "Exercise exact tarball once", number: 12, status: "completed", conclusion: "skipped" },
+          { name: "Upload same-run release artifact", number: 13, status: "completed", conclusion: "skipped" },
+        ],
+      },
+      {
+        id: failedPublishJobId,
+        run_id: failedRunId,
+        run_attempt: 1,
+        head_sha: commit,
+        name: "publish",
+        status: "completed",
+        conclusion: "skipped",
+        steps: [],
+      },
+    ],
+  };
 }
 
 function classificationInput(fixture: Fixture, candidate: string) {

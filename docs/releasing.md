@@ -157,6 +157,26 @@ run and artifact integrity are explicit operator inputs because they are not pre
 tree. It validates every input against GitHub Actions and the immutable npm package, updates only the
 generated version surfaces, and appends a canonical entry to `docs/release-records.json`.
 
+If the superseded tag attempt failed before artifact creation or publication, prepare the recovery
+identity with `--workflow-conclusion failure` and omit `--artifact-integrity`:
+
+```sh
+npm run release:prepare -- <next-version> \
+  --workflow-run-id <failed-tag-run-id> \
+  --workflow-run-attempt <attempt> \
+  --workflow-conclusion failure
+```
+
+The recovery path independently verifies the failed tag workflow's `verify` and `publish` jobs,
+including the skipped tarball build, tarball verification, tarball exercise, and artifact upload
+steps. It checks the canonical npm version list to prove that the failed version has no published
+artifact or SRI, records the result as `failed-superseded`, and re-verifies the latest earlier
+published record as the provenance anchor. A failed record cannot carry an SRI, cannot describe a
+run that reached artifact or publication phases, and cannot be prepared if the failed version is
+present in the registry. Release identity accepts only workflow attempt 1: a rerun is never
+authoritative, even if its jobs independently show a pre-publication failure. Failed tags, runs,
+versions, and approvals remain immutable and must never be moved, reused, or rerun.
+
 Release branches use the `release/` prefix and enter protected `main` through a pull request. A
 direct push only updates the staging branch; it does not produce a release-identity
 verdict and grants no review skip, merge authority, or release authority.
@@ -169,9 +189,10 @@ dependencies, package scripts, workflow code, actions, or verifier code. The can
 only as Git tree and blob data.
 
 The verifier does not trust the prepare command or its flags. It independently rechecks the
-annotated tag, the exact successful workflow attempt, and the npm integrity; verifies the manifest,
-two shrinkwrap root identity fields, runtime literal, version-pin assertion counts, and byte-stable
-allowlist; reconstructs the expected Git tree in a temporary index; and requires exact tree equality.
+annotated tag, the exact workflow attempt, and either the failed pre-publication job/registry
+evidence or the published npm integrity; verifies the manifest, two shrinkwrap root identity fields,
+runtime literal, version-pin assertion counts, and byte-stable allowlist; reconstructs the expected
+Git tree in a temporary index; and requires exact tree equality.
 Any other edit is a code change and follows the ordinary review chain.
 
 ## Current audit state

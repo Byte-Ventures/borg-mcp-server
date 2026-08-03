@@ -1522,6 +1522,29 @@ describe("node server service", () => {
     }
   });
 
+  it("refuses reinitialization when CA material is incomplete without deleting state", async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-setup-missing-ca-")));
+    try {
+      const first = requireFreshSetup(await setupNodeServerInstallation(
+        directory,
+        "127.0.0.1",
+        { reinitialize: false },
+      ));
+      const before = new Map<string, Buffer>();
+      for (const path of Object.values(first.paths)) before.set(path, await readFile(path));
+      await unlink(first.paths.caCertificate);
+
+      await expect(setupNodeServerInstallation(directory, "127.0.0.1", { reinitialize: true }))
+        .rejects.toThrow("The existing CA certificate and private key are required for reinitialization.");
+      await expect(access(first.paths.caCertificate)).rejects.toMatchObject({ code: "ENOENT" });
+      for (const [path, bytes] of before) {
+        if (path !== first.paths.caCertificate) expect(await readFile(path)).toEqual(bytes);
+      }
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("refuses all setup modes while the runtime lock is live", async () => {
     const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-setup-live-lock-")));
     try {

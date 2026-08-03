@@ -17,8 +17,11 @@ that no Borg process is running.
 Setup verifies and prepares the latest immutable npm artifact, but starts no
 listener or managed service. Running `setup` again is idempotent: it preserves
 the existing data and identity and never repeats credentials. After stopping the
-server, `borg-mcp-server setup --reinitialize` explicitly destroys and recreates
-the server identity and database; use it only when prior state may be discarded.
+server, `borg-mcp-server setup --reinitialize` recreates the database and leaf
+identity while preserving the existing CA. It refuses to run if either `ca.key`
+or `ca.crt` is absent or invalid, before deleting any server state. Use the
+separate documented CA-loss recovery procedure only when the CA material is
+genuinely unavailable.
 
 ## Dashboard
 
@@ -115,12 +118,13 @@ the CA bytes or fingerprint before and after the operation when carrying out a
 recovery.
 
 Running `borg-mcp-server setup` again is idempotent. The explicit
-`setup --reinitialize` path recreates the database and server leaf identity but
-preserves `ca.crt` and `ca.key` when both are present. CA regeneration is only
-for documented CA-loss recovery: if the CA private key or certificate is lost,
-stop the server, preserve any required encrypted backup, and plan to re-enroll
-clients after creating a new identity. Never treat a changed LAN address as a
-reason to reinitialize the CA.
+`setup --reinitialize` path recreates the database and server leaf identity
+while preserving `ca.crt` and `ca.key`. If either CA file is absent or invalid,
+setup refuses before deleting anything. CA regeneration is only for documented
+CA-loss recovery: if the CA private key or certificate is lost, stop the server,
+preserve any required encrypted backup, and plan to re-enroll clients after
+creating a new identity. Never treat a changed LAN address as a reason to
+reinitialize the CA.
 
 ## Debugging
 

@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createPrivateKey, createPublicKey, randomUUID, X509Certificate } from "node:crypto";
 import { execFile } from "node:child_process";
 import { lstat, open, readFile, rename, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -1124,13 +1124,9 @@ export async function setupNodeServerInstallation(
     }
     if (options.reinitialize) {
       const names = new Set(existing.map((path) => basename(path)));
-      const preservedCertificateAuthority: PreservedCertificateAuthority | undefined =
-        names.has("ca.key") && names.has("ca.crt")
-          ? {
-              key: (await readFile(join(setupDataDirectory, "ca.key"))).toString("utf8"),
-              certificate: (await readFile(join(setupDataDirectory, "ca.crt"))).toString("utf8"),
-            }
-          : undefined;
+      const preservedCertificateAuthority = existing.length === 0
+        ? undefined
+        : await readPreservedCertificateAuthority(setupDataDirectory, names);
       for (const path of existing) {
         const name = basename(path);
         if (preservedCertificateAuthority !== undefined && (name === "ca.key" || name === "ca.crt")) continue;
@@ -1157,6 +1153,28 @@ export async function setupNodeServerInstallation(
   } finally {
     if (invitationLock === undefined) await runtimeLock.release();
     else await invitationLock.release().finally(() => runtimeLock.release());
+  }
+}
+
+async function readPreservedCertificateAuthority(
+  directory: string,
+  names: ReadonlySet<string>,
+): Promise<PreservedCertificateAuthority> {
+  if (!names.has("ca.key") || !names.has("ca.crt")) throw operatorErrors.CA_MATERIAL_UNAVAILABLE;
+  let key: Buffer | undefined;
+  try {
+    key = await loadTlsPrivateKey(join(directory, "ca.key"));
+    const certificate = await readFile(join(directory, "ca.crt"));
+    const ca = new X509Certificate(certificate);
+    const publicKey = createPublicKey(createPrivateKey(key)).export({ type: "spki", format: "der" });
+    if (!ca.ca || !publicKey.equals(ca.publicKey.export({ type: "spki", format: "der" }))) {
+      throw new Error("CA material does not match.");
+    }
+    return { key: key.toString("utf8"), certificate: certificate.toString("utf8") };
+  } catch {
+    throw operatorErrors.CA_MATERIAL_UNAVAILABLE;
+  } finally {
+    key?.fill(0);
   }
 }
 

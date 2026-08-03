@@ -20,6 +20,7 @@ export type OperatorErrorCode =
   | "DATA_PATH_SYMLINK"
   | "INSTALLATION_EXISTS"
   | "OWNER_CREDENTIAL_UNAVAILABLE"
+  | "CA_MATERIAL_UNAVAILABLE"
   | "LAN_CA_KEY_ONLINE"
   | "RUNTIME_ACTIVE"
   | "RUNTIME_LOCK_UNSAFE"
@@ -68,6 +69,7 @@ const publicMessages: Readonly<Record<OperatorErrorCode, string>> = Object.freez
   DATA_PATH_SYMLINK: "Choose a BORG_SERVER_DATA_DIR path that contains no symbolic links.",
   INSTALLATION_EXISTS: "An installation already exists in BORG_SERVER_DATA_DIR. To destroy and recreate it, stop the server and run borg-mcp-server setup --reinitialize.",
   OWNER_CREDENTIAL_UNAVAILABLE: "The local owner credential is unavailable. Restore the local credential store from backup, or preserve any needed server data and run borg-mcp-server setup --reinitialize to create a new database and leaf identity while preserving the CA when present.",
+  CA_MATERIAL_UNAVAILABLE: "The existing CA certificate and private key are required for reinitialization. Restore both files or follow the documented CA-loss recovery procedure; no server data was changed.",
   LAN_CA_KEY_ONLINE: "Move ca.key out of the runtime data directory before private-LAN startup.",
   RUNTIME_ACTIVE: "Stop the server before running setup or offline administration.",
   RUNTIME_LOCK_UNSAFE: "Ensure runtime.lock is a private regular file before retrying.",

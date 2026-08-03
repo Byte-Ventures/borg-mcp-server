@@ -47,10 +47,31 @@ const [
 ]);
 
 async function installPublishedClient(installationRoot) {
+  const npmHome = join(installationRoot, "npm-home");
+  const npmCache = join(installationRoot, "npm-cache");
+  const npmConfig = join(installationRoot, "npmrc");
+  const npmGlobalConfig = join(installationRoot, "global-npmrc");
+  await mkdir(npmHome);
+  await mkdir(npmCache);
+  await writeFile(npmConfig, "");
+  await writeFile(npmGlobalConfig, "");
   await writeFile(
     join(installationRoot, "package.json"),
     `${JSON.stringify({ private: true })}\n`,
   );
+  const npmEnvironment = Object.fromEntries(
+    Object.entries(process.env).filter(([key]) => !key.toLowerCase().startsWith("npm_config_")),
+  );
+  Object.assign(npmEnvironment, {
+    HOME: npmHome,
+    XDG_CONFIG_HOME: join(installationRoot, "xdg-config"),
+    XDG_CACHE_HOME: join(installationRoot, "xdg-cache"),
+    XDG_DATA_HOME: join(installationRoot, "xdg-data"),
+    npm_config_cache: npmCache,
+    npm_config_globalconfig: npmGlobalConfig,
+    npm_config_prefix: installationRoot,
+    npm_config_userconfig: npmConfig,
+  });
   execFileSync(
     "npm",
     [
@@ -64,7 +85,12 @@ async function installPublishedClient(installationRoot) {
       "--registry=https://registry.npmjs.org",
       clientSpec,
     ],
-    { cwd: repositoryRoot, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+    {
+      cwd: repositoryRoot,
+      encoding: "utf8",
+      env: npmEnvironment,
+      stdio: ["ignore", "pipe", "pipe"],
+    },
   );
   const clientBin = join(installationRoot, "node_modules", "borgmcp", "dist", "claude.js");
   await access(clientBin);
@@ -227,9 +253,25 @@ try {
   let savedAssociationsBeforeSecond = 0;
   try {
     const state = JSON.parse(await readFile(identityStatePath, "utf8"));
+    if (
+      state === null || typeof state !== "object" || Array.isArray(state) ||
+      state.version !== 1 ||
+      state.localIdentities === null || typeof state.localIdentities !== "object" ||
+      Array.isArray(state.localIdentities) ||
+      state.associations === null || typeof state.associations !== "object" ||
+      Array.isArray(state.associations)
+    ) {
+      throw new Error("repository identity state has an unexpected shape");
+    }
     savedAssociationsBeforeSecond = Object.keys(state.associations ?? {}).length;
-  } catch {
-    savedAssociationsBeforeSecond = 0;
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      savedAssociationsBeforeSecond = 0;
+    } else if (error instanceof Error && error.message === "repository identity state has an unexpected shape") {
+      throw error;
+    } else {
+      throw new Error("repository identity state could not be read or decoded", { cause: error });
+    }
   }
   if (savedAssociationsBeforeSecond !== 0) {
     throw new Error("saved repository association existed before the second invocation");

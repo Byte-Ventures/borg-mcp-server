@@ -42,7 +42,7 @@ Dashboard options:
   --ascii          Use strict 7-bit dashboard glyphs
 
 Setup options:
-  --reinitialize   Destroy and recreate the existing server identity and database
+  --reinitialize   Recreate the database and leaf identity; preserve the CA when present
 
 TLS files:
   BORG_SERVER_DATA_DIR (default: ~/.borg/server), or explicit

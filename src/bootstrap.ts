@@ -29,11 +29,17 @@ export interface BootstrapResult {
   };
 }
 
+export interface PreservedCertificateAuthority {
+  readonly key: string;
+  readonly certificate: string;
+}
+
 export async function bootstrapServer(
   dataDirectory: string,
   bindHost = "127.0.0.1",
   clock: () => Date = () => new Date(),
   persistOwnerCredential: (record: PortableServerCredential) => Promise<void> = async () => undefined,
+  preservedCertificateAuthority?: PreservedCertificateAuthority,
 ): Promise<BootstrapResult> {
   const directory = resolve(dataDirectory);
   const paths = {
@@ -45,14 +51,16 @@ export async function bootstrapServer(
     serverCertificate: join(directory, "server.crt"),
     config: join(directory, "server.json"),
   };
-  const ca = await generate([{ name: "commonName", value: "Borg Local CA" }], {
-    algorithm: "sha256",
-    keyType: "ec",
-    extensions: [
-      { name: "basicConstraints", cA: true, pathLenConstraint: 0, critical: true },
-      { name: "keyUsage", keyCertSign: true, cRLSign: true, critical: true },
-    ],
-  });
+  const ca = preservedCertificateAuthority === undefined
+    ? await generate([{ name: "commonName", value: "Borg Local CA" }], {
+        algorithm: "sha256",
+        keyType: "ec",
+        extensions: [
+          { name: "basicConstraints", cA: true, pathLenConstraint: 0, critical: true },
+          { name: "keyUsage", keyCertSign: true, cRLSign: true, critical: true },
+        ],
+      })
+    : { private: preservedCertificateAuthority.key, cert: preservedCertificateAuthority.certificate };
   const server = await generate([{ name: "commonName", value: "Borg Local Server" }], {
     algorithm: "sha256",
     keyType: "ec",
@@ -73,10 +81,8 @@ export async function bootstrapServer(
   const runtime = await openStore({ path: paths.database, clock });
   let completed = false;
   try {
-    await Promise.all([
+    const files = [
       writePrivate(paths.digestKey, digestKey),
-      writePrivate(paths.caKey, ca.private),
-      writePrivate(paths.caCertificate, ca.cert),
       writePrivate(paths.serverKey, server.private),
       writePrivate(paths.serverCertificate, server.cert),
       writePrivate(paths.config, JSON.stringify({
@@ -84,7 +90,12 @@ export async function bootstrapServer(
         ca_spki_sha256: caFingerprint,
         bind_host: bindHost,
       }, null, 2)),
-    ]);
+    ];
+    if (preservedCertificateAuthority === undefined) {
+      files.push(writePrivate(paths.caKey, ca.private));
+      files.push(writePrivate(paths.caCertificate, ca.cert));
+    }
+    await Promise.all(files);
     const digester = new CredentialDigester(digestKey);
     digestKey.fill(0);
     try {
@@ -130,7 +141,11 @@ export async function bootstrapServer(
     runtime.close();
     if (!completed) {
       await Promise.all([
-        ...Object.values(paths),
+        paths.database,
+        paths.digestKey,
+        paths.serverKey,
+        paths.serverCertificate,
+        paths.config,
         `${paths.database}-wal`,
         `${paths.database}-shm`,
         `${paths.database}-journal`,

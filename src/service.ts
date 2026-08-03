@@ -10,6 +10,7 @@ import {
   loadDigestKey,
   loadTlsPrivateKey,
   reissueServerCertificate,
+  type PreservedCertificateAuthority,
   type BootstrapResult,
 } from "./bootstrap.js";
 import {
@@ -1122,7 +1123,28 @@ export async function setupNodeServerInstallation(
       return Object.freeze({ existing: true });
     }
     if (options.reinitialize) {
-      for (const path of existing) await unlink(path);
+      const names = new Set(existing.map((path) => basename(path)));
+      const preservedCertificateAuthority: PreservedCertificateAuthority | undefined =
+        names.has("ca.key") && names.has("ca.crt")
+          ? {
+              key: (await readFile(join(setupDataDirectory, "ca.key"))).toString("utf8"),
+              certificate: (await readFile(join(setupDataDirectory, "ca.crt"))).toString("utf8"),
+            }
+          : undefined;
+      for (const path of existing) {
+        const name = basename(path);
+        if (preservedCertificateAuthority !== undefined && (name === "ca.key" || name === "ca.crt")) continue;
+        await unlink(path);
+      }
+      return await bootstrapServer(
+        setupDataDirectory,
+        bindHost,
+        () => new Date(),
+        credentialRoot === undefined
+          ? async () => undefined
+          : (record) => writePortableServerCredential(credentialRoot, record),
+        preservedCertificateAuthority,
+      );
     }
     return await bootstrapServer(
       directory,

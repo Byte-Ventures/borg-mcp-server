@@ -1495,6 +1495,8 @@ describe("node server service", () => {
       runtime.close();
       const unrelated = join(directory, "operator-notes.txt");
       await writeFile(unrelated, "preserve me", { mode: 0o600 });
+      const caBefore = await readFile(first.paths.caCertificate);
+      const caKeyBefore = await readFile(first.paths.caKey);
 
       const second = requireFreshSetup(await setupNodeServerInstallation(
         directory,
@@ -1502,7 +1504,9 @@ describe("node server service", () => {
         { reinitialize: true },
       ));
       expect(second.serverId).not.toBe(first.serverId);
-      expect(second.caFingerprint).not.toBe(first.caFingerprint);
+      expect(second.caFingerprint).toBe(first.caFingerprint);
+      expect(await readFile(second.paths.caCertificate)).toEqual(caBefore);
+      expect(await readFile(second.paths.caKey)).toEqual(caKeyBefore);
       expect(await readFile(unrelated, "utf8")).toBe("preserve me");
       const freshRuntime = await openStore({ path: second.paths.database });
       expect(freshRuntime.maintenance.observeAuthorityState()).toMatchObject({

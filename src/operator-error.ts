@@ -67,7 +67,7 @@ const publicMessages: Readonly<Record<OperatorErrorCode, string>> = Object.freez
   SERVER_FILES_MISSING: "Configure BORG_SERVER_DATA_DIR or the required TLS file variables.",
   DATA_PATH_SYMLINK: "Choose a BORG_SERVER_DATA_DIR path that contains no symbolic links.",
   INSTALLATION_EXISTS: "An installation already exists in BORG_SERVER_DATA_DIR. To destroy and recreate it, stop the server and run borg-mcp-server setup --reinitialize.",
-  OWNER_CREDENTIAL_UNAVAILABLE: "The local owner credential is unavailable. Restore the local credential store from backup, or preserve any needed server data and run borg-mcp-server setup --reinitialize to create a new server identity.",
+  OWNER_CREDENTIAL_UNAVAILABLE: "The local owner credential is unavailable. Restore the local credential store from backup, or preserve any needed server data and run borg-mcp-server setup --reinitialize to create a new database and leaf identity while preserving the CA when present.",
   LAN_CA_KEY_ONLINE: "Move ca.key out of the runtime data directory before private-LAN startup.",
   RUNTIME_ACTIVE: "Stop the server before running setup or offline administration.",
   RUNTIME_LOCK_UNSAFE: "Ensure runtime.lock is a private regular file before retrying.",

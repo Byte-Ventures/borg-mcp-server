@@ -55,6 +55,12 @@ export function createReleaseRecord(
   authorities?: ReleaseAuthorities,
 ): ReleaseRecord;
 
+export function verifyReleaseProvenance(
+  root: string,
+  record: ReleaseRecord,
+  authorities?: ReleaseAuthorities,
+): ReleaseRecord;
+
 export function buildReleaseTransform(
   baseFiles: ReadonlyMap<string, string>,
   oldVersion: string,

@@ -19,6 +19,7 @@ const FAILED_RELEASE_SKIPPED_STEPS = Object.freeze([
   Object.freeze({ number: 12, name: "Exercise exact tarball once" }),
   Object.freeze({ number: 13, name: "Upload same-run release artifact" }),
 ]);
+const RELEASE_WORKFLOW_ATTEMPT = 1;
 const stableVersionPattern = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/u;
 const registryVersionPattern = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/u;
 const shaPattern = /^[0-9a-f]{40}$/u;
@@ -75,6 +76,13 @@ function requireStableVersion(value, description) {
   if (!stableVersionPattern.test(value) ||
       value.split(".").some((part) => !Number.isSafeInteger(Number(part)))) {
     fail(`${description} must be a stable x.y.z version with safe integer components.`);
+  }
+  return value;
+}
+
+function requireInitialWorkflowAttempt(value, description) {
+  if (value !== RELEASE_WORKFLOW_ATTEMPT) {
+    fail(`${description} must be exactly workflow attempt 1; release workflow reruns are not release authority.`);
   }
   return value;
 }
@@ -209,6 +217,12 @@ function decodeRecord(record) {
     Number.isSafeInteger(decoded.verify_job_id) && decoded.verify_job_id > 0 &&
     Number.isSafeInteger(decoded.publish_job_id) && decoded.publish_job_id > 0 &&
     decoded.artifact_integrity === null;
+  if (Number.isSafeInteger(decoded.workflow_run_attempt)) {
+    requireInitialWorkflowAttempt(
+      decoded.workflow_run_attempt,
+      "Release record workflow run attempt",
+    );
+  }
   if ((!isLegacy && !isCanonical) || (!published && !failedSuperseded) ||
       typeof decoded.version !== "string" ||
       !stableVersionPattern.test(decoded.version) ||
@@ -218,7 +232,7 @@ function decodeRecord(record) {
       !shaPattern.test(decoded.commit) ||
       !shaPattern.test(decoded.tree) ||
       !Number.isSafeInteger(decoded.workflow_run_id) || decoded.workflow_run_id <= 0 ||
-      !Number.isSafeInteger(decoded.workflow_run_attempt) || decoded.workflow_run_attempt <= 0 ||
+      !Number.isSafeInteger(decoded.workflow_run_attempt) ||
       (isCanonical && JSON.stringify(Object.keys(record)) !== JSON.stringify(canonicalKeys)) ||
       (isLegacy && JSON.stringify(Object.keys(record)) !== JSON.stringify(legacyKeys))) {
     fail("Release record has an invalid or non-canonical shape.");
@@ -293,6 +307,10 @@ function decodePublishedVersions(input) {
 }
 
 function failedPhaseEvidence(root, record, authorities, requireRecordedIds = true) {
+  requireInitialWorkflowAttempt(
+    record.workflow_run_attempt,
+    "Failed-superseded workflow run attempt",
+  );
   const response = authorities.githubRunJobs(
     root,
     record.workflow_run_id,
@@ -364,6 +382,7 @@ export function verifyReleaseProvenance(root, recordInput, authorities = systemA
 }
 
 export function createReleaseRecord(root, input, authorities = systemAuthorities) {
+  requireInitialWorkflowAttempt(input.workflowRunAttempt, "Workflow run attempt");
   const provenance = deriveGitProvenance(root, input.version);
   const workflowConclusion = input.workflowConclusion ?? "success";
   const baseRecord = {
@@ -711,6 +730,7 @@ function parsePrepareArguments(args, environment) {
       !Number.isSafeInteger(workflowRunAttempt) || workflowRunAttempt <= 0) {
     fail("release:prepare requires a positive run id and attempt.");
   }
+  requireInitialWorkflowAttempt(workflowRunAttempt, "release:prepare workflow run attempt");
   if (workflowConclusion === "success" &&
       (typeof integrity !== "string" || !sriPattern.test(integrity))) {
     fail("A successful superseded release requires a canonical SHA-512 SRI.");

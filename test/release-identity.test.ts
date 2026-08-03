@@ -7,8 +7,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   classifyReleasePullRequest,
   prepareRelease,
+  verifyReleaseProvenance,
   verifyReleaseIdentity,
   type ReleaseAuthorities,
+  type ReleaseRecord,
 } from "../scripts/release-identity.mjs";
 
 // Synthetic versions exercise the verifier without coupling fixtures to the live package identity.
@@ -171,6 +173,51 @@ describe("release identity automation", () => {
       fixture.authorities,
     )).toMatchObject({ oldVersion, newVersion, candidate });
     expect(new Set(fixture.artifactRequests)).toEqual(new Set([fixture.anchorRecord.version]));
+  });
+
+  it("rejects an otherwise-valid failed-superseded rerun attempt", async () => {
+    const fixture = await createFailedFixture();
+    const attemptTwoAuthorities: ReleaseAuthorities = {
+      ...fixture.authorities,
+      githubRun: (root, runId, attempt) => ({
+        ...fixture.authorities.githubRun(root, runId, attempt),
+        run_attempt: 2,
+      }),
+      githubRunJobs: (root, runId, attempt) => {
+        const response = fixture.authorities.githubRunJobs(root, runId, attempt) as {
+          jobs: Array<Record<string, unknown>>;
+        };
+        return {
+          ...response,
+          jobs: response.jobs.map((job) => ({ ...job, run_attempt: 2 })),
+        };
+      },
+    };
+
+    const attemptTwoRecord: ReleaseRecord = {
+      outcome: "failed-superseded",
+      version: oldVersion,
+      tag: `v${oldVersion}`,
+      tag_object: git(fixture.root, ["rev-parse", `v${oldVersion}^{tag}`]),
+      commit: fixture.base,
+      tree: git(fixture.root, ["rev-parse", `${fixture.base}^{tree}`]),
+      workflow_run_id: failedRunId,
+      workflow_run_attempt: 2,
+      workflow_conclusion: "failure",
+      verify_job_id: failedVerifyJobId,
+      publish_job_id: failedPublishJobId,
+      artifact_integrity: null,
+    };
+    expect(() => verifyReleaseProvenance(
+      fixture.root,
+      attemptTwoRecord,
+      attemptTwoAuthorities,
+    )).toThrow(/exactly workflow attempt 1/);
+
+    await expect(prepareRelease(fixture.root, newVersion, {
+      ...fixture.evidence,
+      workflowRunAttempt: 2,
+    }, attemptTwoAuthorities)).rejects.toThrow(/exactly workflow attempt 1/);
   });
 
   it("rejects failed recovery when artifact or publication phases were reached", async () => {

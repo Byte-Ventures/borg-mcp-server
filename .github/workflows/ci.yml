@@ -13,8 +13,12 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  test:
+  test-matrix:
+    name: test (${{ matrix.node-version }})
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: [22.18.0, 24.19.0]
     steps:
       - name: Check out source
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -24,7 +28,7 @@ jobs:
       - name: Set up exact Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 22.22.2
+          node-version: ${{ matrix.node-version }}
           cache: npm
 
       - name: Install locked dependencies without lifecycle scripts
@@ -35,3 +39,14 @@ jobs:
 
       - name: Check, test, and build
         run: npm run check
+
+  test:
+    name: test
+    if: always()
+    needs: test-matrix
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every Node.js matrix leg to pass
+        env:
+          MATRIX_RESULT: ${{ needs.test-matrix.result }}
+        run: test "${MATRIX_RESULT}" = success

@@ -40,7 +40,9 @@ describe("dashboard command", () => {
     expect(result.stdout).toContain(live.endpoint);
     expect(result.stdout).toContain("0 cubes | 0 posts/15m");
     expect(result.stdout).not.toContain("\u001b");
-    expect(result.stderr).toMatch(sqliteExperimentalWarning);
+    if (Number(process.versions.node.split(".")[0]) < 24) {
+      expect(result.stderr).toMatch(sqliteExperimentalWarning);
+    }
     expect(withoutKnownSqliteWarning(result.stderr)).toBe("");
     expect(server.exitCode).toBeNull();
     expect(() => process.kill(server!.pid!, 0)).not.toThrow();

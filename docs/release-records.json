@@ -118,5 +118,19 @@
     "workflow_run_id": 30762455216,
     "workflow_run_attempt": 1,
     "artifact_integrity": "sha512-lOxIPg3WcjSBte46iTM7SAFVN6Y0b2oizOKAJ9Q1EijBdOlmsh/cQlpUIaa8F2UJPaTDFsXy3M64gpGs6XgKzA=="
+  },
+  {
+    "outcome": "failed-superseded",
+    "version": "0.10.0",
+    "tag": "v0.10.0",
+    "tag_object": "fb1b0919c0e1f92fbc75e50f16a3f2bd7472c215",
+    "commit": "84baa7c891a5b508a6b7df60712549ddca1296f6",
+    "tree": "7f4b85195c938f1a172cc4ef1fb6f2731c4f336d",
+    "workflow_run_id": 30813791855,
+    "workflow_run_attempt": 1,
+    "workflow_conclusion": "failure",
+    "verify_job_id": 91686513878,
+    "publish_job_id": 91686757846,
+    "artifact_integrity": null
   }
 ]

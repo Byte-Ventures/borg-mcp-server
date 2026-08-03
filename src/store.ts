@@ -1962,26 +1962,25 @@ class SqliteScopedStore implements ScopedStore {
 
     this.#database.exec("BEGIN IMMEDIATE");
     try {
-      const result = hasId
-        ? this.#database.prepare(`
-            UPDATE decisions SET status = 'removed'
-            WHERE cube_id = ? AND id = ? AND status = 'active'
-          `).run(cubeId, selector.decisionId!)
-        : this.#database.prepare(`
-            UPDATE decisions SET status = 'removed'
-            WHERE cube_id = ? AND topic = ? AND status = 'active'
-          `).run(cubeId, selector.topic!);
+      const activeId = hasId
+        ? selector.decisionId!
+        : (() => {
+            const row = this.#database.prepare(`
+              SELECT id FROM decisions
+              WHERE cube_id = ? AND topic = ? AND status = 'active'
+            `).get(cubeId, selector.topic!);
+            if (row === undefined) throw new ScopedStoreError();
+            return requiredText(row, "id");
+          })();
+      const result = this.#database.prepare(`
+        UPDATE decisions SET status = 'removed'
+        WHERE cube_id = ? AND id = ? AND status = 'active'
+      `).run(cubeId, activeId);
       if (result.changes !== 1) throw new ScopedStoreError();
-      const row = hasId
-        ? this.#database.prepare(`
-            SELECT id, cube_id, topic, decision, rationale, ratified_by, status, supersedes, created_at
-            FROM decisions WHERE cube_id = ? AND id = ?
-          `).get(cubeId, selector.decisionId!)
-        : this.#database.prepare(`
-            SELECT id, cube_id, topic, decision, rationale, ratified_by, status, supersedes, created_at
-            FROM decisions WHERE cube_id = ? AND topic = ? AND status = 'removed'
-            ORDER BY created_at DESC, id DESC LIMIT 1
-          `).get(cubeId, selector.topic!);
+      const row = this.#database.prepare(`
+        SELECT id, cube_id, topic, decision, rationale, ratified_by, status, supersedes, created_at
+        FROM decisions WHERE cube_id = ? AND id = ?
+      `).get(cubeId, activeId);
       if (row === undefined) throw new ScopedStoreError();
       this.#database.exec("COMMIT");
       return decisionRecord(row);

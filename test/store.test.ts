@@ -1119,9 +1119,14 @@ describe("Principal to ScopedStore isolation", () => {
 
   it("removes active decisions without deleting their audit records", () => {
     const client = runtime.forPrincipal(clientPrincipal(ids.clientA));
-    const byTopic = client.recordDecision(ids.cubeA, { topic: "topic-removal", decision: "remove me" });
+    const firstByTopic = client.recordDecision(ids.cubeA, {
+      topic: "topic-removal",
+      decision: "superseded decision",
+    });
+    const byTopic = client.recordDecision(ids.cubeA, { topic: firstByTopic.topic, decision: "remove me" });
     const removedByTopic = client.removeDecision(ids.cubeA, { topic: byTopic.topic });
     expect(removedByTopic).toMatchObject({ id: byTopic.id, status: "removed" });
+    expect(removedByTopic.id).not.toBe(firstByTopic.id);
     expect(client.listDecisions(ids.cubeA)).toEqual([]);
 
     const byId = client.recordDecision(ids.cubeA, { topic: "id-removal", decision: "remove me too" });

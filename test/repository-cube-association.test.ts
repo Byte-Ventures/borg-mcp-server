@@ -78,7 +78,7 @@ describe("repository cube association", () => {
     });
   });
 
-  it("rejects both repository-to-other-cube and cube-to-other-repository conflicts", async () => {
+  it("keeps repository conflicts while allowing multiple repositories on one cube", async () => {
     const fixture = await legacyCubeFixture();
     const otherCubeId = randomUUID();
     fixture.runtime.maintenance.createCube({
@@ -106,12 +106,39 @@ describe("repository cube association", () => {
       workingRepoName: "other",
       repository,
     })).toThrowError(new RepositoryAssociationConflictError("repository_conflict"));
-    expect(() => store.associateRepositoryCube({
+    const secondRepository = { kind: "local" as const, value: randomUUID() };
+    expect(store.associateRepositoryCube({
       cubeId: fixture.cubeId,
-      workingRepoName: "legacy",
-      repository: { kind: "local", value: randomUUID() },
-    })).toThrowError(new RepositoryAssociationConflictError("cube_conflict"));
-    expect(fixture.runtime.maintenance.observeAuthorityState().repository_associations).toBe(1);
+      workingRepoName: "second",
+      repository: secondRepository,
+    })).toMatchObject({ cubeId: fixture.cubeId, repository: secondRepository });
+    expect(fixture.runtime.maintenance.observeAuthorityState().repository_associations).toBe(2);
+  });
+
+  it("inspects the created cube through the requested repository row", async () => {
+    const fixture = await legacyCubeFixture();
+    fixture.runtime.maintenance.grantCreateCubeCapability(fixture.clientId);
+    const store = fixture.runtime.forPrincipal(clientPrincipal(fixture.clientId));
+    const primaryRepository = { kind: "local" as const, value: randomUUID() };
+    const created = store.createCube({
+      retryKey: randomUUID(),
+      name: "Multi-repository cube",
+      workingRepoName: "primary",
+      repository: primaryRepository,
+      template: "default",
+    });
+    const secondaryRepository = { kind: "local" as const, value: randomUUID() };
+    store.associateRepositoryCube({
+      cubeId: created.cubeId,
+      workingRepoName: "secondary",
+      repository: secondaryRepository,
+    });
+
+    expect(fixture.runtime.maintenance.inspectCreatedCube(fixture.clientId, created)).toMatchObject({
+      cube_exists: true,
+      working_repo_name: "primary",
+      repository: primaryRepository,
+    });
   });
 
   it("requires cube-manage authority without leaking inaccessible cubes", async () => {
@@ -172,6 +199,51 @@ describe("repository cube association", () => {
       repository,
     })).toThrowError(AccessDeniedError);
     expect(fixture.runtime.maintenance.observeAuthorityState().repository_associations).toBe(1);
+  });
+
+  it("keeps revoked associations stored and unusable without affecting another client", async () => {
+    const fixture = await legacyCubeFixture();
+    const secondClientId = randomUUID();
+    fixture.runtime.maintenance.createClient({ id: secondClientId, name: "Second client" });
+    fixture.runtime.maintenance.grantClientCube({
+      clientId: secondClientId,
+      cubeId: fixture.cubeId,
+      access: "manage",
+    });
+    const ownerStore = fixture.runtime.forPrincipal(clientPrincipal(fixture.clientId));
+    const secondStore = fixture.runtime.forPrincipal(clientPrincipal(secondClientId));
+    const ownerRepository = { kind: "local" as const, value: randomUUID() };
+    const secondRepository = { kind: "local" as const, value: randomUUID() };
+    ownerStore.associateRepositoryCube({
+      cubeId: fixture.cubeId,
+      workingRepoName: "owner",
+      repository: ownerRepository,
+    });
+    secondStore.associateRepositoryCube({
+      cubeId: fixture.cubeId,
+      workingRepoName: "second",
+      repository: secondRepository,
+    });
+
+    fixture.runtime.maintenance.revokeClient(fixture.clientId);
+
+    expect(fixture.runtime.maintenance.observeAuthorityState().repository_associations).toBe(2);
+    expect(ownerStore.resolveRepositoryCube({
+      workingRepoName: "owner",
+      repository: ownerRepository,
+    })).toBeNull();
+    expect(() => ownerStore.associateRepositoryCube({
+      cubeId: fixture.cubeId,
+      workingRepoName: "revoked",
+      repository: { kind: "local", value: randomUUID() },
+    })).toThrowError(AccessDeniedError);
+    expect(secondStore.resolveRepositoryCube({
+      workingRepoName: "second",
+      repository: secondRepository,
+    })).toMatchObject({ cubeId: fixture.cubeId, repository: secondRepository });
+    expect(secondStore.appendActivity(fixture.cubeId, "still active")).toMatchObject({
+      cubeId: fixture.cubeId,
+    });
   });
 
   it("scopes repository identities by authenticated client without cross-client conflicts", async () => {
@@ -330,13 +402,13 @@ describe("repository cube association", () => {
       workingRepoName: "legacy",
       repository: firstRepository,
     });
-    expect(() => secondRuntime.forPrincipal(clientPrincipal(secondClientId))
+    expect(secondRuntime.forPrincipal(clientPrincipal(secondClientId))
       .associateRepositoryCube({
         cubeId: fixture.cubeId,
         workingRepoName: "legacy",
         repository: secondRepository,
-      })).toThrowError(AccessDeniedError);
-    expect(secondRuntime.maintenance.observeAuthorityState().repository_associations).toBe(1);
+      })).toMatchObject({ cubeId: fixture.cubeId, repository: secondRepository });
+    expect(secondRuntime.maintenance.observeAuthorityState().repository_associations).toBe(2);
   });
 });
 

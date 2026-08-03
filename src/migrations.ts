@@ -657,6 +657,36 @@ export const STORE_MIGRATIONS: readonly Migration[] = Object.freeze([
       ) STRICT, WITHOUT ROWID;
     `,
   },
+  {
+    version: 20,
+    name: "widen_repository_cube_associations",
+    sql: `
+      DROP INDEX repository_associations_cube_idx;
+      ALTER TABLE repository_associations RENAME TO legacy_repository_associations;
+
+      CREATE TABLE repository_associations (
+        client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+        repository_kind TEXT NOT NULL CHECK (repository_kind IN ('origin', 'local')),
+        repository_value TEXT NOT NULL
+          CHECK (length(CAST(repository_value AS BLOB)) BETWEEN 1 AND 512),
+        cube_id TEXT NOT NULL REFERENCES cubes(id) ON DELETE CASCADE,
+        working_repo_name TEXT NOT NULL
+          CHECK (length(CAST(working_repo_name AS BLOB)) BETWEEN 1 AND 201),
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (client_id, repository_kind, repository_value)
+      ) STRICT, WITHOUT ROWID;
+
+      INSERT INTO repository_associations (
+        client_id, repository_kind, repository_value, cube_id, working_repo_name, created_at
+      )
+      SELECT client_id, repository_kind, repository_value, cube_id, working_repo_name, created_at
+      FROM legacy_repository_associations;
+
+      DROP TABLE legacy_repository_associations;
+      CREATE INDEX repository_associations_cube_idx
+        ON repository_associations (cube_id);
+    `,
+  },
 ]);
 
 interface AppliedMigrationRow {

@@ -34,7 +34,7 @@ afterEach(async () => {
 });
 
 describe("borgmcp-shared server adapter", () => {
-  it("passes forward conformance apart from the retired TTL-expiry probe", async () => {
+  it("passes forward conformance apart from retired probes and shared 0.8.0 pre-widening", async () => {
     const fixture = await conformanceEnvironment();
     try {
       const report = await runAdapterConformance(fixture.environment, {
@@ -43,6 +43,12 @@ describe("borgmcp-shared server adapter", () => {
       });
 
       expect(report.results.filter((result) => !result.ok)).toEqual([
+        {
+          id: "repository.explicit-association",
+          ok: false,
+          error: "Cube-to-other-repository conflict returned HTTP 200; expected 409.",
+          observations: {},
+        },
         {
           id: "security.drone-session-rejection-causes",
           ok: false,

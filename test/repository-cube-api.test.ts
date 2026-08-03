@@ -197,17 +197,16 @@ describe("repository cube API", () => {
       },
     );
     expect(cubeConflict).toMatchObject({
-      status: 409,
+      status: 200,
       body: {
         request_id: "associate-cube-conflict",
-        error: {
-          code: "CUBE_ALREADY_ASSOCIATED",
-          message: "The cube is already associated with another repository.",
+        payload: {
+          result: "resolved",
+          cube_id: fixture.cubeId,
+          repository: otherRepository,
         },
       },
     });
-    expect(JSON.stringify(cubeConflict)).not.toContain(otherRepository.value);
-    expect(JSON.stringify(cubeConflict)).not.toContain(fixture.cubeId);
 
     const invalidRolesCubeId = randomUUID();
     fixture.runtime.maintenance.createCube({
@@ -264,7 +263,7 @@ describe("repository cube API", () => {
       status: 403,
       body: { error: { code: "ACCESS_DENIED", message: "Access denied." } },
     });
-    expect(fixture.runtime.maintenance.observeAuthorityState().repository_associations).toBe(1);
+    expect(fixture.runtime.maintenance.observeAuthorityState().repository_associations).toBe(2);
   });
 
   it("maps association capacity rejection without partial mutation", async () => {

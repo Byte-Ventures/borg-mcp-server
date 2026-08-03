@@ -60,6 +60,10 @@ CA private key offline; the running service does not need it.
 
 Read [SECURITY.md](SECURITY.md) before exposing the service beyond loopback.
 
+For trust artifacts and the operator-side steps for provisioning a client on
+another machine, read [docs/trust-and-provisioning.md](docs/trust-and-provisioning.md).
+That guide is included in the installed package.
+
 ## Reference and support
 
 - [Operator reference](https://github.com/Byte-Ventures/borg-mcp-server/blob/main/docs/operator-reference.md):

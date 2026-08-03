@@ -1116,4 +1116,35 @@ describe("Principal to ScopedStore isolation", () => {
       decision: "role label cannot escalate",
     })).toThrow(AccessDeniedError);
   });
+
+  it("removes active decisions without deleting their audit records", () => {
+    const client = runtime.forPrincipal(clientPrincipal(ids.clientA));
+    const firstByTopic = client.recordDecision(ids.cubeA, {
+      topic: "topic-removal",
+      decision: "superseded decision",
+    });
+    const supersededByTopic = client.recordDecision(ids.cubeA, {
+      topic: firstByTopic.topic,
+      decision: "first removed decision",
+    });
+    const firstRemoved = client.removeDecision(ids.cubeA, { topic: supersededByTopic.topic });
+    const database = new DatabaseSync(join(directory, "borg.db"), {
+      enableForeignKeyConstraints: true,
+    });
+    database.prepare("UPDATE decisions SET id = ? WHERE id = ?").run(
+      "ffffffff-ffff-4fff-8fff-ffffffffffff",
+      firstRemoved.id,
+    );
+    database.close();
+    const byTopic = client.recordDecision(ids.cubeA, { topic: firstByTopic.topic, decision: "remove me" });
+    expect(byTopic.supersedes).toBeNull();
+    const removedByTopic = client.removeDecision(ids.cubeA, { topic: byTopic.topic });
+    expect(removedByTopic).toMatchObject({ id: byTopic.id, status: "removed" });
+    expect(client.listDecisions(ids.cubeA)).toEqual([]);
+
+    const byId = client.recordDecision(ids.cubeA, { topic: "id-removal", decision: "remove me too" });
+    const removedById = client.removeDecision(ids.cubeA, { decisionId: byId.id });
+    expect(removedById).toMatchObject({ id: byId.id, status: "removed" });
+    expect(() => client.removeDecision(ids.cubeA, { decisionId: byId.id })).toThrow(ScopedStoreError);
+  });
 });

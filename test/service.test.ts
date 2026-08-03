@@ -1495,6 +1495,8 @@ describe("node server service", () => {
       runtime.close();
       const unrelated = join(directory, "operator-notes.txt");
       await writeFile(unrelated, "preserve me", { mode: 0o600 });
+      const caBefore = await readFile(first.paths.caCertificate);
+      const caKeyBefore = await readFile(first.paths.caKey);
 
       const second = requireFreshSetup(await setupNodeServerInstallation(
         directory,
@@ -1502,7 +1504,9 @@ describe("node server service", () => {
         { reinitialize: true },
       ));
       expect(second.serverId).not.toBe(first.serverId);
-      expect(second.caFingerprint).not.toBe(first.caFingerprint);
+      expect(second.caFingerprint).toBe(first.caFingerprint);
+      expect(await readFile(second.paths.caCertificate)).toEqual(caBefore);
+      expect(await readFile(second.paths.caKey)).toEqual(caKeyBefore);
       expect(await readFile(unrelated, "utf8")).toBe("preserve me");
       const freshRuntime = await openStore({ path: second.paths.database });
       expect(freshRuntime.maintenance.observeAuthorityState()).toMatchObject({
@@ -1513,6 +1517,29 @@ describe("node server service", () => {
       });
       freshRuntime.close();
       await expect(access(join(directory, "runtime.lock"))).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses reinitialization when CA material is incomplete without deleting state", async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-setup-missing-ca-")));
+    try {
+      const first = requireFreshSetup(await setupNodeServerInstallation(
+        directory,
+        "127.0.0.1",
+        { reinitialize: false },
+      ));
+      const before = new Map<string, Buffer>();
+      for (const path of Object.values(first.paths)) before.set(path, await readFile(path));
+      await unlink(first.paths.caCertificate);
+
+      await expect(setupNodeServerInstallation(directory, "127.0.0.1", { reinitialize: true }))
+        .rejects.toThrow("The existing CA certificate and private key are required for reinitialization.");
+      await expect(access(first.paths.caCertificate)).rejects.toMatchObject({ code: "ENOENT" });
+      for (const [path, bytes] of before) {
+        if (path !== first.paths.caCertificate) expect(await readFile(path)).toEqual(bytes);
+      }
     } finally {
       await rm(directory, { recursive: true, force: true });
     }

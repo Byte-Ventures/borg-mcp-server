@@ -181,7 +181,7 @@ describe("runCli", () => {
     const help = createIo();
     expect(await runCli(["help"], service, help)).toBe(0);
     expect(help.stdout).toHaveBeenCalledWith(expect.stringContaining(
-      "--reinitialize   Destroy and recreate the existing server identity and database",
+      "--reinitialize   Recreate the database and leaf identity; preserve the CA when present",
     ));
   });
 

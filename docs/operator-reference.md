@@ -17,8 +17,11 @@ that no Borg process is running.
 Setup verifies and prepares the latest immutable npm artifact, but starts no
 listener or managed service. Running `setup` again is idempotent: it preserves
 the existing data and identity and never repeats credentials. After stopping the
-server, `borg-mcp-server setup --reinitialize` explicitly destroys and recreates
-the server identity and database; use it only when prior state may be discarded.
+server, `borg-mcp-server setup --reinitialize` recreates the database and leaf
+identity while preserving the existing CA. It refuses to run if either `ca.key`
+or `ca.crt` is absent or invalid, before deleting any server state. Use the
+separate documented CA-loss recovery procedure only when the CA material is
+genuinely unavailable.
 
 ## Dashboard
 
@@ -81,6 +84,47 @@ unspecified, multicast, and otherwise unsafe bind addresses are rejected.
 TLS files may instead be supplied explicitly with
 `BORG_SERVER_TLS_KEY_FILE`, `BORG_SERVER_TLS_CERT_FILE`, and
 `BORG_SERVER_TLS_CA_FILE`.
+
+### LAN address changes
+
+The server certificate contains IP subject-alternative names. If the server's
+LAN address changes, older clients that perform the standard leaf SAN check can
+reject the new address even though the server's CA identity is unchanged.
+Clients that support CA-pinned address changes use the CA SPKI trust identity
+and do not require a leaf reissue. Do not put `ca.key` online just to handle an
+address change.
+
+For an older client, perform the manual leaf-reissue procedure while the server
+is stopped:
+
+1. Retrieve `ca.key` from offline protected storage into the private server data
+   directory. Confirm mode `0600` and do not copy it to the client machine.
+2. Reissue the leaf for the new address:
+
+   ```sh
+   borg-mcp-server cert-reissue --host 192.168.1.20
+   ```
+
+3. Move `ca.key` back to offline protected storage before starting the server.
+4. Start the server with the new address and explicit LAN consent:
+
+   ```sh
+   borg-mcp-server start --host 192.168.1.20 --port 7091 --lan
+   ```
+
+The reissue changes only `server.crt` and `server.key`. The CA certificate,
+CA private key, and `ca_spki_sha256` trust identity remain unchanged. Verify
+the CA bytes or fingerprint before and after the operation when carrying out a
+recovery.
+
+Running `borg-mcp-server setup` again is idempotent. The explicit
+`setup --reinitialize` path recreates the database and server leaf identity
+while preserving `ca.crt` and `ca.key`. If either CA file is absent or invalid,
+setup refuses before deleting anything. CA regeneration is only for documented
+CA-loss recovery: if the CA private key or certificate is lost, stop the server,
+preserve any required encrypted backup, and plan to re-enroll clients after
+creating a new identity. Never treat a changed LAN address as a reason to
+reinitialize the CA.
 
 ## Debugging
 

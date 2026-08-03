@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createPrivateKey, createPublicKey, randomUUID, X509Certificate } from "node:crypto";
 import { execFile } from "node:child_process";
 import { lstat, open, readFile, rename, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -10,6 +10,7 @@ import {
   loadDigestKey,
   loadTlsPrivateKey,
   reissueServerCertificate,
+  type PreservedCertificateAuthority,
   type BootstrapResult,
 } from "./bootstrap.js";
 import {
@@ -1122,7 +1123,24 @@ export async function setupNodeServerInstallation(
       return Object.freeze({ existing: true });
     }
     if (options.reinitialize) {
-      for (const path of existing) await unlink(path);
+      const names = new Set(existing.map((path) => basename(path)));
+      const preservedCertificateAuthority = existing.length === 0
+        ? undefined
+        : await readPreservedCertificateAuthority(setupDataDirectory, names);
+      for (const path of existing) {
+        const name = basename(path);
+        if (preservedCertificateAuthority !== undefined && (name === "ca.key" || name === "ca.crt")) continue;
+        await unlink(path);
+      }
+      return await bootstrapServer(
+        setupDataDirectory,
+        bindHost,
+        () => new Date(),
+        credentialRoot === undefined
+          ? async () => undefined
+          : (record) => writePortableServerCredential(credentialRoot, record),
+        preservedCertificateAuthority,
+      );
     }
     return await bootstrapServer(
       directory,
@@ -1135,6 +1153,28 @@ export async function setupNodeServerInstallation(
   } finally {
     if (invitationLock === undefined) await runtimeLock.release();
     else await invitationLock.release().finally(() => runtimeLock.release());
+  }
+}
+
+async function readPreservedCertificateAuthority(
+  directory: string,
+  names: ReadonlySet<string>,
+): Promise<PreservedCertificateAuthority> {
+  if (!names.has("ca.key") || !names.has("ca.crt")) throw operatorErrors.CA_MATERIAL_UNAVAILABLE;
+  let key: Buffer | undefined;
+  try {
+    key = await loadTlsPrivateKey(join(directory, "ca.key"));
+    const certificate = await readFile(join(directory, "ca.crt"));
+    const ca = new X509Certificate(certificate);
+    const publicKey = createPublicKey(createPrivateKey(key)).export({ type: "spki", format: "der" });
+    if (!ca.ca || !publicKey.equals(ca.publicKey.export({ type: "spki", format: "der" }))) {
+      throw new Error("CA material does not match.");
+    }
+    return { key: key.toString("utf8"), certificate: certificate.toString("utf8") };
+  } catch {
+    throw operatorErrors.CA_MATERIAL_UNAVAILABLE;
+  } finally {
+    key?.fill(0);
   }
 }
 

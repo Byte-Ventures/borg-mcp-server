@@ -1156,6 +1156,7 @@ class SqliteScopedStore implements ScopedStore {
         WHERE c.id = ? AND ${manageScope.sql}
       `).get(input.cubeId, ...manageScope.parameters);
       if (target === undefined) throw new AccessDeniedError();
+      this.#mutationHook?.("repository-association.target-authorized");
 
       const repositoryBinding = this.#database.prepare(`
         SELECT association.cube_id,

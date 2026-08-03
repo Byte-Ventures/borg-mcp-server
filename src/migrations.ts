@@ -682,6 +682,16 @@ export const STORE_MIGRATIONS: readonly Migration[] = Object.freeze([
       SELECT client_id, repository_kind, repository_value, cube_id, working_repo_name, created_at
       FROM legacy_repository_associations;
 
+      INSERT INTO repository_associations (
+        client_id, repository_kind, repository_value, cube_id, working_repo_name, created_at
+      )
+      SELECT NULL, NULL, NULL, NULL, NULL, NULL
+      WHERE (
+        SELECT COUNT(*) FROM repository_associations
+      ) <> (
+        SELECT COUNT(*) FROM legacy_repository_associations
+      );
+
       DROP TABLE legacy_repository_associations;
       CREATE INDEX repository_associations_cube_idx
         ON repository_associations (cube_id);

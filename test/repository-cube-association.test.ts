@@ -142,7 +142,13 @@ describe("repository cube association", () => {
   });
 
   it("requires cube-manage authority without leaking inaccessible cubes", async () => {
-    const fixture = await legacyCubeFixture();
+    let targetAuthorizationReached = false;
+    const fixture = await legacyCubeFixture((phase) => {
+      if (phase === "repository-association.target-authorized") {
+        targetAuthorizationReached = true;
+        throw new Error("target authorization was bypassed");
+      }
+    });
     const readClientId = randomUUID();
     const foreignClientId = randomUUID();
     fixture.runtime.maintenance.createClient({ id: readClientId, name: "Read client" });
@@ -162,6 +168,7 @@ describe("repository cube association", () => {
       .associateRepositoryCube(input)).toThrowError(AccessDeniedError);
     expect(() => fixture.runtime.forPrincipal(clientPrincipal(foreignClientId))
       .associateRepositoryCube(input)).toThrowError(AccessDeniedError);
+    expect(targetAuthorizationReached).toBe(false);
     expect(fixture.runtime.maintenance.observeAuthorityState().repository_associations).toBe(0);
   });
 
@@ -412,9 +419,12 @@ describe("repository cube association", () => {
   });
 });
 
-async function legacyCubeFixture() {
+async function legacyCubeFixture(mutationHook?: (phase: string) => void) {
   const directory = await createDirectory();
-  const runtime = await openStore({ path: join(directory, "borg.db") });
+  const runtime = await openStore({
+    path: join(directory, "borg.db"),
+    ...(mutationHook === undefined ? {} : { mutationHook }),
+  });
   runtimes.push(runtime);
   return { runtime, ...createLegacyCube(runtime) };
 }

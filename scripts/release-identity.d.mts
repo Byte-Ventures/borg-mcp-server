@@ -1,10 +1,12 @@
 export interface ReleaseEvidence {
   readonly workflowRunId: number;
   readonly workflowRunAttempt: number;
-  readonly artifactIntegrity: string;
+  readonly workflowConclusion?: "success" | "failure";
+  readonly artifactIntegrity?: string;
 }
 
 export interface ReleaseRecord {
+  readonly outcome: "published" | "failed-superseded";
   readonly version: string;
   readonly tag: string;
   readonly tag_object: string;
@@ -12,7 +14,10 @@ export interface ReleaseRecord {
   readonly tree: string;
   readonly workflow_run_id: number;
   readonly workflow_run_attempt: number;
-  readonly artifact_integrity: string;
+  readonly workflow_conclusion: "success" | "failure";
+  readonly verify_job_id: number | null;
+  readonly publish_job_id: number | null;
+  readonly artifact_integrity: string | null;
 }
 
 export interface ReleaseAuthorities {
@@ -21,7 +26,13 @@ export interface ReleaseAuthorities {
     runId: number,
     attempt: number,
   ) => Record<string, unknown>;
+  readonly githubRunJobs: (
+    root: string,
+    runId: number,
+    attempt: number,
+  ) => Record<string, unknown>;
   readonly artifactIntegrity: (root: string, version: string) => unknown;
+  readonly publishedVersions: (root: string) => unknown;
 }
 
 export function deriveGitProvenance(root: string, version: string): Readonly<{
@@ -38,7 +49,8 @@ export function createReleaseRecord(
     version: string;
     workflowRunId: number;
     workflowRunAttempt: number;
-    artifactIntegrity: string;
+    workflowConclusion?: "success" | "failure";
+    artifactIntegrity?: string;
   }>,
   authorities?: ReleaseAuthorities,
 ): ReleaseRecord;
@@ -58,6 +70,7 @@ export function prepareRelease(
 ): Promise<Readonly<{
   oldVersion: string;
   newVersion: string;
+  provenanceAnchor: ReleaseRecord;
   record: ReleaseRecord;
   paths: readonly string[];
 }>>;

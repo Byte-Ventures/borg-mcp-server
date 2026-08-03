@@ -13,7 +13,14 @@ const RECORDS_PATH = "docs/release-records.json";
 const PACKAGE_PATH = "package.json";
 const LOCK_PATH = "npm-shrinkwrap.json";
 const VERSION_CONSTANT_PATH = "src/runtime-identity.ts";
+const FAILED_RELEASE_SKIPPED_STEPS = Object.freeze([
+  Object.freeze({ number: 10, name: "Build exact release tarball once" }),
+  Object.freeze({ number: 11, name: "Verify exact release tarball once" }),
+  Object.freeze({ number: 12, name: "Exercise exact tarball once" }),
+  Object.freeze({ number: 13, name: "Upload same-run release artifact" }),
+]);
 const stableVersionPattern = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/u;
+const registryVersionPattern = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/u;
 const shaPattern = /^[0-9a-f]{40}$/u;
 const sriPattern = /^sha512-[A-Za-z0-9+/]{86}==$/u;
 const releaseHeadPattern = /^release\/[A-Za-z0-9._/-]+$/u;
@@ -115,6 +122,7 @@ function decodeAllowlist(raw) {
 function decodeRecords(raw) {
   const parsed = parseJson(raw, RECORDS_PATH);
   if (!Array.isArray(parsed)) fail(`${RECORDS_PATH} must be an array.`);
+  parsed.forEach((record) => decodeRecord(record));
   return parsed;
 }
 
@@ -151,17 +159,58 @@ function decodeRecord(record) {
   if (record === null || typeof record !== "object" || Array.isArray(record)) {
     fail("Release record is not an object.");
   }
-  const decoded = {
-    version: record.version,
-    tag: record.tag,
-    tag_object: record.tag_object,
-    commit: record.commit,
-    tree: record.tree,
-    workflow_run_id: record.workflow_run_id,
-    workflow_run_attempt: record.workflow_run_attempt,
-    artifact_integrity: record.artifact_integrity,
-  };
-  if (typeof decoded.version !== "string" ||
+  const legacyKeys = [
+    "version", "tag", "tag_object", "commit", "tree",
+    "workflow_run_id", "workflow_run_attempt", "artifact_integrity",
+  ];
+  const canonicalKeys = [
+    "outcome", "version", "tag", "tag_object", "commit", "tree",
+    "workflow_run_id", "workflow_run_attempt", "workflow_conclusion",
+    "verify_job_id", "publish_job_id", "artifact_integrity",
+  ];
+  const keys = JSON.stringify(Object.keys(record));
+  const isLegacy = keys === JSON.stringify(legacyKeys);
+  const isCanonical = keys === JSON.stringify(canonicalKeys);
+  const decoded = isLegacy
+    ? {
+        outcome: "published",
+        version: record.version,
+        tag: record.tag,
+        tag_object: record.tag_object,
+        commit: record.commit,
+        tree: record.tree,
+        workflow_run_id: record.workflow_run_id,
+        workflow_run_attempt: record.workflow_run_attempt,
+        workflow_conclusion: "success",
+        verify_job_id: null,
+        publish_job_id: null,
+        artifact_integrity: record.artifact_integrity,
+      }
+    : {
+        outcome: record.outcome,
+        version: record.version,
+        tag: record.tag,
+        tag_object: record.tag_object,
+        commit: record.commit,
+        tree: record.tree,
+        workflow_run_id: record.workflow_run_id,
+        workflow_run_attempt: record.workflow_run_attempt,
+        workflow_conclusion: record.workflow_conclusion,
+        verify_job_id: record.verify_job_id,
+        publish_job_id: record.publish_job_id,
+        artifact_integrity: record.artifact_integrity,
+      };
+  const published = decoded.outcome === "published" &&
+    decoded.workflow_conclusion === "success" &&
+    decoded.verify_job_id === null && decoded.publish_job_id === null &&
+    sriPattern.test(decoded.artifact_integrity);
+  const failedSuperseded = decoded.outcome === "failed-superseded" &&
+    decoded.workflow_conclusion === "failure" &&
+    Number.isSafeInteger(decoded.verify_job_id) && decoded.verify_job_id > 0 &&
+    Number.isSafeInteger(decoded.publish_job_id) && decoded.publish_job_id > 0 &&
+    decoded.artifact_integrity === null;
+  if ((!isLegacy && !isCanonical) || (!published && !failedSuperseded) ||
+      typeof decoded.version !== "string" ||
       !stableVersionPattern.test(decoded.version) ||
       decoded.version.split(".").some((part) => !Number.isSafeInteger(Number(part))) ||
       decoded.tag !== `v${decoded.version}` ||
@@ -170,8 +219,8 @@ function decodeRecord(record) {
       !shaPattern.test(decoded.tree) ||
       !Number.isSafeInteger(decoded.workflow_run_id) || decoded.workflow_run_id <= 0 ||
       !Number.isSafeInteger(decoded.workflow_run_attempt) || decoded.workflow_run_attempt <= 0 ||
-      !sriPattern.test(decoded.artifact_integrity) ||
-      JSON.stringify(Object.keys(record)) !== JSON.stringify(Object.keys(decoded))) {
+      (isCanonical && JSON.stringify(Object.keys(record)) !== JSON.stringify(canonicalKeys)) ||
+      (isLegacy && JSON.stringify(Object.keys(record)) !== JSON.stringify(legacyKeys))) {
     fail("Release record has an invalid or non-canonical shape.");
   }
   return Object.freeze(decoded);
@@ -204,6 +253,13 @@ export const systemAuthorities = Object.freeze({
     ], { cwd: root });
     return parseJson(response, "GitHub Actions run");
   },
+  githubRunJobs(root, runId, attempt) {
+    const response = command("gh", [
+      "api",
+      `repos/${REPOSITORY}/actions/runs/${runId}/attempts/${attempt}/jobs?per_page=100`,
+    ], { cwd: root });
+    return parseJson(response, "GitHub Actions run jobs");
+  },
   artifactIntegrity(root, version) {
     const response = command("npm", [
       "view",
@@ -214,7 +270,68 @@ export const systemAuthorities = Object.freeze({
     ], { cwd: root });
     return parseJson(response, "npm artifact integrity");
   },
+  publishedVersions(root) {
+    const response = command("npm", [
+      "view",
+      PACKAGE_NAME,
+      "versions",
+      "--json",
+      "--registry=https://registry.npmjs.org",
+    ], { cwd: root });
+    return parseJson(response, "npm published versions");
+  },
 });
+
+function decodePublishedVersions(input) {
+  const versions = typeof input === "string" ? [input] : input;
+  if (!Array.isArray(versions) || versions.some((version) =>
+    typeof version !== "string" || !registryVersionPattern.test(version)) ||
+    new Set(versions).size !== versions.length) {
+    fail("npm published-version authority returned an invalid response.");
+  }
+  return versions;
+}
+
+function failedPhaseEvidence(root, record, authorities, requireRecordedIds = true) {
+  const response = authorities.githubRunJobs(
+    root,
+    record.workflow_run_id,
+    record.workflow_run_attempt,
+  );
+  if (response === null || typeof response !== "object" || !Array.isArray(response.jobs)) {
+    fail("Failed-superseded release job authority returned an invalid response.");
+  }
+  const verifyJobs = response.jobs.filter((job) => job?.name === "verify");
+  const publishJobs = response.jobs.filter((job) => job?.name === "publish");
+  if (verifyJobs.length !== 1 || publishJobs.length !== 1) {
+    fail("Failed-superseded release requires exactly one verify and one publish job.");
+  }
+  const [verifyJob] = verifyJobs;
+  const [publishJob] = publishJobs;
+  const commonJobShape = (job) => Number.isSafeInteger(job.id) && job.id > 0 &&
+    job.run_id === record.workflow_run_id &&
+    job.run_attempt === record.workflow_run_attempt &&
+    job.head_sha === record.commit &&
+    job.status === "completed";
+  if (!commonJobShape(verifyJob) ||
+      (requireRecordedIds && verifyJob.id !== record.verify_job_id) ||
+      verifyJob.conclusion !== "failure" || !Array.isArray(verifyJob.steps) ||
+      !commonJobShape(publishJob) ||
+      (requireRecordedIds && publishJob.id !== record.publish_job_id) ||
+      publishJob.conclusion !== "skipped" || !Array.isArray(publishJob.steps) ||
+      publishJob.steps.length !== 0) {
+    fail("Failed-superseded release does not match authoritative pre-publication job evidence.");
+  }
+  for (const expected of FAILED_RELEASE_SKIPPED_STEPS) {
+    const matches = verifyJob.steps.filter((step) =>
+      step?.name === expected.name && step.number === expected.number);
+    if (matches.length !== 1 || matches[0].status !== "completed" ||
+        matches[0].conclusion !== "skipped") {
+      fail(`Failed-superseded release step was not skipped: ${expected.name}`);
+    }
+  }
+  return Object.freeze({ verifyJobId: verifyJob.id, publishJobId: publishJob.id });
+}
 
 export function verifyReleaseProvenance(root, recordInput, authorities = systemAuthorities) {
   const record = decodeRecord(recordInput);
@@ -231,12 +348,16 @@ export function verifyReleaseProvenance(root, recordInput, authorities = systemA
       run.head_branch !== record.tag ||
       run.event !== "push" ||
       run.status !== "completed" ||
-      run.conclusion !== "success" ||
+      run.conclusion !== record.workflow_conclusion ||
       run.path !== WORKFLOW_PATH) {
-    fail("Release record does not match the successful tag workflow authority.");
+    fail("Release record does not match the tag workflow authority.");
   }
-  const integrity = authorities.artifactIntegrity(root, record.version);
-  if (integrity !== record.artifact_integrity) {
+  if (record.outcome === "failed-superseded") {
+    failedPhaseEvidence(root, record, authorities);
+    if (decodePublishedVersions(authorities.publishedVersions(root)).includes(record.version)) {
+      fail("Failed-superseded release version exists in the npm registry.");
+    }
+  } else if (authorities.artifactIntegrity(root, record.version) !== record.artifact_integrity) {
     fail("Release record integrity does not match the npm artifact authority.");
   }
   return record;
@@ -244,11 +365,22 @@ export function verifyReleaseProvenance(root, recordInput, authorities = systemA
 
 export function createReleaseRecord(root, input, authorities = systemAuthorities) {
   const provenance = deriveGitProvenance(root, input.version);
-  return verifyReleaseProvenance(root, {
+  const workflowConclusion = input.workflowConclusion ?? "success";
+  const baseRecord = {
     ...provenance,
     workflow_run_id: input.workflowRunId,
     workflow_run_attempt: input.workflowRunAttempt,
-    artifact_integrity: input.artifactIntegrity,
+    workflow_conclusion: workflowConclusion,
+  };
+  const jobEvidence = workflowConclusion === "failure"
+    ? failedPhaseEvidence(root, baseRecord, authorities, false)
+    : { verifyJobId: null, publishJobId: null };
+  return verifyReleaseProvenance(root, {
+    outcome: workflowConclusion === "failure" ? "failed-superseded" : "published",
+    ...baseRecord,
+    verify_job_id: jobEvidence.verifyJobId,
+    publish_job_id: jobEvidence.publishJobId,
+    artifact_integrity: input.artifactIntegrity ?? null,
   }, authorities);
 }
 
@@ -383,6 +515,25 @@ function readVersion(files) {
   return requireStableVersion(manifest.version, "Package version");
 }
 
+function publishedAnchorForRecord(root, files, version, record, authorities) {
+  if (record.outcome === "published") return { record, anchor: record };
+  const records = decodeRecords(requireFile(files, RECORDS_PATH))
+    .map((candidate) => decodeRecord(candidate))
+    .filter((candidate) => candidate.outcome === "published" &&
+      compareVersions(candidate.version, version) < 0);
+  if (records.length === 0) {
+    fail("Failed-superseded release requires an earlier published provenance anchor.");
+  }
+  const anchor = records.reduce((latest, candidate) =>
+    compareVersions(candidate.version, latest.version) > 0 ? candidate : latest,
+  );
+  const verifiedAnchor = verifyReleaseProvenance(root, anchor, authorities);
+  if (verifiedAnchor.outcome !== "published") {
+    fail("Failed-superseded release provenance anchor must be published.");
+  }
+  return { record, anchor: verifiedAnchor };
+}
+
 export async function prepareRelease(root, targetVersion, evidence, authorities = systemAuthorities) {
   const clean = git(root, ["status", "--porcelain"]);
   if (clean !== "") fail("release:prepare requires a clean working tree.");
@@ -392,12 +543,19 @@ export async function prepareRelease(root, targetVersion, evidence, authorities 
     version: oldVersion,
     workflowRunId: evidence.workflowRunId,
     workflowRunAttempt: evidence.workflowRunAttempt,
+    workflowConclusion: evidence.workflowConclusion,
     artifactIntegrity: evidence.artifactIntegrity,
   }, authorities);
+  const { anchor } = publishedAnchorForRecord(root, baseFiles, oldVersion, record, authorities);
   try {
     git(root, ["merge-base", "--is-ancestor", record.commit, "HEAD"]);
   } catch {
     fail("Released commit is not an ancestor of the preparation base.");
+  }
+  try {
+    git(root, ["merge-base", "--is-ancestor", anchor.commit, "HEAD"]);
+  } catch {
+    fail("Published provenance anchor is not an ancestor of the preparation base.");
   }
   const transformed = buildReleaseTransform(baseFiles, oldVersion, targetVersion, record);
   await Promise.all([...transformed].map(([path, raw]) => writeFile(join(root, path), raw)));
@@ -405,6 +563,7 @@ export async function prepareRelease(root, targetVersion, evidence, authorities 
     oldVersion,
     newVersion: targetVersion,
     record,
+    provenanceAnchor: anchor,
     paths: Object.freeze([...transformed.keys()].sort()),
   });
 }
@@ -459,10 +618,16 @@ export function verifyReleaseIdentity(
     fail(`Candidate has no generated release record for ${oldVersion}.`);
   }
   const verifiedRecord = verifyReleaseProvenance(root, record, authorities);
+  const { anchor } = publishedAnchorForRecord(root, candidateFiles, oldVersion, verifiedRecord, authorities);
   try {
     git(root, ["merge-base", "--is-ancestor", verifiedRecord.commit, base]);
   } catch {
     fail("Recorded release commit is not an ancestor of the release identity base.");
+  }
+  try {
+    git(root, ["merge-base", "--is-ancestor", anchor.commit, base]);
+  } catch {
+    fail("Published provenance anchor is not an ancestor of the release identity base.");
   }
   verifyIndependentShapes(baseFiles, candidateFiles, oldVersion, newVersion, verifiedRecord);
   const transformed = buildReleaseTransform(baseFiles, oldVersion, newVersion, verifiedRecord);
@@ -518,12 +683,13 @@ export function classifyReleasePullRequest(
 function parsePrepareArguments(args, environment) {
   const [version, ...flags] = args;
   if (version === undefined) {
-    fail("Usage: release:prepare <version> --workflow-run-id <id> --workflow-run-attempt <n> --artifact-integrity <sha512-SRI>");
+    fail("Usage: release:prepare <version> --workflow-run-id <id> --workflow-run-attempt <n> [--workflow-conclusion <success|failure>] [--artifact-integrity <sha512-SRI>]");
   }
   const values = new Map();
   const acceptedFlags = new Set([
     "--workflow-run-id",
     "--workflow-run-attempt",
+    "--workflow-conclusion",
     "--artifact-integrity",
   ]);
   for (let index = 0; index < flags.length; index += 2) {
@@ -537,16 +703,32 @@ function parsePrepareArguments(args, environment) {
   const runId = values.get("--workflow-run-id") ?? environment.RELEASE_WORKFLOW_RUN_ID;
   const attempt = values.get("--workflow-run-attempt") ?? environment.RELEASE_WORKFLOW_RUN_ATTEMPT;
   const integrity = values.get("--artifact-integrity") ?? environment.RELEASE_ARTIFACT_INTEGRITY;
+  const workflowConclusion = values.get("--workflow-conclusion") ??
+    environment.RELEASE_WORKFLOW_CONCLUSION ?? "success";
   const workflowRunId = Number(runId);
   const workflowRunAttempt = Number(attempt);
   if (!Number.isSafeInteger(workflowRunId) || workflowRunId <= 0 ||
-      !Number.isSafeInteger(workflowRunAttempt) || workflowRunAttempt <= 0 ||
-      typeof integrity !== "string" || !sriPattern.test(integrity)) {
-    fail("release:prepare requires a positive run id/attempt and canonical SHA-512 SRI.");
+      !Number.isSafeInteger(workflowRunAttempt) || workflowRunAttempt <= 0) {
+    fail("release:prepare requires a positive run id and attempt.");
+  }
+  if (workflowConclusion === "success" &&
+      (typeof integrity !== "string" || !sriPattern.test(integrity))) {
+    fail("A successful superseded release requires a canonical SHA-512 SRI.");
+  }
+  if (workflowConclusion === "failure" && integrity !== undefined) {
+    fail("A failed-superseded release forbids artifact integrity because no artifact was published.");
+  }
+  if (workflowConclusion !== "success" && workflowConclusion !== "failure") {
+    fail("release:prepare workflow conclusion must be success or failure.");
   }
   return {
     version,
-    evidence: { workflowRunId, workflowRunAttempt, artifactIntegrity: integrity },
+    evidence: {
+      workflowRunId,
+      workflowRunAttempt,
+      workflowConclusion,
+      ...(integrity === undefined ? {} : { artifactIntegrity: integrity }),
+    },
   };
 }
 

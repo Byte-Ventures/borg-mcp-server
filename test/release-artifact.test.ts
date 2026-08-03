@@ -46,6 +46,13 @@ describe("packed release artifact", () => {
     ], { cwd: fixture })).resolves.toBeDefined();
   });
 
+  it("ships the trust and provisioning guide in the package", async () => {
+    const fixture = await packageFixture();
+    const tarball = await pack(fixture);
+    const { stdout } = await execute("tar", ["-tf", tarball]);
+    expect(stdout.split("\n")).toContain("package/docs/trust-and-provisioning.md");
+  });
+
   it("binds the published npm compatibility boundary used by runtime staging", async () => {
     const fixture = await packageFixture();
     const manifest = JSON.parse(await readFile(join(fixture, "package.json"), "utf8")) as {
@@ -331,10 +338,11 @@ async function mutateShrinkwrapRoot(
 }
 
 async function packageFixture(overrides: Record<string, unknown> = {}): Promise<string> {
-  const directory = await mkdtemp(join(tmpdir(), "borg-release-fixture-"));
-  directories.push(directory);
-  await execute("mkdir", ["-p", join(directory, "dist")]);
-  await execute("mkdir", ["-p", join(directory, "src")]);
+    const directory = await mkdtemp(join(tmpdir(), "borg-release-fixture-"));
+    directories.push(directory);
+    await execute("mkdir", ["-p", join(directory, "dist")]);
+    await execute("mkdir", ["-p", join(directory, "src")]);
+    await execute("mkdir", ["-p", join(directory, "docs")]);
   const manifest = {
     name: "borgmcp-server",
     version: "1.2.3",
@@ -354,6 +362,7 @@ async function packageFixture(overrides: Record<string, unknown> = {}): Promise<
       "NOTICE",
       "README.md",
       "SECURITY.md",
+      "docs",
       "THIRD_PARTY_NOTICES.md",
       "npm-shrinkwrap.json",
     ],
@@ -368,6 +377,7 @@ async function packageFixture(overrides: Record<string, unknown> = {}): Promise<
     writeFile(join(directory, "NOTICE"), "Fixture copyright notice.\n"),
     writeFile(join(directory, "README.md"), "# Server fixture\n"),
     writeFile(join(directory, "SECURITY.md"), "# Fixture security policy\n"),
+    writeFile(join(directory, "docs", "trust-and-provisioning.md"), "# Trust guide\n"),
     writeFile(join(directory, "THIRD_PARTY_NOTICES.md"), "# Fixture notices\n"),
     writeFile(join(directory, "npm-shrinkwrap.json"), `${JSON.stringify({
       name: "borgmcp-server",

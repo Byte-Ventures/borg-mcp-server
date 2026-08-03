@@ -28,6 +28,7 @@ const ALLOWED_ROOTS = new Set([
   'SECURITY.md',
   'THIRD_PARTY_NOTICES.md',
   'dist',
+  'docs',
   'npm-shrinkwrap.json',
   'package.json',
   'src',
@@ -39,6 +40,7 @@ const EXPECTED_MANIFEST_FILES = [
   'NOTICE',
   'README.md',
   'SECURITY.md',
+  'docs',
   'THIRD_PARTY_NOTICES.md',
   'npm-shrinkwrap.json',
 ];

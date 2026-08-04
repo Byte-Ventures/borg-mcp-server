@@ -842,7 +842,7 @@ describe("HTTPS service", () => {
       ...server.limits,
       maxRequestsPerAddressWindow: 2,
       maxRequestsGlobalWindow: 4,
-    }, () => 0);
+    }, () => 0, "lan");
 
     expect(limiter.consume("address:attacker")).toBeNull();
     expect(limiter.consume("address:attacker")).toBeNull();
@@ -854,7 +854,25 @@ describe("HTTPS service", () => {
     expect(limiter.consume("address:third")).toBe(60);
   });
 
-  it("preserves global admission for fresh source addresses through the HTTPS handler", async () => {
+  it("uses the global bound for loopback admission while retaining the LAN address bound", () => {
+    const limits = {
+      ...server.limits,
+      maxRequestsPerAddressWindow: 2,
+      maxRequestsGlobalWindow: 4,
+    };
+    const loopback = new PreAuthAdmissionLimiter(limits, () => 0, "loopback");
+    expect(Array.from({ length: 4 }, () => loopback.consume("address:loopback")))
+      .toEqual([null, null, null, null]);
+    expect(loopback.consume("address:loopback")).toBe(60);
+
+    const lan = new PreAuthAdmissionLimiter(limits, () => 0, "lan");
+    expect(lan.consume("address:attacker")).toBeNull();
+    expect(lan.consume("address:attacker")).toBeNull();
+    expect(lan.consume("address:attacker")).toBe(60);
+    expect(lan.consume("address:fresh")).toBeNull();
+  });
+
+  it("enforces the shared global pre-authentication bound for loopback bursts through the HTTPS handler", async () => {
     let connection = 0;
     const limited = await startHttpsServer({
       bind: { port: 0 },
@@ -879,7 +897,11 @@ describe("HTTPS service", () => {
         .toBe(204);
       expect((await request(limited.origin, certificate, "/healthz")).status)
         .toBe(204);
-      for (let attempt = 0; attempt < 20; attempt += 1) {
+      expect((await request(limited.origin, certificate, "/healthz")).status)
+        .toBe(204);
+      expect((await request(limited.origin, certificate, "/healthz")).status)
+        .toBe(204);
+      for (let attempt = 0; attempt < 18; attempt += 1) {
         const rejected = await request(
           limited.origin,
           certificate,
@@ -888,10 +910,6 @@ describe("HTTPS service", () => {
         expect(rejected.status).toBe(429);
         expect(rejected.headers["retry-after"]).toBe("60");
       }
-      expect((await request(limited.origin, certificate, "/healthz")).status)
-        .toBe(204);
-      expect((await request(limited.origin, certificate, "/healthz")).status)
-        .toBe(204);
       expect((await request(limited.origin, certificate, "/healthz")).status)
         .toBe(429);
     } finally {
@@ -1014,7 +1032,7 @@ describe("HTTPS service", () => {
     }
   });
 
-  it("aggregates mutation and stream rate limits across sibling drone sessions", async () => {
+  it("isolates mutation and stream rate limits across sibling drone sessions", async () => {
     const clientId = "00000000-0000-4000-8000-000000000230";
     const authorize = async (authorization: string | undefined) => {
       const suffix = authorization === "Bearer drone-a" ? "1" : authorization === "Bearer drone-b" ? "2" : null;
@@ -1050,7 +1068,17 @@ describe("HTTPS service", () => {
         { authorization: "Bearer drone-b" },
         JSON.stringify({ payload: { message: "second" } }),
         "POST",
-      )).status).toBe(429);
+      )).status).toBe(201);
+      const sameSessionRejected = await request(
+        mutationLimited.origin,
+        certificate,
+        logPath,
+        { authorization: "Bearer drone-a" },
+        JSON.stringify({ payload: { message: "third" } }),
+        "POST",
+      );
+      expect(sameSessionRejected.status).toBe(429);
+      expect(sameSessionRejected.headers["retry-after"]).toBe("60");
     } finally {
       await mutationLimited.close();
     }
@@ -1067,14 +1095,68 @@ describe("HTTPS service", () => {
     });
     const streamPath = "/api/cubes/00000000-0000-4000-8000-000000000233/stream";
     const first = await openStream(streamLimited.origin, certificate, streamPath, "Bearer drone-a");
+    const second = await openStream(streamLimited.origin, certificate, streamPath, "Bearer drone-b");
     try {
       expect(first.status).toBe(200);
-      expect((await request(streamLimited.origin, certificate, streamPath, {
+      expect(second.status).toBe(200);
+      const sameSessionRejected = await request(streamLimited.origin, certificate, streamPath, {
         authorization: "Bearer drone-b",
-      })).status).toBe(429);
+      });
+      expect(sameSessionRejected.status).toBe(429);
+      expect(sameSessionRejected.headers["retry-after"]).toBe("60");
     } finally {
       first.close();
+      second.close();
       await streamLimited.close();
+    }
+  });
+
+  it("admits a multi-drone loopback burst within the finite global pre-authentication bound", async () => {
+    const requestCount = DEFAULT_SERVICE_LIMITS.maxRequestsPerWindow;
+    const drones = Array.from({ length: 6 }, (_, index) => ({
+      token: `Bearer burst-drone-${index}`,
+      id: `00000000-0000-4000-8000-00000000025${index}`,
+      droneId: `00000000-0000-4000-8000-00000000026${index}`,
+    }));
+    const clientId = "00000000-0000-4000-8000-000000000250";
+    const burst = await startHttpsServer({
+      bind: { port: 0 },
+      tls: { key, cert: certificate },
+      authorizeCoordination: async (authorization) => {
+        const drone = drones.find((candidate) => candidate.token === authorization);
+        if (drone === undefined) return "invalid";
+        return droneSessionPrincipal({
+          id: drone.id,
+          clientId,
+          cubeId: "00000000-0000-4000-8000-000000000253",
+          droneId: drone.droneId,
+        });
+      },
+      handleCoordination: async () => ({ status: 200, body: {} }),
+      limits: {
+        ...DEFAULT_SERVICE_LIMITS,
+        maxConnections: 10,
+        maxConnectionsPerAddress: 10,
+      },
+    });
+    const agents = drones.map(() => new Agent({ keepAlive: true, maxSockets: 1 }));
+    try {
+      const responses = await Promise.all(drones.flatMap((drone, index) =>
+        Array.from({ length: requestCount }, () => request(
+          burst.origin,
+          certificate,
+          "/api/cubes",
+          { authorization: drone.token },
+          "",
+          "GET",
+          undefined,
+          agents[index]!,
+        ))));
+      expect(responses).toHaveLength(drones.length * requestCount);
+      expect(responses.every((response) => response.status === 200)).toBe(true);
+    } finally {
+      agents.forEach((agent) => agent.destroy());
+      await burst.close();
     }
   });
 
@@ -1325,7 +1407,7 @@ describe("HTTPS service", () => {
       },
       limits: {
         ...server.limits,
-        maxRequestsPerWindow: 2,
+        maxRequestsPerWindow: 1,
       },
     });
     try {

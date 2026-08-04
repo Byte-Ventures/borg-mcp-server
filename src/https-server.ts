@@ -134,6 +134,7 @@ export async function startHttpsServer(options: HttpsServerOptions): Promise<Run
       limits,
       identifyRemoteAddress,
       (socket) => addressConnectionLimiter.isRejected(socket),
+      bind.mode,
     ),
   );
 
@@ -210,8 +211,9 @@ function createRequestListener(
   limits: ServiceLimits,
   identifyRemoteAddress: (socket: Socket) => string = (socket) => socket.remoteAddress ?? "unknown",
   isConnectionRejected: (socket: Socket) => boolean = () => false,
+  bindMode: "loopback" | "lan",
 ): (request: IncomingMessage, response: ServerResponse) => void {
-  const admissionLimiter = new PreAuthAdmissionLimiter(limits);
+  const admissionLimiter = new PreAuthAdmissionLimiter(limits, Date.now, bindMode);
   const credentialRateLimiter = new RequestRateLimiter(limits, limits.maxRequestsPerWindow);
   const streamQuota = new ConcurrentQuota(limits.maxStreamsPerCredential);
   return (request, response) => {
@@ -407,8 +409,8 @@ async function handleRequest(
       sendJson(response, 500, protocolError("INTERNAL_ERROR", "Coordination handling is unavailable."), true);
       return;
     }
-    const clientIdentity = credentialRateLimitIdentity(authentication, request.method, path);
-    const credentialRetry = credentialRateLimiter.consume(clientIdentity);
+    const rateLimitIdentity = credentialRateLimitIdentity(authentication);
+    const credentialRetry = credentialRateLimiter.consume(rateLimitIdentity);
     if (credentialRetry !== null) return sendRateLimited(response, credentialRetry);
     const query = parseCoordinationQuery(request.url, path);
     if (query === INVALID_COORDINATION_QUERY) {
@@ -662,15 +664,11 @@ function isAuthenticatedPath(path: string | null): path is string {
 
 function credentialRateLimitIdentity(
   principal: Principal,
-  method: string | undefined,
-  path: string,
 ): string {
-  const routineRead = (method === "GET" && !path.endsWith("/stream")) ||
-    (method === "PUT" && (path.endsWith("/logs") || path.endsWith("/decisions")));
-  if (principal.kind === "drone-session" && routineRead) {
+  if (principal.kind === "drone-session") {
     return `drone-session:${principal.id}`;
   }
-  return `client:${principal.kind === "drone-session" ? principal.clientId : principal.id}`;
+  return `client:${principal.id}`;
 }
 
 function applyServerLimits(
@@ -1024,9 +1022,19 @@ export class PreAuthAdmissionLimiter {
   readonly #global: RequestRateLimiter;
   readonly #address: RequestRateLimiter;
 
-  constructor(limits: ServiceLimits, clock: () => number = Date.now) {
+  constructor(
+    limits: ServiceLimits,
+    clock: () => number = Date.now,
+    bindMode: "loopback" | "lan" = "lan",
+  ) {
     this.#global = new RequestRateLimiter(limits, limits.maxRequestsGlobalWindow, clock);
-    this.#address = new RequestRateLimiter(limits, limits.maxRequestsPerAddressWindow, clock);
+    // Loopback is the local coordination boundary: its aggregate address
+    // allowance may use the finite global bound, while LAN sources retain the
+    // tighter per-address bound against hostile-source bursts.
+    const addressLimit = bindMode === "loopback"
+      ? limits.maxRequestsGlobalWindow
+      : limits.maxRequestsPerAddressWindow;
+    this.#address = new RequestRateLimiter(limits, addressLimit, clock);
   }
 
   consume(addressIdentity: string): number | null {

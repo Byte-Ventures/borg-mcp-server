@@ -421,13 +421,10 @@ describe("offline operator flow", () => {
     expect(enrolled).not.toBeNull();
     const service = createOfflineCredentialService(dataDirectory);
 
-    const running = await acquireRuntimeLock(dataDirectory);
-    await expect(service.rotateClient(enrolled!.clientId)).rejects.toThrow(
-      "Stop the server before running setup or offline administration.",
-    );
+    const running = await acquireRuntimeLock(dataDirectory, "server");
+    const rotated = await service.rotateClient(enrolled!.clientId);
     await running.release();
 
-    const rotated = await service.rotateClient(enrolled!.clientId);
     expect(await withAuthority(dataDirectory, (authority) =>
       authority.authenticate(`Bearer ${credential}`))).toBeNull();
     expect(await withAuthority(dataDirectory, (authority) =>

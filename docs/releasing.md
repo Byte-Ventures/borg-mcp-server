@@ -238,7 +238,8 @@ reattachment. The protected-main changes after `v0.1.1` are exactly these review
   of this release.
 - PR #25 (`c18ec95`) adds explicit per-run, centrally redacted operator debug logging to local stderr.
 - PR #27 (`570f37c`) permits live-safe local client and pre-claim owner invitation minting while
-  preserving exclusive setup, rotation, revocation, and grant administration.
+  preserving exclusive setup and reinitialization while keeping rotation, revocation,
+  and grant administration operator-only and live-safe.
 - PR #29 (`01d72d9`) adds cube-scoped invitations with exact selector resolution, atomic
   enroll-and-grant, and grant-derived observer/participant posture across attach, recipient, log, and
   stream enforcement.

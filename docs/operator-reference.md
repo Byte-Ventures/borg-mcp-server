@@ -183,7 +183,10 @@ is likewise refused with a working selector for each candidate. An explicit
 name. Existing client UUIDs remain accepted.
 
 Invitations and rotation output are secrets; do not paste them into issues, logs,
-or chat.
+or chat. Client grant, ungrant, revoke, and rotate operations are operator-only
+and may run while the server is live. The running server observes the committed
+SQLite write on the next request; requests already in flight are not retroactively
+changed. A concurrent database write fails closed and can be retried.
 
 ## Capacity controls
 

@@ -58,13 +58,13 @@ describe("packed release artifact", () => {
     const manifest = JSON.parse(await readFile(join(fixture, "package.json"), "utf8")) as {
       engines: unknown;
     };
-    expect(manifest.engines).toEqual({ node: ">=22.12.0", npm: ">=10.0.0" });
+    expect(manifest.engines).toEqual({ node: ">=22.18.0", npm: ">=10.0.0" });
     await expect(verifyPackedArtifact(await pack(fixture))).resolves.toBeDefined();
   });
 
   it("rejects a packed artifact that drifts from the reviewed npm compatibility boundary", async () => {
     const fixture = await packageFixture({
-      engines: { node: ">=22.12.0", npm: ">=10.0.0 <12" },
+      engines: { node: ">=22.18.0", npm: ">=10.0.0 <12" },
     });
     await expect(verifyPackedArtifact(await pack(fixture))).rejects.toThrow(
       "Package engines must match the reviewed Node and npm compatibility boundary.",
@@ -94,7 +94,7 @@ describe("packed release artifact", () => {
 
   it("rejects an npm runtime excluded by the packed artifact engine", async () => {
     const fixture = await packageFixture({
-      engines: { node: ">=22.12.0", npm: ">=999.0.0" },
+      engines: { node: ">=22.18.0", npm: ">=999.0.0" },
     });
     await expect(exercisePackedArtifact(await pack(fixture))).rejects.toMatchObject({
       stderr: expect.stringContaining("EBADENGINE"),
@@ -354,7 +354,7 @@ async function packageFixture(overrides: Record<string, unknown> = {}): Promise<
       url: "git+https://github.com/Byte-Ventures/borg-mcp-server.git",
     },
     publishConfig: { access: "public" },
-    engines: { node: ">=22.12.0", npm: ">=10.0.0" },
+    engines: { node: ">=22.18.0", npm: ">=10.0.0" },
     files: [
       "dist",
       "src",

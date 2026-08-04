@@ -39,12 +39,14 @@ const ids = {
 
 let directory: string;
 let runtime: StoreRuntime;
+let storeNow: Date;
 
 beforeEach(async () => {
   directory = await realpath(await mkdtemp(join(tmpdir(), "borg-server-scope-")));
+  storeNow = new Date("2026-07-14T12:00:00.000Z");
   runtime = await openStore({
     path: join(directory, "borg.db"),
-    clock: () => new Date("2026-07-14T12:00:00.000Z"),
+    clock: () => storeNow,
   });
   runtime.maintenance.createClient({ id: ids.clientA, name: "Client A" });
   runtime.maintenance.createClient({ id: ids.clientB, name: "Client B" });
@@ -1242,5 +1244,40 @@ describe("Principal to ScopedStore isolation", () => {
     const removedById = client.removeDecision(ids.cubeA, { decisionId: byId.id });
     expect(removedById).toMatchObject({ id: byId.id, status: "removed" });
     expect(() => client.removeDecision(ids.cubeA, { decisionId: byId.id })).toThrow(ScopedStoreError);
+  });
+
+  it("derives roster wake state from directed acknowledgements and retries bounded wake pings", () => {
+    const manager = runtime.forPrincipal(clientPrincipal(ids.clientA));
+    const drone = runtime.forPrincipal(droneSessionPrincipal({
+      id: ids.sessionA,
+      clientId: ids.clientA,
+      cubeId: ids.cubeA,
+      droneId: ids.droneA,
+    }));
+    const delivered: ActivityStreamRecord[] = [];
+    const unsubscribe = drone.subscribeActivity(ids.cubeA, (entry) => delivered.push(entry));
+    const entry = manager.appendLog(ids.cubeA, {
+      message: "wake me",
+      visibility: "direct",
+      recipientDroneIds: [ids.droneA],
+    });
+    expect(runtime.forPrincipal(clientPrincipal(ids.clientA)).listDrones(ids.cubeA)[0]!.wake_state)
+      .toBe("pending");
+
+    storeNow = new Date("2026-07-14T12:01:01.000Z");
+    runtime.liveness.scan();
+    runtime.liveness.scan();
+    runtime.liveness.scan();
+    expect(delivered.filter((value) => value.id === entry.id)).toHaveLength(3);
+    expect(runtime.forPrincipal(clientPrincipal(ids.clientA)).listDrones(ids.cubeA)[0]!.wake_state)
+      .toBe("pending");
+    storeNow = new Date("2026-07-14T12:03:01.000Z");
+    expect(runtime.forPrincipal(clientPrincipal(ids.clientA)).listDrones(ids.cubeA)[0]!.wake_state)
+      .toBe("stale");
+
+    drone.acknowledge(ids.cubeA, entry.id, "ack");
+    expect(runtime.forPrincipal(clientPrincipal(ids.clientA)).listDrones(ids.cubeA)[0]!.wake_state)
+      .toBe("awake");
+    unsubscribe();
   });
 });

@@ -1347,6 +1347,9 @@ describe("node server service", () => {
       running = await acquireRuntimeLock(directory, "server");
 
       expect(client).toMatchObject({ purpose: "client", serverCapabilities: [] });
+      expect(await administration.listClients()).toEqual(
+        expect.arrayContaining([expect.objectContaining({ state: "active" })]),
+      );
       const rotatedCredential = await administration.rotateClient(client!.clientId);
       expect(liveAuthority.authenticate(`Bearer ${originalCredential}`)).toBeNull();
       expect(liveAuthority.authenticate(`Bearer ${rotatedCredential}`))

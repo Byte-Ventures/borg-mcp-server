@@ -1622,12 +1622,14 @@ class SqliteScopedStore implements ScopedStore {
     this.#requireCube(cubeId, "read");
     let createdAt: string;
     let anchorId: string | null = null;
-    if (/^[0-9a-f]{8}-[0-9a-f-]{27}$/iu.test(since) || /^[0-9a-f]{8}$/iu.test(since)) {
+    const fullId = /^[0-9a-f]{8}-[0-9a-f-]{27}$/iu.test(since);
+    const shortId = /^[0-9a-f]{8}$/iu.test(since);
+    if (fullId || shortId) {
       const anchors = this.#database.prepare(`
         SELECT id, created_at FROM activity_log
-        WHERE cube_id = ? AND (id = ? OR substr(id, 1, 8) = ?)
+        WHERE cube_id = ? AND ${fullId ? "id = ?" : "substr(id, 1, 8) = ?"}
         LIMIT 2
-      `).all(cubeId, since, since.slice(0, 8).toLowerCase());
+      `).all(cubeId, since);
       if (anchors.length === 0) throw new ScopedStoreError();
       if (anchors.length > 1) throw new ActivityEntryPrefixConflictError();
       const anchor = anchors[0]!;
@@ -1873,13 +1875,14 @@ class SqliteScopedStore implements ScopedStore {
   readLogEntry(cubeId: string, selector: string): EnrichedActivityRecord {
     this.#requireCube(cubeId, "read");
     const broadcastOnly = !this.#allowsDirectedWork(cubeId);
+    const fullId = /^[0-9a-f]{8}-[0-9a-f-]{27}$/iu.test(selector);
     const rows = this.#database.prepare(`
       SELECT l.id
       FROM activity_log AS l
-      WHERE l.cube_id = ? AND (l.id = ? OR substr(l.id, 1, 8) = ?)
+      WHERE l.cube_id = ? AND ${fullId ? "l.id = ?" : "substr(l.id, 1, 8) = ?"}
         AND (${broadcastOnly ? "l.visibility = 'broadcast'" : "1 = 1"})
       LIMIT 2
-    `).all(cubeId, selector, selector);
+    `).all(cubeId, selector);
     if (rows.length === 0) throw new ScopedStoreError();
     if (rows.length > 1) throw new ActivityEntryPrefixConflictError();
     return this.#enrichedEntry(cubeId, requiredText(rows[0]!, "id"));

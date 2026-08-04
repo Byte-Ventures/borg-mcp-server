@@ -185,6 +185,7 @@ variables:
 
 - `BORG_SERVER_MAX_ACTIVITY_ENTRIES_PER_CUBE`
 - `BORG_SERVER_MAX_ACTIVE_DECISION_BYTES_PER_CUBE` (default: 16384 bytes of active decision text)
+- `BORG_SERVER_CONTEXT_GUIDELINE_BYTES` (default: 16384 bytes for directive and playbook review advisories)
 - `BORG_SERVER_MAX_DATABASE_BYTES`
 - `BORG_SERVER_MIN_FREE_DISK_BYTES`
 
@@ -196,5 +197,8 @@ of the configured budget and the current total, so cleanup and same-size
 supersession remain possible even after earlier growth exceeded the budget.
 The 16 KB default keeps the active registry compact enough to load into every
 seat's context while allowing ordinary collections of substantive rulings.
+The context guideline is advisory only: successful directive and role-playbook
+updates report their resulting UTF-8 byte size, with pointed compaction guidance
+at or above the configured value. It never rejects or changes a write.
 Cube creation is additionally bounded to 100 cubes per creating client and
 1,000 cubes per server. Exact idempotent retries do not consume quota twice.

@@ -814,16 +814,35 @@ describe("coordination stream setup", () => {
       body: {
         protocol_version: "7",
         request_id: "cube-context-update",
-        payload: { cube_directive: "migrated directive", message_taxonomy: taxonomy },
+         payload: { cube_directive: "é".repeat(4), message_taxonomy: taxonomy },
       },
       signal: new AbortController().signal,
     });
     expect(updated).toMatchObject({
       status: 200,
       body: { request_id: "cube-context-update", payload: { cube: {
-        cube_directive: "migrated directive",
-        message_taxonomy: taxonomy,
-      } } },
+         cube_directive: "éééé",
+         message_taxonomy: taxonomy,
+      }, advisory: "Directive updated (8 bytes). Review it for relevance and compactness." } },
+    });
+    const largeDirective = await api.handle({
+      method: "PATCH",
+      path: `/api/cubes/${cubeId}`,
+      principal: manager,
+      body: {
+        protocol_version: "7",
+        request_id: "cube-context-large",
+         payload: { cube_directive: "é".repeat(8_192) },
+      },
+      signal: new AbortController().signal,
+    });
+    expect(largeDirective).toMatchObject({
+      status: 200,
+      body: {
+        payload: {
+          advisory: expect.stringContaining("Directive is 16384 bytes, at or above the 16384 byte guideline"),
+        },
+      },
     });
     const denied = await api.handle({
       method: "PATCH",
@@ -1031,6 +1050,26 @@ describe("coordination stream setup", () => {
         is_mandatory: false,
       } } },
     });
+    expect(updated.body).not.toHaveProperty("payload.advisory");
+    const detailedUpdated = await api.handle({
+      method: "PATCH",
+      path: `/api/cubes/${cubeId}/roles/${createdRoleId}`,
+      principal: manager,
+      body: {
+        protocol_version: "7",
+        request_id: "role-detailed-update",
+        payload: { detailed_description: "é".repeat(4) },
+      },
+      signal: new AbortController().signal,
+    });
+    expect(detailedUpdated).toMatchObject({
+      status: 200,
+      body: {
+        payload: {
+          advisory: "Playbook updated (8 bytes). Review it for relevance and compactness.",
+        },
+      },
+    });
     const patched = await api.handle({
       method: "POST",
       path: `/api/cubes/${cubeId}/roles/${createdRoleId}/section-patch`,
@@ -1068,7 +1107,26 @@ describe("coordination stream setup", () => {
       body: { payload: { role: {
         id: createdRoleId,
         detailed_description: expect.stringContaining("Release workflow:\nReview exact SHA.\n"),
-      } } },
+      }, advisory: "Playbook updated (45 bytes). Review it for relevance and compactness." } },
+    });
+    const replaced = await api.handle({
+      method: "POST",
+      path: `/api/cubes/${cubeId}/roles/${createdRoleId}/section-patch`,
+      principal: manager,
+      body: {
+        protocol_version: "7",
+        request_id: "role-section-replace",
+        payload: { action: "replace", heading: "Release workflow", body: "é".repeat(8_192) },
+      },
+      signal: new AbortController().signal,
+    });
+    expect(replaced).toMatchObject({
+      status: 200,
+      body: {
+        payload: {
+          advisory: expect.stringContaining("Playbook is 16412 bytes, at or above the 16384 byte guideline"),
+        },
+      },
     });
     const afterInsert = runtime.forPrincipal(manager).listRoles(cubeId)
       .find((role) => role.id === createdRoleId)!.detailed_description;
@@ -1110,6 +1168,25 @@ describe("coordination stream setup", () => {
       expect(runtime.forPrincipal(manager).listRoles(cubeId)
         .find((role) => role.id === createdRoleId)!.detailed_description).toBe(afterInsert);
     }
+    const deleted = await api.handle({
+      method: "POST",
+      path: `/api/cubes/${cubeId}/roles/${createdRoleId}/section-patch`,
+      principal: manager,
+      body: {
+        protocol_version: "7",
+        request_id: "role-section-delete",
+        payload: { action: "delete", heading: "Release workflow" },
+      },
+      signal: new AbortController().signal,
+    });
+    expect(deleted).toMatchObject({
+      status: 200,
+      body: {
+        payload: {
+          advisory: "Playbook updated (9 bytes). Review it for relevance and compactness.",
+        },
+      },
+    });
     const invalidHeading = await api.handle({
       method: "POST",
       path: `/api/cubes/${cubeId}/roles/${createdRoleId}/section-patch`,
@@ -1129,7 +1206,7 @@ describe("coordination stream setup", () => {
       },
     });
     expect(runtime.forPrincipal(manager).listRoles(cubeId)
-      .find((role) => role.id === createdRoleId)!.detailed_description).toBe(afterInsert);
+      .find((role) => role.id === createdRoleId)!.detailed_description).toBe("éééé\n");
 
     for (const [principal, status, code] of [
       [clientPrincipal(readerId), 403, "ACCESS_DENIED"],

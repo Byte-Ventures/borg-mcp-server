@@ -194,6 +194,7 @@ export const DEFAULT_CUBE_LIMITS: CubeLimits = Object.freeze({
 export interface StorageLimits {
   readonly maxActivityEntriesPerCube: number;
   readonly maxActiveDecisionBytesPerCube?: number;
+  readonly contextGuidelineBytes?: number;
   readonly maxDatabaseBytes: number;
   readonly minFreeDiskBytes: number;
 }
@@ -206,6 +207,7 @@ export interface StorageCapacity {
 export const DEFAULT_STORAGE_LIMITS: StorageLimits = Object.freeze({
   maxActivityEntriesPerCube: 10_000,
   maxActiveDecisionBytesPerCube: 16_384,
+  contextGuidelineBytes: 16_384,
   maxDatabaseBytes: 1_073_741_824,
   minFreeDiskBytes: 67_108_864,
 });

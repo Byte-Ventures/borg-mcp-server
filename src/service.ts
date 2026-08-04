@@ -210,6 +210,7 @@ export interface ServerEnvironment {
   readonly BORG_SERVER_BIND_HOST?: string;
   readonly BORG_SERVER_MAX_ACTIVITY_ENTRIES_PER_CUBE?: string;
   readonly BORG_SERVER_MAX_ACTIVE_DECISION_BYTES_PER_CUBE?: string;
+  readonly BORG_SERVER_CONTEXT_GUIDELINE_BYTES?: string;
   readonly BORG_SERVER_MAX_DATABASE_BYTES?: string;
   readonly BORG_SERVER_MIN_FREE_DISK_BYTES?: string;
   readonly BORG_SERVER_SOURCE_SHA?: string;
@@ -408,7 +409,13 @@ export function createNodeServerService(dependencies: ServiceDependencies): Serv
             undefined,
             debugLogger,
           );
-          coordinationApi = new CoordinationApi(authRuntime, authority, debugLogger);
+          coordinationApi = new CoordinationApi(
+            authRuntime,
+            authority,
+            debugLogger,
+            undefined,
+            storageLimits.contextGuidelineBytes,
+          );
         }
         await dependencies.onStartupPhase?.("pre-listen");
         throwIfShutdown(shutdown?.signal);
@@ -544,6 +551,7 @@ export function selectServerEnvironment(environment: NodeJS.ProcessEnv): ServerE
   const bindHost = environment["BORG_SERVER_BIND_HOST"];
   const maxActivityEntries = environment["BORG_SERVER_MAX_ACTIVITY_ENTRIES_PER_CUBE"];
   const maxActiveDecisionBytes = environment["BORG_SERVER_MAX_ACTIVE_DECISION_BYTES_PER_CUBE"];
+  const contextGuidelineBytes = environment["BORG_SERVER_CONTEXT_GUIDELINE_BYTES"];
   const maxDatabaseBytes = environment["BORG_SERVER_MAX_DATABASE_BYTES"];
   const minFreeDiskBytes = environment["BORG_SERVER_MIN_FREE_DISK_BYTES"];
   const sourceSha = environment["BORG_SERVER_SOURCE_SHA"];
@@ -567,6 +575,9 @@ export function selectServerEnvironment(environment: NodeJS.ProcessEnv): ServerE
     ...(maxActiveDecisionBytes === undefined
       ? {}
       : { BORG_SERVER_MAX_ACTIVE_DECISION_BYTES_PER_CUBE: maxActiveDecisionBytes }),
+    ...(contextGuidelineBytes === undefined
+      ? {}
+      : { BORG_SERVER_CONTEXT_GUIDELINE_BYTES: contextGuidelineBytes }),
     ...(maxDatabaseBytes === undefined ? {} : { BORG_SERVER_MAX_DATABASE_BYTES: maxDatabaseBytes }),
     ...(minFreeDiskBytes === undefined ? {} : { BORG_SERVER_MIN_FREE_DISK_BYTES: minFreeDiskBytes }),
     ...(sourceSha === undefined ? {} : { BORG_SERVER_SOURCE_SHA: sourceSha }),
@@ -587,6 +598,11 @@ export function resolveStorageLimits(environment: ServerEnvironment): StorageLim
       environment.BORG_SERVER_MAX_ACTIVE_DECISION_BYTES_PER_CUBE,
       DEFAULT_STORAGE_LIMITS.maxActiveDecisionBytesPerCube!,
       "BORG_SERVER_MAX_ACTIVE_DECISION_BYTES_PER_CUBE",
+    ),
+    contextGuidelineBytes: positiveEnvironmentInteger(
+      environment.BORG_SERVER_CONTEXT_GUIDELINE_BYTES,
+      DEFAULT_STORAGE_LIMITS.contextGuidelineBytes!,
+      "BORG_SERVER_CONTEXT_GUIDELINE_BYTES",
     ),
     maxDatabaseBytes: positiveEnvironmentInteger(
       environment.BORG_SERVER_MAX_DATABASE_BYTES,
@@ -613,6 +629,7 @@ function positiveEnvironmentInteger(value: string | undefined, fallback: number,
 function storageOperatorErrorCode(name: string): OperatorErrorCode {
   if (name === "BORG_SERVER_MAX_ACTIVITY_ENTRIES_PER_CUBE") return "ACTIVITY_LIMIT_INVALID";
   if (name === "BORG_SERVER_MAX_ACTIVE_DECISION_BYTES_PER_CUBE") return "DECISION_BUDGET_INVALID";
+  if (name === "BORG_SERVER_CONTEXT_GUIDELINE_BYTES") return "CONTEXT_GUIDELINE_INVALID";
   if (name === "BORG_SERVER_MAX_DATABASE_BYTES") return "DATABASE_LIMIT_INVALID";
   if (name === "BORG_SERVER_MIN_FREE_DISK_BYTES") return "DISK_RESERVE_INVALID";
   throw new Error("Unknown storage environment setting.");

@@ -48,6 +48,7 @@ import {
   type LogCursor,
   type RepositoryCubeRecord,
   type StoreRuntime,
+  DEFAULT_STORAGE_LIMITS,
 } from "./store.js";
 
 export interface CoordinationRequest {
@@ -82,6 +83,7 @@ export class CoordinationApi {
   readonly #authority: CredentialAuthority;
   readonly #debugLogger: DebugLogger;
   readonly #streamHeartbeatMs: number;
+  readonly #contextGuidelineBytes: number;
   #replayBarrier: ReplayBarrier | undefined;
 
   constructor(
@@ -89,11 +91,13 @@ export class CoordinationApi {
     authority: CredentialAuthority,
     debugLogger: DebugLogger = disabledDebugLogger,
     streamHeartbeatMs = 5_000,
+    contextGuidelineBytes = DEFAULT_STORAGE_LIMITS.contextGuidelineBytes!,
   ) {
     this.#runtime = runtime;
     this.#authority = authority;
     this.#debugLogger = debugLogger;
     this.#streamHeartbeatMs = streamHeartbeatMs;
+    this.#contextGuidelineBytes = contextGuidelineBytes;
   }
 
   armReplayTransition(): { readonly reached: Promise<void>; readonly release: () => void } {
@@ -316,7 +320,12 @@ export class CoordinationApi {
           ...(directive === undefined ? {} : { directive }),
           ...(messageTaxonomy === undefined ? {} : { messageTaxonomy }),
         });
-        return success(200, envelope.requestId, { cube: cubePayload(cube) });
+        return success(200, envelope.requestId, {
+          cube: cubePayload(cube),
+          ...(directive === undefined
+            ? {}
+            : { advisory: contextAdvisory("Directive", cube.directive, this.#contextGuidelineBytes) }),
+        });
       }
       if (resource === undefined && request.method === "DELETE") {
         const envelope = decodeDeleteCubeRequestEnvelope(request.body);
@@ -412,7 +421,12 @@ export class CoordinationApi {
           ...(receivesAllDirect === undefined ? {} : { receivesAllDirect }),
           ...(roleClass === undefined ? {} : { roleClass }),
         });
-        return success(200, envelope.requestId, { role });
+        return success(200, envelope.requestId, {
+          role,
+          ...(detailedDescription === undefined
+            ? {}
+            : { advisory: contextAdvisory("Playbook", role.detailed_description, this.#contextGuidelineBytes) }),
+        });
       }
       if (resource === "role" && sectionPatch && request.method === "POST") {
         const envelope = decodeEnvelope(request.body);
@@ -423,7 +437,10 @@ export class CoordinationApi {
             action,
             heading: requiredSectionHeading(envelope.payload, "heading"),
           });
-          return success(200, envelope.requestId, { role });
+          return success(200, envelope.requestId, {
+            role,
+            advisory: contextAdvisory("Playbook", role.detailed_description, this.#contextGuidelineBytes),
+          });
         }
         if (action !== "replace" && action !== "insert") throw new InputError();
         exactKeys(envelope.payload, ["action", "heading", "body"], action === "insert" ? ["after"] : []);
@@ -431,18 +448,22 @@ export class CoordinationApi {
         if (body === undefined) throw new InputError();
         const heading = requiredSectionHeading(envelope.payload, "heading");
         if (action === "replace") {
+          const role = store.patchRoleSection(cubeId, roleId!, { action, heading, body });
           return success(200, envelope.requestId, {
-            role: store.patchRoleSection(cubeId, roleId!, { action, heading, body }),
+            role,
+            advisory: contextAdvisory("Playbook", role.detailed_description, this.#contextGuidelineBytes),
           });
         }
         const after = optionalNullableSectionHeading(envelope.payload["after"]);
+        const role = store.patchRoleSection(cubeId, roleId!, {
+          action,
+          heading,
+          body,
+          ...(after === undefined ? {} : { after }),
+        });
         return success(200, envelope.requestId, {
-          role: store.patchRoleSection(cubeId, roleId!, {
-            action,
-            heading,
-            body,
-            ...(after === undefined ? {} : { after }),
-          }),
+          role,
+          advisory: contextAdvisory("Playbook", role.detailed_description, this.#contextGuidelineBytes),
         });
       }
       if (resource === "drones" && request.method === "GET") {
@@ -994,6 +1015,18 @@ function safeRequestId(value: unknown): string | undefined {
 
 function success(status: number, requestId: string, payload: unknown): CoordinationResponse {
   return { status, body: createProtocolEnvelope(requestId, payload) };
+}
+
+function contextAdvisory(
+  document: "Directive" | "Playbook",
+  value: string,
+  guidelineBytes: number,
+): string {
+  const bytes = Buffer.byteLength(value, "utf8");
+  if (bytes >= guidelineBytes) {
+    return `${document} is ${bytes} bytes, at or above the ${guidelineBytes} byte guideline - review for stale sections and compactness: relocate or delete what no longer earns its place in every drone's context.`;
+  }
+  return `${document} updated (${bytes} bytes). Review it for relevance and compactness.`;
 }
 
 function failure(

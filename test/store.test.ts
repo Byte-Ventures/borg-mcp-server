@@ -1132,15 +1132,26 @@ describe("Principal to ScopedStore isolation", () => {
     });
     const client = runtime.forPrincipal(clientPrincipal(ids.clientA));
     const first = client.recordDecision(ids.cubeA, { topic: "a", decision: "12345678" });
-    expect(() => client.recordDecision(ids.cubeA, { topic: "b", decision: "x" }))
-      .toThrowError(expect.objectContaining({
-        name: "StorageCapacityError",
-        code: "CAPACITY_EXCEEDED",
-        message: expect.stringContaining("10 bytes maximum, 9 bytes currently active"),
-      }));
-    expect(() => client.recordDecision(ids.cubeA, { topic: "b", decision: "x" }))
-      .toThrow(/remove outdated entries with borg_remove-decision/);
-    expect(client.listDecisions(ids.cubeA)).toEqual([first]);
+    const database = new DatabaseSync(path, { enableForeignKeyConstraints: true });
+    const snapshot = () => database.prepare(`
+      SELECT id, cube_id, topic, decision, rationale, ratified_by, status, supersedes, created_at
+      FROM decisions ORDER BY id
+    `).all();
+    try {
+      const before = snapshot();
+      expect(() => client.recordDecision(ids.cubeA, { topic: "b", decision: "x" }))
+        .toThrowError(expect.objectContaining({
+          name: "StorageCapacityError",
+          code: "CAPACITY_EXCEEDED",
+          message: expect.stringContaining("10 bytes maximum, 9 bytes currently active"),
+        }));
+      expect(() => client.recordDecision(ids.cubeA, { topic: "b", decision: "x" }))
+        .toThrow(/remove outdated entries with borg_remove-decision/);
+      expect(snapshot()).toEqual(before);
+      expect(client.listDecisions(ids.cubeA)).toEqual([first]);
+    } finally {
+      database.close();
+    }
   });
 
   it("allows same-topic replacement at and over the decision budget", async () => {
@@ -1160,6 +1171,10 @@ describe("Principal to ScopedStore isolation", () => {
     const atBudget = client.recordDecision(ids.cubeA, { topic: "a", decision: "123456789" });
     const equal = client.recordDecision(ids.cubeA, { topic: "a", decision: "123456789" });
     expect(equal.supersedes).toBe(atBudget.id);
+    const smaller = client.recordDecision(ids.cubeA, { topic: "a", decision: "x" });
+    const secondTopic = client.recordDecision(ids.cubeA, { topic: "b", decision: "1234567" });
+    expect(smaller.supersedes).toBe(equal.id);
+    expect(secondTopic.supersedes).toBeNull();
 
     runtime.close();
     runtime = await openStore({
@@ -1173,9 +1188,29 @@ describe("Principal to ScopedStore isolation", () => {
       capacityProbe: () => ({ databaseBytes: 0, freeDiskBytes: 1_000_000 }),
     });
     const overBudgetClient = runtime.forPrincipal(clientPrincipal(ids.clientA));
-    const smaller = overBudgetClient.recordDecision(ids.cubeA, { topic: "a", decision: "x" });
-    expect(smaller.supersedes).toBe(equal.id);
-    expect(overBudgetClient.listDecisions(ids.cubeA)).toEqual([smaller]);
+    const database = new DatabaseSync(path, { enableForeignKeyConstraints: true });
+    const before = database.prepare(`
+      SELECT id, cube_id, topic, decision, rationale, ratified_by, status, supersedes, created_at
+      FROM decisions ORDER BY id
+    `).all();
+    try {
+      expect(() => overBudgetClient.recordDecision(ids.cubeA, {
+        topic: "a",
+        decision: "1234567890",
+      })).toThrowError(expect.objectContaining({
+        name: "StorageCapacityError",
+        code: "CAPACITY_EXCEEDED",
+      }));
+      expect(database.prepare(`
+        SELECT id, cube_id, topic, decision, rationale, ratified_by, status, supersedes, created_at
+        FROM decisions ORDER BY id
+      `).all()).toEqual(before);
+      const replacement = overBudgetClient.recordDecision(ids.cubeA, { topic: "a", decision: "x" });
+      expect(replacement.supersedes).toBe(smaller.id);
+      expect(overBudgetClient.listDecisions(ids.cubeA)).toEqual([replacement, secondTopic]);
+    } finally {
+      database.close();
+    }
   });
 
   it("removes active decisions without deleting their audit records", () => {

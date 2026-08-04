@@ -194,5 +194,7 @@ decision, and rationale. A new topic cannot exceed the budget. Replacing an
 existing topic is allowed when the resulting total stays at or below the larger
 of the configured budget and the current total, so cleanup and same-size
 supersession remain possible even after earlier growth exceeded the budget.
+The 16 KB default keeps the active registry compact enough to load into every
+seat's context while allowing ordinary collections of substantive rulings.
 Cube creation is additionally bounded to 100 cubes per creating client and
 1,000 cubes per server. Exact idempotent retries do not consume quota twice.

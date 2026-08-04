@@ -80,8 +80,8 @@ v1 scope.
   duplicate names, stale handle prefixes, and cross-namespace name/handle/UUID collisions fail
   closed with a working selector for every candidate; an explicit `id:<client-uuid>` selector
   disambiguates a handle shadowed by a name. A uniquely resolved revoked client is reported as
-  revoked rather than absent. Stop the server first, run
-  `borg-mcp-server client-rotate <client-id>` or `borg-mcp-server client-revoke <client-name-or-handle>`, securely
+  revoked rather than absent. Run `borg-mcp-server client-rotate <client-id>` or
+  `borg-mcp-server client-revoke <client-name-or-handle>` while the server is live; securely
   deliver any one-time rotated credential. Live operations commit through the same SQLite store
   while the service runs; request-time authorization observes the commit on the next request, with
   no polling window. Requests already in flight retain their established state. A concurrent write

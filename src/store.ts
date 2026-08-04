@@ -86,6 +86,7 @@ export interface EnrichedActivityRecord {
   readonly drone_label: string | null;
   readonly role_name: string | null;
   readonly recipient_drone_ids: string[];
+  readonly wake_nonce?: string;
 }
 
 export type ActivityNotificationRecord = EnrichedActivityRecord & (
@@ -163,6 +164,7 @@ export interface DroneRecord {
   readonly created_at: string;
   readonly last_log_post_at?: string | null;
   readonly seen_since?: boolean;
+  readonly wake_state: "idle" | "pending" | "awake" | "stale";
 }
 
 export interface StoreDiagnostics {
@@ -876,7 +878,7 @@ export async function openStore(options: OpenStoreOptions): Promise<StoreRuntime
   );
   const activityHub = new ActivityHub();
   const maintenance = new SqliteMaintenanceStore(database, clock, activityHub);
-  const liveness = new IdleLivenessStore();
+  const liveness = new SqliteLivenessStore(database, clock, activityHub);
   const dashboard = createDashboardSnapshotSource(database, clock, activityHub);
   const credentials = new SqliteCredentialStore(database, clock, capacityGuard, options.mutationHook);
   return Object.freeze({
@@ -1606,8 +1608,8 @@ class SqliteScopedStore implements ScopedStore {
              drone.hostname, drone.agent_kind, drone.reported_model,
              drone.working_repo_name, drone.working_repo_origin,
              drone.runtime_metadata_reported, drone.created_at,
-             CASE WHEN client.revoked_at IS NULL AND grant_row.access IN ('write', 'manage')
-               THEN 'participant' ELSE 'observer' END AS posture
+              CASE WHEN client.revoked_at IS NULL AND grant_row.access IN ('write', 'manage')
+                THEN 'participant' ELSE 'observer' END AS posture
       FROM drones AS drone
       LEFT JOIN clients AS client ON client.id = drone.client_id
       LEFT JOIN client_cube_grants AS grant_row
@@ -1615,7 +1617,10 @@ class SqliteScopedStore implements ScopedStore {
       WHERE drone.cube_id = ? AND drone.evicted_at IS NULL
       ORDER BY drone.label, drone.id
     `).all(cubeId);
-    return rows.map(droneRecord);
+    return rows.map((row) => ({
+      ...droneRecord(row),
+      wake_state: droneWakeState(this.#database, requiredText(row, "id"), this.#clock()),
+    }));
   }
 
   listDronesSince(cubeId: string, since: string): { drones: DroneRecord[]; since: string } {
@@ -1669,6 +1674,7 @@ class SqliteScopedStore implements ScopedStore {
         ...droneRecord(row),
         last_log_post_at: nullableText(row, "last_log_post_at"),
         seen_since: requiredInteger(row, "seen_since") === 1,
+        wake_state: droneWakeState(this.#database, requiredText(row, "id"), this.#clock()),
       })),
     };
   }
@@ -2320,7 +2326,7 @@ class SqliteScopedStore implements ScopedStore {
         return;
       }
       if (entry.visibility === "broadcast" || this.#allowsDirectedWork(cubeId)) listener(entry);
-    }, onCubeDeleted);
+    }, onCubeDeleted, this.#principal.kind === "drone-session" ? this.#principal.droneId : undefined);
   }
 
   #claimAudience(cubeId: string, entryId: string, visibility: string): string[] {
@@ -2619,7 +2625,16 @@ class SqliteMaintenanceStore implements MaintenanceStore {
   }
 
   listClients(): ClientAdministrationRecord[] {
-    return listClientAdministrationRecords(this.#database);
+    this.#database.exec("PRAGMA busy_timeout = 0");
+    this.#database.exec("BEGIN IMMEDIATE");
+    try {
+      const clients = listClientAdministrationRecords(this.#database);
+      this.#database.exec("ROLLBACK");
+      return clients;
+    } catch (error) {
+      try { this.#database.exec("ROLLBACK"); } catch { /* Preserve the query error. */ }
+      throw error;
+    }
   }
 
   createClient(input: { readonly id: string; readonly name: string }): void {
@@ -3143,6 +3158,7 @@ class SqliteMaintenanceStore implements MaintenanceStore {
 
 class ActivityHub {
   readonly #listeners = new Map<string, Set<(entry: ActivityStreamRecord) => void>>();
+  readonly #wakeListeners = new Map<string, Map<string, number>>();
   readonly #cubeDeletionListeners = new Map<string, Set<() => void>>();
   readonly #allListeners = new Set<() => void>();
 
@@ -3150,6 +3166,7 @@ class ActivityHub {
     cubeId: string,
     listener: (entry: ActivityStreamRecord) => void,
     onCubeDeleted: () => void,
+    droneId?: string,
   ): () => void {
     const listeners = this.#listeners.get(cubeId) ?? new Set();
     listeners.add(listener);
@@ -3157,11 +3174,23 @@ class ActivityHub {
     const deletionListeners = this.#cubeDeletionListeners.get(cubeId) ?? new Set();
     deletionListeners.add(onCubeDeleted);
     this.#cubeDeletionListeners.set(cubeId, deletionListeners);
+    if (droneId !== undefined) {
+      const wakeListeners = this.#wakeListeners.get(cubeId) ?? new Map<string, number>();
+      wakeListeners.set(droneId, (wakeListeners.get(droneId) ?? 0) + 1);
+      this.#wakeListeners.set(cubeId, wakeListeners);
+    }
     return () => {
       listeners.delete(listener);
       if (listeners.size === 0) this.#listeners.delete(cubeId);
       deletionListeners.delete(onCubeDeleted);
       if (deletionListeners.size === 0) this.#cubeDeletionListeners.delete(cubeId);
+      if (droneId !== undefined) {
+        const wakeListeners = this.#wakeListeners.get(cubeId);
+        const count = wakeListeners?.get(droneId) ?? 0;
+        if (count <= 1) wakeListeners?.delete(droneId);
+        else wakeListeners?.set(droneId, count - 1);
+        if (wakeListeners?.size === 0) this.#wakeListeners.delete(cubeId);
+      }
     };
   }
 
@@ -3205,13 +3234,76 @@ class ActivityHub {
     this.#allListeners.add(listener);
     return () => this.#allListeners.delete(listener);
   }
+
+  hasListener(cubeId: string, droneId: string): boolean {
+    return (this.#wakeListeners.get(cubeId)?.get(droneId) ?? 0) > 0;
+  }
 }
 
-class IdleLivenessStore implements LivenessStore {
+const WAKE_RETRY_INTERVAL_MS = 60_000;
+const WAKE_MAX_ATTEMPTS = 2;
+const WAKE_STALE_AFTER_MS = WAKE_RETRY_INTERVAL_MS * (WAKE_MAX_ATTEMPTS + 1);
+
+class SqliteLivenessStore implements LivenessStore {
+  readonly #database: DatabaseSync;
+  readonly #clock: () => Date;
+  readonly #activityHub: ActivityHub;
+  constructor(database: DatabaseSync, clock: () => Date, activityHub: ActivityHub) {
+    this.#database = database;
+    this.#clock = clock;
+    this.#activityHub = activityHub;
+  }
+
   scan(): ActivityNotificationRecord[] {
-    // Silence is not a delivery failure. Keep the scheduler's lifecycle seam without
-    // creating a directed event that crosses the client/model wake boundary.
+    const now = this.#clock();
+    const threshold = new Date(now.getTime() - WAKE_RETRY_INTERVAL_MS).toISOString();
+    const rows = this.#database.prepare(`
+      SELECT entry.id, entry.cube_id, recipient.drone_id, entry.created_at,
+             COALESCE(attempt.attempt_count, 0) AS attempt_count,
+             attempt.last_ping_at
+      FROM activity_log AS entry
+      JOIN activity_log_recipients AS recipient ON recipient.entry_id = entry.id
+      LEFT JOIN activity_acks AS ack
+        ON ack.entry_id = entry.id AND ack.claimant_drone_id = recipient.drone_id AND ack.kind = 'ack'
+      LEFT JOIN activity_wake_attempts AS attempt
+        ON attempt.entry_id = entry.id AND attempt.drone_id = recipient.drone_id
+      WHERE entry.visibility = 'direct' AND ack.entry_id IS NULL AND entry.created_at <= ?
+        AND COALESCE(attempt.attempt_count, 0) < ?
+        AND (attempt.last_ping_at IS NULL OR attempt.last_ping_at <= ?)
+      ORDER BY entry.created_at, entry.id, recipient.drone_id
+    `).all(threshold, WAKE_MAX_ATTEMPTS, threshold);
+    for (const row of rows) {
+      const cubeId = requiredText(row, "cube_id");
+      const entryId = requiredText(row, "id");
+      const droneId = requiredText(row, "drone_id");
+      if (!this.#activityHub.hasListener(cubeId, droneId)) continue;
+      const wakeNonce = randomUUID();
+      this.#database.prepare(`
+        INSERT INTO activity_wake_attempts (entry_id, drone_id, attempt_count, last_ping_at)
+        VALUES (?, ?, 1, ?)
+        ON CONFLICT (entry_id, drone_id) DO UPDATE SET
+          attempt_count = activity_wake_attempts.attempt_count + 1,
+          last_ping_at = excluded.last_ping_at
+      `).run(entryId, droneId, this.#clock().toISOString());
+      this.#activityHub.publish(cubeId, this.#enrichedEntry(cubeId, entryId, wakeNonce));
+    }
     return [];
+  }
+
+  #enrichedEntry(cubeId: string, entryId: string, wakeNonce?: string): EnrichedActivityRecord {
+    const row = this.#database.prepare(`
+      SELECT l.id, l.cube_id, l.drone_id, l.message, l.visibility, l.created_at,
+             d.label AS drone_label, r.name AS role_name
+      FROM activity_log AS l
+      LEFT JOIN drones AS d ON d.id = l.drone_id AND d.cube_id = l.cube_id
+      LEFT JOIN roles AS r ON r.id = d.role_id AND r.cube_id = d.cube_id
+      WHERE l.cube_id = ? AND l.id = ?
+    `).get(cubeId, entryId);
+    if (row === undefined) throw new ScopedStoreError();
+    const recipients = this.#database.prepare(
+      "SELECT drone_id FROM activity_log_recipients WHERE entry_id = ? ORDER BY drone_id",
+    ).all(entryId).map((recipient) => requiredText(recipient, "drone_id"));
+    return enrichedActivityRecord(row, recipients, wakeNonce);
   }
 }
 
@@ -3822,6 +3914,7 @@ function activityRow(row: Record<string, unknown>): ActivityRow {
 function enrichedActivityRecord(
   row: Record<string, unknown>,
   recipientDroneIds: string[],
+  wakeNonce?: string,
 ): EnrichedActivityRecord {
   const visibility = requiredText(row, "visibility");
   if (visibility !== "broadcast" && visibility !== "direct") {
@@ -3837,6 +3930,7 @@ function enrichedActivityRecord(
     drone_label: nullableText(row, "drone_label"),
     role_name: nullableText(row, "role_name"),
     recipient_drone_ids: recipientDroneIds,
+    ...(wakeNonce === undefined ? {} : { wake_nonce: wakeNonce }),
   };
 }
 
@@ -4011,7 +4105,31 @@ function droneRecord(row: Record<string, unknown>): DroneRecord {
     posture,
     ...runtimeMetadataFlat(row),
     created_at: requiredText(row, "created_at"),
+    wake_state: "idle",
   };
+}
+
+function droneWakeState(
+  database: DatabaseSync,
+  droneId: string,
+  now: Date,
+): "idle" | "pending" | "awake" | "stale" {
+  const latest = database.prepare(`
+    SELECT entry.id, entry.created_at,
+           EXISTS(
+             SELECT 1 FROM activity_acks AS ack
+             WHERE ack.entry_id = entry.id AND ack.claimant_drone_id = ? AND ack.kind = 'ack'
+           ) AS acknowledged
+    FROM activity_log AS entry
+    JOIN activity_log_recipients AS recipient ON recipient.entry_id = entry.id
+    WHERE recipient.drone_id = ? AND entry.visibility = 'direct'
+    ORDER BY entry.created_at DESC, entry.id DESC
+    LIMIT 1
+  `).get(droneId, droneId);
+  if (latest === undefined) return "idle";
+  if (requiredInteger(latest, "acknowledged") === 1) return "awake";
+  const age = now.getTime() - Date.parse(requiredText(latest, "created_at"));
+  return age >= WAKE_STALE_AFTER_MS ? "stale" : "pending";
 }
 
 const EMPTY_RUNTIME_METADATA: DroneRuntimeMetadata = Object.freeze({

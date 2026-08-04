@@ -1325,28 +1325,6 @@ export function createOfflineCredentialService(
   "rotateClient" | "listClients" | "revokeClient" | "grantClient" | "ungrantClient" |
   "createClientInvitation" | "replaceOwnerInvitation" | "invite"
 > {
-  const withAuthority = async <T>(operation: (
-    authority: CredentialAuthority,
-    runtime: Awaited<ReturnType<typeof openStore>>,
-  ) => T): Promise<T> => {
-    const runtimeLock = await acquireRuntimeLock(offlineDataDirectory);
-    let invitationLock: RuntimeLock | undefined;
-    let runtime: Awaited<ReturnType<typeof openStore>> | undefined;
-    let digester: CredentialDigester | undefined;
-    try {
-      invitationLock = await acquireInvitationMintLock(offlineDataDirectory);
-      runtime = await openStore({ path: join(offlineDataDirectory, "borg.db") });
-      const digestKey = await loadDigestKey(join(offlineDataDirectory, "credential-digest.key"));
-      digester = new CredentialDigester(digestKey);
-      digestKey.fill(0);
-      return operation(new CredentialAuthority(runtime.credentials, digester), runtime);
-    } finally {
-      digester?.destroy();
-      runtime?.close();
-      if (invitationLock === undefined) await runtimeLock.release();
-      else await invitationLock.release().finally(() => runtimeLock.release());
-    }
-  };
   const withInvitationAuthority = async <T>(
     operation: (
       authority: CredentialAuthority,
@@ -1385,7 +1363,10 @@ export function createOfflineCredentialService(
       (authority) => authority.rotateClient(clientId),
       operatorErrors.LIVE_ADMIN_CONTENTION,
     ),
-    listClients: () => withAuthority((_authority, runtime) => runtime.maintenance.listClients()),
+    listClients: () => withInvitationAuthority(
+      (_authority, runtime) => runtime.maintenance.listClients(),
+      operatorErrors.LIVE_ADMIN_CONTENTION,
+    ),
     revokeClient: (selector) => withInvitationAuthority(
       (authority) => authority.revokeClient(selector),
       operatorErrors.LIVE_ADMIN_CONTENTION,

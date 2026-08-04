@@ -697,6 +697,22 @@ export const STORE_MIGRATIONS: readonly Migration[] = Object.freeze([
         ON repository_associations (cube_id);
     `,
   },
+  {
+    version: 21,
+    name: "durable_activity_wake_attempts",
+    sql: `
+      CREATE TABLE activity_wake_attempts (
+        entry_id TEXT NOT NULL REFERENCES activity_log(id) ON DELETE CASCADE,
+        drone_id TEXT NOT NULL REFERENCES drones(id) ON DELETE CASCADE,
+        attempt_count INTEGER NOT NULL CHECK (attempt_count BETWEEN 0 AND 2),
+        last_ping_at TEXT,
+        PRIMARY KEY (entry_id, drone_id)
+      ) STRICT, WITHOUT ROWID;
+
+      CREATE INDEX activity_wake_attempts_retry_idx
+        ON activity_wake_attempts (last_ping_at, entry_id, drone_id);
+    `,
+  },
 ]);
 
 interface AppliedMigrationRow {

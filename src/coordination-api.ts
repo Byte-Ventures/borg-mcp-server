@@ -687,10 +687,10 @@ export class CoordinationApi {
     let notificationIndex = 0;
     let live = false;
     try {
-      unsubscribe = store.subscribeActivity(cubeId, (entry) => {
-        if (live) queue.push(encodeLogEvent(entry));
-        else if ("kind" in entry) pendingNotifications.push(entry);
-        else replayDirty = true;
+       unsubscribe = store.subscribeActivity(cubeId, (entry) => {
+         if (live) queue.push(encodeLogEvent(entry));
+         else if ("kind" in entry || entry.wake_nonce !== undefined) pendingNotifications.push(entry);
+         else replayDirty = true;
       }, () => {
         queue.terminate(encodeCubeDeletedEvent());
       });

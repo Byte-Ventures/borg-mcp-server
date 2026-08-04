@@ -1347,6 +1347,11 @@ describe("node server service", () => {
       running = await acquireRuntimeLock(directory, "server");
 
       expect(client).toMatchObject({ purpose: "client", serverCapabilities: [] });
+      const beforeList = runtime.maintenance.observeAuthorityState();
+      expect(await administration.listClients()).toEqual(
+        expect.arrayContaining([expect.objectContaining({ state: "active" })]),
+      );
+      expect(runtime.maintenance.observeAuthorityState()).toEqual(beforeList);
       const rotatedCredential = await administration.rotateClient(client!.clientId);
       expect(liveAuthority.authenticate(`Bearer ${originalCredential}`)).toBeNull();
       expect(liveAuthority.authenticate(`Bearer ${rotatedCredential}`))
@@ -1396,6 +1401,9 @@ describe("node server service", () => {
       blocker = new DatabaseSync(installation.paths.database);
       blocker.exec("BEGIN IMMEDIATE");
       const administration = createOfflineCredentialService(directory);
+
+      await expect(administration.listClients())
+        .rejects.toThrow("Retry the live client authorization change after the current server database write completes.");
 
       await expect(administration.createClientInvitation(installation.recoveryCredential))
         .rejects.toThrow("Retry invitation minting after the current server database write completes.");

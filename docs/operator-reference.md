@@ -133,6 +133,13 @@ unique eight-hex-character prefix. Cursor timestamps accept ISO-8601 values with
 or without fractional seconds; malformed selectors identify the accepted forms.
 Point lookups retain the same cube visibility rules as paginated reads.
 
+Roster `wake_state` is `idle` when no directed dispatch is pending, `pending`
+while an unacknowledged dispatch is within the three-minute wake window, `awake`
+after an acknowledgement, and `stale` after the window expires. The server
+re-pings registered wake paths at most twice, once per minute; it then gives up
+without creating additional log entries. Acknowledgement is the liveness signal,
+not an idle drone's last-seen timestamp.
+
 ## Debugging
 
 Debug diagnostics are off by default. A local operator can enable centrally
@@ -152,8 +159,9 @@ private local sink. The log level cannot be changed through the network API.
 ## Local credential administration
 
 Invitation minting is an additive local operation and may run while the server is
-live. Rotation, revocation, and grant changes remain exclusive: stop the server
-before running those commands.
+live. Client listing, rotation, revocation, and grant changes are operator-only
+live-safe operations; the running server observes committed changes on the next
+request. Requests already in flight retain their established state.
 
 ```sh
 borg-mcp-server client-rotate <client-id>

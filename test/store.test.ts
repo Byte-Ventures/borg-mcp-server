@@ -1117,6 +1117,67 @@ describe("Principal to ScopedStore isolation", () => {
     })).toThrow(AccessDeniedError);
   });
 
+  it("enforces the active decision text budget without partial writes", async () => {
+    const path = join(directory, "borg.db");
+    runtime.close();
+    runtime = await openStore({
+      path,
+      storageLimits: {
+        maxActivityEntriesPerCube: 10_000,
+        maxActiveDecisionBytesPerCube: 10,
+        maxDatabaseBytes: 1_000_000,
+        minFreeDiskBytes: 1,
+      },
+      capacityProbe: () => ({ databaseBytes: 0, freeDiskBytes: 1_000_000 }),
+    });
+    const client = runtime.forPrincipal(clientPrincipal(ids.clientA));
+    const first = client.recordDecision(ids.cubeA, { topic: "a", decision: "12345678" });
+    expect(() => client.recordDecision(ids.cubeA, { topic: "b", decision: "x" }))
+      .toThrowError(expect.objectContaining({
+        name: "StorageCapacityError",
+        code: "CAPACITY_EXCEEDED",
+        message: expect.stringContaining("10 bytes maximum, 9 bytes currently active"),
+      }));
+    expect(() => client.recordDecision(ids.cubeA, { topic: "b", decision: "x" }))
+      .toThrow(/remove outdated entries with borg_remove-decision/);
+    expect(client.listDecisions(ids.cubeA)).toEqual([first]);
+  });
+
+  it("allows same-topic replacement at and over the decision budget", async () => {
+    const path = join(directory, "borg.db");
+    runtime.close();
+    runtime = await openStore({
+      path,
+      storageLimits: {
+        maxActivityEntriesPerCube: 10_000,
+        maxActiveDecisionBytesPerCube: 10,
+        maxDatabaseBytes: 1_000_000,
+        minFreeDiskBytes: 1,
+      },
+      capacityProbe: () => ({ databaseBytes: 0, freeDiskBytes: 1_000_000 }),
+    });
+    const client = runtime.forPrincipal(clientPrincipal(ids.clientA));
+    const atBudget = client.recordDecision(ids.cubeA, { topic: "a", decision: "123456789" });
+    const equal = client.recordDecision(ids.cubeA, { topic: "a", decision: "123456789" });
+    expect(equal.supersedes).toBe(atBudget.id);
+
+    runtime.close();
+    runtime = await openStore({
+      path,
+      storageLimits: {
+        maxActivityEntriesPerCube: 10_000,
+        maxActiveDecisionBytesPerCube: 5,
+        maxDatabaseBytes: 1_000_000,
+        minFreeDiskBytes: 1,
+      },
+      capacityProbe: () => ({ databaseBytes: 0, freeDiskBytes: 1_000_000 }),
+    });
+    const overBudgetClient = runtime.forPrincipal(clientPrincipal(ids.clientA));
+    const smaller = overBudgetClient.recordDecision(ids.cubeA, { topic: "a", decision: "x" });
+    expect(smaller.supersedes).toBe(equal.id);
+    expect(overBudgetClient.listDecisions(ids.cubeA)).toEqual([smaller]);
+  });
+
   it("removes active decisions without deleting their audit records", () => {
     const client = runtime.forPrincipal(clientPrincipal(ids.clientA));
     const firstByTopic = client.recordDecision(ids.cubeA, {

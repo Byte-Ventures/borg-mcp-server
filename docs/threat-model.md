@@ -173,7 +173,8 @@ v1 scope.
   DB/WAL/SHM footprint plus writing each new page to both the database and WAL. This intentionally
   trades usable capacity for a no-write-before-rejection guarantee, including prune/cascade paths. Operators
   may lower or raise these positive-integer bounds with
-  `BORG_SERVER_MAX_ACTIVITY_ENTRIES_PER_CUBE`, `BORG_SERVER_MAX_DATABASE_BYTES`, and
+  `BORG_SERVER_MAX_ACTIVITY_ENTRIES_PER_CUBE`, `BORG_SERVER_MAX_ACTIVE_DECISION_BYTES_PER_CUBE`,
+  `BORG_SERVER_MAX_DATABASE_BYTES`, and
   `BORG_SERVER_MIN_FREE_DISK_BYTES`; changes require restart and must fit the host backup policy.
 
 | Remote growth surface | Capacity-gated mutation |

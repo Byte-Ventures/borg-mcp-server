@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { DatabaseSync } from "node:sqlite";
 import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -353,6 +354,226 @@ describe("coordination stream setup", () => {
       signal: new AbortController().signal,
     });
     expect(broadcast.status).toBe(201);
+    const broadcastEntry = (broadcast.body as any).payload.entry;
+    const database = new DatabaseSync(join(directory, "borg.db"));
+    const collisionCreatedAt = broadcastEntry.created_at;
+    database.prepare(`
+      INSERT INTO activity_log (id, cube_id, drone_id, actor_kind, actor_id, message, created_at, visibility)
+      VALUES (?, ?, NULL, 'client', ?, ?, ?, 'broadcast')
+    `).run(
+      "deadbeef-0000-4000-8000-000000000001", cubeId, participantClientId,
+      "collision-one", collisionCreatedAt,
+    );
+    database.prepare(`
+      INSERT INTO activity_log (id, cube_id, drone_id, actor_kind, actor_id, message, created_at, visibility)
+      VALUES (?, ?, NULL, 'client', ?, ?, ?, 'broadcast')
+    `).run(
+      "deadbeef-0000-4000-8000-000000000002", cubeId, participantClientId,
+      "collision-two", collisionCreatedAt,
+    );
+    database.prepare(`
+      INSERT INTO activity_log (id, cube_id, drone_id, actor_kind, actor_id, message, created_at, visibility)
+      VALUES (?, ?, NULL, 'client', ?, ?, ?, 'direct')
+    `).run(
+      "cafebabe-0000-4000-8000-000000000001", cubeId, participantClientId,
+      "hidden-entry", collisionCreatedAt,
+    );
+    database.close();
+    const fullCollisionLookup = await api.handle({
+      method: "GET",
+      path: `/api/cubes/${cubeId}/logs/deadbeef-0000-4000-8000-000000000001`,
+      principal: observerSession,
+      signal: new AbortController().signal,
+    });
+    expect(fullCollisionLookup).toMatchObject({
+      status: 200,
+      body: { payload: { entry: { message: "collision-one" } } },
+    });
+    const ambiguousPointLookup = await api.handle({
+      method: "GET",
+      path: `/api/cubes/${cubeId}/logs/deadbeef`,
+      principal: observerSession,
+      signal: new AbortController().signal,
+    });
+    expect(ambiguousPointLookup).toMatchObject({
+      status: 409,
+      body: { error: { code: "LOG_ENTRY_PREFIX_AMBIGUOUS" } },
+    });
+    const hiddenLookup = await api.handle({
+      method: "GET",
+      path: `/api/cubes/${cubeId}/logs/cafebabe-0000-4000-8000-000000000001`,
+      principal: observerSession,
+      signal: new AbortController().signal,
+    });
+    const nonexistentLookup = await api.handle({
+      method: "GET",
+      path: `/api/cubes/${cubeId}/logs/aaaaaaaa-0000-4000-8000-000000000001`,
+      principal: observerSession,
+      signal: new AbortController().signal,
+    });
+    expect(hiddenLookup).toEqual(nonexistentLookup);
+    const hiddenCursor = await api.handle({
+      method: "PUT",
+      path: `/api/cubes/${cubeId}/logs`,
+      principal: observerSession,
+      body: {
+        protocol_version: "7",
+        request_id: "hidden-prefix-cursor",
+        payload: { cursor: { id: "cafebabe", created_at: collisionCreatedAt } },
+      },
+      signal: new AbortController().signal,
+    });
+    const missingCursor = await api.handle({
+      method: "PUT",
+      path: `/api/cubes/${cubeId}/logs`,
+      principal: observerSession,
+      body: {
+        protocol_version: "7",
+        request_id: "missing-prefix-cursor",
+        payload: { cursor: { id: "aaaaaaaa", created_at: collisionCreatedAt } },
+      },
+      signal: new AbortController().signal,
+    });
+    expect(hiddenCursor).toEqual(missingCursor);
+    const fullCollisionSince = await api.handle({
+      method: "GET",
+      path: `/api/cubes/${cubeId}/drones`,
+      principal: observerSession,
+      since: "deadbeef-0000-4000-8000-000000000001",
+      signal: new AbortController().signal,
+    });
+    expect(fullCollisionSince.status).toBe(200);
+    const ambiguousSince = await api.handle({
+      method: "GET",
+      path: `/api/cubes/${cubeId}/drones`,
+      principal: observerSession,
+      since: "deadbeef",
+      signal: new AbortController().signal,
+    });
+    expect(ambiguousSince).toMatchObject({
+      status: 409,
+      body: { error: { code: "LOG_ENTRY_PREFIX_AMBIGUOUS" } },
+    });
+    const prefixSince = await api.handle({
+      method: "GET",
+      path: `/api/cubes/${cubeId}/drones`,
+      principal: observerSession,
+      since: broadcastEntry.id.slice(0, 8),
+      signal: new AbortController().signal,
+    });
+    expect(prefixSince.status).toBe(200);
+    const participantPrefixSince = await api.handle({
+      method: "GET",
+      path: `/api/cubes/${cubeId}/drones`,
+      principal: participantSession,
+      since: directedEntryId.slice(0, 8),
+      signal: new AbortController().signal,
+    });
+    expect(participantPrefixSince.status).toBe(200);
+    const hiddenSince = await api.handle({
+      method: "GET",
+      path: `/api/cubes/${cubeId}/drones`,
+      principal: observerSession,
+      since: "cafebabe",
+      signal: new AbortController().signal,
+    });
+    const missingSince = await api.handle({
+      method: "GET",
+      path: `/api/cubes/${cubeId}/drones`,
+      principal: observerSession,
+      since: "aaaaaaaa",
+      signal: new AbortController().signal,
+    });
+    expect(hiddenSince).toEqual(missingSince);
+    const invalidSince = await api.handle({
+      method: "GET",
+      path: `/api/cubes/${cubeId}/drones`,
+      principal: observerSession,
+      since: "not-a-cursor",
+      signal: new AbortController().signal,
+    });
+    expect(invalidSince).toMatchObject({
+      status: 400,
+      body: {
+        error: {
+          message: "Log cursor must be a full UUID, 8-hex prefix, or ISO-8601 timestamp.",
+        },
+      },
+    });
+    const invalidTimestamp = await api.handle({
+      method: "GET",
+      path: `/api/cubes/${cubeId}/drones`,
+      principal: observerSession,
+      since: "2026-07-19T10:00:00.000Z-extra-garbage",
+      signal: new AbortController().signal,
+    });
+    expect(invalidTimestamp).toMatchObject({
+      status: 400,
+      body: {
+        error: {
+          message: "Log cursor must be a full UUID, 8-hex prefix, or ISO-8601 timestamp.",
+        },
+      },
+    });
+    const pointLookup = await api.handle({
+      method: "GET",
+      path: `/api/cubes/${cubeId}/logs/${broadcastEntry.id.slice(0, 8)}`,
+      principal: observerSession,
+      signal: new AbortController().signal,
+    });
+    expect(pointLookup).toMatchObject({
+      status: 200,
+      body: { payload: { entry: { id: broadcastEntry.id, message: "shared-update" } } },
+    });
+    const prefixedPage = await api.handle({
+      method: "PUT",
+      path: `/api/cubes/${cubeId}/logs`,
+      principal: observerSession,
+      body: {
+        protocol_version: "7",
+        request_id: "prefix-cursor-read",
+        payload: {
+          cursor: { id: broadcastEntry.id.slice(0, 8), created_at: broadcastEntry.created_at },
+        },
+      },
+      signal: new AbortController().signal,
+    });
+    expect(prefixedPage).toMatchObject({
+      status: 200,
+      body: { payload: { entries: expect.any(Array) } },
+    });
+    const secondPrecisionPage = await api.handle({
+      method: "PUT",
+      path: `/api/cubes/${cubeId}/logs`,
+      principal: observerSession,
+      body: {
+        protocol_version: "7",
+        request_id: "second-precision-cursor",
+        payload: {
+          cursor: { id: broadcastEntry.id.slice(0, 8), created_at: `${broadcastEntry.created_at.slice(0, 19)}Z` },
+        },
+      },
+      signal: new AbortController().signal,
+    });
+    expect(secondPrecisionPage).toMatchObject({
+      status: 200,
+      body: { payload: { entries: expect.any(Array) } },
+    });
+    const invalidCursor = await api.handle({
+      method: "PUT",
+      path: `/api/cubes/${cubeId}/logs`,
+      principal: observerSession,
+      body: {
+        protocol_version: "7",
+        request_id: "invalid-log-cursor",
+        payload: { cursor: { id: "not-a-cursor", created_at: broadcastEntry.created_at } },
+      },
+      signal: new AbortController().signal,
+    });
+    expect(invalidCursor).toMatchObject({
+      status: 400,
+      body: { error: { code: "INVALID_INPUT", message: "Log cursor id must be a full UUID or 8-hex prefix." } },
+    });
     const observerWake = (await observerIterator.next()).value!;
     expect(observerWake).toContain("shared-update");
     expect(observerWake).not.toContain("participant-work");
@@ -369,8 +590,9 @@ describe("coordination stream setup", () => {
       signal: new AbortController().signal,
     });
     expect(observerRead.status).toBe(200);
-    expect((observerRead.body as any).payload.entries.map((entry: any) => entry.message))
-      .toEqual(["shared-update"]);
+    const observerMessages = (observerRead.body as any).payload.entries.map((entry: any) => entry.message);
+    expect(observerMessages).toHaveLength(3);
+    expect(observerMessages).toEqual(expect.arrayContaining(["shared-update", "collision-one", "collision-two"]));
     observerController.abort();
     participantController.abort();
     await observerIterator.return?.();

@@ -1,12 +1,15 @@
 import { describe, expect, it } from "vitest";
 
 import { createManagedServiceDefinition } from "../src/managed-service.js";
+import { runCli } from "../src/cli.js";
+import type { ServerService } from "../src/service.js";
 
 describe("managed service adapters", () => {
   it("renders a portable systemd user service against the immutable current target", () => {
     const service = createManagedServiceDefinition({
       platform: "systemd",
       nodeExecutable: "/usr/bin/node",
+      nodeVersion: "24.19.0",
       runtimeRoot: "/home/operator/.borg/server-runtime",
       dataDirectory: "/home/operator/.borg/server",
       definitionPath: "/home/operator/.config/systemd/user/ai.borgmcp.server.service",
@@ -26,6 +29,32 @@ describe("managed service adapters", () => {
       "--property=LoadState,ActiveState,SubState,MainPID",
     ]);
     expect(service.content).not.toContain("checkout");
+  });
+
+  it("adds the sqlite warning suppression only for Node 22 managed starts", async () => {
+    for (const [platform, nodeVersion, expected] of [
+      ["systemd", "22.18.0", true],
+      ["launchd", "22.18.0", true],
+      ["systemd", "24.19.0", false],
+      ["launchd", "24.19.0", false],
+    ] as const) {
+      const definition = createManagedServiceDefinition({
+        platform,
+        nodeExecutable: "/usr/bin/node",
+        nodeVersion,
+        runtimeRoot: "/runtime",
+        dataDirectory: "/data",
+        definitionPath: "/service",
+        ...(platform === "launchd" ? { launchdDomain: "gui/501" } : {}),
+      });
+      expect(definition.content.includes("--disable-warning=ExperimentalWarning")).toBe(expected);
+    }
+    let directStartArgs: readonly string[] | undefined;
+    await runCli(["start"], {
+      start: async (args) => { directStartArgs = args; },
+    } as ServerService, { stdout: () => undefined, stderr: () => undefined });
+    expect(directStartArgs).toEqual([]);
+    expect(directStartArgs).not.toContain("--disable-warning=ExperimentalWarning");
   });
 
   it("renders a thin launchd adapter with the same runtime and data contract", () => {

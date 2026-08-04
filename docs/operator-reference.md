@@ -126,6 +126,13 @@ preserve any required encrypted backup, and plan to re-enroll clients after
 creating a new identity. Never treat a changed LAN address as a reason to
 reinitialize the CA.
 
+## Activity log lookup
+
+Activity log point lookups and paginated cursors accept a full entry UUID or a
+unique eight-hex-character prefix. Cursor timestamps accept ISO-8601 values with
+or without fractional seconds; malformed selectors identify the accepted forms.
+Point lookups retain the same cube visibility rules as paginated reads.
+
 ## Debugging
 
 Debug diagnostics are off by default. A local operator can enable centrally

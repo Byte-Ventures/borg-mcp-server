@@ -7,6 +7,7 @@ describe("managed service adapters", () => {
     const service = createManagedServiceDefinition({
       platform: "systemd",
       nodeExecutable: "/usr/bin/node",
+      nodeVersion: "24.19.0",
       runtimeRoot: "/home/operator/.borg/server-runtime",
       dataDirectory: "/home/operator/.borg/server",
       definitionPath: "/home/operator/.config/systemd/user/ai.borgmcp.server.service",
@@ -26,6 +27,29 @@ describe("managed service adapters", () => {
       "--property=LoadState,ActiveState,SubState,MainPID",
     ]);
     expect(service.content).not.toContain("checkout");
+  });
+
+  it("adds the sqlite warning suppression only for Node 22 managed starts", () => {
+    const node22 = createManagedServiceDefinition({
+      platform: "systemd",
+      nodeExecutable: "/usr/bin/node",
+      nodeVersion: "22.18.0",
+      runtimeRoot: "/runtime",
+      dataDirectory: "/data",
+      definitionPath: "/service",
+    });
+    const node24 = createManagedServiceDefinition({
+      platform: "launchd",
+      nodeExecutable: "/usr/bin/node",
+      nodeVersion: "24.19.0",
+      runtimeRoot: "/runtime",
+      dataDirectory: "/data",
+      definitionPath: "/service",
+      launchdDomain: "gui/501",
+    });
+
+    expect(node22.content).toContain("--disable-warning=ExperimentalWarning");
+    expect(node24.content).not.toContain("--disable-warning=ExperimentalWarning");
   });
 
   it("renders a thin launchd adapter with the same runtime and data contract", () => {

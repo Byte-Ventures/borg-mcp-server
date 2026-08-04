@@ -819,6 +819,7 @@ function createNodeRuntimeOperator(managedRuntimeDirectory: string, runtimeDataD
   const definition = createManagedServiceDefinition({
     platform,
     nodeExecutable: process.execPath,
+    nodeVersion: process.versions.node,
     runtimeRoot: managedRuntimeDirectory,
     dataDirectory: runtimeDataDirectory,
     definitionPath: platform === "launchd"

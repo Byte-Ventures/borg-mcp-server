@@ -39,6 +39,7 @@ import {
   RoleConflictError,
   RoleInUseError,
   RoleSectionConflictError,
+  ActivityEntryPrefixConflictError,
   ScopedStoreError,
   StorageCapacityError,
   type DroneRecord,
@@ -268,16 +269,18 @@ export class CoordinationApi {
 
     const roleMatch = /^\/api\/cubes\/([0-9a-f-]{36})\/roles\/([0-9a-f-]{36})(\/section-patch)?$/u
       .exec(request.path);
+    const logEntryMatch = /^\/api\/cubes\/([0-9a-f-]{36})\/logs\/([0-9a-f]{8}|[0-9a-f-]{36})$/iu
+      .exec(request.path);
     const droneMatch = /^\/api\/cubes\/([0-9a-f-]{36})\/drones\/([0-9a-f-]{36})$/u
       .exec(request.path);
     const selfMetadataMatch =
       /^\/api\/cubes\/([0-9a-f-]{36})\/drones\/self\/metadata$/u.exec(request.path);
     const match = /^\/api\/cubes\/([0-9a-f-]{36})(?:\/(roles|drones|logs|acks|decisions|stream|taxonomy-patch))?$/u
       .exec(request.path);
-    if (match === null && roleMatch === null && droneMatch === null && selfMetadataMatch === null) {
+    if (match === null && roleMatch === null && logEntryMatch === null && droneMatch === null && selfMetadataMatch === null) {
       return failure(404, "NOT_FOUND", "The requested resource was not found.");
     }
-    const cubeId = (roleMatch?.[1] ?? droneMatch?.[1] ?? selfMetadataMatch?.[1] ?? match?.[1])!;
+    const cubeId = (roleMatch?.[1] ?? logEntryMatch?.[1] ?? droneMatch?.[1] ?? selfMetadataMatch?.[1] ?? match?.[1])!;
     const roleId = roleMatch?.[2];
     const droneId = droneMatch?.[2];
     if (!uuidPattern.test(cubeId) || (roleId !== undefined && !uuidPattern.test(roleId)) ||
@@ -286,6 +289,8 @@ export class CoordinationApi {
     }
     const resource = roleMatch !== null
       ? "role"
+      : logEntryMatch !== null
+        ? "log-entry"
       : droneMatch !== null
         ? "drone"
         : selfMetadataMatch !== null
@@ -542,6 +547,10 @@ export class CoordinationApi {
         });
         return success(200, envelope.requestId, page);
       }
+      if (resource === "log-entry" && request.method === "GET") {
+        const entry = store.readLogEntry(cubeId, requiredLogEntrySelector(logEntryMatch![2]!));
+        return success(200, "log-entry-read", { entry });
+      }
       if (resource === "acks" && request.method === "POST") {
         const envelope = decodeEnvelope(request.body);
         const entryId = requiredUuid(envelope.payload, "entry_id");
@@ -617,6 +626,9 @@ export class CoordinationApi {
       if (error instanceof RoleSectionConflictError) {
         return failure(409, error.code, error.message, safeRequestId(request.body));
       }
+      if (error instanceof ActivityEntryPrefixConflictError) {
+        return failure(409, error.code, error.message, safeRequestId(request.body));
+      }
       if (error instanceof RoleInUseError) {
         return failure(409, error.code, error.message, safeRequestId(request.body));
       }
@@ -629,7 +641,14 @@ export class CoordinationApi {
           : failure(400, "INVALID_INPUT", "Invalid protocol request.", safeRequestId(request.body));
       }
       if (error instanceof InputError || error instanceof TypeError || error instanceof RangeError) {
-        return failure(400, "INVALID_INPUT", "Invalid protocol request.", safeRequestId(request.body));
+        return failure(
+          400,
+          "INVALID_INPUT",
+          error instanceof InputError && error.message !== ""
+            ? error.message
+            : "Invalid protocol request.",
+          safeRequestId(request.body),
+        );
       }
       throw error;
     }
@@ -958,6 +977,12 @@ function requiredUuid(record: Record<string, unknown>, key: string): string {
   return value.toLowerCase();
 }
 
+function requiredLogEntrySelector(value: string): string {
+  if (uuidPattern.test(value)) return value.toLowerCase();
+  if (/^[0-9a-f]{8}$/iu.test(value)) return value.toLowerCase();
+  throw new InputError("Activity entry selector must be a full UUID or unique 8-hex prefix.");
+}
+
 function optionalVisibility(value: unknown): "broadcast" | "direct" | undefined {
   if (value === undefined) return undefined;
   if (value !== "broadcast" && value !== "direct") throw new InputError();
@@ -983,26 +1008,43 @@ function decodeCursor(value: unknown): LogCursor | null {
   if (value === null) return null;
   const record = object(value);
   exactKeys(record, ["id", "created_at"]);
-  const id = requiredUuid(record, "id");
+  const rawId = record["id"];
+  if (typeof rawId !== "string" || (!uuidPattern.test(rawId) && !/^[0-9a-f]{8}$/iu.test(rawId))) {
+    throw new InputError("Log cursor id must be a full UUID or 8-hex prefix.");
+  }
+  const id = rawId.toLowerCase();
   const createdAt = record["created_at"];
-  if (typeof createdAt !== "string" || !timestampPattern.test(createdAt) ||
-      new Date(createdAt).toISOString() !== createdAt) throw new InputError();
-  return { id, created_at: createdAt };
+  if (typeof createdAt !== "string") {
+    throw new InputError("Log cursor timestamp must be an ISO-8601 timestamp.");
+  }
+  const normalizedCreatedAt = normalizeTimestamp(createdAt);
+  if (normalizedCreatedAt === null) {
+    throw new InputError("Log cursor timestamp must be ISO-8601 with optional fractional seconds.");
+  }
+  return { id, created_at: normalizedCreatedAt };
 }
 
 function decodeOpaqueCursor(value: string | undefined): LogCursor | null {
   if (value === undefined) return null;
   try {
     return decodeCursor(JSON.parse(Buffer.from(value, "base64url").toString("utf8")));
-  } catch {
-    throw new InputError();
+  } catch (error) {
+    if (error instanceof InputError) throw error;
+    throw new InputError("Log cursor must be a base64url-encoded cursor with a full UUID or 8-hex prefix.");
   }
 }
 
 function decodeSince(value: string): string {
-  if (uuidPattern.test(value)) return value.toLowerCase();
-  if (timestampPattern.test(value) && new Date(value).toISOString() === value) return value;
-  throw new InputError();
+  if (uuidPattern.test(value) || /^[0-9a-f]{8}$/iu.test(value)) return value.toLowerCase();
+  const normalized = normalizeTimestamp(value);
+  if (normalized !== null) return normalized;
+  throw new InputError("Log cursor must be a full UUID, 8-hex prefix, or ISO-8601 timestamp.");
+}
+
+function normalizeTimestamp(value: string): string | null {
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/u.test(value)) return null;
+  const normalized = value.includes(".") ? value : value.replace("Z", ".000Z");
+  return new Date(normalized).toISOString() === normalized ? normalized : null;
 }
 
 function safeRequestId(value: unknown): string | undefined {
@@ -1123,4 +1165,3 @@ function managedDronePayload(drone: DroneRecord) {
 }
 
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
-const timestampPattern = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u;

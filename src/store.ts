@@ -335,6 +335,7 @@ export interface ScopedStore {
     readonly recipientDroneIds?: readonly string[];
   }) => EnrichedActivityRecord;
   readonly readLog: (cubeId: string, cursor: LogCursor | null, limit: number) => ActivityPage;
+  readonly readLogEntry: (cubeId: string, selector: string) => EnrichedActivityRecord;
   readonly acknowledge: (cubeId: string, entryId: string, kind: "ack" | "claim") => void;
   readonly recordDecision: (cubeId: string, input: {
     readonly topic: string;
@@ -676,6 +677,15 @@ export class CursorExpiredError extends Error {
   constructor() {
     super("The activity cursor has expired.");
     this.name = "CursorExpiredError";
+  }
+}
+
+export class ActivityEntryPrefixConflictError extends Error {
+  readonly code = "LOG_ENTRY_PREFIX_AMBIGUOUS";
+
+  constructor() {
+    super("The activity entry prefix is ambiguous; provide a full UUID.");
+    this.name = "ActivityEntryPrefixConflictError";
   }
 }
 
@@ -1612,11 +1622,15 @@ class SqliteScopedStore implements ScopedStore {
     this.#requireCube(cubeId, "read");
     let createdAt: string;
     let anchorId: string | null = null;
-    if (/^[0-9a-f]{8}-[0-9a-f-]{27}$/iu.test(since)) {
-      const anchor = this.#database.prepare(
-        "SELECT id, created_at FROM activity_log WHERE id = ? AND cube_id = ?",
-      ).get(since, cubeId);
-      if (anchor === undefined) throw new ScopedStoreError();
+    if (/^[0-9a-f]{8}-[0-9a-f-]{27}$/iu.test(since) || /^[0-9a-f]{8}$/iu.test(since)) {
+      const anchors = this.#database.prepare(`
+        SELECT id, created_at FROM activity_log
+        WHERE cube_id = ? AND (id = ? OR substr(id, 1, 8) = ?)
+        LIMIT 2
+      `).all(cubeId, since, since.slice(0, 8).toLowerCase());
+      if (anchors.length === 0) throw new ScopedStoreError();
+      if (anchors.length > 1) throw new ActivityEntryPrefixConflictError();
+      const anchor = anchors[0]!;
       anchorId = requiredText(anchor, "id");
       createdAt = requiredText(anchor, "created_at");
     } else {
@@ -1822,13 +1836,14 @@ class SqliteScopedStore implements ScopedStore {
     if (!Number.isInteger(limit) || limit < 1 || limit > 500) {
       throw new Error("Activity read limit must be an integer from 1 to 500.");
     }
-    this.#validateCursor(cubeId, cursor);
+    const resolvedCursor = cursor === null ? null : this.#resolveCursor(cubeId, cursor);
+    this.#validateCursor(cubeId, resolvedCursor);
     const broadcastOnly = !this.#allowsDirectedWork(cubeId);
-    const cursorSql = cursor === null
+    const cursorSql = resolvedCursor === null
       ? { sql: "1 = 1", parameters: [] as string[] }
       : {
           sql: "(l.created_at > ? OR (l.created_at = ? AND l.id > ?))",
-          parameters: [cursor.created_at, cursor.created_at, cursor.id],
+          parameters: [resolvedCursor.created_at, resolvedCursor.created_at, resolvedCursor.id],
         };
     const rows = this.#database.prepare(`
       SELECT l.id
@@ -1841,7 +1856,7 @@ class SqliteScopedStore implements ScopedStore {
     const selected = rows.slice(0, limit);
     const entries = selected.map((row) => this.#enrichedEntry(cubeId, requiredText(row, "id")));
     const nextCursor = entries.length === 0
-      ? cursor
+      ? resolvedCursor
       : { id: entries.at(-1)!.id, created_at: entries.at(-1)!.created_at };
     const behind = nextCursor === null
       ? this.#countAfter(cubeId, null, broadcastOnly)
@@ -1853,6 +1868,21 @@ class SqliteScopedStore implements ScopedStore {
       has_more: behind > 0,
       claims: this.#claims(cubeId, broadcastOnly),
     };
+  }
+
+  readLogEntry(cubeId: string, selector: string): EnrichedActivityRecord {
+    this.#requireCube(cubeId, "read");
+    const broadcastOnly = !this.#allowsDirectedWork(cubeId);
+    const rows = this.#database.prepare(`
+      SELECT l.id
+      FROM activity_log AS l
+      WHERE l.cube_id = ? AND (l.id = ? OR substr(l.id, 1, 8) = ?)
+        AND (${broadcastOnly ? "l.visibility = 'broadcast'" : "1 = 1"})
+      LIMIT 2
+    `).all(cubeId, selector, selector);
+    if (rows.length === 0) throw new ScopedStoreError();
+    if (rows.length > 1) throw new ActivityEntryPrefixConflictError();
+    return this.#enrichedEntry(cubeId, requiredText(rows[0]!, "id"));
   }
 
   acknowledge(cubeId: string, entryId: string, kind: "ack" | "claim"): void {
@@ -2431,6 +2461,22 @@ class SqliteScopedStore implements ScopedStore {
       SELECT 1 AS present FROM activity_log WHERE cube_id = ? AND id = ? AND created_at = ?
     `).get(cubeId, cursor.id, cursor.created_at);
     if (valid === undefined) throw new ScopedStoreError();
+  }
+
+  #resolveCursor(cubeId: string, cursor: LogCursor): LogCursor {
+    if (/^[0-9a-f]{8}$/iu.test(cursor.id)) {
+      const rows = this.#database.prepare(`
+        SELECT id, created_at FROM activity_log
+        WHERE cube_id = ? AND substr(id, 1, 8) = ? LIMIT 2
+      `).all(cubeId, cursor.id.toLowerCase());
+      if (rows.length === 0) throw new ScopedStoreError();
+      if (rows.length > 1) throw new ActivityEntryPrefixConflictError();
+      return {
+        id: requiredText(rows[0]!, "id"),
+        created_at: requiredText(rows[0]!, "created_at"),
+      };
+    }
+    return cursor;
   }
 
   #countAfter(cubeId: string, cursor: LogCursor | null, broadcastOnly: boolean): number {

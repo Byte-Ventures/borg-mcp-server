@@ -353,6 +353,60 @@ describe("coordination stream setup", () => {
       signal: new AbortController().signal,
     });
     expect(broadcast.status).toBe(201);
+    const broadcastEntry = (broadcast.body as any).payload.entry;
+    const pointLookup = await api.handle({
+      method: "GET",
+      path: `/api/cubes/${cubeId}/logs/${broadcastEntry.id.slice(0, 8)}`,
+      principal: observerSession,
+      signal: new AbortController().signal,
+    });
+    expect(pointLookup).toMatchObject({
+      status: 200,
+      body: { payload: { entry: { id: broadcastEntry.id, message: "shared-update" } } },
+    });
+    const prefixedPage = await api.handle({
+      method: "PUT",
+      path: `/api/cubes/${cubeId}/logs`,
+      principal: observerSession,
+      body: {
+        protocol_version: "7",
+        request_id: "prefix-cursor-read",
+        payload: {
+          cursor: { id: broadcastEntry.id.slice(0, 8), created_at: broadcastEntry.created_at },
+        },
+      },
+      signal: new AbortController().signal,
+    });
+    expect(prefixedPage).toMatchObject({ status: 200, body: { payload: { entries: [] } } });
+    const secondPrecisionPage = await api.handle({
+      method: "PUT",
+      path: `/api/cubes/${cubeId}/logs`,
+      principal: observerSession,
+      body: {
+        protocol_version: "7",
+        request_id: "second-precision-cursor",
+        payload: {
+          cursor: { id: broadcastEntry.id.slice(0, 8), created_at: `${broadcastEntry.created_at.slice(0, 19)}Z` },
+        },
+      },
+      signal: new AbortController().signal,
+    });
+    expect(secondPrecisionPage).toMatchObject({ status: 200, body: { payload: { entries: [] } } });
+    const invalidCursor = await api.handle({
+      method: "PUT",
+      path: `/api/cubes/${cubeId}/logs`,
+      principal: observerSession,
+      body: {
+        protocol_version: "7",
+        request_id: "invalid-log-cursor",
+        payload: { cursor: { id: "not-a-cursor", created_at: broadcastEntry.created_at } },
+      },
+      signal: new AbortController().signal,
+    });
+    expect(invalidCursor).toMatchObject({
+      status: 400,
+      body: { error: { code: "INVALID_INPUT", message: "Log cursor id must be a full UUID or 8-hex prefix." } },
+    });
     const observerWake = (await observerIterator.next()).value!;
     expect(observerWake).toContain("shared-update");
     expect(observerWake).not.toContain("participant-work");

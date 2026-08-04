@@ -193,6 +193,7 @@ export const DEFAULT_CUBE_LIMITS: CubeLimits = Object.freeze({
 
 export interface StorageLimits {
   readonly maxActivityEntriesPerCube: number;
+  readonly maxActiveDecisionBytesPerCube?: number;
   readonly maxDatabaseBytes: number;
   readonly minFreeDiskBytes: number;
 }
@@ -204,6 +205,7 @@ export interface StorageCapacity {
 
 export const DEFAULT_STORAGE_LIMITS: StorageLimits = Object.freeze({
   maxActivityEntriesPerCube: 10_000,
+  maxActiveDecisionBytesPerCube: 16_384,
   maxDatabaseBytes: 1_073_741_824,
   minFreeDiskBytes: 67_108_864,
 });
@@ -705,8 +707,8 @@ export class AttachDroneEvictedError extends Error {
 export class StorageCapacityError extends Error {
   readonly code = "CAPACITY_EXCEEDED";
 
-  constructor() {
-    super("Storage capacity is unavailable.");
+  constructor(message = "Storage capacity is unavailable.") {
+    super(message);
     this.name = "StorageCapacityError";
   }
 }
@@ -827,7 +829,7 @@ class StorageCapacityGuard {
 
 export async function openStore(options: OpenStoreOptions): Promise<StoreRuntime> {
   const databasePath = await prepareDatabasePath(options.path);
-  const storageLimits = options.storageLimits ?? DEFAULT_STORAGE_LIMITS;
+  const storageLimits = { ...DEFAULT_STORAGE_LIMITS, ...(options.storageLimits ?? {}) };
   const cubeLimits = options.cubeLimits ?? DEFAULT_CUBE_LIMITS;
   validateStorageLimits(storageLimits);
   validateStorageLimits(cubeLimits);
@@ -1925,9 +1927,35 @@ class SqliteScopedStore implements ScopedStore {
     this.#database.exec("BEGIN IMMEDIATE");
     try {
       const previous = this.#database.prepare(`
-        SELECT id FROM decisions WHERE cube_id = ? AND topic = ? AND status = 'active'
+        SELECT id, topic, decision, rationale FROM decisions
+        WHERE cube_id = ? AND topic = ? AND status = 'active'
       `).get(cubeId, input.topic);
       const supersedes = previous === undefined ? null : requiredText(previous, "id");
+      const activeRows = this.#database.prepare(`
+        SELECT topic, decision, rationale FROM decisions
+        WHERE cube_id = ? AND status = 'active'
+      `).all(cubeId);
+      const currentBytes = activeRows.reduce(
+        (total, row) => total + decisionTextBytes(row),
+        0,
+      );
+      const previousBytes = previous === undefined ? 0 : decisionTextBytes(previous);
+      const nextBytes = currentBytes - previousBytes + decisionTextBytes({
+        topic: input.topic,
+        decision: input.decision,
+        rationale: input.rationale ?? null,
+      });
+      const budget = this.#storageLimits.maxActiveDecisionBytesPerCube ??
+        DEFAULT_STORAGE_LIMITS.maxActiveDecisionBytesPerCube!;
+      const allowedBytes = supersedes === null ? budget : Math.max(budget, currentBytes);
+      if (nextBytes > allowedBytes) {
+        throw new StorageCapacityError(
+          `Active decision text budget exceeded: ${budget} bytes maximum, ` +
+          `${currentBytes} bytes currently active. Review decisions and remove outdated ` +
+          `entries with borg_remove-decision, or relocate permanent operating rules to ` +
+          `the cube directive and then remove the registry copy.`,
+        );
+      }
       if (supersedes !== null) {
         this.#database.prepare("UPDATE decisions SET status = 'superseded' WHERE id = ?")
           .run(supersedes);
@@ -4394,6 +4422,12 @@ function validateStorageLimits(limits: StorageLimits | CubeLimits): void {
       throw new Error(`${name} must be a positive safe integer.`);
     }
   }
+}
+
+function decisionTextBytes(row: Record<string, unknown>): number {
+  return Buffer.byteLength(requiredText(row, "topic")) +
+    Buffer.byteLength(requiredText(row, "decision")) +
+    (row["rationale"] === null ? 0 : Buffer.byteLength(requiredText(row, "rationale")));
 }
 
 function storageCapacity(databasePath: string): StorageCapacity {

@@ -11,7 +11,7 @@ Verify current package metadata through
 
 ## Requirements
 
-- Node.js 22.12 or later
+- Node.js 22.18 or later
 - npm 10 or later
 - A private local data directory with sufficient disk space
 

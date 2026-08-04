@@ -184,9 +184,17 @@ The server accepts positive integer values for these optional environment
 variables:
 
 - `BORG_SERVER_MAX_ACTIVITY_ENTRIES_PER_CUBE`
+- `BORG_SERVER_MAX_ACTIVE_DECISION_BYTES_PER_CUBE` (default: 16384 bytes of active decision text)
 - `BORG_SERVER_MAX_DATABASE_BYTES`
 - `BORG_SERVER_MIN_FREE_DISK_BYTES`
 
 Invalid values fail closed before the server starts.
+The active decision text budget sums UTF-8 bytes from each active decision's topic,
+decision, and rationale. A new topic cannot exceed the budget. Replacing an
+existing topic is allowed when the resulting total stays at or below the larger
+of the configured budget and the current total, so cleanup and same-size
+supersession remain possible even after earlier growth exceeded the budget.
+The 16 KB default keeps the active registry compact enough to load into every
+seat's context while allowing ordinary collections of substantive rulings.
 Cube creation is additionally bounded to 100 cubes per creating client and
 1,000 cubes per server. Exact idempotent retries do not consume quota twice.

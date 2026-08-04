@@ -33,7 +33,7 @@ function createDashboardRenderer(
 
 const server: DashboardServerIdentity = Object.freeze({
   name: "borgmcp-server",
-  version: "0.11.0",
+  version: "0.11.1",
   endpoint: "https://127.0.0.1:7091",
   state: "online",
   started_at: "2026-07-25T09:00:00.000Z",
@@ -367,7 +367,7 @@ describe("dashboard renderer", () => {
     const maliciousServer: DashboardServerIdentity = {
       ...server,
       name: "borg\u001b]52;c;clipboard\u0007\nserver",
-      version: "0.11.0\u001b[2J",
+      version: "0.11.1\u001b[2J",
       endpoint: "https://safe.invalid/\u202Eevil",
     };
     const data = snapshotData(1);

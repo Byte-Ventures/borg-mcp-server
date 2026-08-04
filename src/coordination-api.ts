@@ -316,7 +316,10 @@ export class CoordinationApi {
           ...(directive === undefined ? {} : { directive }),
           ...(messageTaxonomy === undefined ? {} : { messageTaxonomy }),
         });
-        return success(200, envelope.requestId, { cube: cubePayload(cube) });
+        return success(200, envelope.requestId, {
+          cube: cubePayload(cube),
+          ...(directive === undefined ? {} : { advisory: contextAdvisory("Directive", cube.directive) }),
+        });
       }
       if (resource === undefined && request.method === "DELETE") {
         const envelope = decodeDeleteCubeRequestEnvelope(request.body);
@@ -412,7 +415,12 @@ export class CoordinationApi {
           ...(receivesAllDirect === undefined ? {} : { receivesAllDirect }),
           ...(roleClass === undefined ? {} : { roleClass }),
         });
-        return success(200, envelope.requestId, { role });
+        return success(200, envelope.requestId, {
+          role,
+          ...(detailedDescription === undefined
+            ? {}
+            : { advisory: contextAdvisory("Playbook", role.detailed_description) }),
+        });
       }
       if (resource === "role" && sectionPatch && request.method === "POST") {
         const envelope = decodeEnvelope(request.body);
@@ -423,7 +431,10 @@ export class CoordinationApi {
             action,
             heading: requiredSectionHeading(envelope.payload, "heading"),
           });
-          return success(200, envelope.requestId, { role });
+          return success(200, envelope.requestId, {
+            role,
+            advisory: contextAdvisory("Playbook", role.detailed_description),
+          });
         }
         if (action !== "replace" && action !== "insert") throw new InputError();
         exactKeys(envelope.payload, ["action", "heading", "body"], action === "insert" ? ["after"] : []);
@@ -431,18 +442,22 @@ export class CoordinationApi {
         if (body === undefined) throw new InputError();
         const heading = requiredSectionHeading(envelope.payload, "heading");
         if (action === "replace") {
+          const role = store.patchRoleSection(cubeId, roleId!, { action, heading, body });
           return success(200, envelope.requestId, {
-            role: store.patchRoleSection(cubeId, roleId!, { action, heading, body }),
+            role,
+            advisory: contextAdvisory("Playbook", role.detailed_description),
           });
         }
         const after = optionalNullableSectionHeading(envelope.payload["after"]);
+        const role = store.patchRoleSection(cubeId, roleId!, {
+          action,
+          heading,
+          body,
+          ...(after === undefined ? {} : { after }),
+        });
         return success(200, envelope.requestId, {
-          role: store.patchRoleSection(cubeId, roleId!, {
-            action,
-            heading,
-            body,
-            ...(after === undefined ? {} : { after }),
-          }),
+          role,
+          advisory: contextAdvisory("Playbook", role.detailed_description),
         });
       }
       if (resource === "drones" && request.method === "GET") {
@@ -994,6 +1009,16 @@ function safeRequestId(value: unknown): string | undefined {
 
 function success(status: number, requestId: string, payload: unknown): CoordinationResponse {
   return { status, body: createProtocolEnvelope(requestId, payload) };
+}
+
+const contextGuidelineBytes = 16_384;
+
+function contextAdvisory(document: "Directive" | "Playbook", value: string): string {
+  const bytes = Buffer.byteLength(value, "utf8");
+  if (bytes >= contextGuidelineBytes) {
+    return `${document} is ${bytes} bytes, above the 16 KB guideline - review for stale sections and compactness: relocate or delete what no longer earns its place in every drone's context.`;
+  }
+  return `${document} updated (${bytes} bytes). Review it for relevance and compactness.`;
 }
 
 function failure(

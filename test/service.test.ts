@@ -616,6 +616,7 @@ describe("node server service", () => {
       BORG_SERVER_TLS_CA_FILE: "/private/ca.crt",
       BORG_SERVER_MAX_DATABASE_BYTES: "2000000000",
       BORG_SERVER_MAX_ACTIVE_DECISION_BYTES_PER_CUBE: "32768",
+      BORG_SERVER_CONTEXT_GUIDELINE_BYTES: "8192",
       BORG_TOKEN: "must-not-cross-boundary",
       UNRELATED_REFRESH_TOKEN: "must-not-cross-boundary",
     })).toEqual({
@@ -624,19 +625,23 @@ describe("node server service", () => {
       BORG_SERVER_TLS_CA_FILE: "/private/ca.crt",
       BORG_SERVER_MAX_DATABASE_BYTES: "2000000000",
       BORG_SERVER_MAX_ACTIVE_DECISION_BYTES_PER_CUBE: "32768",
+      BORG_SERVER_CONTEXT_GUIDELINE_BYTES: "8192",
     });
   });
 
   it("parses bounded storage settings and rejects ambiguous values", () => {
     expect(resolveStorageLimits({}).maxActiveDecisionBytesPerCube).toBe(16_384);
+    expect(resolveStorageLimits({}).contextGuidelineBytes).toBe(16_384);
     expect(resolveStorageLimits({
       BORG_SERVER_MAX_ACTIVITY_ENTRIES_PER_CUBE: "2500",
       BORG_SERVER_MAX_ACTIVE_DECISION_BYTES_PER_CUBE: "32768",
+      BORG_SERVER_CONTEXT_GUIDELINE_BYTES: "8192",
       BORG_SERVER_MAX_DATABASE_BYTES: "500000000",
       BORG_SERVER_MIN_FREE_DISK_BYTES: "50000000",
     })).toEqual({
       maxActivityEntriesPerCube: 2_500,
       maxActiveDecisionBytesPerCube: 32_768,
+      contextGuidelineBytes: 8_192,
       maxDatabaseBytes: 500_000_000,
       minFreeDiskBytes: 50_000_000,
     });
@@ -644,6 +649,8 @@ describe("node server service", () => {
       .toThrow("Set BORG_SERVER_MAX_DATABASE_BYTES to a positive integer.");
     expect(() => resolveStorageLimits({ BORG_SERVER_MAX_ACTIVE_DECISION_BYTES_PER_CUBE: "0" }))
       .toThrow("Set BORG_SERVER_MAX_ACTIVE_DECISION_BYTES_PER_CUBE to a positive integer.");
+    expect(() => resolveStorageLimits({ BORG_SERVER_CONTEXT_GUIDELINE_BYTES: "0" }))
+      .toThrow("Set BORG_SERVER_CONTEXT_GUIDELINE_BYTES to a positive integer.");
   });
 
   it("requires the CA signing key to leave the runtime directory before LAN startup", async () => {

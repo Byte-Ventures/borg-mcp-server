@@ -36,6 +36,7 @@ export type OperatorErrorCode =
   | "DASHBOARD_DATA_UNAVAILABLE"
   | "ACTIVITY_LIMIT_INVALID"
   | "DECISION_BUDGET_INVALID"
+  | "CONTEXT_GUIDELINE_INVALID"
   | "DATABASE_LIMIT_INVALID"
   | "DISK_RESERVE_INVALID"
   | "CLIENT_NOT_FOUND"
@@ -86,6 +87,7 @@ const publicMessages: Readonly<Record<OperatorErrorCode, string>> = Object.freez
   DASHBOARD_DATA_UNAVAILABLE: "Dashboard data is unavailable. Check that BORG_SERVER_DATA_DIR is private and readable, then retry.",
   ACTIVITY_LIMIT_INVALID: "Set BORG_SERVER_MAX_ACTIVITY_ENTRIES_PER_CUBE to a positive integer.",
   DECISION_BUDGET_INVALID: "Set BORG_SERVER_MAX_ACTIVE_DECISION_BYTES_PER_CUBE to a positive integer.",
+  CONTEXT_GUIDELINE_INVALID: "Set BORG_SERVER_CONTEXT_GUIDELINE_BYTES to a positive integer.",
   DATABASE_LIMIT_INVALID: "Set BORG_SERVER_MAX_DATABASE_BYTES to a positive integer.",
   DISK_RESERVE_INVALID: "Set BORG_SERVER_MIN_FREE_DISK_BYTES to a positive integer.",
   CLIENT_NOT_FOUND: "Provide an existing active client ID.",

@@ -48,6 +48,7 @@ import {
   type LogCursor,
   type RepositoryCubeRecord,
   type StoreRuntime,
+  DEFAULT_STORAGE_LIMITS,
 } from "./store.js";
 
 export interface CoordinationRequest {
@@ -82,6 +83,7 @@ export class CoordinationApi {
   readonly #authority: CredentialAuthority;
   readonly #debugLogger: DebugLogger;
   readonly #streamHeartbeatMs: number;
+  readonly #contextGuidelineBytes: number;
   #replayBarrier: ReplayBarrier | undefined;
 
   constructor(
@@ -89,11 +91,13 @@ export class CoordinationApi {
     authority: CredentialAuthority,
     debugLogger: DebugLogger = disabledDebugLogger,
     streamHeartbeatMs = 5_000,
+    contextGuidelineBytes = DEFAULT_STORAGE_LIMITS.contextGuidelineBytes!,
   ) {
     this.#runtime = runtime;
     this.#authority = authority;
     this.#debugLogger = debugLogger;
     this.#streamHeartbeatMs = streamHeartbeatMs;
+    this.#contextGuidelineBytes = contextGuidelineBytes;
   }
 
   armReplayTransition(): { readonly reached: Promise<void>; readonly release: () => void } {
@@ -318,7 +322,9 @@ export class CoordinationApi {
         });
         return success(200, envelope.requestId, {
           cube: cubePayload(cube),
-          ...(directive === undefined ? {} : { advisory: contextAdvisory("Directive", cube.directive) }),
+          ...(directive === undefined
+            ? {}
+            : { advisory: contextAdvisory("Directive", cube.directive, this.#contextGuidelineBytes) }),
         });
       }
       if (resource === undefined && request.method === "DELETE") {
@@ -419,7 +425,7 @@ export class CoordinationApi {
           role,
           ...(detailedDescription === undefined
             ? {}
-            : { advisory: contextAdvisory("Playbook", role.detailed_description) }),
+            : { advisory: contextAdvisory("Playbook", role.detailed_description, this.#contextGuidelineBytes) }),
         });
       }
       if (resource === "role" && sectionPatch && request.method === "POST") {
@@ -433,7 +439,7 @@ export class CoordinationApi {
           });
           return success(200, envelope.requestId, {
             role,
-            advisory: contextAdvisory("Playbook", role.detailed_description),
+            advisory: contextAdvisory("Playbook", role.detailed_description, this.#contextGuidelineBytes),
           });
         }
         if (action !== "replace" && action !== "insert") throw new InputError();
@@ -445,7 +451,7 @@ export class CoordinationApi {
           const role = store.patchRoleSection(cubeId, roleId!, { action, heading, body });
           return success(200, envelope.requestId, {
             role,
-            advisory: contextAdvisory("Playbook", role.detailed_description),
+            advisory: contextAdvisory("Playbook", role.detailed_description, this.#contextGuidelineBytes),
           });
         }
         const after = optionalNullableSectionHeading(envelope.payload["after"]);
@@ -457,7 +463,7 @@ export class CoordinationApi {
         });
         return success(200, envelope.requestId, {
           role,
-          advisory: contextAdvisory("Playbook", role.detailed_description),
+          advisory: contextAdvisory("Playbook", role.detailed_description, this.#contextGuidelineBytes),
         });
       }
       if (resource === "drones" && request.method === "GET") {
@@ -1011,12 +1017,14 @@ function success(status: number, requestId: string, payload: unknown): Coordinat
   return { status, body: createProtocolEnvelope(requestId, payload) };
 }
 
-const contextGuidelineBytes = 16_384;
-
-function contextAdvisory(document: "Directive" | "Playbook", value: string): string {
+function contextAdvisory(
+  document: "Directive" | "Playbook",
+  value: string,
+  guidelineBytes: number,
+): string {
   const bytes = Buffer.byteLength(value, "utf8");
-  if (bytes >= contextGuidelineBytes) {
-    return `${document} is ${bytes} bytes, above the 16 KB guideline - review for stale sections and compactness: relocate or delete what no longer earns its place in every drone's context.`;
+  if (bytes >= guidelineBytes) {
+    return `${document} is ${bytes} bytes, at or above the ${guidelineBytes} byte guideline - review for stale sections and compactness: relocate or delete what no longer earns its place in every drone's context.`;
   }
   return `${document} updated (${bytes} bytes). Review it for relevance and compactness.`;
 }

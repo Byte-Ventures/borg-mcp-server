@@ -47,6 +47,7 @@ describe("main operator errors", () => {
       "Next: check your Node.js and npm installation, then rerun setup.",
     ],
     ["DATABASE_LIMIT_INVALID", "Set BORG_SERVER_MAX_DATABASE_BYTES to a positive integer."],
+    ["CUBE_ID_INVALID", "Provide the cube UUID shown by `client-list`."],
     [
       "CLIENT_NAME_CONFLICT",
       "A client with this name already exists. Choose another name, or revoke the existing client before reusing it.",

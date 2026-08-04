@@ -43,6 +43,7 @@ export type OperatorErrorCode =
   | "CLIENT_SELECTOR_NOT_FOUND"
   | "CLIENT_REVOKED"
   | "GRANT_NOT_FOUND"
+  | "CUBE_ID_INVALID"
   | "RECOVERY_INVALID"
   | "INVITATION_BUSY"
   | "INVITATION_CONTENTION"
@@ -95,6 +96,7 @@ const publicMessages: Readonly<Record<OperatorErrorCode, string>> = Object.freez
   CLIENT_SELECTOR_NOT_FOUND: "Provide an existing client name, handle, or ID.",
   CLIENT_REVOKED: "Client exists but is revoked.",
   GRANT_NOT_FOUND: "Provide an existing client cube grant.",
+  CUBE_ID_INVALID: "Provide the cube UUID shown by `client-list`.",
   RECOVERY_INVALID: "Provide the active recovery credential through the private prompt.",
   INVITATION_BUSY: "Confirm no invitation or offline administration command is running, then remove invitation-mint.lock.",
   INVITATION_CONTENTION: "Retry invitation minting after the current server database write completes.",

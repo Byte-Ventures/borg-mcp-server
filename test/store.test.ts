@@ -25,6 +25,7 @@ import {
   openStore,
 } from "../src/store.js";
 import { PLATFORM_QUEEN_DETAILED_DESCRIPTION } from "../src/platform-queen.js";
+import { operatorErrors } from "../src/operator-error.js";
 
 const ids = {
   clientA: "00000000-0000-4000-8000-000000000001",
@@ -99,6 +100,13 @@ afterEach(async () => {
 });
 
 describe("Principal to ScopedStore isolation", () => {
+  it("reports the UUID requirement for selector-based cube grants", () => {
+    expect(() => runtime.maintenance.grantClientCubeBySelector({
+      selector: ids.clientA,
+      cubeId: "Cube A",
+      access: "manage",
+    })).toThrow(operatorErrors.CUBE_ID_INVALID);
+  });
   it("gives the delegated Queen the complete activation timing contract", () => {
     expect(PLATFORM_QUEEN_DETAILED_DESCRIPTION).toContain(
       "Use START NOW, RESUME NOW, REVIEW NOW, or HOLD",

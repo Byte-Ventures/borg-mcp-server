@@ -2688,7 +2688,11 @@ class SqliteMaintenanceStore implements MaintenanceStore {
     readonly access: CubeAccess;
   }): void {
     validateClientSelector(input.selector);
-    assertCanonicalUuid(input.cubeId, "Cube id");
+    try {
+      assertCanonicalUuid(input.cubeId, "Cube id");
+    } catch {
+      throw operatorErrors.CUBE_ID_INVALID;
+    }
     if (!(["read", "write", "manage"] as const).includes(input.access)) {
       throw new Error("Unknown cube access grant.");
     }

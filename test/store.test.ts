@@ -1246,7 +1246,7 @@ describe("Principal to ScopedStore isolation", () => {
     expect(() => client.removeDecision(ids.cubeA, { decisionId: byId.id })).toThrow(ScopedStoreError);
   });
 
-  it("derives roster wake state from directed acknowledgements and retries bounded wake pings", () => {
+  it("derives roster wake state from directed acknowledgements and retries bounded wake pings", async () => {
     const manager = runtime.forPrincipal(clientPrincipal(ids.clientA));
     const drone = runtime.forPrincipal(droneSessionPrincipal({
       id: ids.sessionA,
@@ -1256,6 +1256,8 @@ describe("Principal to ScopedStore isolation", () => {
     }));
     const delivered: ActivityStreamRecord[] = [];
     const unsubscribe = drone.subscribeActivity(ids.cubeA, (entry) => delivered.push(entry));
+    expect(runtime.forPrincipal(clientPrincipal(ids.clientA)).listDrones(ids.cubeA)[0]!.wake_state)
+      .toBe("idle");
     const entry = manager.appendLog(ids.cubeA, {
       message: "wake me",
       visibility: "direct",
@@ -1266,18 +1268,93 @@ describe("Principal to ScopedStore isolation", () => {
 
     storeNow = new Date("2026-07-14T12:01:01.000Z");
     runtime.liveness.scan();
+    storeNow = new Date("2026-07-14T12:01:02.000Z");
     runtime.liveness.scan();
-    runtime.liveness.scan();
-    expect(delivered.filter((value) => value.id === entry.id)).toHaveLength(3);
+    expect(delivered.filter((value) => value.id === entry.id)).toHaveLength(2);
+    const wakeEvents = delivered.filter((value) => value.id === entry.id && "wake_nonce" in value);
+    expect(wakeEvents).toHaveLength(1);
+    expect(wakeEvents[0]!.wake_nonce).toEqual(expect.any(String));
     expect(runtime.forPrincipal(clientPrincipal(ids.clientA)).listDrones(ids.cubeA)[0]!.wake_state)
       .toBe("pending");
-    storeNow = new Date("2026-07-14T12:03:01.000Z");
+    runtime.close();
+    runtime = await openStore({ path: join(directory, "borg.db"), clock: () => storeNow });
+    const resumedDrone = runtime.forPrincipal(droneSessionPrincipal({
+      id: ids.sessionA,
+      clientId: ids.clientA,
+      cubeId: ids.cubeA,
+      droneId: ids.droneA,
+    }));
+    const resumedEvents: ActivityStreamRecord[] = [];
+    const stopResumed = resumedDrone.subscribeActivity(ids.cubeA, (value) => resumedEvents.push(value));
+    storeNow = new Date("2026-07-14T12:02:02.000Z");
+    runtime.liveness.scan();
+    expect(resumedEvents.filter((value) => "wake_nonce" in value)).toHaveLength(1);
+    expect(resumedEvents.find((value) => "wake_nonce" in value)!.wake_nonce)
+      .not.toBe(wakeEvents[0]!.wake_nonce);
+    const database = new DatabaseSync(join(directory, "borg.db"));
+    expect(database.prepare("SELECT COUNT(*) AS count FROM activity_log").get()).toMatchObject({ count: 1 });
+    database.close();
+    storeNow = new Date("2026-07-14T12:03:02.000Z");
+    expect(runtime.liveness.scan()).toEqual([]);
     expect(runtime.forPrincipal(clientPrincipal(ids.clientA)).listDrones(ids.cubeA)[0]!.wake_state)
       .toBe("stale");
 
-    drone.acknowledge(ids.cubeA, entry.id, "ack");
+    resumedDrone.acknowledge(ids.cubeA, entry.id, "ack");
     expect(runtime.forPrincipal(clientPrincipal(ids.clientA)).listDrones(ids.cubeA)[0]!.wake_state)
       .toBe("awake");
     unsubscribe();
+    stopResumed();
+  });
+
+  it("keeps overlapping wake subscriptions registered until the last one closes", () => {
+    const manager = runtime.forPrincipal(clientPrincipal(ids.clientA));
+    const drone = runtime.forPrincipal(droneSessionPrincipal({
+      id: ids.sessionA,
+      clientId: ids.clientA,
+      cubeId: ids.cubeA,
+      droneId: ids.droneA,
+    }));
+    const first: ActivityStreamRecord[] = [];
+    const second: ActivityStreamRecord[] = [];
+    const stopFirst = drone.subscribeActivity(ids.cubeA, (entry) => first.push(entry));
+    const stopSecond = drone.subscribeActivity(ids.cubeA, (entry) => second.push(entry));
+    stopFirst();
+    const entry = manager.appendLog(ids.cubeA, {
+      message: "overlapping wake listener",
+      visibility: "direct",
+      recipientDroneIds: [ids.droneA],
+    });
+    expect(first).toEqual([]);
+    expect(second.map((value) => value.id)).toEqual([entry.id]);
+    stopSecond();
+  });
+
+  it("keeps wake bookkeeping bounded across many directed entries without log writes", () => {
+    const manager = runtime.forPrincipal(clientPrincipal(ids.clientA));
+    const drone = runtime.forPrincipal(droneSessionPrincipal({
+      id: ids.sessionA,
+      clientId: ids.clientA,
+      cubeId: ids.cubeA,
+      droneId: ids.droneA,
+    }));
+    const delivered: ActivityStreamRecord[] = [];
+    const stop = drone.subscribeActivity(ids.cubeA, (entry) => delivered.push(entry));
+    for (let index = 0; index < 32; index += 1) {
+      manager.appendLog(ids.cubeA, {
+        message: `many-entry-${index}`,
+        visibility: "direct",
+        recipientDroneIds: [ids.droneA],
+      });
+    }
+    const database = new DatabaseSync(join(directory, "borg.db"));
+    const logCount = database.prepare("SELECT COUNT(*) AS count FROM activity_log").get();
+    storeNow = new Date("2026-07-14T12:01:01.000Z");
+    runtime.liveness.scan();
+    expect(delivered.filter((entry) => "wake_nonce" in entry)).toHaveLength(32);
+    expect(database.prepare("SELECT COUNT(*) AS count FROM activity_log").get()).toEqual(logCount);
+    expect(database.prepare("SELECT COUNT(*) AS count FROM activity_wake_attempts").get())
+      .toEqual({ count: 32 });
+    database.close();
+    stop();
   });
 });

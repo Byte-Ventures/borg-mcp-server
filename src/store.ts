@@ -86,6 +86,7 @@ export interface EnrichedActivityRecord {
   readonly drone_label: string | null;
   readonly role_name: string | null;
   readonly recipient_drone_ids: string[];
+  readonly wake_nonce?: string;
 }
 
 export type ActivityNotificationRecord = EnrichedActivityRecord & (
@@ -2624,7 +2625,16 @@ class SqliteMaintenanceStore implements MaintenanceStore {
   }
 
   listClients(): ClientAdministrationRecord[] {
-    return listClientAdministrationRecords(this.#database);
+    this.#database.exec("PRAGMA busy_timeout = 0");
+    this.#database.exec("BEGIN IMMEDIATE");
+    try {
+      const clients = listClientAdministrationRecords(this.#database);
+      this.#database.exec("ROLLBACK");
+      return clients;
+    } catch (error) {
+      try { this.#database.exec("ROLLBACK"); } catch { /* Preserve the query error. */ }
+      throw error;
+    }
   }
 
   createClient(input: { readonly id: string; readonly name: string }): void {
@@ -3148,7 +3158,7 @@ class SqliteMaintenanceStore implements MaintenanceStore {
 
 class ActivityHub {
   readonly #listeners = new Map<string, Set<(entry: ActivityStreamRecord) => void>>();
-  readonly #wakeListeners = new Map<string, Set<string>>();
+  readonly #wakeListeners = new Map<string, Map<string, number>>();
   readonly #cubeDeletionListeners = new Map<string, Set<() => void>>();
   readonly #allListeners = new Set<() => void>();
 
@@ -3165,8 +3175,8 @@ class ActivityHub {
     deletionListeners.add(onCubeDeleted);
     this.#cubeDeletionListeners.set(cubeId, deletionListeners);
     if (droneId !== undefined) {
-      const wakeListeners = this.#wakeListeners.get(cubeId) ?? new Set<string>();
-      wakeListeners.add(droneId);
+      const wakeListeners = this.#wakeListeners.get(cubeId) ?? new Map<string, number>();
+      wakeListeners.set(droneId, (wakeListeners.get(droneId) ?? 0) + 1);
       this.#wakeListeners.set(cubeId, wakeListeners);
     }
     return () => {
@@ -3176,7 +3186,9 @@ class ActivityHub {
       if (deletionListeners.size === 0) this.#cubeDeletionListeners.delete(cubeId);
       if (droneId !== undefined) {
         const wakeListeners = this.#wakeListeners.get(cubeId);
-        wakeListeners?.delete(droneId);
+        const count = wakeListeners?.get(droneId) ?? 0;
+        if (count <= 1) wakeListeners?.delete(droneId);
+        else wakeListeners?.set(droneId, count - 1);
         if (wakeListeners?.size === 0) this.#wakeListeners.delete(cubeId);
       }
     };
@@ -3224,7 +3236,7 @@ class ActivityHub {
   }
 
   hasListener(cubeId: string, droneId: string): boolean {
-    return this.#wakeListeners.get(cubeId)?.has(droneId) ?? false;
+    return (this.#wakeListeners.get(cubeId)?.get(droneId) ?? 0) > 0;
   }
 }
 
@@ -3236,8 +3248,6 @@ class SqliteLivenessStore implements LivenessStore {
   readonly #database: DatabaseSync;
   readonly #clock: () => Date;
   readonly #activityHub: ActivityHub;
-  readonly #attempts = new Map<string, number>();
-
   constructor(database: DatabaseSync, clock: () => Date, activityHub: ActivityHub) {
     this.#database = database;
     this.#clock = clock;
@@ -3245,34 +3255,42 @@ class SqliteLivenessStore implements LivenessStore {
   }
 
   scan(): ActivityNotificationRecord[] {
-    const threshold = new Date(this.#clock().getTime() - WAKE_RETRY_INTERVAL_MS).toISOString();
+    const now = this.#clock();
+    const threshold = new Date(now.getTime() - WAKE_RETRY_INTERVAL_MS).toISOString();
     const rows = this.#database.prepare(`
-      SELECT entry.id, entry.cube_id, recipient.drone_id, entry.created_at
+      SELECT entry.id, entry.cube_id, recipient.drone_id, entry.created_at,
+             COALESCE(attempt.attempt_count, 0) AS attempt_count,
+             attempt.last_ping_at
       FROM activity_log AS entry
       JOIN activity_log_recipients AS recipient ON recipient.entry_id = entry.id
       LEFT JOIN activity_acks AS ack
         ON ack.entry_id = entry.id AND ack.claimant_drone_id = recipient.drone_id AND ack.kind = 'ack'
+      LEFT JOIN activity_wake_attempts AS attempt
+        ON attempt.entry_id = entry.id AND attempt.drone_id = recipient.drone_id
       WHERE entry.visibility = 'direct' AND ack.entry_id IS NULL AND entry.created_at <= ?
+        AND COALESCE(attempt.attempt_count, 0) < ?
+        AND (attempt.last_ping_at IS NULL OR attempt.last_ping_at <= ?)
       ORDER BY entry.created_at, entry.id, recipient.drone_id
-    `).all(threshold);
+    `).all(threshold, WAKE_MAX_ATTEMPTS, threshold);
     for (const row of rows) {
       const cubeId = requiredText(row, "cube_id");
       const entryId = requiredText(row, "id");
       const droneId = requiredText(row, "drone_id");
-      const key = `${entryId}:${droneId}`;
-      const attempts = this.#attempts.get(key) ?? 0;
-      if (attempts >= WAKE_MAX_ATTEMPTS || !this.#activityHub.hasListener(cubeId, droneId)) continue;
-      this.#activityHub.publish(cubeId, this.#enrichedEntry(cubeId, entryId));
-      this.#attempts.set(key, attempts + 1);
-    }
-    const activeKeys = new Set(rows.map((row) => `${requiredText(row, "id")}:${requiredText(row, "drone_id")}`));
-    for (const key of this.#attempts.keys()) {
-      if (!activeKeys.has(key)) this.#attempts.delete(key);
+      if (!this.#activityHub.hasListener(cubeId, droneId)) continue;
+      const wakeNonce = randomUUID();
+      this.#database.prepare(`
+        INSERT INTO activity_wake_attempts (entry_id, drone_id, attempt_count, last_ping_at)
+        VALUES (?, ?, 1, ?)
+        ON CONFLICT (entry_id, drone_id) DO UPDATE SET
+          attempt_count = activity_wake_attempts.attempt_count + 1,
+          last_ping_at = excluded.last_ping_at
+      `).run(entryId, droneId, this.#clock().toISOString());
+      this.#activityHub.publish(cubeId, this.#enrichedEntry(cubeId, entryId, wakeNonce));
     }
     return [];
   }
 
-  #enrichedEntry(cubeId: string, entryId: string): EnrichedActivityRecord {
+  #enrichedEntry(cubeId: string, entryId: string, wakeNonce?: string): EnrichedActivityRecord {
     const row = this.#database.prepare(`
       SELECT l.id, l.cube_id, l.drone_id, l.message, l.visibility, l.created_at,
              d.label AS drone_label, r.name AS role_name
@@ -3285,7 +3303,7 @@ class SqliteLivenessStore implements LivenessStore {
     const recipients = this.#database.prepare(
       "SELECT drone_id FROM activity_log_recipients WHERE entry_id = ? ORDER BY drone_id",
     ).all(entryId).map((recipient) => requiredText(recipient, "drone_id"));
-    return enrichedActivityRecord(row, recipients);
+    return enrichedActivityRecord(row, recipients, wakeNonce);
   }
 }
 
@@ -3896,6 +3914,7 @@ function activityRow(row: Record<string, unknown>): ActivityRow {
 function enrichedActivityRecord(
   row: Record<string, unknown>,
   recipientDroneIds: string[],
+  wakeNonce?: string,
 ): EnrichedActivityRecord {
   const visibility = requiredText(row, "visibility");
   if (visibility !== "broadcast" && visibility !== "direct") {
@@ -3911,6 +3930,7 @@ function enrichedActivityRecord(
     drone_label: nullableText(row, "drone_label"),
     role_name: nullableText(row, "role_name"),
     recipient_drone_ids: recipientDroneIds,
+    ...(wakeNonce === undefined ? {} : { wake_nonce: wakeNonce }),
   };
 }
 

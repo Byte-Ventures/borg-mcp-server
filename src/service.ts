@@ -1363,7 +1363,10 @@ export function createOfflineCredentialService(
       (authority) => authority.rotateClient(clientId),
       operatorErrors.LIVE_ADMIN_CONTENTION,
     ),
-    listClients: () => withInvitationAuthority((_authority, runtime) => runtime.maintenance.listClients()),
+    listClients: () => withInvitationAuthority(
+      (_authority, runtime) => runtime.maintenance.listClients(),
+      operatorErrors.LIVE_ADMIN_CONTENTION,
+    ),
     revokeClient: (selector) => withInvitationAuthority(
       (authority) => authority.revokeClient(selector),
       operatorErrors.LIVE_ADMIN_CONTENTION,

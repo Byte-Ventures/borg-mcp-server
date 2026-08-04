@@ -1985,8 +1985,13 @@ describe("drones since parameter validation", () => {
       signal: new AbortController().signal,
     });
     expect(response.status).toBe(200);
-    const payload = (response.body as { payload: { drones: Array<{ id: string; seen_since: boolean }> } }).payload;
-    expect(payload.drones).toEqual([expect.objectContaining({ id: droneId, seen_since: false })]);
+    const payload = (response.body as { payload: { drones: Array<{ id: string; seen_since: boolean; wake_state: string }> } }).payload;
+    expect(payload.drones).toEqual([expect.objectContaining({ id: droneId, seen_since: false, wake_state: "idle" })]);
+    expect(Object.keys(payload.drones[0]!).sort()).toEqual([
+      "agent_kind", "created_at", "cube_id", "hostname", "id", "label", "last_log_post_at",
+      "last_seen", "posture", "reported_model", "role_id", "runtime_metadata_reported",
+      "seen_since", "wake_state", "working_repo_name", "working_repo_origin",
+    ]);
   });
 
   it("accepts a valid UUID as since and returns 404 when not found", async () => {

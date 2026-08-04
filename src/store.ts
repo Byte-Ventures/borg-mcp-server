@@ -1625,11 +1625,12 @@ class SqliteScopedStore implements ScopedStore {
     const fullId = /^[0-9a-f]{8}-[0-9a-f-]{27}$/iu.test(since);
     const shortId = /^[0-9a-f]{8}$/iu.test(since);
     if (fullId || shortId) {
+      const broadcastOnly = !this.#allowsDirectedWork(cubeId);
       const anchors = this.#database.prepare(`
         SELECT id, created_at FROM activity_log
         WHERE cube_id = ? AND ${fullId
           ? "id = ?"
-          : "substr(id, 1, 8) = ? AND visibility = 'broadcast'"}
+          : `substr(id, 1, 8) = ? AND (${broadcastOnly ? "visibility = 'broadcast'" : "1 = 1"})`}
         LIMIT 2
       `).all(cubeId, since);
       if (anchors.length === 0) throw new ScopedStoreError();

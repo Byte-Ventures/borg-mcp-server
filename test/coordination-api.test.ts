@@ -462,6 +462,14 @@ describe("coordination stream setup", () => {
       signal: new AbortController().signal,
     });
     expect(prefixSince.status).toBe(200);
+    const participantPrefixSince = await api.handle({
+      method: "GET",
+      path: `/api/cubes/${cubeId}/drones`,
+      principal: participantSession,
+      since: directedEntryId.slice(0, 8),
+      signal: new AbortController().signal,
+    });
+    expect(participantPrefixSince.status).toBe(200);
     const hiddenSince = await api.handle({
       method: "GET",
       path: `/api/cubes/${cubeId}/drones`,

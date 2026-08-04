@@ -131,6 +131,59 @@ describe("coordination stream setup", () => {
     await iterator.return?.();
   }, 15_000);
 
+  it("preserves a wake nonce emitted during the replay barrier", async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-api-replay-wake-")));
+    directories.push(directory);
+    let now = new Date("2026-07-14T12:00:00.000Z");
+    runtime = await openStore({ path: join(directory, "borg.db"), clock: () => now });
+    digester = new CredentialDigester(Buffer.alloc(32, 27));
+    const authority = new CredentialAuthority(runtime.credentials, digester);
+    const clientId = "00000000-0000-4000-8000-0000000000f1";
+    const cubeId = "00000000-0000-4000-8000-0000000000f2";
+    const roleId = "00000000-0000-4000-8000-0000000000f3";
+    const droneId = "00000000-0000-4000-8000-0000000000f4";
+    const sessionId = "00000000-0000-4000-8000-0000000000f5";
+    runtime.maintenance.createClient({ id: clientId, name: "Replay wake client" });
+    runtime.maintenance.createCube({ id: cubeId, name: "Replay wake", directive: "" });
+    runtime.maintenance.grantClientCube({ clientId, cubeId, access: "manage" });
+    runtime.maintenance.createRole({ id: roleId, cubeId, name: "Replay worker" });
+    runtime.maintenance.createDrone({ id: droneId, cubeId, roleId, clientId, label: "replay-worker" });
+    runtime.maintenance.createDroneSession({ id: sessionId, clientId, cubeId, droneId });
+    const manager = runtime.forPrincipal(clientPrincipal(clientId));
+    const entry = manager.appendLog(cubeId, {
+      message: "replay wake",
+      visibility: "direct",
+      recipientDroneIds: [droneId],
+    });
+    const principal = droneSessionPrincipal({ id: sessionId, clientId, cubeId, droneId });
+    const api = new CoordinationApi(runtime, authority);
+    const barrier = api.armReplayTransition();
+    const opening = api.handle({
+      method: "GET",
+      path: `/api/cubes/${cubeId}/stream`,
+      principal,
+      signal: new AbortController().signal,
+    });
+    await barrier.reached;
+    now = new Date("2026-07-14T12:01:01.000Z");
+    runtime.liveness.scan();
+    barrier.release();
+
+    const response = await opening;
+    const iterator = response.stream![Symbol.asyncIterator]();
+    const wakeFrames: Array<{ entry: { id: string; wake_nonce?: string } }> = [];
+    for (;;) {
+      const next = await iterator.next();
+      expect(next.done).toBe(false);
+      if (next.value.includes("event: bookmark")) break;
+      const data = JSON.parse(next.value.match(/data: (.+)\n\n/u)![1]!);
+      if (data.entry?.wake_nonce !== undefined) wakeFrames.push(data);
+    }
+    expect(wakeFrames).toHaveLength(1);
+    expect(wakeFrames[0]!.entry).toMatchObject({ id: entry.id, wake_nonce: expect.any(String) });
+    await iterator.return?.();
+  }, 15_000);
+
   it("emits heartbeat events while a live stream is idle", async () => {
     const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-api-heartbeat-")));
     directories.push(directory);

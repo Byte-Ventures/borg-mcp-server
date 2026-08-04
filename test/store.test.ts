@@ -1326,6 +1326,9 @@ describe("Principal to ScopedStore isolation", () => {
     });
     expect(first).toEqual([]);
     expect(second.map((value) => value.id)).toEqual([entry.id]);
+    storeNow = new Date("2026-07-14T12:01:01.000Z");
+    runtime.liveness.scan();
+    expect(second.filter((value) => "wake_nonce" in value)).toHaveLength(1);
     stopSecond();
   });
 

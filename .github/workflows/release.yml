@@ -43,7 +43,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "$(node --version)" = "v24.19.0"
+          test "$(node --version)" = "v$(cat .nvmrc)"
           test "${REPOSITORY_PRIVATE}" = "false"
           version="$(node -p "require('./package.json').version")"
           test "${GITHUB_EVENT_NAME}" = "push"

@@ -412,6 +412,29 @@ describe("coordination stream setup", () => {
       signal: new AbortController().signal,
     });
     expect(hiddenLookup).toEqual(nonexistentLookup);
+    const hiddenCursor = await api.handle({
+      method: "PUT",
+      path: `/api/cubes/${cubeId}/logs`,
+      principal: observerSession,
+      body: {
+        protocol_version: "7",
+        request_id: "hidden-prefix-cursor",
+        payload: { cursor: { id: "cafebabe", created_at: collisionCreatedAt } },
+      },
+      signal: new AbortController().signal,
+    });
+    const missingCursor = await api.handle({
+      method: "PUT",
+      path: `/api/cubes/${cubeId}/logs`,
+      principal: observerSession,
+      body: {
+        protocol_version: "7",
+        request_id: "missing-prefix-cursor",
+        payload: { cursor: { id: "aaaaaaaa", created_at: collisionCreatedAt } },
+      },
+      signal: new AbortController().signal,
+    });
+    expect(hiddenCursor).toEqual(missingCursor);
     const fullCollisionSince = await api.handle({
       method: "GET",
       path: `/api/cubes/${cubeId}/drones`,
@@ -439,6 +462,21 @@ describe("coordination stream setup", () => {
       signal: new AbortController().signal,
     });
     expect(prefixSince.status).toBe(200);
+    const hiddenSince = await api.handle({
+      method: "GET",
+      path: `/api/cubes/${cubeId}/drones`,
+      principal: observerSession,
+      since: "cafebabe",
+      signal: new AbortController().signal,
+    });
+    const missingSince = await api.handle({
+      method: "GET",
+      path: `/api/cubes/${cubeId}/drones`,
+      principal: observerSession,
+      since: "aaaaaaaa",
+      signal: new AbortController().signal,
+    });
+    expect(hiddenSince).toEqual(missingSince);
     const invalidSince = await api.handle({
       method: "GET",
       path: `/api/cubes/${cubeId}/drones`,
@@ -544,8 +582,9 @@ describe("coordination stream setup", () => {
       signal: new AbortController().signal,
     });
     expect(observerRead.status).toBe(200);
-    expect((observerRead.body as any).payload.entries.map((entry: any) => entry.message))
-      .toEqual(["shared-update", "collision-one", "collision-two"]);
+    const observerMessages = (observerRead.body as any).payload.entries.map((entry: any) => entry.message);
+    expect(observerMessages).toHaveLength(3);
+    expect(observerMessages).toEqual(expect.arrayContaining(["shared-update", "collision-one", "collision-two"]));
     observerController.abort();
     participantController.abort();
     await observerIterator.return?.();

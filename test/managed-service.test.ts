@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 
 import { createManagedServiceDefinition } from "../src/managed-service.js";
+import { runCli } from "../src/cli.js";
+import type { ServerService } from "../src/service.js";
 
 describe("managed service adapters", () => {
   it("renders a portable systemd user service against the immutable current target", () => {
@@ -29,7 +31,7 @@ describe("managed service adapters", () => {
     expect(service.content).not.toContain("checkout");
   });
 
-  it("adds the sqlite warning suppression only for Node 22 managed starts", () => {
+  it("adds the sqlite warning suppression only for Node 22 managed starts", async () => {
     for (const [platform, nodeVersion, expected] of [
       ["systemd", "22.18.0", true],
       ["launchd", "22.18.0", true],
@@ -47,8 +49,12 @@ describe("managed service adapters", () => {
       });
       expect(definition.content.includes("--disable-warning=ExperimentalWarning")).toBe(expected);
     }
-    const directStart = ["/usr/bin/node", "/runtime/current/package/dist/main.js", "start"];
-    expect(directStart).not.toContain("--disable-warning=ExperimentalWarning");
+    let directStartArgs: readonly string[] | undefined;
+    await runCli(["start"], {
+      start: async (args) => { directStartArgs = args; },
+    } as ServerService, { stdout: () => undefined, stderr: () => undefined });
+    expect(directStartArgs).toEqual([]);
+    expect(directStartArgs).not.toContain("--disable-warning=ExperimentalWarning");
   });
 
   it("renders a thin launchd adapter with the same runtime and data contract", () => {

@@ -1627,7 +1627,9 @@ class SqliteScopedStore implements ScopedStore {
     if (fullId || shortId) {
       const anchors = this.#database.prepare(`
         SELECT id, created_at FROM activity_log
-        WHERE cube_id = ? AND ${fullId ? "id = ?" : "substr(id, 1, 8) = ?"}
+        WHERE cube_id = ? AND ${fullId
+          ? "id = ?"
+          : "substr(id, 1, 8) = ? AND visibility = 'broadcast'"}
         LIMIT 2
       `).all(cubeId, since);
       if (anchors.length === 0) throw new ScopedStoreError();
@@ -1838,9 +1840,9 @@ class SqliteScopedStore implements ScopedStore {
     if (!Number.isInteger(limit) || limit < 1 || limit > 500) {
       throw new Error("Activity read limit must be an integer from 1 to 500.");
     }
-    const resolvedCursor = cursor === null ? null : this.#resolveCursor(cubeId, cursor);
-    this.#validateCursor(cubeId, resolvedCursor);
     const broadcastOnly = !this.#allowsDirectedWork(cubeId);
+    const resolvedCursor = cursor === null ? null : this.#resolveCursor(cubeId, cursor, broadcastOnly);
+    this.#validateCursor(cubeId, resolvedCursor);
     const cursorSql = resolvedCursor === null
       ? { sql: "1 = 1", parameters: [] as string[] }
       : {
@@ -2466,11 +2468,13 @@ class SqliteScopedStore implements ScopedStore {
     if (valid === undefined) throw new ScopedStoreError();
   }
 
-  #resolveCursor(cubeId: string, cursor: LogCursor): LogCursor {
+  #resolveCursor(cubeId: string, cursor: LogCursor, broadcastOnly: boolean): LogCursor {
     if (/^[0-9a-f]{8}$/iu.test(cursor.id)) {
       const rows = this.#database.prepare(`
         SELECT id, created_at FROM activity_log
-        WHERE cube_id = ? AND substr(id, 1, 8) = ? LIMIT 2
+        WHERE cube_id = ? AND substr(id, 1, 8) = ?
+          AND (${broadcastOnly ? "visibility = 'broadcast'" : "1 = 1"})
+        LIMIT 2
       `).all(cubeId, cursor.id.toLowerCase());
       if (rows.length === 0) throw new ScopedStoreError();
       if (rows.length > 1) throw new ActivityEntryPrefixConflictError();

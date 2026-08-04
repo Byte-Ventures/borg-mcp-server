@@ -72,7 +72,7 @@ v1 scope.
   `ca.key`. After setup, operators deploying on a LAN must move `ca.key` to offline storage that the
   service account cannot read; only `ca.crt`, `server.crt`, and `server.key` remain available at
   runtime.
-- Client listing, rotation, revocation, and grant changes are offline commands, not network routes.
+- Client listing, rotation, revocation, and grant changes remain operator commands, not network routes.
   The listing exposes client names, current ID-derived handles, active/revoked state, and cube grants,
   but no credential or invitation material. Revocation and grant changes resolve an exact unique
   name, a listed handle, or a full client UUID in the same immediate transaction as the
@@ -82,10 +82,10 @@ v1 scope.
   disambiguates a handle shadowed by a name. A uniquely resolved revoked client is reported as
   revoked rather than absent. Stop the server first, run
   `borg-mcp-server client-rotate <client-id>` or `borg-mcp-server client-revoke <client-name-or-handle>`, securely
-  deliver any one-time rotated credential, then restart. A PID-bound runtime lock rejects offline
-  changes while the service is live. Stale locks fail closed and require explicit removal only after
-  confirming the recorded PID is stopped; an old cross-process SSE stream therefore cannot survive
-  an offline database change.
+  deliver any one-time rotated credential. Live operations commit through the same SQLite store
+  while the service runs; request-time authorization observes the commit on the next request, with
+  no polling window. Requests already in flight retain their established state. A concurrent write
+  fails closed and can be retried; no stale cross-process authorization cache exists.
 - Client and pre-claim owner invitation minting remain local CLI operations with no network route, but
   may execute beside a live server because they invalidate no live authority. Client minting adds one
   purpose-bound digest row; owner replacement revokes prior
@@ -93,7 +93,7 @@ v1 scope.
   it requires the exact migration version/name/checksum
   chain used by the running CLI and fails closed on mismatch. A separate short-lived invitation-mutation
   lock prevents concurrent invitation commands and
-  excludes setup, reinitialization, rotation, revocation, and grant changes. The live server observes the
+  excludes setup and reinitialization. The live server observes the
   committed WAL write on its next enrollment read without restart; SQLite contention fails closed.
   Invitation claim inserts the client, credential digest, retry binding, and invitation consumption in
   one immediate transaction; owner claim also inserts `create_cube`. Cube access remains a separate
@@ -198,7 +198,7 @@ v1 scope.
 
 | Release criterion | Enforcement and evidence |
 | --- | --- |
-| Separate least-privilege credentials | Purpose-separated digest domains, scoped principals, narrow drone sessions, and offline-only client rotation/revocation commands. |
+| Separate least-privilege credentials | Purpose-separated digest domains, scoped principals, narrow drone sessions, and operator-only client rotation/revocation commands. |
 | Loopback default, explicit LAN consent, no discovery | `network-policy.ts`, `start-options.ts`, bind negatives, and static discovery boundary test. |
 | Verified TLS for non-loopback | Exact SAN/EKU/validity checks plus mandatory bounded root/intermediate path verification for LAN mode; trusted/untrusted/direct/intermediate LAN certificate tests. |
 | Authentication on all REST and SSE | All application REST/SSE routes authenticate; invitation exchange is one-time authenticated; the ratified shared-contract health exception is data-free; missing/invalid SSE/route matrix is release-gating. |

@@ -39,6 +39,7 @@ import {
 import type { ForegroundDashboard } from "../src/dashboard.js";
 import { createManagedServiceDefinition } from "../src/managed-service.js";
 import { operatorErrors } from "../src/operator-error.js";
+import { clientPrincipal } from "../src/principal.js";
 
 function requireFreshSetup(
   result: Awaited<ReturnType<typeof setupNodeServerInstallation>>,
@@ -1332,28 +1333,30 @@ describe("node server service", () => {
       digester = new CredentialDigester(digestKey);
       digestKey.fill(0);
       const liveAuthority = new CredentialAuthority(runtime.credentials, digester);
-      running = await acquireRuntimeLock(directory, "server");
       const administration = createOfflineCredentialService(directory);
-
       const clientInvitation = await administration.createClientInvitation(installation.recoveryCredential);
+      const originalCredential = generateSecret();
       const client = liveAuthority.exchangeInvitation({
         invitation: clientInvitation,
         retryKey: randomUUID(),
-        clientCredential: generateSecret(),
+        clientCredential: originalCredential,
       });
-      expect(client).toMatchObject({ purpose: "client", serverCapabilities: [] });
+      expect(client).not.toBeNull();
+      const cubeId = "00000000-0000-4000-8000-000000000081";
+      runtime.maintenance.createCube({ id: cubeId, name: "Live grant", directive: "" });
+      running = await acquireRuntimeLock(directory, "server");
 
-      await expect(administration.rotateClient(client!.clientId)).rejects.toThrow(
-        "Stop the server before running setup or offline administration.",
-      );
-      await expect(administration.revokeClient(client!.clientId)).rejects.toThrow(
-        "Stop the server before running setup or offline administration.",
-      );
-      await expect(administration.grantClient(
-        client!.clientId,
-        "00000000-0000-4000-8000-000000000081",
-        "read",
-      )).rejects.toThrow("Stop the server before running setup or offline administration.");
+      expect(client).toMatchObject({ purpose: "client", serverCapabilities: [] });
+      const rotatedCredential = await administration.rotateClient(client!.clientId);
+      expect(liveAuthority.authenticate(`Bearer ${originalCredential}`)).toBeNull();
+      expect(liveAuthority.authenticate(`Bearer ${rotatedCredential}`))
+        .toMatchObject({ kind: "client", id: client!.clientId });
+      await administration.grantClient(client!.clientId, cubeId, "read");
+      expect(runtime.forPrincipal(clientPrincipal(client!.clientId)).getCube(cubeId)).not.toBeNull();
+      await administration.ungrantClient(client!.clientId, cubeId);
+      expect(runtime.forPrincipal(clientPrincipal(client!.clientId)).getCube(cubeId)).toBeNull();
+      await administration.revokeClient(client!.clientId);
+      expect(liveAuthority.authenticate(`Bearer ${rotatedCredential}`)).toBeNull();
     } finally {
       await running?.release();
       digester?.destroy();
@@ -1638,7 +1641,7 @@ describe("node server service", () => {
         await closeStarted;
         await expect(createOfflineCredentialService(directory).revokeClient(
           "00000000-0000-4000-8000-000000000001",
-        )).rejects.toThrow("Stop the server before running setup or offline administration.");
+        )).rejects.toThrow("Provide an existing client name, handle, or ID.");
         releaseClose();
 
         expect(await result).toBe(failure);
@@ -1779,7 +1782,7 @@ describe("node server service", () => {
       expect(authCloseCalls).toBe(0);
       await expect(createOfflineCredentialService(directory).rotateClient(
         "00000000-0000-4000-8000-000000000001",
-      )).rejects.toThrow("Stop the server before running setup or offline administration.");
+      )).rejects.toThrow("Provide an existing active client ID.");
       await expect(acquireRuntimeLock(directory)).rejects.toThrow(
         "Stop the server before running setup or offline administration.",
       );

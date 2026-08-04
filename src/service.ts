@@ -1348,7 +1348,11 @@ export function createOfflineCredentialService(
     }
   };
   const withInvitationAuthority = async <T>(
-    operation: (authority: CredentialAuthority) => T | Promise<T>,
+    operation: (
+      authority: CredentialAuthority,
+      runtime: Awaited<ReturnType<typeof openStore>>,
+    ) => T | Promise<T>,
+    contentionError = operatorErrors.INVITATION_CONTENTION,
   ): Promise<T> => {
     const invitationLock = await acquireInvitationMintLock(offlineDataDirectory);
     let offlineRuntimeLock: RuntimeLock | undefined;
@@ -1364,10 +1368,10 @@ export function createOfflineCredentialService(
       const digestKey = await loadDigestKey(join(offlineDataDirectory, "credential-digest.key"));
       digester = new CredentialDigester(digestKey);
       digestKey.fill(0);
-      return await operation(new CredentialAuthority(runtime.credentials, digester));
+      return await operation(new CredentialAuthority(runtime.credentials, digester), runtime);
     } catch (error) {
       if (error instanceof MigrationCompatibilityError) throw operatorErrors.INVITATION_SCHEMA_MISMATCH;
-      if (isSqliteContention(error)) throw operatorErrors.INVITATION_CONTENTION;
+      if (isSqliteContention(error)) throw contentionError;
       throw error;
     } finally {
       digester?.destroy();
@@ -1377,17 +1381,23 @@ export function createOfflineCredentialService(
     }
   };
   return {
-    rotateClient: (clientId) => withAuthority((authority) => authority.rotateClient(clientId)),
+    rotateClient: (clientId) => withInvitationAuthority(
+      (authority) => authority.rotateClient(clientId),
+      operatorErrors.LIVE_ADMIN_CONTENTION,
+    ),
     listClients: () => withAuthority((_authority, runtime) => runtime.maintenance.listClients()),
-    revokeClient: (selector) => withAuthority((authority) => authority.revokeClient(selector)),
-    grantClient: (selector, cubeId, access) => withAuthority((_authority, runtime) => {
+    revokeClient: (selector) => withInvitationAuthority(
+      (authority) => authority.revokeClient(selector),
+      operatorErrors.LIVE_ADMIN_CONTENTION,
+    ),
+    grantClient: (selector, cubeId, access) => withInvitationAuthority((_authority, runtime) => {
       runtime.maintenance.grantClientCubeBySelector({ selector, cubeId, access });
-    }),
-    ungrantClient: (selector, cubeId) => withAuthority((_authority, runtime) => {
+    }, operatorErrors.LIVE_ADMIN_CONTENTION),
+    ungrantClient: (selector, cubeId) => withInvitationAuthority((_authority, runtime) => {
       if (!runtime.maintenance.removeClientCubeGrantBySelector(selector, cubeId)) {
         throw operatorErrors.GRANT_NOT_FOUND;
       }
-    }),
+    }, operatorErrors.LIVE_ADMIN_CONTENTION),
     createClientInvitation: (recoveryCredential) => withInvitationAuthority((authority) => {
       const invitation = authority.createInvitation(recoveryCredential, 15 * 60_000);
       if (invitation === null) throw operatorErrors.RECOVERY_INVALID;

@@ -154,13 +154,14 @@ v1 scope.
   credentials fail closed.
 - Request bodies, headers, global connections, per-address connections, per-credential SSE streams,
   requests per socket, TLS handshakes, handler time, request time, and keepalive time are bounded. Bounded
-  global and per-remote-address fixed-window limiters run before body parsing and authentication;
-  authenticated coordination requests enter a separate parent-client limiter only after authentication
-  derives a server-trusted principal. Client credentials and drone-session credentials issued to the
-  same parent client share that request allowance, so rotation or reissue cannot reset it. Credential
-  hashes remain storage and authentication identifiers, not fairness identities. Excess requests return
-  `429` with `Retry-After`. Arbitrary invalid credentials cannot occupy client limiter state. SSE stream
-  allowances remain per credential. Unknown identities fail closed when limiter state reaches its bound.
+  global and per-remote-address fixed-window limiters run before body parsing and authentication; loopback
+  admission uses the finite global request bound for local coordination bursts while LAN sources retain the
+  tighter per-address bound. Authenticated coordination requests enter a separate principal limiter only
+  after authentication derives a server-trusted principal: client credentials are keyed by client identity,
+  and drone-session credentials are keyed by drone-session identity for reads, mutations, and streams.
+  Credential hashes remain storage and authentication identifiers, not fairness identities. Excess requests
+  return `429` with `Retry-After`. Arbitrary invalid credentials cannot occupy client limiter state. SSE
+  stream allowances remain per credential. Unknown identities fail closed when limiter state reaches its bound.
 - SSE replay, pending-event queues, and live queues are bounded. Credential rotation/revocation in the
   running authority aborts registered streams.
 - Activity storage retains at most 10,000 entries and 10,000 cursor tombstones per cube by default;

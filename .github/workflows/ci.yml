@@ -37,3 +37,14 @@ jobs:
 
       - name: Check, test, and build
         run: npm run check
+
+  test:
+    name: test
+    if: always()
+    needs: test-matrix
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every Node.js matrix leg to pass
+        env:
+          MATRIX_RESULT: ${{ needs.test-matrix.result }}
+        run: test "${MATRIX_RESULT}" = success

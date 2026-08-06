@@ -1,3 +1,8 @@
+import { createInkDashboardElement, renderInkDashboardFrame } from "./dashboard-ink.js";
+import { createElement as createReactElement } from "react";
+import { render as renderInk, Text as InkText, type Instance as InkInstance } from "ink";
+import { Writable } from "node:stream";
+
 export const DASHBOARD_ACTIVITY_WINDOW_MS = 15 * 60_000;
 export const DASHBOARD_IDLE_REFRESH_MS = 5_000;
 export const DASHBOARD_EVENT_COALESCE_MS = 250;
@@ -89,12 +94,15 @@ export interface DashboardActivitySample {
   readonly sentRate: number;
 }
 
-export type DashboardRenderer = (
-  snapshot: DashboardSnapshot,
-  columns: number,
-  rows: number,
-  view?: DashboardViewState,
-) => string;
+export interface DashboardRenderer {
+  (
+    snapshot: DashboardSnapshot,
+    columns: number,
+    rows: number,
+    view?: DashboardViewState,
+  ): string;
+  readonly inkOptions?: DashboardRenderOptions & { readonly baseFooter: string };
+}
 
 export interface DashboardTerminal {
   readonly write: (value: string) => void;
@@ -110,7 +118,7 @@ export interface ForegroundDashboard {
   readonly close: () => void;
 }
 
-interface Glyphs {
+export interface Glyphs {
   readonly horizontal: string;
   readonly vertical: string;
   readonly topLeft: string;
@@ -125,7 +133,7 @@ interface Glyphs {
   readonly axis: string;
 }
 
-const BOX_GLYPHS: Glyphs = Object.freeze({
+export const BOX_GLYPHS: Glyphs = Object.freeze({
   horizontal: "─",
   vertical: "│",
   topLeft: "┌",
@@ -140,7 +148,7 @@ const BOX_GLYPHS: Glyphs = Object.freeze({
   axis: "→",
 });
 
-const ASCII_GLYPHS: Glyphs = Object.freeze({
+export const ASCII_GLYPHS: Glyphs = Object.freeze({
   horizontal: "-",
   vertical: "|",
   topLeft: "+",
@@ -162,6 +170,7 @@ const amber = "\u001b[33m";
 const green = "\u001b[32;1m";
 const dim = "\u001b[2m";
 const reset = "\u001b[0m";
+const inkRenderers = new WeakSet<DashboardRenderer>();
 
 export function rankDashboardSnapshot(
   data: DashboardDataSnapshot,
@@ -190,9 +199,8 @@ export function rankDashboardSnapshot(
 }
 
 export function createDashboardRenderer(options: DashboardRenderOptions): DashboardRenderer {
-  const glyphs = options.glyphMode === "ascii" ? ASCII_GLYPHS : BOX_GLYPHS;
   const baseFooter = sanitizeTerminalLabel(options.footer);
-  return (snapshot, columns, rows, view = {
+  const renderer: DashboardRenderer = (snapshot, columns, rows, view = {
     autoFollow: true,
     focusedCubeId: null,
     pulseCubeIds: new Set(),
@@ -200,65 +208,22 @@ export function createDashboardRenderer(options: DashboardRenderOptions): Dashbo
     activity: new Map(),
     activityWindowMs: DASHBOARD_ACTIVITY_WINDOW_MS,
     page: 0,
-  }) => {
-    const width = boundedDimension(columns, 20, 500);
-    const height = boundedDimension(rows, 4, 200);
-    if (width < 40 || height < 10) {
-      return renderPlainDashboard(
-        snapshot,
-        width,
-        height,
-        options.footer,
-      );
-    }
-    const lifecycleFooter = options.footer === EMBEDDED_DASHBOARD_FOOTER
-      ? wrapDashboardFooter(EMBEDDED_DASHBOARD_LIFECYCLE_FOOTER, width)
-      : [];
-
-    const lines: string[] = [];
-    lines.push(renderRail(snapshot, width, glyphs, options.color));
-    lines.push(glyphs.horizontal.repeat(width));
-    const focus = view.autoFollow || view.focusedCubeId === null
-      ? snapshot.cubes[0]
-      : snapshot.cubes.find((cube) => cube.id === view.focusedCubeId) ?? snapshot.cubes[0];
-    const maximumPosts = Math.max(...snapshot.cubes.map((cube) => cube.posts_15m), 0);
-    const footerRows = lifecycleFooter.length + 1;
-    const chromeRows = 3 + footerRows;
-    const bodyRows = Math.max(0, height - chromeRows);
-    const listCap = Math.max(1, Math.floor(bodyRows * 0.42));
-    const listRows = Math.min(snapshot.cubes.length, listCap);
-    const panelRows = Math.max(1, bodyRows - listRows);
-    if (focus === undefined) {
-      lines.push(...renderEmptyPanel(width, glyphs));
-    } else {
-      lines.push(...renderFocusPanel(snapshot, focus, width, panelRows, glyphs, view, options.color));
-    }
-    lines.push(glyphs.horizontal.repeat(width));
-    const pageCount = Math.max(1, Math.ceil(snapshot.cubes.length / listCap));
-    const page = Math.max(0, view.page ?? 0) % pageCount;
-    const pageStart = page * listCap;
-    for (const cube of snapshot.cubes.slice(pageStart, pageStart + listRows)) {
-      lines.push(renderSummaryRow(snapshot, cube, width, glyphs, view, maximumPosts, options.color));
-    }
-    const footerWithPage = renderDashboardFooter(
-      snapshot,
-      width,
-      options.navigation === true,
-      view.activityWindowMs ?? DASHBOARD_ACTIVITY_WINDOW_MS,
-      page,
-      pageCount,
-      baseFooter,
-      glyphs,
-    );
-    lines.push(...lifecycleFooter.map((line) => fitCell(line, width, " ", glyphs.ellipsis)));
-    lines.push(footerWithPage);
-    return lines.slice(0, height)
-      .map((line) => fitCell(line, width, " ", glyphs.ellipsis))
-      .join("\n");
-  };
+  }) => renderInkDashboardFrame(snapshot, columns, rows, view, {
+    ...options,
+    footer: options.footer,
+    baseFooter,
+  });
+  Object.defineProperty(renderer, "inkOptions", {
+    configurable: false,
+    enumerable: false,
+    value: Object.freeze({ ...options, baseFooter }),
+    writable: false,
+  });
+  inkRenderers.add(renderer);
+  return renderer;
 }
 
-function renderDashboardFooter(
+export function renderDashboardFooter(
   snapshot: DashboardSnapshot,
   width: number,
   navigation: boolean,
@@ -286,7 +251,7 @@ function renderDashboardFooter(
   return fitCell(segments.join("  |  "), width, " ", glyphs.ellipsis);
 }
 
-function wrapDashboardFooter(value: string, width: number): string[] {
+export function wrapDashboardFooter(value: string, width: number): string[] {
   const sentences = value.match(/[^.]+(?:\.|$)/gu)?.map((sentence) => sentence.trim()) ?? [value];
   return sentences.flatMap((sentence) => {
     const lines: string[] = [];
@@ -416,6 +381,8 @@ export function startForegroundDashboard(input: {
   let eventTimer: ReturnType<typeof setTimeout> | undefined;
   let resizeTimer: ReturnType<typeof setTimeout> | undefined;
   let pulseTimer: ReturnType<typeof setTimeout> | undefined;
+  let inkInstance: InkInstance | undefined;
+  let inkStdout: NodeJS.WriteStream | undefined;
   let autoFollow = true;
   let focusedCubeId: string | null = null;
   let pulseCubeIds = new Set<string>();
@@ -461,6 +428,10 @@ export function startForegroundDashboard(input: {
     try { unsubscribeSource(); } catch { /* Continue restoring terminal state. */ }
     try { unsubscribeResize(); } catch { /* Continue restoring terminal state. */ }
     try { unsubscribeInput(); } catch { /* Continue restoring terminal state. */ }
+    try { inkInstance?.unmount(); } catch { /* Continue restoring terminal state. */ }
+    if (inkStdout !== undefined) flushInkStdout(inkStdout);
+    inkInstance = undefined;
+    inkStdout = undefined;
     restore();
   };
   const fail = (error: unknown): void => {
@@ -486,7 +457,7 @@ export function startForegroundDashboard(input: {
     if (closed || lastSnapshot === undefined) return;
     try {
       const dimensions = input.terminal.dimensions();
-      const frame = input.renderer(lastSnapshot, dimensions.columns, dimensions.rows, {
+      const view = {
         autoFollow,
         focusedCubeId,
         pulseCubeIds,
@@ -495,9 +466,19 @@ export function startForegroundDashboard(input: {
         observation: observationHistory,
         activityWindowMs,
         page,
-      });
+      } satisfies DashboardViewState;
+      const frame = input.renderer(lastSnapshot, dimensions.columns, dimensions.rows, view);
       if (frame === lastFrame) return;
-      input.terminal.write(`${clearScreen}${frame}`);
+      if (inkInstance !== undefined && inkStdout !== undefined) {
+        const inkOptions = input.renderer.inkOptions;
+        const element = inkOptions === undefined || dimensions.columns < 40 || dimensions.rows < 10
+          ? createReactElement(InkText, { wrap: "truncate-end" }, frame)
+          : createInkDashboardElement(lastSnapshot, dimensions.columns, dimensions.rows, view, inkOptions);
+        inkInstance.rerender(element);
+        flushInkStdout(inkStdout);
+      } else {
+        input.terminal.write(`${clearScreen}${frame}`);
+      }
       lastFrame = frame;
     } catch (error) {
       fail(error);
@@ -552,6 +533,10 @@ export function startForegroundDashboard(input: {
   };
   const scheduleResize = (): void => {
     if (closed) return;
+    if (inkRenderers.has(input.renderer)) {
+      paint();
+      return;
+    }
     if (resizeTimer !== undefined) clearTimeout(resizeTimer);
     resizeTimer = setTimeout(() => {
       resizeTimer = undefined;
@@ -632,6 +617,17 @@ export function startForegroundDashboard(input: {
 
   try {
     input.terminal.write(alternateScreenEnter);
+    inkStdout = createInkStdout(input.terminal);
+    inkInstance = renderInk(
+      createReactElement(InkText, null, ""),
+      {
+        stdout: inkStdout,
+        exitOnCtrlC: false,
+        patchConsole: false,
+        maxFps: 0,
+      },
+    );
+    flushInkStdout(inkStdout);
     unsubscribeSource = input.source.subscribe(scheduleEvent);
     unsubscribeResize = input.terminal.onResize(scheduleResize);
     subscribeInput();
@@ -642,6 +638,41 @@ export function startForegroundDashboard(input: {
     throw error;
   }
   return Object.freeze({ failure, close: stop });
+}
+
+function createInkStdout(terminal: DashboardTerminal): NodeJS.WriteStream {
+  let pending = "";
+  const stream = new Writable({
+    write(chunk, _encoding, callback) {
+      try {
+        pending += Buffer.isBuffer(chunk) ? chunk.toString() : String(chunk);
+        callback();
+      } catch (error) {
+        callback(error instanceof Error ? error : new Error(String(error)));
+      }
+    },
+  });
+  Object.defineProperties(stream, {
+    columns: { configurable: true, enumerable: true, get: () => terminal.dimensions().columns },
+    isTTY: { configurable: true, enumerable: true, value: true, writable: false },
+    rows: { configurable: true, enumerable: true, get: () => terminal.dimensions().rows },
+  });
+  Object.defineProperty(stream, "flushInk", {
+    configurable: false,
+    enumerable: false,
+    value: () => {
+      if (pending === "") return;
+      const value = pending;
+      pending = "";
+      terminal.write(value);
+    },
+    writable: false,
+  });
+  return stream as unknown as NodeJS.WriteStream;
+}
+
+function flushInkStdout(stream: NodeJS.WriteStream): void {
+  (stream as NodeJS.WriteStream & { readonly flushInk?: () => void }).flushInk?.();
 }
 
 function recordDashboardActivity(
@@ -680,7 +711,7 @@ function recordActivityBucket(
   }
 }
 
-function renderRail(
+export function renderRail(
   snapshot: DashboardSnapshot,
   width: number,
   glyphs: Glyphs,
@@ -709,7 +740,7 @@ function renderRail(
     .replace(state, `${green}${state}${reset}`);
 }
 
-function renderFocusPanel(
+export function renderFocusPanel(
   snapshot: DashboardSnapshot,
   cube: DashboardCubeSnapshot,
   width: number,
@@ -768,7 +799,7 @@ function renderFocusPanel(
   return [top, ...lines.slice(0, contentRows).map((line) => `${glyphs.vertical}${fitCell(line, inner, " ", glyphs.ellipsis)}${glyphs.vertical}`), `${glyphs.bottomLeft}${glyphs.horizontal.repeat(inner)}${glyphs.bottomRight}`];
 }
 
-function renderDroneBand(
+export function renderDroneBand(
   drone: DashboardDroneData,
   capturedAt: string,
   width: number,
@@ -798,7 +829,7 @@ function renderDroneBand(
   ], capturedAt, drone.last_seen, color);
 }
 
-function renderActivityGraph(
+export function renderActivityGraph(
   samples: readonly DashboardActivitySample[],
   width: number,
   height: number,
@@ -856,7 +887,7 @@ function activitySlots(samples: readonly DashboardActivitySample[], capturedAt: 
 
 function formatWindow(windowMs: number): string { return `${Math.floor(windowMs / 60_000)}m`; }
 
-function renderEmptyPanel(width: number, glyphs: Glyphs): string[] {
+export function renderEmptyPanel(width: number, glyphs: Glyphs): string[] {
   const inner = Math.max(1, width - 2);
   return [
     `${glyphs.topLeft}${glyphs.horizontal.repeat(inner)}${glyphs.topRight}`,
@@ -865,7 +896,7 @@ function renderEmptyPanel(width: number, glyphs: Glyphs): string[] {
   ];
 }
 
-function renderSummaryRow(
+export function renderSummaryRow(
   snapshot: DashboardSnapshot,
   cube: DashboardCubeSnapshot,
   width: number,
@@ -976,7 +1007,7 @@ function formatUptime(capturedAt: string, startedAt: string): string {
   return hours < 24 ? `${hours}h` : `${Math.floor(hours / 24)}d${String(hours % 24).padStart(2, "0")}h`;
 }
 
-function fitCell(
+export function fitCell(
   value: string,
   width: number,
   fill: string,

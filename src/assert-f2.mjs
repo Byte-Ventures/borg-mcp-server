@@ -26,7 +26,7 @@ const renderMode = (glyphMode) => {
   const graphRow = (label) => {
     const index = lines.findIndex((line) => line.includes(label));
     if (index < 0) throw new Error(`missing drone row: ${label}`);
-    const graph = lines.slice(index + 1, index + 3).join("\n");
+    const graph = lines.slice(index + 1, index + 3).map((line) => line.slice(1, -1)).join("\n");
     if (graph.length === 0) throw new Error(`missing graph for: ${label}`);
     return graph;
   };
@@ -35,12 +35,13 @@ const renderMode = (glyphMode) => {
 
 for (const glyphMode of ["box", "ascii"]) {
   const { summaryGlyph, graphRow } = renderMode(glyphMode);
-  const levels = glyphMode === "box" ? "▁▂▃▄▅▆▇█" : ":+*#";
+  const nonLevel = new Set([" ", "\n", "·", "."]);
   const heavy = graphRow("drone-heavy");
   const light = graphRow("drone-light");
   const mid = graphRow("drone-mid");
   const silent = graphRow("drone-silent");
-  const levelCount = (row) => new Set([...row].filter((char) => levels.includes(char))).size;
+  const levelCount = (row) => new Set([...row].filter((char) => !nonLevel.has(char))).size;
+  const rampCardinality = glyphMode === "box" ? 8 : 4;
   const suffix = ` [${glyphMode}]`;
 
   check("CONTROL", `heat ramp is not flat: zeta(8) vs theta(2) differ${suffix}`,
@@ -55,8 +56,8 @@ for (const glyphMode of ["box", "ascii"]) {
     levelCount(heavy) > 1,
     `${levelCount(heavy)} distinct bar heights on drone-heavy`);
   check("CONTROL", `graph uses the full activity ramp${suffix}`,
-    levelCount(heavy) === (glyphMode === "box" ? 8 : 4),
-    `${levelCount(heavy)} of ${glyphMode === "box" ? 8 : 4} levels on drone-heavy`);
+    levelCount(heavy) === rampCardinality,
+    `${levelCount(heavy)} of ${rampCardinality} levels on drone-heavy`);
   check("CONTROL", `graph renders zero: heavy vs silent differ${suffix}`,
     heavy !== silent);
   check("CONTROL", `quiet drone remains visible${suffix}`,

@@ -2,6 +2,7 @@ import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import stringWidth from "string-width";
 
 import {
   createDashboardRenderer as createRenderer,
@@ -217,6 +218,20 @@ describe("dashboard renderer", () => {
     expect(oneShotViewer).toContain("borgmcp-server online");
     expect(oneShotViewer).not.toContain("Ctrl-C");
     expect(oneShotViewer).not.toContain("read-only");
+  });
+
+  it("keeps the plain fallback boundary at exactly 40 columns by 10 rows", () => {
+    const snapshot = rankDashboardSnapshot(snapshotData(1), server);
+    const renderer = createDashboardRenderer({ glyphMode: "ascii", color: false });
+    for (const [columns, rows] of [[39, 24], [100, 8], [20, 4]] as const) {
+      const frame = renderer(snapshot, columns, rows);
+      expect(frame).not.toContain("DRONE ACTIVITY");
+    }
+
+    const inkFrame = renderer(snapshot, 40, 10);
+    expect(inkFrame).toContain("-".repeat(40));
+    expect(inkFrame.split("\n").every((line) => stringWidth(line) === 40)).toBe(true);
+    expect(inkFrame.split("\n")).toHaveLength(10);
   });
 
   it("replaces isometric art with a flat bounded activity panel", () => {
@@ -529,6 +544,7 @@ describe("dashboard renderer", () => {
     expect(frame).toContain("██");
     expect(frame).not.toContain("\u001b");
     expect(frame).not.toContain("clipboard");
+    expect(frame.split("\n").every((line) => stringWidth(line) <= 100)).toBe(true);
   });
 
   it("leaves empty launch activity blank while reporting zero observed coverage", () => {

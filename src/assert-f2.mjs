@@ -54,6 +54,9 @@ for (const glyphMode of ["box", "ascii"]) {
   check("CONTROL", `graph encodes AMPLITUDE, not just presence${suffix}`,
     levelCount(heavy) > 1,
     `${levelCount(heavy)} distinct bar heights on drone-heavy`);
+  check("CONTROL", `graph uses the full activity ramp${suffix}`,
+    levelCount(heavy) === (glyphMode === "box" ? 8 : 4),
+    `${levelCount(heavy)} of ${glyphMode === "box" ? 8 : 4} levels on drone-heavy`);
   check("CONTROL", `graph renders zero: heavy vs silent differ${suffix}`,
     heavy !== silent);
   check("CONTROL", `quiet drone remains visible${suffix}`,

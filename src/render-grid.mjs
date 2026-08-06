@@ -1,6 +1,6 @@
 import { render as inkRender } from "ink";
 import { createDashboardRenderer, rankDashboardSnapshot, EMBEDDED_DASHBOARD_FOOTER } from "./dashboard.ts";
-import { createInkDashboardElement, normalizeInkFrame } from "./dashboard-ink.js";
+import { createInkDashboardElement, normalizeInkFrame } from "./dashboard-ink.ts";
 import { SERVER, DATA, PREVIOUS_RANKS, VIEW } from "./fixture.mjs";
 import { writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";

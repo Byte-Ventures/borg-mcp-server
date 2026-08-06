@@ -1,5 +1,5 @@
-import { createInkDashboardElement, renderInkDashboardFrame } from "./dashboard-ink.js";
-import { renderPlainDashboard } from "./dashboard-plain.js";
+import { createInkDashboardElement, renderInkDashboardFrame } from "./dashboard-ink.ts";
+import { renderPlainDashboard } from "./dashboard-plain.ts";
 import { createElement as createReactElement } from "react";
 import { render as renderInk, Text as InkText, type Instance as InkInstance } from "ink";
 import { Writable } from "node:stream";
@@ -224,7 +224,7 @@ export function createDashboardRenderer(options: DashboardRenderOptions): Dashbo
   return renderer;
 }
 
-export { renderPlainDashboard } from "./dashboard-plain.js";
+export { renderPlainDashboard } from "./dashboard-plain.ts";
 
 export function selectDashboardGlyphMode(input: {
   readonly asciiRequested: boolean;

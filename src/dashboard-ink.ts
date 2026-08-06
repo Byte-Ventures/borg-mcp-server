@@ -21,7 +21,7 @@ import {
   type DashboardSnapshot,
   type DashboardViewState,
   type Glyphs,
-} from "./dashboard.js";
+} from "./dashboard.ts";
 
 export interface InkRenderOptions extends DashboardRenderOptions {
   readonly baseFooter: string;

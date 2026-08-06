@@ -21,7 +21,7 @@ import {
   type DashboardSnapshot,
   type DashboardViewState,
   type Glyphs,
-} from "./dashboard.ts";
+} from "./dashboard.js";
 
 export interface InkRenderOptions extends DashboardRenderOptions {
   readonly baseFooter: string;
@@ -33,7 +33,6 @@ const DASHBOARD_PULSE_PHASES = 4;
 const DASHBOARD_ACTIVITY_PULSE_MARKERS = [" ", "_", "-", "o", "O"] as const;
 const green = "\u001b[32;1m";
 const amber = "\u001b[33m";
-const dim = "\u001b[2m";
 const reset = "\u001b[0m";
 
 /**
@@ -75,11 +74,11 @@ function InkDashboard(input: {
   readonly options: InkRenderOptions;
 }): ReactNode {
   const { snapshot, width, height, view, options } = input;
-  const lifecycleFooter = options.footer === EMBEDDED_DASHBOARD_FOOTER
-    ? wrapLifecycleFooter(EMBEDDED_DASHBOARD_LIFECYCLE_FOOTER, width)
-    : [];
+  const lifecycleRows = options.footer === EMBEDDED_DASHBOARD_FOOTER
+    ? lifecycleFooterRows(EMBEDDED_DASHBOARD_LIFECYCLE_FOOTER, width)
+    : 0;
   const maximumPosts = Math.max(...snapshot.cubes.map((cube) => cube.posts_15m), 0);
-  const footerRows = lifecycleFooter.length + 1;
+  const footerRows = lifecycleRows + 1;
   const chromeRows = 3 + footerRows;
   const bodyRows = Math.max(0, height - chromeRows);
   const listCap = Math.max(1, Math.floor(bodyRows * 0.42));
@@ -123,14 +122,14 @@ function InkDashboard(input: {
       color: options.color,
     }));
   }
-  lifecycleFooter.forEach((line, index) => {
-    children.push(h(InkFooterLine, {
-      key: `lifecycle-${index}`,
-      value: line,
+  if (lifecycleRows > 0) {
+    children.push(h(InkLifecycleFooter, {
+      key: "lifecycle",
+      value: EMBEDDED_DASHBOARD_LIFECYCLE_FOOTER,
       width,
-      ellipsis: glyphs.ellipsis,
+      rows: lifecycleRows,
     }));
-  });
+  }
   children.push(h(InkFooter, {
     key: "footer",
     snapshot,
@@ -341,50 +340,53 @@ function InkDroneBand(input: {
   const label = truncateCell(sanitizeTerminalText(drone.label), Math.max(8, Math.floor(width * 0.32)), glyphs.ellipsis);
   const role = truncateCell(sanitizeTerminalText(drone.role), Math.max(4, Math.floor(width * 0.12)), glyphs.ellipsis);
   const last = formatAge(capturedAt, drone.last_seen);
+  const graphStyle = color ? style : {};
   if (height === 1) {
-    const prefix = `${label} ${drone.sent} ${last} `;
-    const graphWidth = Math.max(4, width - terminalCellWidth(prefix));
-    const graph = graphText(samples, graphWidth, 1, windowMs, capturedAt, glyphs, maximumActivityRate);
-    const plain = `${prefix}${graph}`;
-    return color
-      ? h(StyledLine, { key: drone.id, value: cellText(plain, width, glyphs.ellipsis), style })
-      : h(Box, { width, height: 1, flexDirection: "row", overflow: "hidden" },
-          h(Text, null, prefix),
-          h(InkActivityGraph, { samples, width: graphWidth, height: 1, windowMs, capturedAt, glyphs, maximumActivityRate }),
-        );
-  }
-
-  const identity = height >= 3
-    ? `${label} ${role}  SENT ${drone.sent}  RECV ${drone.received}  LAST ${last}`
-    : `${label} ${role}  SENT ${drone.sent}  LAST ${last}`;
-  const lines: ReactNode[] = [];
-  if (color) {
-    lines.push(h(StyledLine, { key: "identity", value: cellText(identity, width, glyphs.ellipsis), style }));
-    for (let row = 0; row < height - 1; row += 1) {
-      lines.push(h(StyledLine, {
-        key: `graph-${row}`,
-        value: graphText(samples, width, height - 1, windowMs, capturedAt, glyphs, maximumActivityRate, row),
-        style,
-      }));
-    }
-  } else {
-    lines.push(h(Text, {
-      key: "identity",
-      wrap: "truncate-end",
-    }, truncateCell(identity, width, glyphs.ellipsis)));
-    for (let row = 0; row < height - 1; row += 1) {
-      lines.push(h(InkActivityGraph, {
-        key: `graph-${row}`,
+    const prefixWidth = terminalCellWidth(label) + 1 + String(drone.sent).length + 1 + terminalCellWidth(last) + 1;
+    const graphWidth = Math.max(4, width - prefixWidth);
+    return h(Box, { key: drone.id, width, height: 1, flexDirection: "row", overflow: "hidden" },
+      h(InkNaturalText, { value: label, maxWidth: terminalCellWidth(label), ellipsis: glyphs.ellipsis, style: graphStyle }),
+      h(Text, null, styledText(" ", graphStyle)),
+      h(Text, null, styledText(String(drone.sent), graphStyle)),
+      h(Text, null, styledText(" ", graphStyle)),
+      h(Text, null, styledText(last, graphStyle)),
+      h(Text, null, styledText(" ", graphStyle)),
+      h(InkActivityGraph, {
         samples,
-        width,
-        height: height - 1,
+        width: graphWidth,
+        height: 1,
         windowMs,
         capturedAt,
         glyphs,
         maximumActivityRate,
-        row,
-      }));
-    }
+        style: graphStyle,
+      }),
+    );
+  }
+
+  const lines: ReactNode[] = [];
+  lines.push(h(Box, { key: "identity", width, height: 1, flexDirection: "row", overflow: "hidden" },
+    h(InkNaturalText, { value: label, maxWidth: terminalCellWidth(label), ellipsis: glyphs.ellipsis, style: graphStyle }),
+    h(Text, null, styledText(" ", graphStyle)),
+    h(InkNaturalText, { value: role, maxWidth: terminalCellWidth(role), ellipsis: glyphs.ellipsis, style: graphStyle }),
+    h(Text, null, styledText(
+      height >= 3 ? `  SENT ${drone.sent}  RECV ${drone.received}  LAST ${last}` : `  SENT ${drone.sent}  LAST ${last}`,
+      graphStyle,
+    )),
+  ));
+  for (let row = 0; row < height - 1; row += 1) {
+    lines.push(h(InkActivityGraph, {
+      key: `graph-${row}`,
+      samples,
+      width,
+      height: height - 1,
+      windowMs,
+      capturedAt,
+      glyphs,
+      maximumActivityRate,
+      row,
+      style: graphStyle,
+    }));
   }
   return h(Box, { width, height, flexDirection: "column", overflow: "hidden" }, lines);
 }
@@ -398,17 +400,21 @@ function InkActivityGraph(input: {
   readonly glyphs: Glyphs;
   readonly maximumActivityRate: number;
   readonly row?: number;
+  readonly style?: InkTextStyle;
 }): ReactNode {
-  return h(Text, { wrap: "truncate-end" }, graphText(
-    input.samples,
-    input.width,
-    input.height,
-    input.windowMs,
-    input.capturedAt,
-    input.glyphs,
-    input.maximumActivityRate,
-    input.row ?? 0,
-  ));
+  const graph = graphText(
+      input.samples,
+      input.width,
+      input.height,
+      input.windowMs,
+      input.capturedAt,
+      input.glyphs,
+      input.maximumActivityRate,
+      input.row ?? 0,
+    );
+  return h(Box, { width: input.width, height: 1, flexDirection: "row", overflow: "hidden" },
+    h(Text, { wrap: "truncate-end" }, styledText(graph, input.style)),
+  );
 }
 
 function graphText(
@@ -435,7 +441,9 @@ function graphText(
 }
 
 function InkNote(input: { readonly value: string; readonly width: number; readonly ellipsis: string }): ReactNode {
-  return h(Text, { wrap: "truncate-end" }, truncateCell(input.value, input.width, input.ellipsis));
+  return h(Box, { width: input.width, height: 1, flexDirection: "row", overflow: "hidden" },
+    h(Text, { wrap: "truncate-end" }, truncateCell(input.value, input.width, input.ellipsis)),
+  );
 }
 
 function InkSummaryRow(input: {
@@ -448,14 +456,101 @@ function InkSummaryRow(input: {
   readonly color: boolean;
 }): ReactNode {
   const { snapshot, cube, width, glyphs, view, maximumPosts, color } = input;
-  const plain = truncateCell(summaryText(snapshot, cube, width, glyphs, view, maximumPosts), width, glyphs.ellipsis);
   const style = livenessStyle(snapshot.captured_at, cube.last_post_at, color);
-  if (color) return h(StyledLine, { value: plain, style });
-  return h(Text, { wrap: "truncate-end" }, plain);
+  const compact = width < 60;
+  const nameWidth = compact ? Math.max(6, width - 32) : Math.max(10, width - 54);
+  const pulse = activityPulseMarker(view.pulsePhase);
+  const pulseMarker = view.pulseCubeIds.has(cube.id) ? pulse : " ";
+  const rankChange = rankMarker(cube.rank_change);
+  const heat = heatGlyph(cube.posts_15m, maximumPosts, glyphs);
+  const content: ReactNode[] = [
+    h(InkFixedText, { key: "heat", value: heat, width: 1, ellipsis: glyphs.ellipsis, style }),
+    h(Text, { key: "gap-heat" }, styledText(" ", style)),
+    h(InkFixedText, { key: "rank", value: String(cube.rank), width: 3, ellipsis: glyphs.ellipsis, align: "end", style }),
+    h(Text, { key: "gap-rank" }, styledText(" ", style)),
+    h(InkFixedText, {
+      key: "name",
+      value: sanitizeTerminalText(cube.name),
+      width: nameWidth,
+      ellipsis: glyphs.ellipsis,
+      style,
+    }),
+  ];
+  const prefixWidth = compact
+    ? 1 + 1 + 3 + 1 + nameWidth + 1 + 4 + 5 + 5
+    : 1 + 1 + 3 + 1 + nameWidth + 1 + 3 + 1 + 3 + 6 + 4 + 5 + 3 +
+      terminalCellWidth(` ${plural(cube.distinct_posting_drones_15m, "poster")} `) + 6;
+  if (compact) {
+    content.push(
+      h(Text, { key: "gap-name" }, styledText(" ", style)),
+      h(InkFixedText, { key: "posts", value: String(cube.posts_15m), width: 4, ellipsis: glyphs.ellipsis, align: "end", style }),
+      h(Text, { key: "posts-window" }, styledText("/15m ", style)),
+      h(InkFixedText, { key: "age", value: formatAge(snapshot.captured_at, cube.last_post_at), width: 5, ellipsis: glyphs.ellipsis, align: "end", style }),
+      h(InkFixedText, {
+        key: "markers",
+        value: ` ${pulseMarker} ${rankChange}`,
+        width: Math.max(0, width - prefixWidth),
+        ellipsis: glyphs.ellipsis,
+        forceEllipsis: true,
+        style,
+      }),
+    );
+  } else {
+    content.push(
+      h(Text, { key: "gap-name" }, styledText(" ", style)),
+      h(InkFixedText, { key: "seen", value: String(cube.drones_seen_15m), width: 3, ellipsis: glyphs.ellipsis, align: "end", style }),
+      h(Text, { key: "total-separator" }, styledText("/", style)),
+      h(InkFixedText, { key: "total", value: String(cube.drones_total), width: 3, ellipsis: glyphs.ellipsis, style }),
+      h(Text, { key: "seen-label" }, styledText(" seen ", style)),
+      h(InkFixedText, { key: "posts", value: String(cube.posts_15m), width: 4, ellipsis: glyphs.ellipsis, align: "end", style }),
+      h(Text, { key: "posts-window" }, styledText("/15m ", style)),
+      h(InkFixedText, { key: "posters", value: String(cube.distinct_posting_drones_15m), width: 3, ellipsis: glyphs.ellipsis, align: "end", style }),
+      h(Text, { key: "poster-label" }, styledText(` ${plural(cube.distinct_posting_drones_15m, "poster")} `, style)),
+      h(InkFixedText, { key: "age", value: formatAge(snapshot.captured_at, cube.last_post_at), width: 6, ellipsis: glyphs.ellipsis, align: "end", style }),
+      h(InkFixedText, {
+        key: "markers",
+        value: ` ${pulseMarker} ${rankChange}`,
+        width: Math.max(0, width - prefixWidth),
+        ellipsis: glyphs.ellipsis,
+        forceEllipsis: true,
+        style,
+      }),
+    );
+  }
+  return h(Box, { width, height: 1, flexDirection: "row", overflow: "hidden" }, content);
 }
 
-function InkFooterLine(input: { readonly value: string; readonly width: number; readonly ellipsis: string }): ReactNode {
-  return h(Text, { wrap: "truncate-end" }, truncateCell(input.value, input.width, input.ellipsis));
+function InkFixedText(input: {
+  readonly value: string;
+  readonly width: number;
+  readonly ellipsis: string;
+  readonly align?: "start" | "end";
+  readonly forceEllipsis?: boolean;
+  readonly style?: InkTextStyle;
+}): ReactNode {
+  return h(Box, {
+    width: input.width,
+    flexShrink: 0,
+    justifyContent: input.align === "end" ? "flex-end" : "flex-start",
+    overflow: "hidden",
+  }, h(Text, null, styledText(
+    truncateCell(input.value, input.width, input.ellipsis, input.forceEllipsis),
+    input.style,
+  )));
+}
+
+function InkNaturalText(input: {
+  readonly value: string;
+  readonly maxWidth: number;
+  readonly ellipsis: string;
+  readonly style?: InkTextStyle;
+}): ReactNode {
+  return h(Box, { maxWidth: input.maxWidth, flexShrink: 1, overflow: "hidden" },
+    h(Text, { wrap: "truncate-end" }, styledText(
+      truncateCell(input.value, input.maxWidth, input.ellipsis),
+      input.style,
+    )),
+  );
 }
 
 function InkFooter(input: {
@@ -482,20 +577,56 @@ function InkFooter(input: {
         ...(pageSegment === undefined ? [] : [pageSegment]),
         input.baseFooter,
       ];
-  while (segments.length > 1 && terminalCellWidth(segments.join("  |  ")) > input.width) segments.shift();
-  return h(Text, { wrap: "truncate-end" }, truncateCell(segments.join("  |  "), input.width, input.ellipsis));
+  while (segments.length > 1 && footerSegmentsWidth(segments) > input.width) segments.shift();
+  const fixedWidth = segments.slice(0, -1).reduce(
+    (total, segment) => total + terminalCellWidth(segment) + 5,
+    0,
+  );
+  const finalWidth = Math.max(0, input.width - fixedWidth);
+  const children: ReactNode[] = [];
+  segments.forEach((segment, index) => {
+    if (index > 0) children.push(h(Text, { key: `separator-${index}` }, "  |  "));
+    if (index === segments.length - 1) {
+      children.push(h(InkFixedText, {
+        key: `footer-${index}`,
+        value: segment,
+        width: finalWidth,
+        ellipsis: input.ellipsis,
+      }));
+    } else {
+      children.push(h(Text, { key: `footer-${index}` }, segment));
+    }
+  });
+  return h(Box, { width: input.width, height: 1, flexDirection: "row", overflow: "hidden" }, children);
 }
 
-function StyledLine(input: { readonly value: string; readonly style: InkTextStyle }): ReactNode {
-  const opening = styleSequence(input.style);
-  if (opening === "") return h(Text, { wrap: "truncate-end" }, input.value);
-  return h(Text, { wrap: "truncate-end" }, `${opening}${input.value}${reset}`);
+function InkLifecycleFooter(input: {
+  readonly value: string;
+  readonly width: number;
+  readonly rows: number;
+}): ReactNode {
+  const sentences = lifecycleSentences(input.value);
+  return h(Box, { width: input.width, height: input.rows, flexDirection: "column", overflow: "hidden" },
+    sentences.map((sentence, index) => h(Text, { key: `sentence-${index}`, wrap: "wrap" }, sentence)),
+  );
+}
+
+function footerSegmentsWidth(segments: readonly string[]): number {
+  return segments.reduce(
+    (total, segment, index) => total + terminalCellWidth(segment) + (index > 0 ? 5 : 0),
+    0,
+  );
+}
+
+function styledText(value: string, style: InkTextStyle | undefined): string {
+  const opening = style === undefined ? "" : styleSequence(style);
+  return opening === "" ? value : `${opening}${value}${reset}`;
 }
 
 function styleSequence(style: InkTextStyle): string {
   if (style.color === "green" && style.bold === true) return green;
   if (style.color === "yellow") return amber;
-  if (style.dimColor === true) return dim;
+  if (style.dimColor === true) return "\u001b[2m";
   return "";
 }
 
@@ -509,75 +640,31 @@ function livenessStyle(capturedAt: string, lastActivity: string | null, color: b
   return {};
 }
 
-function summaryText(
-  snapshot: DashboardSnapshot,
-  cube: DashboardCubeSnapshot,
-  width: number,
-  glyphs: Glyphs,
-  view: DashboardViewState,
-  maximumPosts: number,
-): string {
-  const pulse = activityPulseMarker(view.pulsePhase);
-  const pulseMarker = view.pulseCubeIds.has(cube.id) ? pulse : " ";
-  const rank = rankMarker(cube.rank_change);
-  const heat = heatGlyph(cube.posts_15m, maximumPosts, glyphs);
-  if (width < 60) {
-    return [
-      heat,
-      " ",
-      cellText(String(cube.rank), 3, glyphs.ellipsis, "end"),
-      " ",
-      cellText(sanitizeTerminalText(cube.name), Math.max(6, width - 32), glyphs.ellipsis),
-      " ",
-      cellText(String(cube.posts_15m), 4, glyphs.ellipsis, "end"),
-      "/15m ",
-      cellText(formatAge(snapshot.captured_at, cube.last_post_at), 5, glyphs.ellipsis, "end"),
-      ` ${pulseMarker} ${rank}`,
-    ].join("");
-  }
-  return [
-    heat,
-    " ",
-    cellText(String(cube.rank), 3, glyphs.ellipsis, "end"),
-    " ",
-    cellText(sanitizeTerminalText(cube.name), Math.max(10, width - 54), glyphs.ellipsis),
-    " ",
-    cellText(String(cube.drones_seen_15m), 3, glyphs.ellipsis, "end"),
-    "/",
-    cellText(String(cube.drones_total), 3, glyphs.ellipsis),
-    " seen ",
-    cellText(String(cube.posts_15m), 4, glyphs.ellipsis, "end"),
-    "/15m ",
-    cellText(String(cube.distinct_posting_drones_15m), 3, glyphs.ellipsis, "end"),
-    ` ${plural(cube.distinct_posting_drones_15m, "poster")} `,
-    cellText(formatAge(snapshot.captured_at, cube.last_post_at), 6, glyphs.ellipsis, "end"),
-    ` ${pulseMarker} ${rank}`,
-  ].join("");
-}
-
-function cellText(value: string, width: number, ellipsis: string, align: "start" | "end" = "start"): string {
-  const clipped = truncateCell(value, width, ellipsis);
-  const missing = Math.max(0, width - terminalCellWidth(clipped));
-  return align === "end" ? `${blank(missing)}${clipped}` : `${clipped}${blank(missing)}`;
-}
-
-function wrapLifecycleFooter(value: string, width: number): string[] {
-  const sentences = value.match(/[^.]+(?:\.|$)/gu)?.map((sentence) => sentence.trim()) ?? [value];
-  return sentences.flatMap((sentence) => {
-    const lines: string[] = [];
+function lifecycleFooterRows(value: string, width: number): number {
+  const sentences = lifecycleSentences(value);
+  return sentences.reduce((total, sentence) => {
+    let rows = 0;
+    let current = "";
     for (const word of sentence.split(/\s+/u)) {
-      const current = lines.at(-1);
-      if (current === undefined || terminalCellWidth(`${current} ${word}`) > width) lines.push(word);
-      else lines[lines.length - 1] = `${current} ${word}`;
+      if (current === "" || terminalCellWidth(`${current} ${word}`) > width) {
+        rows += 1;
+        current = word;
+      } else {
+        current = `${current} ${word}`;
+      }
     }
-    return lines;
-  });
+    return total + rows;
+  }, 0);
 }
 
-function truncateCell(value: string, width: number, ellipsis: string): string {
+function lifecycleSentences(value: string): string[] {
+  return value.match(/[^.]+(?:\.|$)/gu)?.map((sentence) => sentence.trim()) ?? [value];
+}
+
+function truncateCell(value: string, width: number, ellipsis: string, forceEllipsis = false): string {
   const targetWidth = Math.max(0, width);
   if (terminalCellWidth(value) <= targetWidth) return value;
-  const suffix = targetWidth >= 4 ? ellipsis : "";
+  const suffix = targetWidth >= 4 || forceEllipsis ? ellipsis : "";
   const target = Math.max(0, targetWidth - terminalCellWidth(suffix));
   let result = "";
   for (const character of value) {
@@ -589,10 +676,6 @@ function truncateCell(value: string, width: number, ellipsis: string): string {
 
 function terminalCellWidth(value: string): number {
   return stringWidth(stripAnsi(value));
-}
-
-function blank(width: number): string {
-  return Array.from({ length: Math.max(0, width) }, () => " ").join("");
 }
 
 function finiteDimension(value: number, fallback: number): number {
@@ -740,8 +823,9 @@ function padInkRow(line: string, width: number): string {
   const missing = Math.max(0, width - visible);
   if (missing === 0) return line;
   const suffix = line.match(/(\u001b\[[0-?]*[ -/]*[@-~])$/u)?.[1];
-  if (suffix === undefined) return `${line}${blank(missing)}`;
-  return `${line.slice(0, -suffix.length)}${blank(missing)}${suffix}`;
+  const padding = " ".repeat(missing);
+  if (suffix === undefined) return `${line}${padding}`;
+  return `${line.slice(0, -suffix.length)}${padding}${suffix}`;
 }
 
 function normalizeInkAnsi(line: string): string {

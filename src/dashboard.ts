@@ -1,7 +1,6 @@
-import { createInkDashboardElement, renderInkDashboardFrame } from "./dashboard-ink.ts";
-import { renderPlainDashboard } from "./dashboard-plain.ts";
-import { createElement as createReactElement } from "react";
-import { render as renderInk, Text as InkText, type Instance as InkInstance } from "ink";
+import { createInkDashboardElement, renderInkDashboardFrame } from "./dashboard-ink.js";
+import { renderPlainDashboard } from "./dashboard-plain.js";
+import { render as renderInk, type Instance as InkInstance } from "ink";
 import { Writable } from "node:stream";
 
 export const DASHBOARD_ACTIVITY_WINDOW_MS = 15 * 60_000;
@@ -224,7 +223,7 @@ export function createDashboardRenderer(options: DashboardRenderOptions): Dashbo
   return renderer;
 }
 
-export { renderPlainDashboard } from "./dashboard-plain.ts";
+export { renderPlainDashboard } from "./dashboard-plain.js";
 
 export function selectDashboardGlyphMode(input: {
   readonly asciiRequested: boolean;
@@ -307,7 +306,7 @@ export function startForegroundDashboard(input: {
     readonly lastPostAt: string | null;
   }>();
   let lastSnapshot: DashboardSnapshot | undefined;
-  let lastFrame: string | undefined;
+  let lastPlainFrame: string | undefined;
   let rejectFailure!: (error: unknown) => void;
   const failure = new Promise<never>((_resolve, reject) => { rejectFailure = reject; });
 
@@ -332,6 +331,30 @@ export function startForegroundDashboard(input: {
     }
     unsubscribeInput = input.terminal.onInput(handleInput);
   };
+  const unmountInk = (): void => {
+    try { inkInstance?.unmount(); } catch { /* Continue restoring terminal state. */ }
+    if (inkStdout !== undefined) flushInkStdout(inkStdout);
+    inkInstance = undefined;
+    inkStdout = undefined;
+  };
+  const mountInk = (
+    snapshot: DashboardSnapshot,
+    dimensions: { readonly columns: number; readonly rows: number },
+    view: DashboardViewState,
+    options: NonNullable<DashboardRenderer["inkOptions"]>,
+  ): void => {
+    inkStdout = createInkStdout(input.terminal);
+    inkInstance = renderInk(
+      createInkDashboardElement(snapshot, dimensions.columns, dimensions.rows, view, options),
+      {
+        stdout: inkStdout,
+        exitOnCtrlC: false,
+        patchConsole: false,
+        maxFps: 0,
+      },
+    );
+    flushInkStdout(inkStdout);
+  };
   const stop = (): void => {
     if (closed) return;
     closed = true;
@@ -339,10 +362,7 @@ export function startForegroundDashboard(input: {
     try { unsubscribeSource(); } catch { /* Continue restoring terminal state. */ }
     try { unsubscribeResize(); } catch { /* Continue restoring terminal state. */ }
     try { unsubscribeInput(); } catch { /* Continue restoring terminal state. */ }
-    try { inkInstance?.unmount(); } catch { /* Continue restoring terminal state. */ }
-    if (inkStdout !== undefined) flushInkStdout(inkStdout);
-    inkInstance = undefined;
-    inkStdout = undefined;
+    unmountInk();
     restore();
   };
   const fail = (error: unknown): void => {
@@ -378,19 +398,29 @@ export function startForegroundDashboard(input: {
         activityWindowMs,
         page,
       } satisfies DashboardViewState;
-      const frame = input.renderer(lastSnapshot, dimensions.columns, dimensions.rows, view);
-      if (frame === lastFrame) return;
-      if (inkInstance !== undefined && inkStdout !== undefined) {
-        const inkOptions = input.renderer.inkOptions;
-        const element = inkOptions === undefined || !usesInkDashboard(dimensions.columns, dimensions.rows)
-          ? createReactElement(InkText, { wrap: "truncate-end" }, frame)
-          : createInkDashboardElement(lastSnapshot, dimensions.columns, dimensions.rows, view, inkOptions);
-        inkInstance.rerender(element);
-        flushInkStdout(inkStdout);
-      } else {
-        input.terminal.write(`${clearScreen}${frame}`);
+      const inkOptions = inkRenderers.has(input.renderer) ? input.renderer.inkOptions : undefined;
+      if (inkOptions !== undefined && usesInkDashboard(dimensions.columns, dimensions.rows)) {
+        const element = createInkDashboardElement(
+          lastSnapshot,
+          dimensions.columns,
+          dimensions.rows,
+          view,
+          inkOptions,
+        );
+        if (inkInstance === undefined || inkStdout === undefined) {
+          mountInk(lastSnapshot, dimensions, view, inkOptions);
+        } else {
+          inkInstance.rerender(element);
+          flushInkStdout(inkStdout);
+        }
+        lastPlainFrame = undefined;
+        return;
       }
-      lastFrame = frame;
+      if (inkInstance !== undefined || inkStdout !== undefined) unmountInk();
+      const frame = input.renderer(lastSnapshot, dimensions.columns, dimensions.rows, view);
+      if (frame === lastPlainFrame) return;
+      input.terminal.write(`${clearScreen}${frame}`);
+      lastPlainFrame = frame;
     } catch (error) {
       fail(error);
     }
@@ -481,12 +511,13 @@ export function startForegroundDashboard(input: {
     if (input.terminal.requestSuspend === undefined) return;
     unsubscribeInput();
     unsubscribeInput = (): void => undefined;
+    unmountInk();
+    lastPlainFrame = undefined;
     input.terminal.write(alternateScreenRestore);
     input.terminal.requestSuspend(() => {
       if (closed) return;
       try {
         input.terminal.write(alternateScreenEnter);
-        lastFrame = undefined;
         subscribeInput();
         refresh();
       } catch (error) {
@@ -528,17 +559,6 @@ export function startForegroundDashboard(input: {
 
   try {
     input.terminal.write(alternateScreenEnter);
-    inkStdout = createInkStdout(input.terminal);
-    inkInstance = renderInk(
-      createReactElement(InkText, null, ""),
-      {
-        stdout: inkStdout,
-        exitOnCtrlC: false,
-        patchConsole: false,
-        maxFps: 0,
-      },
-    );
-    flushInkStdout(inkStdout);
     unsubscribeSource = input.source.subscribe(scheduleEvent);
     unsubscribeResize = input.terminal.onResize(scheduleResize);
     subscribeInput();

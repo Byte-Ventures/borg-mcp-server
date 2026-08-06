@@ -7,7 +7,7 @@ import {
   sanitizeTerminalText,
   type DashboardFooter,
   type DashboardSnapshot,
-} from "./dashboard.ts";
+} from "./dashboard.js";
 
 /**
  * The plain path is only the failure/tiny-terminal fallback. The normal

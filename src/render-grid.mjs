@@ -1,8 +1,8 @@
 import { render as inkRender } from "ink";
 import { createDashboardRenderer, rankDashboardSnapshot, EMBEDDED_DASHBOARD_FOOTER } from "./dashboard.ts";
-import { createInkDashboardElement, normalizeInkFrame } from "./dashboard-ink.ts";
+import { createInkDashboardElement, normalizeInkFrame } from "./dashboard-ink.js";
 import { SERVER, DATA, PREVIOUS_RANKS, VIEW } from "./fixture.mjs";
-import { writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 const snapshot = rankDashboardSnapshot(DATA, SERVER, PREVIOUS_RANKS);
 const out = [];
@@ -33,6 +33,7 @@ const capture = async (renderer, columns, rows) => {
 };
 
 const run = async () => {
+mkdirSync(new URL("../frames/", import.meta.url), { recursive: true });
 for (const columns of [100, 80, 60, 48]) {
   for (const color of [true, false]) {
     for (const glyphMode of ["box", "ascii"]) {

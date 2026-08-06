@@ -234,6 +234,33 @@ describe("dashboard renderer", () => {
     expect(inkFrame.split("\n")).toHaveLength(10);
   });
 
+  it("keeps the live foreground fallback outside Ink while crossing the boundary", async () => {
+    const harness = terminalHarness();
+    harness.setDimensions(39, 24);
+    const source = sourceHarness(snapshotData(1));
+    const dashboard = startForegroundDashboard({
+      source,
+      server,
+      terminal: harness.terminal,
+      renderer: createDashboardRenderer({ glyphMode: "ascii", color: false }),
+    });
+
+    expect(harness.output.at(-1)).toContain("borgmcp-server online");
+    expect(harness.output.join("")).not.toContain("DRONE ACTIVITY");
+
+    harness.setDimensions(40, 10);
+    const beforeInk = harness.output.length;
+    harness.resize();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(harness.output.slice(beforeInk).join("")).toContain("\u001b[?2026h");
+
+    harness.setDimensions(39, 24);
+    harness.resize();
+    expect(harness.output.at(-1)).toContain("borgmcp-server online");
+    expect(harness.output.at(-1)).not.toContain("DRONE ACTIVITY");
+    dashboard.close();
+  });
+
   it("replaces isometric art with a flat bounded activity panel", () => {
     const frame = createDashboardRenderer({ glyphMode: "box", color: false })(
       rankDashboardSnapshot(snapshotData(1), server),
@@ -967,6 +994,25 @@ describe("foreground dashboard lifecycle", () => {
       .toHaveLength(1);
     expect(source.listenerCount()).toBe(0);
     expect(harness.resizeListenerCount()).toBe(0);
+  });
+
+  it("remounts the Ink dashboard after suspend and resume", async () => {
+    const harness = terminalHarness();
+    const source = sourceHarness(snapshotData(1));
+    const dashboard = startForegroundDashboard({
+      source,
+      server,
+      terminal: harness.terminal,
+      renderer: createDashboardRenderer({ glyphMode: "ascii", color: false }),
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const beforeResume = harness.output.length;
+
+    harness.input("\u001a");
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(harness.output.slice(beforeResume).join("")).toContain("DRONE ACTIVITY");
+    dashboard.close();
   });
 
   it("restores terminal state, emits bounded plain status, and rejects on render failure", async () => {

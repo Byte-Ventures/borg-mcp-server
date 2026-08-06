@@ -408,6 +408,7 @@ export function startForegroundDashboard(input: {
           inkOptions,
         );
         if (inkInstance === undefined || inkStdout === undefined) {
+          if (lastPlainFrame !== undefined) input.terminal.write(clearScreen);
           mountInk(lastSnapshot, dimensions, view, inkOptions);
         } else {
           inkInstance.rerender(element);

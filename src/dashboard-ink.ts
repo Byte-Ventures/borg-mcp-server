@@ -337,8 +337,12 @@ function InkDroneBand(input: {
 }): ReactNode {
   const { drone, capturedAt, width, height, samples, windowMs, maximumActivityRate, glyphs, color } = input;
   const style = livenessStyle(capturedAt, drone.last_seen, color);
-  const label = truncateCell(sanitizeTerminalText(drone.label), Math.max(8, Math.floor(width * 0.32)), glyphs.ellipsis);
-  const role = truncateCell(sanitizeTerminalText(drone.role), Math.max(4, Math.floor(width * 0.12)), glyphs.ellipsis);
+  const rawLabel = sanitizeTerminalText(drone.label);
+  const rawRole = sanitizeTerminalText(drone.role);
+  const labelLimit = Math.max(8, Math.floor(width * 0.32));
+  const roleLimit = Math.max(4, Math.floor(width * 0.12));
+  const label = truncateCell(rawLabel, labelLimit, glyphs.ellipsis);
+  const role = truncateCell(rawRole, roleLimit, glyphs.ellipsis);
   const last = formatAge(capturedAt, drone.last_seen);
   const graphStyle = color ? style : {};
   if (height === 1) {
@@ -364,16 +368,19 @@ function InkDroneBand(input: {
     );
   }
 
+  const detailWidth = Math.max(0, width - terminalCellWidth(label) - 1 - terminalCellWidth(role) - 2);
+  const details = height >= 3
+    ? `SENT ${drone.sent}  RECV ${drone.received}  LAST ${last}`
+    : `SENT ${drone.sent}  LAST ${last}`;
+  const identityChildren: ReactNode[] = [
+    h(InkFixedText, { key: "label", value: label, width: terminalCellWidth(label), ellipsis: glyphs.ellipsis, style: graphStyle }),
+    h(Text, { key: "label-gap" }, styledText(" ", graphStyle)),
+    h(InkFixedText, { key: "role", value: role, width: terminalCellWidth(role), ellipsis: glyphs.ellipsis, style: graphStyle }),
+    h(Text, { key: "role-gap" }, styledText("  ", graphStyle)),
+    h(InkFixedText, { key: "details", value: details, width: detailWidth, ellipsis: glyphs.ellipsis, style: graphStyle }),
+  ];
   const lines: ReactNode[] = [];
-  lines.push(h(Box, { key: "identity", width, height: 1, flexDirection: "row", overflow: "hidden" },
-    h(InkNaturalText, { value: label, maxWidth: terminalCellWidth(label), ellipsis: glyphs.ellipsis, style: graphStyle }),
-    h(Text, null, styledText(" ", graphStyle)),
-    h(InkNaturalText, { value: role, maxWidth: terminalCellWidth(role), ellipsis: glyphs.ellipsis, style: graphStyle }),
-    h(Text, null, styledText(
-      height >= 3 ? `  SENT ${drone.sent}  RECV ${drone.received}  LAST ${last}` : `  SENT ${drone.sent}  LAST ${last}`,
-      graphStyle,
-    )),
-  ));
+  lines.push(h(Box, { key: "identity", width, height: 1, flexDirection: "row", overflow: "hidden" }, identityChildren));
   for (let row = 0; row < height - 1; row += 1) {
     lines.push(h(InkActivityGraph, {
       key: `graph-${row}`,

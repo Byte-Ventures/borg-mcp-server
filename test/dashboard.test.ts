@@ -252,7 +252,11 @@ describe("dashboard renderer", () => {
     const beforeInk = harness.output.length;
     harness.resize();
     await new Promise<void>((resolve) => setImmediate(resolve));
-    expect(harness.output.slice(beforeInk).join("")).toContain("\u001b[?2026h");
+    const transition = harness.output.slice(beforeInk).join("");
+    const clearIndex = transition.indexOf("\u001b[2J\u001b[H");
+    const inkIndex = transition.indexOf("\u001b[?2026h");
+    expect(clearIndex).toBeGreaterThanOrEqual(0);
+    expect(inkIndex).toBeGreaterThan(clearIndex);
 
     harness.setDimensions(39, 24);
     harness.resize();

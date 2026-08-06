@@ -61,12 +61,12 @@ export const VIEW = {
   pulseCubeIds: new Set(["cube-borg-mcp"]),
   pulsePhase: 2,
   activity: new Map([
-    ["d-coord", [
+    ["cube-borg-mcp:d-coord", [
       { capturedAt: "2026-08-06T13:35:00.000Z", sentRate: 3 },
       { capturedAt: "2026-08-06T13:40:00.000Z", sentRate: 9 },
       { capturedAt: "2026-08-06T13:45:00.000Z", sentRate: 6 },
     ]],
-    ["d-rq", [
+    ["cube-borg-mcp:d-rq", [
       { capturedAt: "2026-08-06T13:35:00.000Z", sentRate: 0 },
       { capturedAt: "2026-08-06T13:40:00.000Z", sentRate: 1 },
       { capturedAt: "2026-08-06T13:45:00.000Z", sentRate: 2 },

@@ -899,7 +899,16 @@ function renderSummaryRow(
 
 function heatGlyph(posts: number, maximumPosts: number, glyphs: Glyphs): string {
   if (posts <= 0 || maximumPosts <= 0) return glyphs.cube[0]!;
-  return magnitudeGlyph(posts, maximumPosts, glyphs);
+  const index = Math.min(
+    glyphs.cube.length - 1,
+    Math.max(
+      1,
+      Math.ceil(
+        (Math.log1p(posts) / Math.log1p(maximumPosts)) * (glyphs.cube.length - 1),
+      ),
+    ),
+  );
+  return glyphs.cube[index]!;
 }
 
 function activityPulseMarker(phase: number): string {

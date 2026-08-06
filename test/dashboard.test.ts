@@ -345,7 +345,7 @@ describe("dashboard renderer", () => {
     );
     const quiet = frame.split("\n").find((line) => line.includes("quiet"))!;
     const busy = frame.split("\n").filter((line) => line.includes("busy")).at(-1)!;
-    expect(quiet.startsWith(":"), quiet).toBe(true);
+    expect(quiet.startsWith("*"), quiet).toBe(true);
     expect(busy.startsWith("#"), busy).toBe(true);
     expect(busy).toContain("O");
     expect(busy).toContain("^1");

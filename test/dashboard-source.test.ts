@@ -70,6 +70,7 @@ describe("read-only dashboard snapshot source", () => {
         role: "Builder",
         last_seen: "2026-07-25T12:00:00.000Z",
         sent: 0,
+        sent_5s: 0,
         received: 0,
       }],
     });
@@ -93,12 +94,53 @@ describe("read-only dashboard snapshot source", () => {
       posts_15m: 1,
       distinct_posting_drones_15m: 1,
       last_post_at: "2026-07-25T12:01:00.000Z",
-      drones: [{ sent: 1, received: 1 }],
+      drones: [{ sent: 1, sent_5s: 1, received: 1 }],
     });
     expect(JSON.stringify(source.read())).not.toContain("poll-secret-body");
     unsubscribe();
     source.close();
     expect(() => source.subscribe(vi.fn())).toThrow("closed");
+  });
+
+  it("counts sent_5s from the trailing tick rather than the 15-minute total", async () => {
+    directory = await realpath(await mkdtemp(join(tmpdir(), "borg-dashboard-windowed-")));
+    await bootstrapServer(directory);
+    let now = new Date("2026-07-25T12:00:00.000Z");
+    writer = await openStore({
+      path: join(directory, "borg.db"),
+      clock: () => now,
+      migrationMode: "require-current",
+    });
+    seed(writer);
+    const append = (timestamp: string) => {
+      now = new Date(timestamp);
+      writer!.forPrincipal(droneSessionPrincipal({
+        id: ids.session,
+        clientId: ids.client,
+        cubeId: ids.cube,
+        droneId: ids.drone,
+      })).appendLog(ids.cube, {
+        message: `windowed-${timestamp}`,
+        visibility: "direct",
+        recipientDroneIds: [ids.drone],
+      });
+    };
+    append("2026-07-25T11:44:59.000Z");
+    append("2026-07-25T11:45:10.000Z");
+    append("2026-07-25T11:59:54.000Z");
+    append("2026-07-25T11:59:55.000Z");
+    now = new Date("2026-07-25T12:00:00.000Z");
+
+    const source = await openReadonlyDashboardSnapshotSource({
+      dataDirectory: directory,
+      clock: () => now,
+    });
+    expect(source.read().cubes[0]?.drones[0]).toMatchObject({
+      sent: 3,
+      sent_5s: 1,
+      received: 3,
+    });
+    source.close();
   });
 
   it("turns a failed live-runtime validation into a source read failure", async () => {

@@ -31,6 +31,10 @@ function createDashboardRenderer(
   return createRenderer({ ...options, footer: EMBEDDED_DASHBOARD_FOOTER });
 }
 
+function stripAnsi(value: string): string {
+  return value.replace(/\u001b\[[0-?]*[ -/]*[@-~]/gu, "");
+}
+
 const server: DashboardServerIdentity = Object.freeze({
   name: "borgmcp-server",
   version: "0.13.1",
@@ -101,7 +105,7 @@ describe("dashboard snapshot source", () => {
           drones_total: 1,
           drones_seen_15m: 1,
           last_post_at: "2026-07-25T11:51:00.000Z",
-          drones: [{ id: ids.droneA, label: "builder-alpha", role: "Builder", last_seen: "2026-07-25T11:51:00.000Z", sent: 2, received: 0 }],
+          drones: [{ id: ids.droneA, label: "builder-alpha", role: "Builder", last_seen: "2026-07-25T11:51:00.000Z", sent: 1, sent_5s: 0, received: 0 }],
         },
         {
           id: ids.cubeB,
@@ -111,7 +115,7 @@ describe("dashboard snapshot source", () => {
           drones_total: 1,
           drones_seen_15m: 1,
           last_post_at: "2026-07-25T11:56:00.000Z",
-          drones: [{ id: ids.droneB, label: "builder-beta", role: "Builder", last_seen: "2026-07-25T11:56:00.000Z", sent: 1, received: 0 }],
+          drones: [{ id: ids.droneB, label: "builder-beta", role: "Builder", last_seen: "2026-07-25T11:56:00.000Z", sent: 1, sent_5s: 0, received: 0 }],
         },
       ],
     });
@@ -154,6 +158,7 @@ describe("dashboard renderer", () => {
     expect(frame).toContain("DRONE ACTIVITY");
     expect(frame).toContain("cube-01");
     expect(frame).toContain("collecting");
+    expect(frame).toContain("up 3h");
     expect(frame).not.toContain("CUBE DETAIL");
     expect(renderer(eight, 80, 24)).toBe(frame);
 
@@ -174,7 +179,7 @@ describe("dashboard renderer", () => {
     expect(ascii).not.toMatch(/[─│┌┐└┘█▢▤▥▣…]/u);
     for (const line of ascii.split("\n")) expect([...line]).toHaveLength(60);
     expect(ascii).toContain("DRONE ACTIVITY");
-    expect(ascii).toContain("collecting —");
+    expect(ascii).toContain("collecting -");
 
     const tiny = createDashboardRenderer({ glyphMode: "box", color: true })(
       snapshot,
@@ -183,14 +188,14 @@ describe("dashboard renderer", () => {
     );
     expect(tiny).toContain("borgmcp-server online");
     expect(tiny).toContain("Ctrl-C or close terminal stops server.");
-    expect(tiny).toContain("Data and identity remain saved.");
+    expect(tiny).toContain("Data saved. Read-only view.");
     expect(tiny).not.toContain("\u001b[");
     expect(tiny).not.toContain("┌");
     expect(tiny.split("\n")).toHaveLength(7);
     expect(tiny.split("\n").every((line) => [...line].length <= 39)).toBe(true);
 
     const narrow = createDashboardRenderer({ glyphMode: "box", color: true })(snapshot, 20, 9);
-    expect(narrow).toContain("Data saved.");
+    expect(narrow).toContain("Saved. Read-only.");
     expect(narrow.split("\n").every((line) => [...line].length <= 20)).toBe(true);
     for (let width = 20; width <= 60; width += 1) {
       const rendered = createDashboardRenderer({ glyphMode: "box", color: true })(snapshot, width, 9);
@@ -315,6 +320,112 @@ describe("dashboard renderer", () => {
     expect(empty).not.toContain("< > switch");
   });
 
+  it("keeps volume, pulse, and rank in separate global channels", () => {
+    const data = snapshotData(2);
+    const ranked = rankDashboardSnapshot({
+      ...data,
+      cubes: [
+        { ...data.cubes[0]!, name: "quiet", posts_15m: 9 },
+        { ...data.cubes[1]!, name: "busy", posts_15m: 47 },
+      ],
+    }, server, new Map([
+      [data.cubes[0]!.id, 1],
+      [data.cubes[1]!.id, 2],
+    ]));
+    const frame = createDashboardRenderer({ glyphMode: "ascii", color: false })(
+      ranked,
+      80,
+      24,
+      {
+        autoFollow: true,
+        focusedCubeId: null,
+        pulseCubeIds: new Set([ranked.cubes[0]!.id]),
+        pulsePhase: 4,
+      },
+    );
+    const quiet = frame.split("\n").find((line) => line.includes("quiet"))!;
+    const busy = frame.split("\n").filter((line) => line.includes("busy")).at(-1)!;
+    expect(quiet.startsWith("*"), quiet).toBe(true);
+    expect(busy.startsWith("#"), busy).toBe(true);
+    expect(busy).toContain("O");
+    expect(busy).toContain("^1");
+  });
+
+  it("normalizes activity graphs per focused cube rather than per drone", () => {
+    const data = snapshotData(1);
+    const original = data.cubes[0]!;
+    const quiet = original.drones[0]!;
+    const busy = { ...quiet, id: "10000000-0000-4000-8000-000000000099", label: "busy" };
+    const snapshot = rankDashboardSnapshot({
+      ...data,
+      cubes: [{ ...original, drones: [quiet, busy], drones_total: 2 }],
+    }, server);
+    const timestamp = snapshot.captured_at;
+    const frame = createDashboardRenderer({ glyphMode: "ascii", color: false })(
+      snapshot,
+      100,
+      24,
+      {
+        autoFollow: true,
+        focusedCubeId: null,
+        pulseCubeIds: new Set(),
+        pulsePhase: 0,
+        activity: new Map([
+          [`${snapshot.cubes[0]!.id}:${quiet.id}`, [{ capturedAt: timestamp, sentRate: 1 }]],
+          [`${snapshot.cubes[0]!.id}:${busy.id}`, [{ capturedAt: timestamp, sentRate: 10 }]],
+        ]),
+        observation: [{ capturedAt: timestamp, sentRate: 1 }],
+      },
+    );
+    const lines = frame.split("\n");
+    const quietIndex = lines.findIndex((line) => line.includes("builder-01"));
+    const busyIndex = lines.findIndex((line) => line.includes("busy"));
+    const quietGraph = lines[quietIndex + 2]!;
+    const busyGraph = lines[busyIndex + 2]!;
+    expect(quietGraph).toContain(":");
+    expect(quietGraph).not.toContain("#");
+    expect(busyGraph).toContain("#");
+  });
+
+  it("uses liveness color on the whole row and stays semantic in mono", () => {
+    const data = snapshotData(1);
+    const cube = data.cubes[0]!;
+    const capturedAt = Date.parse(data.captured_at);
+    const age = (minutes: number) => new Date(capturedAt - minutes * 60_000).toISOString();
+    const drones = [
+      { ...cube.drones[0]!, id: "live", label: "live", last_seen: age(0.5) },
+      { ...cube.drones[0]!, id: "recent", label: "recent", last_seen: age(10) },
+      { ...cube.drones[0]!, id: "idle", label: "idle", last_seen: age(30) },
+      { ...cube.drones[0]!, id: "stale", label: "stale", last_seen: age(120) },
+    ];
+    const snapshot = rankDashboardSnapshot({
+      ...data,
+      cubes: [{ ...cube, drones, drones_total: drones.length }],
+    }, server);
+    const render = (color: boolean) => createDashboardRenderer({ glyphMode: "ascii", color })(snapshot, 100, 36);
+    const colorFrame = render(true);
+    const lines = colorFrame.split("\n");
+    expect(lines.find((line) => line.includes("live"))).toContain("\u001b[32;1m");
+    expect(lines.find((line) => line.includes("recent"))).toContain("\u001b[33m");
+    expect(lines.find((line) => line.includes("idle"))).not.toContain("\u001b[");
+    expect(lines.find((line) => line.includes("stale"))).toContain("\u001b[2m");
+    expect(stripAnsi(colorFrame).match(/[^\u0000-\u007F]/gu)).toEqual(null);
+    expect(render(false)).not.toContain("\u001b[");
+  });
+
+  it("keeps the read-only footer intact when optional controls do not fit", () => {
+    const snapshot = rankDashboardSnapshot(snapshotData(2), server);
+    const frame = createDashboardRenderer({ glyphMode: "ascii", color: false, navigation: true })(
+      snapshot,
+      48,
+      16,
+    );
+    const footer = frame.split("\n").at(-1)!;
+    expect(footer).toContain("^C");
+    expect(footer).toContain("read-only");
+    expect(footer).not.toContain("...");
+  });
+
   it("keeps representative terminal widths and a thousand-cube snapshot bounded", () => {
     const renderer = createDashboardRenderer({ glyphMode: "ascii", color: false });
     const snapshot = rankDashboardSnapshot(snapshotData(1_000), server);
@@ -437,7 +548,7 @@ describe("dashboard renderer", () => {
         activityWindowMs: 15 * 60_000,
       },
     );
-    expect(frame).toContain("collecting — 0% of 15m observed");
+    expect(frame).toContain("collecting - 0% of 15m observed");
     const lines = frame.split("\n");
     const identity = lines.findIndex((line) => line.includes(drone.label));
     expect(lines[identity + 1]!.slice(1, -1)).toMatch(/^\s+$/u);
@@ -618,7 +729,7 @@ describe("foreground dashboard lifecycle", () => {
         captured_at: new Date(Date.parse(initial.captured_at) + (index * 500)).toISOString(),
         cubes: [{
           ...cube,
-          drones: [{ ...drone, sent: drone.sent + index }],
+          drones: [{ ...drone, sent: 6 - index, sent_5s: index }],
         }],
       });
       source.emit();
@@ -631,7 +742,7 @@ describe("foreground dashboard lifecycle", () => {
     expect(samples).toHaveLength(1);
     expect(samples?.[0]).toMatchObject({
       capturedAt: "2026-07-25T12:00:02.500Z",
-      sentRate: 2,
+      sentRate: 5,
     });
     dashboard.close();
   });
@@ -696,11 +807,11 @@ describe("foreground dashboard lifecycle", () => {
     expect(pulse).not.toBe(before);
     expect(pulse).toContain("DRONE ACTIVITY");
     expect(pulse.split("\n").find((line) => line.includes("cube-02"))).toMatch(
-      /^=\s+2 .*O\s*$/u,
+      /^[.:+*#]\s+2 .*O\s*$/u,
     );
     await vi.advanceTimersByTimeAsync(100);
     expect(harness.output.at(-1)!.split("\n").find((line) => line.includes("cube-02"))).toMatch(
-      /^=\s+2 .*o\s*$/u,
+      /^[.:+*#]\s+2 .*o\s*$/u,
     );
     dashboard.close();
   });
@@ -708,6 +819,7 @@ describe("foreground dashboard lifecycle", () => {
   it("pulses on snapshot deltas and supports pinned navigation with explicit auto return", async () => {
     vi.useFakeTimers();
     const harness = terminalHarness();
+    harness.setDimensions(80, 12);
     const source = sourceHarness(snapshotData(3));
     const renderer = vi.fn(createDashboardRenderer({
       glyphMode: "ascii",
@@ -722,24 +834,25 @@ describe("foreground dashboard lifecycle", () => {
       pulseFrameMs: 100,
     });
 
-    expect(harness.output.at(-1)).toContain("cube-01 · DRONE ACTIVITY");
+    expect(harness.output.at(-1)).toContain("cube-01 . (auto) . DRONE ACTIVITY");
     harness.input(">");
-    expect(harness.output.at(-1)).toContain("cube-02 · DRONE ACTIVITY");
+    expect(harness.output.at(-1)).toContain("cube-02 . (pinned) . DRONE ACTIVITY");
     harness.input("<");
-    expect(harness.output.at(-1)).toContain("cube-01 · DRONE ACTIVITY");
+    expect(harness.output.at(-1)).toContain("cube-01 . (pinned) . DRONE ACTIVITY");
     harness.input("a");
-    expect(harness.output.at(-1)).toContain("cube-01 · DRONE ACTIVITY");
+    expect(harness.output.at(-1)).toContain("cube-01 . (auto) . DRONE ACTIVITY");
     harness.input("<");
-    expect(harness.output.at(-1)).toContain("cube-03 · DRONE ACTIVITY");
+    expect(harness.output.at(-1)).toContain("cube-03 . (pinned) . DRONE ACTIVITY");
     harness.input("a");
-    expect(harness.output.at(-1)).toContain("cube-01 · DRONE ACTIVITY");
+    expect(harness.output.at(-1)).toContain("cube-01 . (auto) . DRONE ACTIVITY");
 
     harness.input("w");
     expect(harness.output.at(-1)).toContain("of 60m");
     harness.input("w");
     expect(harness.output.at(-1)).toContain("of 5m");
     harness.input(" ");
-    expect(harness.output.at(-1)).toContain("SPACE page");
+    expect(harness.output.at(-1)).toContain("SPACE 2/2");
+    harness.input(" ");
 
     const changed = snapshotData(3);
     source.set({
@@ -915,6 +1028,7 @@ function snapshotData(count: number): DashboardDataSnapshot {
         role: "Builder",
         last_seen: new Date(Date.parse("2026-07-25T12:00:00.000Z") - ((index + 1) * 60_000)).toISOString(),
         sent: index + 1,
+        sent_5s: index + 1,
         received: index + 1,
       }],
     })),

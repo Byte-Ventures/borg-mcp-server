@@ -70,6 +70,7 @@ describe("read-only dashboard snapshot source", () => {
         role: "Builder",
         last_seen: "2026-07-25T12:00:00.000Z",
         sent: 0,
+        sent_5s: 0,
         received: 0,
       }],
     });
@@ -93,7 +94,7 @@ describe("read-only dashboard snapshot source", () => {
       posts_15m: 1,
       distinct_posting_drones_15m: 1,
       last_post_at: "2026-07-25T12:01:00.000Z",
-      drones: [{ sent: 1, received: 1 }],
+      drones: [{ sent: 1, sent_5s: 1, received: 1 }],
     });
     expect(JSON.stringify(source.read())).not.toContain("poll-secret-body");
     unsubscribe();

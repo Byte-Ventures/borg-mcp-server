@@ -6,6 +6,7 @@ import { assertMigrationsCurrent, MigrationCompatibilityError } from "./migratio
 import { operatorErrors } from "./operator-error.js";
 import {
   DASHBOARD_ACTIVITY_WINDOW_MS,
+  DASHBOARD_IDLE_REFRESH_MS,
   type DashboardDroneData,
   type DashboardDataSnapshot,
   type DashboardSnapshotSource,
@@ -52,12 +53,16 @@ export function createDashboardSnapshotReader(
     SELECT drone.id, drone.label, role.name AS role,
            COALESCE(drone.last_seen, drone.created_at) AS last_seen,
            (SELECT COUNT(*) FROM activity_log AS entry
-            WHERE entry.cube_id = drone.cube_id AND entry.drone_id = drone.id) AS sent,
+            WHERE entry.cube_id = drone.cube_id AND entry.drone_id = drone.id
+              AND entry.created_at >= ?) AS sent,
+           (SELECT COUNT(*) FROM activity_log AS entry
+            WHERE entry.cube_id = drone.cube_id AND entry.drone_id = drone.id
+              AND entry.created_at >= ?) AS sent_5s,
            (SELECT COUNT(*) FROM activity_log AS entry
             WHERE entry.cube_id = drone.cube_id AND EXISTS (
               SELECT 1 FROM activity_log_recipients AS recipient
               WHERE recipient.entry_id = entry.id AND recipient.drone_id = drone.id
-            )) AS received
+            ) AND entry.created_at >= ?) AS received
     FROM drones AS drone
     JOIN roles AS role ON role.id = drone.role_id AND role.cube_id = drone.cube_id
     WHERE drone.cube_id = ? AND drone.evicted_at IS NULL
@@ -68,12 +73,15 @@ export function createDashboardSnapshotReader(
     const cutoff = new Date(
       capturedAt.getTime() - DASHBOARD_ACTIVITY_WINDOW_MS,
     ).toISOString();
+    const tickCutoff = new Date(
+      capturedAt.getTime() - DASHBOARD_IDLE_REFRESH_MS,
+    ).toISOString();
     const rows = statement.all(cutoff, cutoff, cutoff, maxCubes);
     return Object.freeze({
       captured_at: capturedAt.toISOString(),
       cubes: Object.freeze(rows.map((row) => {
         const cubeId = requiredText(row, "id");
-        const droneRows = drones.all(cubeId);
+        const droneRows = drones.all(cutoff, tickCutoff, cutoff, cubeId);
         return Object.freeze({
         id: cubeId,
         name: requiredText(row, "name"),
@@ -99,6 +107,7 @@ function dashboardDrone(row: Record<string, unknown>): DashboardDroneData {
     role: requiredText(row, "role"),
     last_seen: requiredText(row, "last_seen"),
     sent: requiredInteger(row, "sent"),
+    sent_5s: requiredInteger(row, "sent_5s"),
     received: requiredInteger(row, "received"),
   });
 }

@@ -58,7 +58,7 @@ describe("immutable runtime lifecycle", () => {
       { executable: "/usr/bin/tar", args: ["-xzf", "-", "-C", staging] },
       {
         executable: "/usr/bin/npm",
-        args: ["ci", "--omit=dev", "--ignore-scripts", "--no-audit", "--no-fund"],
+        args: ["ci", "--omit=dev", "--ignore-scripts", "--no-bin-links", "--no-audit", "--no-fund"],
         cwd: join(canonicalStaging, "package"),
       },
     ]);
@@ -96,7 +96,7 @@ describe("immutable runtime lifecycle", () => {
     );
     expect(run).toHaveBeenLastCalledWith(
       `npm-${npmVersion}`,
-      ["ci", "--omit=dev", "--ignore-scripts", "--no-audit", "--no-fund"],
+      ["ci", "--omit=dev", "--ignore-scripts", "--no-bin-links", "--no-audit", "--no-fund"],
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
   });

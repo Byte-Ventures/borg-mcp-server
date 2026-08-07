@@ -2,6 +2,7 @@ import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import stringWidth from "string-width";
 
 import {
   createDashboardRenderer as createRenderer,
@@ -217,6 +218,51 @@ describe("dashboard renderer", () => {
     expect(oneShotViewer).toContain("borgmcp-server online");
     expect(oneShotViewer).not.toContain("Ctrl-C");
     expect(oneShotViewer).not.toContain("read-only");
+  });
+
+  it("keeps the plain fallback boundary at exactly 40 columns by 10 rows", () => {
+    const snapshot = rankDashboardSnapshot(snapshotData(1), server);
+    const renderer = createDashboardRenderer({ glyphMode: "ascii", color: false });
+    for (const [columns, rows] of [[39, 24], [100, 8], [20, 4]] as const) {
+      const frame = renderer(snapshot, columns, rows);
+      expect(frame).not.toContain("DRONE ACTIVITY");
+    }
+
+    const inkFrame = renderer(snapshot, 40, 10);
+    expect(inkFrame).toContain("-".repeat(40));
+    expect(inkFrame.split("\n").every((line) => stringWidth(line) === 40)).toBe(true);
+    expect(inkFrame.split("\n")).toHaveLength(10);
+  });
+
+  it("keeps the live foreground fallback outside Ink while crossing the boundary", async () => {
+    const harness = terminalHarness();
+    harness.setDimensions(39, 24);
+    const source = sourceHarness(snapshotData(1));
+    const dashboard = startForegroundDashboard({
+      source,
+      server,
+      terminal: harness.terminal,
+      renderer: createDashboardRenderer({ glyphMode: "ascii", color: false }),
+    });
+
+    expect(harness.output.at(-1)).toContain("borgmcp-server online");
+    expect(harness.output.join("")).not.toContain("DRONE ACTIVITY");
+
+    harness.setDimensions(40, 10);
+    const beforeInk = harness.output.length;
+    harness.resize();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const transition = harness.output.slice(beforeInk).join("");
+    const clearIndex = transition.indexOf("\u001b[2J\u001b[H");
+    const inkIndex = transition.indexOf("\u001b[?2026h");
+    expect(clearIndex).toBeGreaterThanOrEqual(0);
+    expect(inkIndex).toBeGreaterThan(clearIndex);
+
+    harness.setDimensions(39, 24);
+    harness.resize();
+    expect(harness.output.at(-1)).toContain("borgmcp-server online");
+    expect(harness.output.at(-1)).not.toContain("DRONE ACTIVITY");
+    dashboard.close();
   });
 
   it("replaces isometric art with a flat bounded activity panel", () => {
@@ -529,6 +575,7 @@ describe("dashboard renderer", () => {
     expect(frame).toContain("██");
     expect(frame).not.toContain("\u001b");
     expect(frame).not.toContain("clipboard");
+    expect(frame.split("\n").every((line) => stringWidth(line) <= 100)).toBe(true);
   });
 
   it("leaves empty launch activity blank while reporting zero observed coverage", () => {
@@ -951,6 +998,25 @@ describe("foreground dashboard lifecycle", () => {
       .toHaveLength(1);
     expect(source.listenerCount()).toBe(0);
     expect(harness.resizeListenerCount()).toBe(0);
+  });
+
+  it("remounts the Ink dashboard after suspend and resume", async () => {
+    const harness = terminalHarness();
+    const source = sourceHarness(snapshotData(1));
+    const dashboard = startForegroundDashboard({
+      source,
+      server,
+      terminal: harness.terminal,
+      renderer: createDashboardRenderer({ glyphMode: "ascii", color: false }),
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const beforeResume = harness.output.length;
+
+    harness.input("\u001a");
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(harness.output.slice(beforeResume).join("")).toContain("DRONE ACTIVITY");
+    dashboard.close();
   });
 
   it("restores terminal state, emits bounded plain status, and rejects on render failure", async () => {

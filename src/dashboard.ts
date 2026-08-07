@@ -1,10 +1,14 @@
+import { createInkDashboardElement, renderInkDashboardFrame } from "./dashboard-ink.js";
+import { renderPlainDashboard } from "./dashboard-plain.js";
+import { render as renderInk, type Instance as InkInstance } from "ink";
+import { Writable } from "node:stream";
+
 export const DASHBOARD_ACTIVITY_WINDOW_MS = 15 * 60_000;
 export const DASHBOARD_IDLE_REFRESH_MS = 5_000;
 export const DASHBOARD_EVENT_COALESCE_MS = 250;
 export const DASHBOARD_RESIZE_DEBOUNCE_MS = 125;
 export const DASHBOARD_PULSE_FRAME_MS = 125;
 const DASHBOARD_PULSE_PHASES = 4;
-const DASHBOARD_ACTIVITY_PULSE_MARKERS = [" ", "_", "-", "o", "O"] as const;
 
 export interface DashboardDroneData {
   readonly id: string;
@@ -89,12 +93,15 @@ export interface DashboardActivitySample {
   readonly sentRate: number;
 }
 
-export type DashboardRenderer = (
-  snapshot: DashboardSnapshot,
-  columns: number,
-  rows: number,
-  view?: DashboardViewState,
-) => string;
+export interface DashboardRenderer {
+  (
+    snapshot: DashboardSnapshot,
+    columns: number,
+    rows: number,
+    view?: DashboardViewState,
+  ): string;
+  readonly inkOptions?: DashboardRenderOptions & { readonly baseFooter: string };
+}
 
 export interface DashboardTerminal {
   readonly write: (value: string) => void;
@@ -110,7 +117,7 @@ export interface ForegroundDashboard {
   readonly close: () => void;
 }
 
-interface Glyphs {
+export interface Glyphs {
   readonly horizontal: string;
   readonly vertical: string;
   readonly topLeft: string;
@@ -125,7 +132,7 @@ interface Glyphs {
   readonly axis: string;
 }
 
-const BOX_GLYPHS: Glyphs = Object.freeze({
+export const BOX_GLYPHS: Glyphs = Object.freeze({
   horizontal: "─",
   vertical: "│",
   topLeft: "┌",
@@ -140,7 +147,7 @@ const BOX_GLYPHS: Glyphs = Object.freeze({
   axis: "→",
 });
 
-const ASCII_GLYPHS: Glyphs = Object.freeze({
+export const ASCII_GLYPHS: Glyphs = Object.freeze({
   horizontal: "-",
   vertical: "|",
   topLeft: "+",
@@ -158,10 +165,7 @@ const ASCII_GLYPHS: Glyphs = Object.freeze({
 const alternateScreenEnter = "\u001b[?1049h\u001b[?25l";
 const alternateScreenRestore = "\u001b[?25h\u001b[?1049l\u001b[?25h";
 const clearScreen = "\u001b[2J\u001b[H";
-const amber = "\u001b[33m";
-const green = "\u001b[32;1m";
-const dim = "\u001b[2m";
-const reset = "\u001b[0m";
+const inkRenderers = new WeakSet<DashboardRenderer>();
 
 export function rankDashboardSnapshot(
   data: DashboardDataSnapshot,
@@ -190,9 +194,8 @@ export function rankDashboardSnapshot(
 }
 
 export function createDashboardRenderer(options: DashboardRenderOptions): DashboardRenderer {
-  const glyphs = options.glyphMode === "ascii" ? ASCII_GLYPHS : BOX_GLYPHS;
   const baseFooter = sanitizeTerminalLabel(options.footer);
-  return (snapshot, columns, rows, view = {
+  const renderer: DashboardRenderer = (snapshot, columns, rows, view = {
     autoFollow: true,
     focusedCubeId: null,
     pulseCubeIds: new Set(),
@@ -201,164 +204,26 @@ export function createDashboardRenderer(options: DashboardRenderOptions): Dashbo
     activityWindowMs: DASHBOARD_ACTIVITY_WINDOW_MS,
     page: 0,
   }) => {
-    const width = boundedDimension(columns, 20, 500);
-    const height = boundedDimension(rows, 4, 200);
-    if (width < 40 || height < 10) {
-      return renderPlainDashboard(
-        snapshot,
-        width,
-        height,
-        options.footer,
-      );
+    if (!usesInkDashboard(columns, rows)) {
+      return renderPlainDashboard(snapshot, columns, rows, options.footer);
     }
-    const lifecycleFooter = options.footer === EMBEDDED_DASHBOARD_FOOTER
-      ? wrapDashboardFooter(EMBEDDED_DASHBOARD_LIFECYCLE_FOOTER, width)
-      : [];
-
-    const lines: string[] = [];
-    lines.push(renderRail(snapshot, width, glyphs, options.color));
-    lines.push(glyphs.horizontal.repeat(width));
-    const focus = view.autoFollow || view.focusedCubeId === null
-      ? snapshot.cubes[0]
-      : snapshot.cubes.find((cube) => cube.id === view.focusedCubeId) ?? snapshot.cubes[0];
-    const maximumPosts = Math.max(...snapshot.cubes.map((cube) => cube.posts_15m), 0);
-    const footerRows = lifecycleFooter.length + 1;
-    const chromeRows = 3 + footerRows;
-    const bodyRows = Math.max(0, height - chromeRows);
-    const listCap = Math.max(1, Math.floor(bodyRows * 0.42));
-    const listRows = Math.min(snapshot.cubes.length, listCap);
-    const panelRows = Math.max(1, bodyRows - listRows);
-    if (focus === undefined) {
-      lines.push(...renderEmptyPanel(width, glyphs));
-    } else {
-      lines.push(...renderFocusPanel(snapshot, focus, width, panelRows, glyphs, view, options.color));
-    }
-    lines.push(glyphs.horizontal.repeat(width));
-    const pageCount = Math.max(1, Math.ceil(snapshot.cubes.length / listCap));
-    const page = Math.max(0, view.page ?? 0) % pageCount;
-    const pageStart = page * listCap;
-    for (const cube of snapshot.cubes.slice(pageStart, pageStart + listRows)) {
-      lines.push(renderSummaryRow(snapshot, cube, width, glyphs, view, maximumPosts, options.color));
-    }
-    const footerWithPage = renderDashboardFooter(
-      snapshot,
-      width,
-      options.navigation === true,
-      view.activityWindowMs ?? DASHBOARD_ACTIVITY_WINDOW_MS,
-      page,
-      pageCount,
+    return renderInkDashboardFrame(snapshot, columns, rows, view, {
+      ...options,
+      footer: options.footer,
       baseFooter,
-      glyphs,
-    );
-    lines.push(...lifecycleFooter.map((line) => fitCell(line, width, " ", glyphs.ellipsis)));
-    lines.push(footerWithPage);
-    return lines.slice(0, height)
-      .map((line) => fitCell(line, width, " ", glyphs.ellipsis))
-      .join("\n");
+    });
   };
-}
-
-function renderDashboardFooter(
-  snapshot: DashboardSnapshot,
-  width: number,
-  navigation: boolean,
-  activityWindowMs: number,
-  page: number,
-  pageCount: number,
-  baseFooter: string,
-  glyphs: Glyphs,
-): string {
-  const pageSegment = pageCount > 1
-    ? `${navigation ? "SPACE " : "page "}${page + 1}/${pageCount}`
-    : undefined;
-  const segments = navigation
-    ? [
-        ...(snapshot.cubes.length > 1 ? ["< > switch  |  a auto"] : []),
-        ...(pageSegment === undefined ? [] : [pageSegment]),
-        `w ${formatWindow(activityWindowMs)}`,
-        baseFooter,
-      ]
-    : [
-        ...(pageSegment === undefined ? [] : [pageSegment]),
-        baseFooter,
-      ];
-  while (segments.length > 1 && displayWidth(segments.join("  |  ")) > width) segments.shift();
-  return fitCell(segments.join("  |  "), width, " ", glyphs.ellipsis);
-}
-
-function wrapDashboardFooter(value: string, width: number): string[] {
-  const sentences = value.match(/[^.]+(?:\.|$)/gu)?.map((sentence) => sentence.trim()) ?? [value];
-  return sentences.flatMap((sentence) => {
-    const lines: string[] = [];
-    for (const word of sentence.split(/\s+/u)) {
-      const current = lines.at(-1);
-      if (current === undefined || displayWidth(`${current} ${word}`) > width) {
-        lines.push(word);
-      } else {
-        lines[lines.length - 1] = `${current} ${word}`;
-      }
-    }
-    return lines;
+  Object.defineProperty(renderer, "inkOptions", {
+    configurable: false,
+    enumerable: false,
+    value: Object.freeze({ ...options, baseFooter }),
+    writable: false,
   });
+  inkRenderers.add(renderer);
+  return renderer;
 }
 
-export function renderPlainDashboard(
-  snapshot: DashboardSnapshot,
-  columns = 80,
-  rows = 20,
-  footer?: DashboardFooter,
-): string {
-  const width = boundedDimension(columns, 20, 500);
-  const height = boundedDimension(rows, 4, 200);
-  const totalPosts = snapshot.cubes.reduce((sum, cube) => sum + cube.posts_15m, 0);
-  const lines = [
-    fitCell(
-      `${sanitizeTerminalText(snapshot.server.name)} ${snapshot.server.state} ` +
-      `${sanitizeTerminalText(snapshot.server.endpoint)}`,
-      width,
-      " ",
-      ASCII_GLYPHS.ellipsis,
-    ),
-    fitCell(
-      `${snapshot.cubes.length} cubes | ${totalPosts} posts/15m`,
-      width,
-      " ",
-      ASCII_GLYPHS.ellipsis,
-    ),
-    ...renderPlainDashboardFooter(footer, width),
-  ];
-  const available = Math.max(0, height - lines.length);
-  for (const cube of snapshot.cubes.slice(0, available)) {
-    lines.push(fitCell(
-      `${cube.rank}. ${sanitizeTerminalText(cube.name)} ` +
-      `${cube.posts_15m}/15m ${formatAge(snapshot.captured_at, cube.last_post_at)}`,
-      width,
-      " ",
-      ASCII_GLYPHS.ellipsis,
-    ));
-  }
-  return lines.join("\n");
-}
-
-function renderPlainDashboardFooter(footer: DashboardFooter | undefined, width: number): string[] {
-  if (footer === EMBEDDED_DASHBOARD_FOOTER) {
-    return [
-      width >= 60
-        ? "Press Ctrl-C or close this terminal to stop the server."
-        : width >= 38 ? "Ctrl-C or close terminal stops server." : "Ctrl-C stops server.",
-      width >= 60
-        ? "Your server data and identity remain saved. Read-only view."
-        : width >= 44 ? "Data and identity saved. Read-only view."
-        : width >= 33 ? "Data saved. Read-only view." : "Saved. Read-only.",
-    ];
-  }
-  if (footer === STANDALONE_DASHBOARD_FOOTER) {
-    return width >= 35
-      ? ["Ctrl-C closes this viewer.", "Server stays up. View is read-only."]
-      : ["Ctrl-C closes viewer", "Read-only, server up"];
-  }
-  return [];
-}
+export { renderPlainDashboard } from "./dashboard-plain.js";
 
 export function selectDashboardGlyphMode(input: {
   readonly asciiRequested: boolean;
@@ -374,6 +239,16 @@ export function dashboardColorEnabled(
   environment: Readonly<Record<string, string | undefined>>,
 ): boolean {
   return environment["NO_COLOR"] === undefined && environment["TERM"] !== "dumb";
+}
+
+function usesInkDashboard(columns: number, rows: number): boolean {
+  const width = Math.min(500, Math.max(20, finiteDashboardDimension(columns, 20)));
+  const height = Math.min(200, Math.max(4, finiteDashboardDimension(rows, 4)));
+  return width >= 40 && height >= 10;
+}
+
+function finiteDashboardDimension(value: number, fallback: number): number {
+  return Number.isFinite(value) ? Math.floor(value) : fallback;
 }
 
 export function sanitizeTerminalText(value: string): string {
@@ -416,6 +291,8 @@ export function startForegroundDashboard(input: {
   let eventTimer: ReturnType<typeof setTimeout> | undefined;
   let resizeTimer: ReturnType<typeof setTimeout> | undefined;
   let pulseTimer: ReturnType<typeof setTimeout> | undefined;
+  let inkInstance: InkInstance | undefined;
+  let inkStdout: NodeJS.WriteStream | undefined;
   let autoFollow = true;
   let focusedCubeId: string | null = null;
   let pulseCubeIds = new Set<string>();
@@ -429,7 +306,7 @@ export function startForegroundDashboard(input: {
     readonly lastPostAt: string | null;
   }>();
   let lastSnapshot: DashboardSnapshot | undefined;
-  let lastFrame: string | undefined;
+  let lastPlainFrame: string | undefined;
   let rejectFailure!: (error: unknown) => void;
   const failure = new Promise<never>((_resolve, reject) => { rejectFailure = reject; });
 
@@ -454,6 +331,31 @@ export function startForegroundDashboard(input: {
     }
     unsubscribeInput = input.terminal.onInput(handleInput);
   };
+  const unmountInk = (): void => {
+    try { inkInstance?.unmount(); } catch { /* Continue restoring terminal state. */ }
+    if (inkStdout !== undefined) flushInkStdout(inkStdout);
+    inkInstance = undefined;
+    inkStdout = undefined;
+  };
+  const mountInk = (
+    snapshot: DashboardSnapshot,
+    dimensions: { readonly columns: number; readonly rows: number },
+    view: DashboardViewState,
+    options: NonNullable<DashboardRenderer["inkOptions"]>,
+  ): void => {
+    inkStdout = createInkStdout(input.terminal);
+    inkInstance = renderInk(
+      createInkDashboardElement(snapshot, dimensions.columns, dimensions.rows, view, options),
+      {
+        stdout: inkStdout,
+        exitOnCtrlC: false,
+        patchConsole: false,
+        maxFps: 0,
+        interactive: true,
+      },
+    );
+    flushInkStdout(inkStdout);
+  };
   const stop = (): void => {
     if (closed) return;
     closed = true;
@@ -461,6 +363,7 @@ export function startForegroundDashboard(input: {
     try { unsubscribeSource(); } catch { /* Continue restoring terminal state. */ }
     try { unsubscribeResize(); } catch { /* Continue restoring terminal state. */ }
     try { unsubscribeInput(); } catch { /* Continue restoring terminal state. */ }
+    unmountInk();
     restore();
   };
   const fail = (error: unknown): void => {
@@ -486,7 +389,7 @@ export function startForegroundDashboard(input: {
     if (closed || lastSnapshot === undefined) return;
     try {
       const dimensions = input.terminal.dimensions();
-      const frame = input.renderer(lastSnapshot, dimensions.columns, dimensions.rows, {
+      const view = {
         autoFollow,
         focusedCubeId,
         pulseCubeIds,
@@ -495,10 +398,31 @@ export function startForegroundDashboard(input: {
         observation: observationHistory,
         activityWindowMs,
         page,
-      });
-      if (frame === lastFrame) return;
+      } satisfies DashboardViewState;
+      const inkOptions = inkRenderers.has(input.renderer) ? input.renderer.inkOptions : undefined;
+      if (inkOptions !== undefined && usesInkDashboard(dimensions.columns, dimensions.rows)) {
+        const element = createInkDashboardElement(
+          lastSnapshot,
+          dimensions.columns,
+          dimensions.rows,
+          view,
+          inkOptions,
+        );
+        if (inkInstance === undefined || inkStdout === undefined) {
+          if (lastPlainFrame !== undefined) input.terminal.write(clearScreen);
+          mountInk(lastSnapshot, dimensions, view, inkOptions);
+        } else {
+          inkInstance.rerender(element);
+          flushInkStdout(inkStdout);
+        }
+        lastPlainFrame = undefined;
+        return;
+      }
+      if (inkInstance !== undefined || inkStdout !== undefined) unmountInk();
+      const frame = input.renderer(lastSnapshot, dimensions.columns, dimensions.rows, view);
+      if (frame === lastPlainFrame) return;
       input.terminal.write(`${clearScreen}${frame}`);
-      lastFrame = frame;
+      lastPlainFrame = frame;
     } catch (error) {
       fail(error);
     }
@@ -552,6 +476,10 @@ export function startForegroundDashboard(input: {
   };
   const scheduleResize = (): void => {
     if (closed) return;
+    if (inkRenderers.has(input.renderer)) {
+      paint();
+      return;
+    }
     if (resizeTimer !== undefined) clearTimeout(resizeTimer);
     resizeTimer = setTimeout(() => {
       resizeTimer = undefined;
@@ -585,12 +513,13 @@ export function startForegroundDashboard(input: {
     if (input.terminal.requestSuspend === undefined) return;
     unsubscribeInput();
     unsubscribeInput = (): void => undefined;
+    unmountInk();
+    lastPlainFrame = undefined;
     input.terminal.write(alternateScreenRestore);
     input.terminal.requestSuspend(() => {
       if (closed) return;
       try {
         input.terminal.write(alternateScreenEnter);
-        lastFrame = undefined;
         subscribeInput();
         refresh();
       } catch (error) {
@@ -644,6 +573,41 @@ export function startForegroundDashboard(input: {
   return Object.freeze({ failure, close: stop });
 }
 
+function createInkStdout(terminal: DashboardTerminal): NodeJS.WriteStream {
+  let pending = "";
+  const stream = new Writable({
+    write(chunk, _encoding, callback) {
+      try {
+        pending += Buffer.isBuffer(chunk) ? chunk.toString() : String(chunk);
+        callback();
+      } catch (error) {
+        callback(error instanceof Error ? error : new Error(String(error)));
+      }
+    },
+  });
+  Object.defineProperties(stream, {
+    columns: { configurable: true, enumerable: true, get: () => terminal.dimensions().columns },
+    isTTY: { configurable: true, enumerable: true, value: true, writable: false },
+    rows: { configurable: true, enumerable: true, get: () => terminal.dimensions().rows },
+  });
+  Object.defineProperty(stream, "flushInk", {
+    configurable: false,
+    enumerable: false,
+    value: () => {
+      if (pending === "") return;
+      const value = pending;
+      pending = "";
+      terminal.write(value);
+    },
+    writable: false,
+  });
+  return stream as unknown as NodeJS.WriteStream;
+}
+
+function flushInkStdout(stream: NodeJS.WriteStream): void {
+  (stream as NodeJS.WriteStream & { readonly flushInk?: () => void }).flushInk?.();
+}
+
 function recordDashboardActivity(
   snapshot: DashboardSnapshot,
   history: Map<string, DashboardActivitySample[]>,
@@ -678,348 +642,4 @@ function recordActivityBucket(
     samples.push(sample);
     samples.sort((left, right) => Date.parse(left.capturedAt) - Date.parse(right.capturedAt));
   }
-}
-
-function renderRail(
-  snapshot: DashboardSnapshot,
-  width: number,
-  glyphs: Glyphs,
-  color: boolean,
-): string {
-  const identity = sanitizeTerminalText(snapshot.server.name).toUpperCase();
-  const version = sanitizeTerminalText(snapshot.server.version);
-  const endpoint = sanitizeTerminalText(snapshot.server.endpoint);
-  const uptime = formatUptime(snapshot.captured_at, snapshot.server.started_at);
-  const totalPosts = snapshot.cubes.reduce((sum, cube) => sum + cube.posts_15m, 0);
-  const state = snapshot.server.state.toUpperCase();
-  const body = `${glyphs.rail}${glyphs.rail} ${identity} ${glyphs.rail}${glyphs.rail} ` +
-    `${state}  ${snapshot.cubes.length} ${plural(snapshot.cubes.length, "cube")}  ${totalPosts}/15m  ` +
-    `${endpoint}  v${version}`;
-  const uptimeSuffix = `  up ${uptime}`;
-  const line = `${fitCell(
-    body,
-    Math.max(0, width - displayWidth(uptimeSuffix)),
-    " ",
-    glyphs.ellipsis,
-  )}${uptimeSuffix}`;
-  if (!color) return line;
-  const brand = `${glyphs.rail}${glyphs.rail} ${identity} ${glyphs.rail}${glyphs.rail}`;
-  return line
-    .replace(brand, `${amber}${brand}${reset}`)
-    .replace(state, `${green}${state}${reset}`);
-}
-
-function renderFocusPanel(
-  snapshot: DashboardSnapshot,
-  cube: DashboardCubeSnapshot,
-  width: number,
-  rows: number,
-  glyphs: Glyphs,
-  view: DashboardViewState,
-  color: boolean,
-): string[] {
-  const inner = Math.max(1, width - 2);
-  if (rows < 4) {
-    return [fitCell(
-      `${sanitizeTerminalText(cube.name)} ${glyphs.dash} ${cube.drones.length} ${plural(cube.drones.length, "drone")} ${glyphs.separator} activity panel needs a taller terminal`,
-      width,
-      " ",
-      glyphs.ellipsis,
-    )];
-  }
-  const window = view.activityWindowMs ?? DASHBOARD_ACTIVITY_WINDOW_MS;
-  const mode = view.autoFollow || view.focusedCubeId === null ? "(auto)" : "(pinned)";
-  const title = ` ${sanitizeTerminalText(cube.name)} ${glyphs.separator} ${mode} ${glyphs.separator} DRONE ACTIVITY ${glyphs.separator} ${formatWindow(window)} ago ${glyphs.axis} now `;
-  const top = glyphs.topLeft + title + glyphs.horizontal.repeat(Math.max(0, inner - displayWidth(title))) + glyphs.topRight;
-  const contentRows = rows - 2;
-  const coverage = activityCoverage(view.observation ?? [], snapshot.captured_at, window);
-  const maximumActivityRate = activityRateMaximum(cube, view.activity);
-  const collecting = coverage < 1;
-  const reserveNotes = collecting ? 1 : 0;
-  const bandHeight = ([3, 2, 1] as const).find((candidate) =>
-    cube.drones.length <= Math.floor((contentRows - reserveNotes) / candidate)) ?? 1;
-  const allFit = cube.drones.length <= Math.floor((contentRows - reserveNotes) / bandHeight);
-  const visible = allFit
-    ? cube.drones.length
-    : Math.max(1, Math.floor((contentRows - reserveNotes - 1) / bandHeight));
-  const drones = cube.drones.slice(0, visible);
-  const lines = drones.flatMap((drone) => renderDroneBand(
-    drone,
-    snapshot.captured_at,
-    inner,
-    bandHeight,
-    view.activity?.get(`${cube.id}:${drone.id}`) ?? [],
-    window,
-    maximumActivityRate,
-    glyphs,
-    color,
-  ));
-  const hidden = Math.max(0, cube.drones.length - drones.length);
-  if (hidden > 0 && lines.length < contentRows) lines.push(fitCell(` +${hidden} more drones ${glyphs.dash} taller terminal shows them`, inner, " ", glyphs.ellipsis));
-  if (collecting && lines.length < contentRows) {
-    lines.push(fitCell(
-      ` collecting ${glyphs.dash} ${Math.round(coverage * 100)}% of ${formatWindow(window)} observed`,
-      inner,
-      " ",
-      glyphs.ellipsis,
-    ));
-  }
-  while (lines.length < contentRows) lines.push(" ".repeat(inner));
-  return [top, ...lines.slice(0, contentRows).map((line) => `${glyphs.vertical}${fitCell(line, inner, " ", glyphs.ellipsis)}${glyphs.vertical}`), `${glyphs.bottomLeft}${glyphs.horizontal.repeat(inner)}${glyphs.bottomRight}`];
-}
-
-function renderDroneBand(
-  drone: DashboardDroneData,
-  capturedAt: string,
-  width: number,
-  height: number,
-  samples: readonly DashboardActivitySample[],
-  windowMs: number,
-  maximumActivityRate: number,
-  glyphs: Glyphs,
-  color: boolean,
-): string[] {
-  const label = fitCell(sanitizeTerminalText(drone.label), Math.max(8, Math.floor(width * 0.32)), " ", glyphs.ellipsis).trimEnd();
-  const role = fitCell(sanitizeTerminalText(drone.role), Math.max(4, Math.floor(width * 0.12)), " ", glyphs.ellipsis).trimEnd();
-  const last = formatAge(capturedAt, drone.last_seen);
-  if (height === 1) {
-    const prefix = `${label} ${drone.sent} ${last} `;
-    return colorizeDashboardLines([
-      fitCell(`${prefix}${renderActivityGraph(samples, Math.max(4, width - displayWidth(prefix)), 1, windowMs, capturedAt, glyphs, maximumActivityRate)}`, width, " ", glyphs.ellipsis),
-    ], capturedAt, drone.last_seen, color);
-  }
-  const identity = height >= 3
-    ? `${label} ${role}  SENT ${drone.sent}  RECV ${drone.received}  LAST ${last}`
-    : `${label} ${role}  SENT ${drone.sent}  LAST ${last}`;
-  return colorizeDashboardLines([
-    fitCell(identity, width, " ", glyphs.ellipsis),
-    ...Array.from({ length: height - 1 }, (_unused, index) =>
-      renderActivityGraph(samples, width, height - 1, windowMs, capturedAt, glyphs, maximumActivityRate, index)),
-  ], capturedAt, drone.last_seen, color);
-}
-
-function renderActivityGraph(
-  samples: readonly DashboardActivitySample[],
-  width: number,
-  height: number,
-  windowMs: number,
-  capturedAt: string,
-  glyphs: Glyphs,
-  maximumActivityRate: number,
-  row = 0,
-): string {
-  const slots = activitySlots(samples, capturedAt, windowMs);
-  const graph = Array.from({ length: width }, (_unused, columnIndex) => {
-    const startSlot = Math.floor(columnIndex * slots.total / width);
-    const endSlot = Math.max(startSlot + 1, Math.floor((columnIndex + 1) * slots.total / width));
-    const sample = [...slots.entries()].find(([slot]) => slot >= startSlot && slot < endSlot)?.[1];
-    if (sample === undefined) return " ";
-    if (sample.sentRate <= 0 || maximumActivityRate <= 0) return glyphs.cube[0]!;
-    const level = Math.ceil((sample.sentRate / maximumActivityRate) * (height * 8)) - ((height - row - 1) * 8);
-    if (level <= 0) return " ";
-    return magnitudeGlyph(level, height * 8, glyphs);
-  }).join("");
-  return graph;
-}
-
-function activityRateMaximum(
-  cube: DashboardCubeSnapshot,
-  activity: ReadonlyMap<string, readonly DashboardActivitySample[]> | undefined,
-): number {
-  let maximum = 0;
-  for (const drone of cube.drones) {
-    for (const sample of activity?.get(`${cube.id}:${drone.id}`) ?? []) {
-      maximum = Math.max(maximum, sample.sentRate);
-    }
-  }
-  return maximum;
-}
-
-function activityCoverage(samples: readonly DashboardActivitySample[], capturedAt: string, windowMs: number): number {
-  const slots = activitySlots(samples, capturedAt, windowMs);
-  return slots.size / slots.total;
-}
-
-function activitySlots(samples: readonly DashboardActivitySample[], capturedAt: string, windowMs: number): (Map<number, DashboardActivitySample> & { total: number }) {
-  const end = Date.parse(capturedAt);
-  const start = end - windowMs;
-  const buckets = new Map<number, DashboardActivitySample>() as Map<number, DashboardActivitySample> & { total: number };
-  buckets.total = Math.max(1, Math.ceil(windowMs / DASHBOARD_IDLE_REFRESH_MS));
-  for (const sample of samples) {
-    const timestamp = Date.parse(sample.capturedAt);
-    if (!Number.isFinite(timestamp) || timestamp < start || timestamp > end) continue;
-    const bucket = Math.min(buckets.total - 1, Math.floor((timestamp - start) / DASHBOARD_IDLE_REFRESH_MS));
-    buckets.set(bucket, sample);
-  }
-  return buckets;
-}
-
-function formatWindow(windowMs: number): string { return `${Math.floor(windowMs / 60_000)}m`; }
-
-function renderEmptyPanel(width: number, glyphs: Glyphs): string[] {
-  const inner = Math.max(1, width - 2);
-  return [
-    `${glyphs.topLeft}${glyphs.horizontal.repeat(inner)}${glyphs.topRight}`,
-    `${glyphs.vertical}${fitCell(" No cubes yet. Activity will appear here.", inner, " ", glyphs.ellipsis)}${glyphs.vertical}`,
-    `${glyphs.bottomLeft}${glyphs.horizontal.repeat(inner)}${glyphs.bottomRight}`,
-  ];
-}
-
-function renderSummaryRow(
-  snapshot: DashboardSnapshot,
-  cube: DashboardCubeSnapshot,
-  width: number,
-  glyphs: Glyphs,
-  view: DashboardViewState,
-  maximumPosts: number,
-  color: boolean,
-): string {
-  const pulse = activityPulseMarker(view.pulsePhase);
-  const pulseMarker = view.pulseCubeIds.has(cube.id) ? pulse : " ";
-  const rank = rankMarker(cube.rank_change);
-  const heat = heatGlyph(cube.posts_15m, maximumPosts, glyphs);
-  let line: string;
-  if (width < 60) {
-    const nameWidth = Math.max(6, width - 32);
-    line = `${heat} ${String(cube.rank).padStart(3)} ` +
-      `${fitCell(sanitizeTerminalText(cube.name), nameWidth, " ", glyphs.ellipsis)} ` +
-      `${String(cube.posts_15m).padStart(4)}/15m ` +
-      `${formatAge(snapshot.captured_at, cube.last_post_at).padStart(5)} ${pulseMarker} ${rank}`;
-  } else {
-    const nameWidth = Math.max(10, width - 54);
-    line = `${heat} ${String(cube.rank).padStart(3)} ` +
-      `${fitCell(sanitizeTerminalText(cube.name), nameWidth, " ", glyphs.ellipsis)} ` +
-      `${String(cube.drones_seen_15m).padStart(3)}/${String(cube.drones_total).padEnd(3)} seen ` +
-      `${String(cube.posts_15m).padStart(4)}/15m ` +
-      `${String(cube.distinct_posting_drones_15m).padStart(3)} ${plural(cube.distinct_posting_drones_15m, "poster")} ` +
-      `${formatAge(snapshot.captured_at, cube.last_post_at).padStart(6)} ${pulseMarker} ${rank}`;
-  }
-  return colorizeDashboardLines([fitCell(line, width, " ", glyphs.ellipsis)], snapshot.captured_at, cube.last_post_at, color)[0]!;
-}
-
-function heatGlyph(posts: number, maximumPosts: number, glyphs: Glyphs): string {
-  if (posts <= 0 || maximumPosts <= 0) return glyphs.cube[0]!;
-  const index = Math.min(
-    glyphs.cube.length - 1,
-    Math.max(
-      1,
-      Math.ceil(
-        (Math.log1p(posts) / Math.log1p(maximumPosts)) * (glyphs.cube.length - 1),
-      ),
-    ),
-  );
-  return glyphs.cube[index]!;
-}
-
-function activityPulseMarker(phase: number): string {
-  const boundedPhase = Math.max(
-    0,
-    Math.min(DASHBOARD_PULSE_PHASES, Math.floor(phase)),
-  );
-  return DASHBOARD_ACTIVITY_PULSE_MARKERS[boundedPhase]!;
-}
-
-function rankMarker(delta: number): string {
-  if (delta === 0) return "  ";
-  return `${delta > 0 ? "^" : "v"}${Math.min(9, Math.abs(delta))}`;
-}
-
-function magnitudeGlyph(level: number, maximumLevel: number, glyphs: Glyphs): string {
-  if (level <= 0 || maximumLevel <= 0) return glyphs.cube[0]!;
-  const index = Math.min(
-    glyphs.cube.length - 1,
-    Math.max(1, Math.ceil((level / maximumLevel) * (glyphs.cube.length - 1))),
-  );
-  return glyphs.cube[index]!;
-}
-
-function colorizeDashboardLines(
-  lines: readonly string[],
-  capturedAt: string,
-  lastActivity: string | null,
-  color: boolean,
-): string[] {
-  if (!color) return [...lines];
-  const style = dashboardLivenessStyle(capturedAt, lastActivity);
-  return style === "" ? [...lines] : lines.map((line) => `${style}${line}${reset}`);
-}
-
-function dashboardLivenessStyle(capturedAt: string, lastActivity: string | null): string {
-  if (lastActivity === null) return dim;
-  const age = Date.parse(capturedAt) - Date.parse(lastActivity);
-  if (!Number.isFinite(age) || age >= 60 * 60_000) return dim;
-  if (age < 60_000) return green;
-  if (age < 15 * 60_000) return amber;
-  return "";
-}
-
-function plural(count: number, singular: string): string {
-  return count === 1 ? singular : `${singular}s`;
-}
-
-function formatAge(capturedAt: string, timestamp: string | null): string {
-  if (timestamp === null) return "never";
-  const age = Math.max(0, Date.parse(capturedAt) - Date.parse(timestamp));
-  if (!Number.isFinite(age)) return "unknown";
-  if (age < 60_000) return "<1m";
-  if (age < 60 * 60_000) return `${Math.floor(age / 60_000)}m`;
-  if (age < 24 * 60 * 60_000) return `${Math.floor(age / (60 * 60_000))}h`;
-  return `${Math.floor(age / (24 * 60 * 60_000))}d`;
-}
-
-function formatUptime(capturedAt: string, startedAt: string): string {
-  const elapsed = Math.max(0, Date.parse(capturedAt) - Date.parse(startedAt));
-  if (!Number.isFinite(elapsed)) return "unknown";
-  if (elapsed < 60_000) return "<1m";
-  if (elapsed < 60 * 60_000) return `${Math.floor(elapsed / 60_000)}m`;
-  const hours = Math.floor(elapsed / (60 * 60_000));
-  return hours < 24 ? `${hours}h` : `${Math.floor(hours / 24)}d${String(hours % 24).padStart(2, "0")}h`;
-}
-
-function fitCell(
-  value: string,
-  width: number,
-  fill: string,
-  ellipsis: string,
-): string {
-  if (displayWidth(value) <= width) return value + fill.repeat(width - displayWidth(value));
-  const suffix = width >= 4 ? (fill === " " ? ellipsis : fill) : "";
-  const target = Math.max(0, width - displayWidth(suffix));
-  let result = "";
-  for (const character of value) {
-    if (displayWidth(result + character) > target) break;
-    result += character;
-  }
-  return result + suffix + fill.repeat(Math.max(0, width - displayWidth(result + suffix)));
-}
-
-function displayWidth(value: string): number {
-  let width = 0;
-  for (const character of value.replace(/\u001b\[[0-?]*[ -/]*[@-~]/gu, "")) {
-    const code = character.codePointAt(0)!;
-    if (/\p{Mark}/u.test(character)) continue;
-    width += isWide(code) ? 2 : 1;
-  }
-  return width;
-}
-
-function isWide(code: number): boolean {
-  return code >= 0x1100 && (
-    code <= 0x115f ||
-    code === 0x2329 || code === 0x232a ||
-    (code >= 0x2e80 && code <= 0xa4cf && code !== 0x303f) ||
-    (code >= 0xac00 && code <= 0xd7a3) ||
-    (code >= 0xf900 && code <= 0xfaff) ||
-    (code >= 0xfe10 && code <= 0xfe19) ||
-    (code >= 0xfe30 && code <= 0xfe6f) ||
-    (code >= 0xff00 && code <= 0xff60) ||
-    (code >= 0xffe0 && code <= 0xffe6) ||
-    (code >= 0x1f300 && code <= 0x1faff) ||
-    (code >= 0x20000 && code <= 0x3fffd)
-  );
-}
-
-function boundedDimension(value: number, minimum: number, maximum: number): number {
-  if (!Number.isFinite(value)) return minimum;
-  return Math.min(maximum, Math.max(minimum, Math.floor(value)));
 }

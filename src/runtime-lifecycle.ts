@@ -270,6 +270,7 @@ export function createUnixNpmArtifactUnpacker(options: {
       "ci",
       "--omit=dev",
       "--ignore-scripts",
+      "--no-bin-links",
       "--no-audit",
       "--no-fund",
     ], { cwd: packageDirectory, signal });

@@ -314,6 +314,21 @@ describe("release identity automation", () => {
       { ...doubleFailureFixture.authorities, githubRunJobs: () => doubleFailureJobs },
     )).rejects.toThrow("Failed-superseded release requires exactly one authored failure.");
 
+    const wrongIdentityFixture = await createFailedFixture("verify");
+    const wrongIdentityJobs = failedRunJobs(wrongIdentityFixture.base, "verify") as typeof doubleFailureJobs;
+    wrongIdentityJobs.jobs[0]!.steps.push({
+      name: "Unexpected failed step",
+      number: 11,
+      status: "completed",
+      conclusion: "failure",
+    });
+    await expect(prepareRelease(
+      wrongIdentityFixture.root,
+      newVersion,
+      wrongIdentityFixture.evidence,
+      { ...wrongIdentityFixture.authorities, githubRunJobs: () => wrongIdentityJobs },
+    )).rejects.toThrow("Failed-superseded release requires exactly one authored failure.");
+
     const unknownFailureFixture = await createFailedFixture("check");
     const unknownFailureJobs = failedRunJobs(unknownFailureFixture.base, "check") as typeof doubleFailureJobs;
     const authoredCheck = unknownFailureJobs.jobs[0]!.steps.find(

@@ -384,14 +384,15 @@ function failedPhaseEvidence(root, record, authorities, requireRecordedIds = tru
       fail("Failed-superseded release authored steps are out of runner order.");
     }
   }
-  const authoredNumbers = new Set(authoredSteps.map(({ step }) => step.number));
+  const hasAuthoredIdentity = (step) => authoredSteps.some(({ name, step: authoredStep }) =>
+    step.name === name && step.number === authoredStep.number);
   const authoredFailures = authoredSteps.filter(({ step }) =>
     step.status === "completed" && step.conclusion === "failure");
   const unmatchedFailures = verifyJob.steps.filter((step) =>
     step.status === "completed" &&
     step.conclusion === "failure" &&
     (!Number.isSafeInteger(step.number) ||
-      (step.number < RUNNER_CLEANUP_STEP_MIN_NUMBER && !authoredNumbers.has(step.number))));
+      (step.number < RUNNER_CLEANUP_STEP_MIN_NUMBER && !hasAuthoredIdentity(step))));
   if (authoredFailures.length + unmatchedFailures.length > 1) {
     fail("Failed-superseded release requires exactly one authored failure.");
   }

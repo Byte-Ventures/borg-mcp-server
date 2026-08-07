@@ -86,18 +86,15 @@ describe("packed release artifact", () => {
     };
     expect(report).toMatchObject({ name: manifest.name, version: manifest.version });
 
-    const { stdout: trackedSourceOutput } = await execute("git", ["ls-files", "--", "src"], {
-      cwd: repository,
-    });
-    const expectedSourceFiles = trackedSourceOutput.split("\n")
+    const expectedSourceFiles = (await listFiles(join(repository, "src")))
       .filter((path) => path.endsWith(".ts"))
-      .map((path) => `package/${path}`)
-      .sort();
-    expect(expectedSourceFiles.length).toBeGreaterThan(0);
+      .map((path) => `package/src/${path}`);
+    expect(expectedSourceFiles).not.toHaveLength(0);
     const { stdout } = await execute("tar", ["-tf", tarball]);
     const packedSourceFiles = stdout.split("\n")
       .filter((path) => path.startsWith("package/src/"))
       .sort();
+    expect(packedSourceFiles).not.toHaveLength(0);
     expect(packedSourceFiles.filter((path) => !path.endsWith(".ts"))).toEqual([]);
     expect(packedSourceFiles).toEqual(expectedSourceFiles);
   });

@@ -14,7 +14,6 @@ const PACKAGE_PATH = "package.json";
 const LOCK_PATH = "npm-shrinkwrap.json";
 const VERSION_CONSTANT_PATH = "src/runtime-identity.ts";
 const RUNNER_SETUP_STEP_COUNT = 1;
-const RUNNER_CLEANUP_STEP_MIN_NUMBER = 25;
 const RELEASE_WORKFLOW_ATTEMPT = 1;
 const stableVersionPattern = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/u;
 const registryVersionPattern = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/u;
@@ -302,7 +301,7 @@ function decodePublishedVersions(input) {
   return versions;
 }
 
-function deriveAuthoredReleaseSteps(root, tag) {
+function deriveReleaseStepIdentities(root, tag) {
   let workflow;
   try {
     workflow = git(root, ["show", `${tag}:${WORKFLOW_PATH}`]);
@@ -316,21 +315,40 @@ function deriveAuthoredReleaseSteps(root, tag) {
     fail("Failed-superseded release workflow has no parseable verify job steps.");
   }
   const names = [];
+  const postStepNames = [];
+  let currentStep = null;
+  const finishCurrentStep = () => {
+    if (currentStep?.uses === true) postStepNames.push(`Post ${currentStep.name}`);
+    currentStep = null;
+  };
   for (const line of workflow.slice(stepsStart, publishStart).split("\n")) {
-    if (!/^ {6}-\s+/u.test(line)) continue;
-    const match = line.match(/^ {6}- name:\s*(\S.*)$/u);
-    if (match === null) {
-      fail("Failed-superseded release workflow has an unnamed verify step.");
+    if (/^ {6}-\s+/u.test(line)) {
+      finishCurrentStep();
+      const match = line.match(/^ {6}- name:\s*(\S.*)$/u);
+      if (match === null) {
+        fail("Failed-superseded release workflow has an unnamed verify step.");
+      }
+      currentStep = { name: match[1].trim(), uses: false };
+      names.push(currentStep.name);
+      continue;
     }
-    names.push(match[1].trim());
+    if (currentStep !== null && /^ {8}uses:\s*\S/u.test(line)) currentStep.uses = true;
   }
+  finishCurrentStep();
   if (names.length === 0 || new Set(names).size !== names.length) {
     fail("Failed-superseded release workflow has no unique authored verify steps.");
   }
-  return Object.freeze(names.map((name, index) => Object.freeze({
-    name,
-    number: index + RUNNER_SETUP_STEP_COUNT + 1,
-  })));
+  return Object.freeze({
+    authoredSteps: Object.freeze(names.map((name, index) => Object.freeze({
+      name,
+      number: index + RUNNER_SETUP_STEP_COUNT + 1,
+    }))),
+    runnerStepNames: Object.freeze([
+      "Set up job",
+      "Complete job",
+      ...postStepNames,
+    ]),
+  });
 }
 
 function failedPhaseEvidence(root, record, authorities, requireRecordedIds = true) {
@@ -367,7 +385,8 @@ function failedPhaseEvidence(root, record, authorities, requireRecordedIds = tru
       publishJob.steps.length !== 0) {
     fail("Failed-superseded release does not match authoritative pre-publication job evidence.");
   }
-  const authoredSteps = deriveAuthoredReleaseSteps(root, record.tag).map((expected) => {
+  const { authoredSteps: expectedAuthoredSteps, runnerStepNames } = deriveReleaseStepIdentities(root, record.tag);
+  const authoredSteps = expectedAuthoredSteps.map((expected) => {
     const matches = verifyJob.steps.filter((step) =>
       step?.name === expected.name && step.number === expected.number);
     if (matches.length !== 1) {
@@ -386,13 +405,15 @@ function failedPhaseEvidence(root, record, authorities, requireRecordedIds = tru
   }
   const hasAuthoredIdentity = (step) => authoredSteps.some(({ name, step: authoredStep }) =>
     step.name === name && step.number === authoredStep.number);
+  const isRunnerCleanupIdentity = (step) =>
+    step.name !== "Set up job" && runnerStepNames.includes(step.name);
   const authoredFailures = authoredSteps.filter(({ step }) =>
     step.status === "completed" && step.conclusion === "failure");
   const unmatchedFailures = verifyJob.steps.filter((step) =>
     step.status === "completed" &&
     step.conclusion === "failure" &&
-    (!Number.isSafeInteger(step.number) ||
-      (step.number < RUNNER_CLEANUP_STEP_MIN_NUMBER && !hasAuthoredIdentity(step))));
+    !hasAuthoredIdentity(step) &&
+    !isRunnerCleanupIdentity(step));
   if (authoredFailures.length + unmatchedFailures.length > 1) {
     fail("Failed-superseded release requires exactly one authored failure.");
   }

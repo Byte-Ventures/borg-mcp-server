@@ -36,6 +36,11 @@ const authoredReleaseStepNames = [
   "Exercise exact tarball once",
   "Upload same-run release artifact",
 ] as const;
+const fixtureUsesStepNames = new Set([
+  "Check out tagged source",
+  "Set up exact Node.js",
+  "Upload same-run release artifact",
+]);
 const fixtureReleaseWorkflow = [
   "name: Verify and publish npm release",
   "jobs:",
@@ -43,7 +48,7 @@ const fixtureReleaseWorkflow = [
   "    steps:",
   ...authoredReleaseStepNames.flatMap((name) => [
     `      - name: ${name}`,
-    "        run: true",
+    fixtureUsesStepNames.has(name) ? "        uses: example/action@v1" : "        run: true",
   ]),
   "  publish:",
   "    needs: verify",
@@ -327,6 +332,36 @@ describe("release identity automation", () => {
       newVersion,
       wrongIdentityFixture.evidence,
       { ...wrongIdentityFixture.authorities, githubRunJobs: () => wrongIdentityJobs },
+    )).rejects.toThrow("Failed-superseded release requires exactly one authored failure.");
+
+    const unknownNumberFixture = await createFailedFixture("verify");
+    const unknownNumberJobs = failedRunJobs(unknownNumberFixture.base, "verify") as typeof doubleFailureJobs;
+    unknownNumberJobs.jobs[0]!.steps.push({
+      name: "Unexpected failed step",
+      number: 20,
+      status: "completed",
+      conclusion: "failure",
+    });
+    await expect(prepareRelease(
+      unknownNumberFixture.root,
+      newVersion,
+      unknownNumberFixture.evidence,
+      { ...unknownNumberFixture.authorities, githubRunJobs: () => unknownNumberJobs },
+    )).rejects.toThrow("Failed-superseded release requires exactly one authored failure.");
+
+    const unknownTailFixture = await createFailedFixture("verify");
+    const unknownTailJobs = failedRunJobs(unknownTailFixture.base, "verify") as typeof doubleFailureJobs;
+    unknownTailJobs.jobs[0]!.steps.push({
+      name: "Unexpected failed step",
+      number: 26,
+      status: "completed",
+      conclusion: "failure",
+    });
+    await expect(prepareRelease(
+      unknownTailFixture.root,
+      newVersion,
+      unknownTailFixture.evidence,
+      { ...unknownTailFixture.authorities, githubRunJobs: () => unknownTailJobs },
     )).rejects.toThrow("Failed-superseded release requires exactly one authored failure.");
 
     const unknownFailureFixture = await createFailedFixture("check");

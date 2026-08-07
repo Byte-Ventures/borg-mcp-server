@@ -351,6 +351,36 @@ function deriveReleaseStepIdentities(root, tag) {
   });
 }
 
+function deriveRunnerCleanupIdentities(steps, runnerStepNames, authoredSteps) {
+  const authoredMaxNumber = Math.max(...authoredSteps.map(({ step }) => step.number));
+  const stepsByNumber = new Map();
+  for (const step of steps) {
+    if (!Number.isSafeInteger(step?.number)) continue;
+    const matches = stepsByNumber.get(step.number) ?? [];
+    matches.push(step);
+    stepsByNumber.set(step.number, matches);
+  }
+  const completeSteps = steps.filter((step) =>
+    step?.name === "Complete job" &&
+    Number.isSafeInteger(step.number) &&
+    step.number > authoredMaxNumber);
+  if (completeSteps.length !== 1) return Object.freeze([]);
+
+  const cleanupIdentities = [];
+  for (let number = completeSteps[0].number; number > authoredMaxNumber; number -= 1) {
+    const matches = stepsByNumber.get(number);
+    if (matches?.length !== 1) break;
+    const [step] = matches;
+    if (number === completeSteps[0].number) {
+      if (step.name !== "Complete job") break;
+    } else if (step.name === "Set up job" || !runnerStepNames.includes(step.name)) {
+      break;
+    }
+    cleanupIdentities.push(Object.freeze({ name: step.name, number }));
+  }
+  return Object.freeze(cleanupIdentities);
+}
+
 function failedPhaseEvidence(root, record, authorities, requireRecordedIds = true) {
   requireInitialWorkflowAttempt(
     record.workflow_run_attempt,
@@ -405,8 +435,13 @@ function failedPhaseEvidence(root, record, authorities, requireRecordedIds = tru
   }
   const hasAuthoredIdentity = (step) => authoredSteps.some(({ name, step: authoredStep }) =>
     step.name === name && step.number === authoredStep.number);
-  const isRunnerCleanupIdentity = (step) =>
-    step.name !== "Set up job" && runnerStepNames.includes(step.name);
+  const runnerCleanupIdentities = deriveRunnerCleanupIdentities(
+    verifyJob.steps,
+    runnerStepNames,
+    authoredSteps,
+  );
+  const isRunnerCleanupIdentity = (step) => runnerCleanupIdentities.some(({ name, number }) =>
+    step.name === name && step.number === number);
   const authoredFailures = authoredSteps.filter(({ step }) =>
     step.status === "completed" && step.conclusion === "failure");
   const unmatchedFailures = verifyJob.steps.filter((step) =>

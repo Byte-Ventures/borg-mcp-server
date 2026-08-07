@@ -334,6 +334,21 @@ describe("release identity automation", () => {
       { ...wrongIdentityFixture.authorities, githubRunJobs: () => wrongIdentityJobs },
     )).rejects.toThrow("Failed-superseded release requires exactly one authored failure.");
 
+    const conflictingCleanupFixture = await createFailedFixture("verify");
+    const conflictingCleanupJobs = failedRunJobs(conflictingCleanupFixture.base, "verify") as typeof doubleFailureJobs;
+    conflictingCleanupJobs.jobs[0]!.steps.push({
+      name: "Post Check out tagged source",
+      number: 11,
+      status: "completed",
+      conclusion: "failure",
+    });
+    await expect(prepareRelease(
+      conflictingCleanupFixture.root,
+      newVersion,
+      conflictingCleanupFixture.evidence,
+      { ...conflictingCleanupFixture.authorities, githubRunJobs: () => conflictingCleanupJobs },
+    )).rejects.toThrow("Failed-superseded release requires exactly one authored failure.");
+
     const unknownNumberFixture = await createFailedFixture("verify");
     const unknownNumberJobs = failedRunJobs(unknownNumberFixture.base, "verify") as typeof doubleFailureJobs;
     unknownNumberJobs.jobs[0]!.steps.push({

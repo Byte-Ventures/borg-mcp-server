@@ -168,14 +168,35 @@ npm run release:prepare -- <next-version> \
 ```
 
 The recovery path independently verifies the failed tag workflow's `verify` and `publish` jobs,
-including the skipped tarball build, tarball verification, tarball exercise, and artifact upload
-steps. It checks the canonical npm version list to prove that the failed version has no published
-artifact or SRI, records the result as `failed-superseded`, and re-verifies the latest earlier
-published record as the provenance anchor. A failed record cannot carry an SRI, cannot describe a
-run that reached artifact or publication phases, and cannot be prepared if the failed version is
-present in the registry. Release identity accepts only workflow attempt 1: a rerun is never
-authoritative, even if its jobs independently show a pre-publication failure. Failed tags, runs,
-versions, and approvals remain immutable and must never be moved, reused, or rerun.
+reading the complete authored `verify` step set from `.github/workflows/release.yml` at the failed
+tag. A burn at any authored step, including a pre-build source, lock, install, or audit gate, is
+recordable when exactly one authored step failed, every earlier authored step succeeded, and every
+later authored step completed and skipped; no later authored step may succeed. Unrecognized
+runner/infrastructure failures are rejected, while runner cleanup steps are not authored release
+steps. Cleanup names come from the failed tag's workflow `uses` steps and are accepted only after
+every authored step by runner order (`step.number > max(authored step number)`); the exact numeric
+tail positions are runner output, not workflow data, so this ordering is the deliberate bound.
+An allow-listed cleanup name above that authored maximum can still be classified as cleanup even
+if it is not one of the observed tail positions. `Set up job` remains a pre-authored failure
+boundary and is rejected by design. A failed tarball exercise is still pre-publication and is
+recordable when upload and publish remain skipped; it carries no SRI. The canonical npm version
+list proves that the failed version has no published artifact, records the result as
+`failed-superseded`, and re-verifies the latest earlier published record as the provenance anchor.
+A failed record cannot carry an SRI, cannot describe a run that reached publication or successfully
+uploaded the same-run artifact, and cannot be prepared if the failed version is present in the
+registry. Release identity accepts only workflow attempt 1: a rerun is never authoritative, even
+if its jobs independently show a pre-publication failure. Failed tags, runs, versions, and
+approvals remain immutable and must never be moved, reused, or rerun.
+
+This recovery shape requires the `verify` job itself to have failed and the `publish` job to be
+skipped. If verification succeeds and publication or a postpublication check fails, that run is
+not a `failed-superseded` verify burn and this command rejects it; preserve that immutable run as
+publication-stage evidence and use the applicable publication recovery procedure instead.
+
+The authored step set is read from the workflow committed at the failed tag; recovery does not
+backfill historical runs using the current workflow or infer a missing workflow shape. A tag whose
+workflow cannot be read or whose verify steps cannot be matched to the authoritative job evidence
+fails closed and requires a separately reviewed historical backfill decision.
 
 Release branches use the `release/` prefix and enter protected `main` through a pull request. A
 direct push only updates the staging branch; it does not produce a release-identity

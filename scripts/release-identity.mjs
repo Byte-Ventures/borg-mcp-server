@@ -13,12 +13,7 @@ const RECORDS_PATH = "docs/release-records.json";
 const PACKAGE_PATH = "package.json";
 const LOCK_PATH = "npm-shrinkwrap.json";
 const VERSION_CONSTANT_PATH = "src/runtime-identity.ts";
-const FAILED_RELEASE_SKIPPED_STEPS = Object.freeze([
-  Object.freeze({ number: 10, name: "Build exact release tarball once" }),
-  Object.freeze({ number: 11, name: "Verify exact release tarball once" }),
-  Object.freeze({ number: 12, name: "Exercise exact tarball once" }),
-  Object.freeze({ number: 13, name: "Upload same-run release artifact" }),
-]);
+const RUNNER_SETUP_STEP_COUNT = 1;
 const RELEASE_WORKFLOW_ATTEMPT = 1;
 const stableVersionPattern = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/u;
 const registryVersionPattern = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/u;
@@ -306,6 +301,56 @@ function decodePublishedVersions(input) {
   return versions;
 }
 
+function deriveReleaseStepIdentities(root, tag) {
+  let workflow;
+  try {
+    workflow = git(root, ["show", `${tag}:${WORKFLOW_PATH}`]);
+  } catch {
+    fail(`Failed-superseded release workflow is missing at the failed tag: ${WORKFLOW_PATH}`);
+  }
+  const verifyStart = workflow.indexOf("\n  verify:");
+  const stepsStart = workflow.indexOf("\n    steps:", verifyStart);
+  const publishStart = workflow.indexOf("\n  publish:", stepsStart);
+  if (verifyStart === -1 || stepsStart === -1 || publishStart === -1 || stepsStart > publishStart) {
+    fail("Failed-superseded release workflow has no parseable verify job steps.");
+  }
+  const names = [];
+  const postStepNames = [];
+  let currentStep = null;
+  const finishCurrentStep = () => {
+    if (currentStep?.uses === true) postStepNames.push(`Post ${currentStep.name}`);
+    currentStep = null;
+  };
+  for (const line of workflow.slice(stepsStart, publishStart).split("\n")) {
+    if (/^ {6}-\s+/u.test(line)) {
+      finishCurrentStep();
+      const match = line.match(/^ {6}- name:\s*(\S.*)$/u);
+      if (match === null) {
+        fail("Failed-superseded release workflow has an unnamed verify step.");
+      }
+      currentStep = { name: match[1].trim(), uses: false };
+      names.push(currentStep.name);
+      continue;
+    }
+    if (currentStep !== null && /^ {8}uses:\s*\S/u.test(line)) currentStep.uses = true;
+  }
+  finishCurrentStep();
+  if (names.length === 0 || new Set(names).size !== names.length) {
+    fail("Failed-superseded release workflow has no unique authored verify steps.");
+  }
+  return Object.freeze({
+    authoredSteps: Object.freeze(names.map((name, index) => Object.freeze({
+      name,
+      number: index + RUNNER_SETUP_STEP_COUNT + 1,
+    }))),
+    runnerStepNames: Object.freeze([
+      "Set up job",
+      "Complete job",
+      ...postStepNames,
+    ]),
+  });
+}
+
 function failedPhaseEvidence(root, record, authorities, requireRecordedIds = true) {
   requireInitialWorkflowAttempt(
     record.workflow_run_attempt,
@@ -340,12 +385,62 @@ function failedPhaseEvidence(root, record, authorities, requireRecordedIds = tru
       publishJob.steps.length !== 0) {
     fail("Failed-superseded release does not match authoritative pre-publication job evidence.");
   }
-  for (const expected of FAILED_RELEASE_SKIPPED_STEPS) {
+  const { authoredSteps: expectedAuthoredSteps, runnerStepNames } = deriveReleaseStepIdentities(root, record.tag);
+  const authoredSteps = expectedAuthoredSteps.map((expected) => {
     const matches = verifyJob.steps.filter((step) =>
       step?.name === expected.name && step.number === expected.number);
-    if (matches.length !== 1 || matches[0].status !== "completed" ||
-        matches[0].conclusion !== "skipped") {
-      fail(`Failed-superseded release step was not skipped: ${expected.name}`);
+    if (matches.length !== 1) {
+      fail(`Failed-superseded release authored step is missing or duplicated: ${expected.name}`);
+    }
+    const step = matches[0];
+    if (!Number.isSafeInteger(step.number) || step.number <= 0) {
+      fail(`Failed-superseded release authored step has no valid runner number: ${expected.name}`);
+    }
+    return Object.freeze({ ...expected, step });
+  });
+  for (let index = 1; index < authoredSteps.length; index += 1) {
+    if (authoredSteps[index - 1].step.number >= authoredSteps[index].step.number) {
+      fail("Failed-superseded release authored steps are out of runner order.");
+    }
+  }
+  const hasAuthoredIdentity = (step) => authoredSteps.some(({ name, step: authoredStep }) =>
+    step.name === name && step.number === authoredStep.number);
+  const maxAuthoredNumber = Math.max(...authoredSteps.map(({ step }) => step.number));
+  const isRunnerCleanupIdentity = (step) =>
+    Number.isSafeInteger(step.number) &&
+    step.number > maxAuthoredNumber &&
+    step.name !== "Set up job" &&
+    runnerStepNames.includes(step.name);
+  const authoredFailures = authoredSteps.filter(({ step }) =>
+    step.status === "completed" && step.conclusion === "failure");
+  const unmatchedFailures = verifyJob.steps.filter((step) =>
+    step.status === "completed" &&
+    step.conclusion === "failure" &&
+    !hasAuthoredIdentity(step) &&
+    !isRunnerCleanupIdentity(step));
+  if (authoredFailures.length + unmatchedFailures.length > 1) {
+    fail("Failed-superseded release requires exactly one authored failure.");
+  }
+  const failedIndex = authoredSteps.findIndex(({ step }) =>
+    step.status === "completed" && step.conclusion === "failure");
+  if (failedIndex === -1) {
+    fail("Failed-superseded release has no failed authored step.");
+  }
+  for (let index = 0; index < authoredSteps.length; index += 1) {
+    const { name, step } = authoredSteps[index];
+    const expectedConclusion = index < failedIndex
+      ? "success"
+      : index === failedIndex
+        ? "failure"
+        : "skipped";
+    if (step.status !== "completed" || step.conclusion !== expectedConclusion) {
+      if (index > failedIndex) {
+        fail(`Failed-superseded release step was not skipped: ${name}`);
+      }
+      if (index < failedIndex) {
+        fail(`Failed-superseded release authored step succeeded out of order: ${name}`);
+      }
+      fail(`Failed-superseded release authored step did not fail: ${name}`);
     }
   }
   return Object.freeze({ verifyJobId: verifyJob.id, publishJobId: publishJob.id });

@@ -22,6 +22,41 @@ const failedRunId = 456;
 const failedVerifyJobId = 789;
 const failedPublishJobId = 790;
 const directories: string[] = [];
+const authoredReleaseStepNames = [
+  "Check out tagged source",
+  "Reject immutable release reruns and repository npm configuration",
+  "Set up exact Node.js",
+  "Verify immutable release source and readiness boundaries",
+  "Verify source lock before dependency installation",
+  "Install locked dependencies without lifecycle scripts",
+  "Audit locked dependency tree",
+  "Check, test, and build once",
+  "Build exact release tarball once",
+  "Verify exact release tarball once",
+  "Exercise exact tarball once",
+  "Upload same-run release artifact",
+] as const;
+const fixtureUsesStepNames = new Set([
+  "Check out tagged source",
+  "Set up exact Node.js",
+  "Upload same-run release artifact",
+]);
+const fixtureReleaseWorkflow = [
+  "name: Verify and publish npm release",
+  "jobs:",
+  "  verify:",
+  "    steps:",
+  ...authoredReleaseStepNames.flatMap((name) => [
+    `      - name: ${name}`,
+    fixtureUsesStepNames.has(name) ? "        uses: example/action@v1" : "        run: true",
+  ]),
+  "  publish:",
+  "    needs: verify",
+  "    steps:",
+  "      - name: Publish package",
+  "        run: true",
+  "",
+].join("\n");
 
 // Git-backed fixture tests are correctness checks, not performance gates on busy dev machines.
 vi.setConfig({ testTimeout: 30_000 });
@@ -63,6 +98,16 @@ describe("release identity automation", () => {
     expect(allowlist.versionPins).toEqual([...allowlist.versionPins].sort());
     for (const path of allowlist.versionPins) {
       expect((await readFile(path, "utf8")).split(manifest.version).length - 1).toBeGreaterThan(0);
+    }
+  });
+
+  it("keeps the authored verify-step names synchronized with the release workflow", async () => {
+    const workflow = await readFile(".github/workflows/release.yml", "utf8");
+
+    expect(workflow).toContain("\n  verify:\n");
+    expect(workflow).toContain("\n  publish:\n");
+    for (const name of authoredReleaseStepNames) {
+      expect(workflow).toContain(`      - name: ${name}`);
     }
   });
 
@@ -142,8 +187,18 @@ describe("release identity automation", () => {
     });
   });
 
-  it("prepares failed-superseded recovery from the exact failed workflow and earlier anchor", async () => {
-    const fixture = await createFailedFixture();
+  it.each([
+    ["during checkout", "checkout"],
+    ["during source verification", "source"],
+    ["during source lock verification", "lock"],
+    ["during dependency audit", "audit"],
+    ["before the release phases", "check"],
+    ["during tarball build", "build"],
+    ["during tarball verification", "verify"],
+    ["during tarball exercise", "exercise"],
+    ["during artifact upload", "upload"],
+  ] as const)("prepares failed-superseded recovery %s", async (_description, failurePhase) => {
+    const fixture = await createFailedFixture(failurePhase);
     const prepared = await prepareRelease(
       fixture.root,
       newVersion,
@@ -221,7 +276,8 @@ describe("release identity automation", () => {
   });
 
   it("rejects failed recovery when artifact or publication phases were reached", async () => {
-    const jobs = failedRunJobs("base") as {
+    const fixture = await createFailedFixture();
+    const jobs = failedRunJobs(fixture.base) as {
       jobs: Array<{
         name: string;
         conclusion: string;
@@ -229,11 +285,12 @@ describe("release identity automation", () => {
       }>;
     };
     jobs.jobs[0]!.steps.find((step) => step.name === "Upload same-run release artifact")!.conclusion = "success";
-    const fixture = await createFailedFixture();
     await expect(prepareRelease(fixture.root, newVersion, fixture.evidence, {
       ...fixture.authorities,
       githubRunJobs: () => jobs,
-    })).rejects.toThrow(/pre-publication job evidence|step was not skipped/);
+    })).rejects.toThrow(
+      "Failed-superseded release step was not skipped: Upload same-run release artifact",
+    );
 
     const publishedJobs = failedRunJobs(fixture.base) as typeof jobs;
     publishedJobs.jobs[1]!.conclusion = "success";
@@ -247,6 +304,196 @@ describe("release identity automation", () => {
       ...fixture.authorities,
       githubRunJobs: () => publishedJobs,
     })).rejects.toThrow(/pre-publication job evidence/);
+  });
+
+  it("rejects multiple authored failures and failures outside the authored chain", async () => {
+    const doubleFailureFixture = await createFailedFixture("verify");
+    const doubleFailureJobs = failedRunJobs(doubleFailureFixture.base, "verify") as {
+      jobs: Array<{
+        steps: Array<{ name: string; number: number; status: string; conclusion: string }>;
+      }>;
+    };
+    doubleFailureJobs.jobs[0]!.steps.find((step) => step.name === "Check, test, and build once")!.conclusion = "failure";
+    await expect(prepareRelease(
+      doubleFailureFixture.root,
+      newVersion,
+      doubleFailureFixture.evidence,
+      { ...doubleFailureFixture.authorities, githubRunJobs: () => doubleFailureJobs },
+    )).rejects.toThrow("Failed-superseded release requires exactly one authored failure.");
+
+    const wrongIdentityFixture = await createFailedFixture("verify");
+    const wrongIdentityJobs = failedRunJobs(wrongIdentityFixture.base, "verify") as typeof doubleFailureJobs;
+    wrongIdentityJobs.jobs[0]!.steps.push({
+      name: "Unexpected failed step",
+      number: 11,
+      status: "completed",
+      conclusion: "failure",
+    });
+    await expect(prepareRelease(
+      wrongIdentityFixture.root,
+      newVersion,
+      wrongIdentityFixture.evidence,
+      { ...wrongIdentityFixture.authorities, githubRunJobs: () => wrongIdentityJobs },
+    )).rejects.toThrow("Failed-superseded release requires exactly one authored failure.");
+
+    const conflictingCleanupFixture = await createFailedFixture("verify");
+    const conflictingCleanupJobs = failedRunJobs(conflictingCleanupFixture.base, "verify") as typeof doubleFailureJobs;
+    conflictingCleanupJobs.jobs[0]!.steps.push({
+      name: "Post Check out tagged source",
+      number: 11,
+      status: "completed",
+      conclusion: "failure",
+    });
+    await expect(prepareRelease(
+      conflictingCleanupFixture.root,
+      newVersion,
+      conflictingCleanupFixture.evidence,
+      { ...conflictingCleanupFixture.authorities, githubRunJobs: () => conflictingCleanupJobs },
+    )).rejects.toThrow("Failed-superseded release requires exactly one authored failure.");
+
+    const conflictingCompleteFixture = await createFailedFixture("verify");
+    const conflictingCompleteJobs = failedRunJobs(conflictingCompleteFixture.base, "verify") as typeof doubleFailureJobs;
+    conflictingCompleteJobs.jobs[0]!.steps.push({
+      name: "Complete job",
+      number: 9,
+      status: "completed",
+      conclusion: "failure",
+    });
+    await expect(prepareRelease(
+      conflictingCompleteFixture.root,
+      newVersion,
+      conflictingCompleteFixture.evidence,
+      { ...conflictingCompleteFixture.authorities, githubRunJobs: () => conflictingCompleteJobs },
+    )).rejects.toThrow("Failed-superseded release requires exactly one authored failure.");
+
+    const conflictingUploadFixture = await createFailedFixture("verify");
+    const conflictingUploadJobs = failedRunJobs(conflictingUploadFixture.base, "verify") as typeof doubleFailureJobs;
+    conflictingUploadJobs.jobs[0]!.steps.push({
+      name: "Post Upload same-run release artifact",
+      number: 11,
+      status: "completed",
+      conclusion: "failure",
+    });
+    await expect(prepareRelease(
+      conflictingUploadFixture.root,
+      newVersion,
+      conflictingUploadFixture.evidence,
+      { ...conflictingUploadFixture.authorities, githubRunJobs: () => conflictingUploadJobs },
+    )).rejects.toThrow("Failed-superseded release requires exactly one authored failure.");
+
+    const residualCleanupFixture = await createFailedFixture("verify");
+    const residualCleanupJobs = failedRunJobs(residualCleanupFixture.base, "verify") as typeof doubleFailureJobs;
+    residualCleanupJobs.jobs[0]!.steps.push({
+      name: "Complete job",
+      number: 20,
+      status: "completed",
+      conclusion: "failure",
+    });
+    const residualPrepared = await prepareRelease(
+      residualCleanupFixture.root,
+      newVersion,
+      residualCleanupFixture.evidence,
+      { ...residualCleanupFixture.authorities, githubRunJobs: () => residualCleanupJobs },
+    );
+    expect(residualPrepared.record.outcome).toBe("failed-superseded");
+
+    const renumberedTailFixture = await createFailedFixture("verify");
+    const renumberedTailJobs = failedRunJobs(renumberedTailFixture.base, "verify") as typeof doubleFailureJobs;
+    renumberedTailJobs.jobs[0]!.steps.find((step) => step.name === "Post Set up exact Node.js")!.number = 30;
+    const renumberedFailure = renumberedTailJobs.jobs[0]!.steps.find(
+      (step) => step.name === "Post Check out tagged source",
+    )!;
+    renumberedFailure.number = 31;
+    renumberedFailure.conclusion = "failure";
+    renumberedTailJobs.jobs[0]!.steps.find((step) => step.name === "Complete job")!.number = 32;
+    const renumberedPrepared = await prepareRelease(
+      renumberedTailFixture.root,
+      newVersion,
+      renumberedTailFixture.evidence,
+      { ...renumberedTailFixture.authorities, githubRunJobs: () => renumberedTailJobs },
+    );
+    expect(renumberedPrepared.record.outcome).toBe("failed-superseded");
+
+    const unknownNumberFixture = await createFailedFixture("verify");
+    const unknownNumberJobs = failedRunJobs(unknownNumberFixture.base, "verify") as typeof doubleFailureJobs;
+    unknownNumberJobs.jobs[0]!.steps.push({
+      name: "Unexpected failed step",
+      number: 20,
+      status: "completed",
+      conclusion: "failure",
+    });
+    await expect(prepareRelease(
+      unknownNumberFixture.root,
+      newVersion,
+      unknownNumberFixture.evidence,
+      { ...unknownNumberFixture.authorities, githubRunJobs: () => unknownNumberJobs },
+    )).rejects.toThrow("Failed-superseded release requires exactly one authored failure.");
+
+    const unknownTailFixture = await createFailedFixture("verify");
+    const unknownTailJobs = failedRunJobs(unknownTailFixture.base, "verify") as typeof doubleFailureJobs;
+    unknownTailJobs.jobs[0]!.steps.push({
+      name: "Unexpected failed step",
+      number: 26,
+      status: "completed",
+      conclusion: "failure",
+    });
+    await expect(prepareRelease(
+      unknownTailFixture.root,
+      newVersion,
+      unknownTailFixture.evidence,
+      { ...unknownTailFixture.authorities, githubRunJobs: () => unknownTailJobs },
+    )).rejects.toThrow("Failed-superseded release requires exactly one authored failure.");
+
+    const unknownFailureFixture = await createFailedFixture("check");
+    const unknownFailureJobs = failedRunJobs(unknownFailureFixture.base, "check") as typeof doubleFailureJobs;
+    const authoredCheck = unknownFailureJobs.jobs[0]!.steps.find(
+      (step) => step.name === "Check, test, and build once",
+    )!;
+    authoredCheck.status = "completed";
+    authoredCheck.conclusion = "skipped";
+    unknownFailureJobs.jobs[0]!.steps.unshift({
+      name: "Set up job",
+      number: 1,
+      status: "completed",
+      conclusion: "failure",
+    });
+    await expect(prepareRelease(
+      unknownFailureFixture.root,
+      newVersion,
+      unknownFailureFixture.evidence,
+      { ...unknownFailureFixture.authorities, githubRunJobs: () => unknownFailureJobs },
+    )).rejects.toThrow("Failed-superseded release has no failed authored step.");
+
+    const mixedFailureFixture = await createFailedFixture("verify");
+    const mixedFailureJobs = failedRunJobs(mixedFailureFixture.base, "verify") as typeof doubleFailureJobs;
+    mixedFailureJobs.jobs[0]!.steps.unshift({
+      name: "Set up job",
+      number: 1,
+      status: "completed",
+      conclusion: "failure",
+    });
+    await expect(prepareRelease(
+      mixedFailureFixture.root,
+      newVersion,
+      mixedFailureFixture.evidence,
+      { ...mixedFailureFixture.authorities, githubRunJobs: () => mixedFailureJobs },
+    )).rejects.toThrow("Failed-superseded release requires exactly one authored failure.");
+  });
+
+  it("ignores a runner cleanup failure after a valid authored burn", async () => {
+    const fixture = await createFailedFixture("verify");
+    const jobs = failedRunJobs(fixture.base, "verify") as {
+      jobs: Array<{
+        steps: Array<{ name: string; number: number; status: string; conclusion: string }>;
+      }>;
+    };
+    jobs.jobs[0]!.steps.find((step) => step.name === "Post Check out tagged source")!.conclusion = "failure";
+
+    const prepared = await prepareRelease(fixture.root, newVersion, fixture.evidence, {
+      ...fixture.authorities,
+      githubRunJobs: () => jobs,
+    });
+    expect(prepared.record.outcome).toBe("failed-superseded");
   });
 
   it("rejects a failed record with an SRI or a registry-present version", async () => {
@@ -431,6 +678,7 @@ async function createFixture(): Promise<Omit<Fixture, "candidate">> {
   await writeFixture(root, "scripts/release-identity-allowlist.json", `${JSON.stringify(allowlist, null, 2)}\n`);
   await writeFixture(root, "docs/release-records.json", "[]\n");
   await writeFixture(root, "README.md", "# Server fixture\n");
+  await writeFixture(root, ".github/workflows/release.yml", fixtureReleaseWorkflow);
   await writeFixture(root, "package.json", `${JSON.stringify({
     name: "borgmcp-server",
     version: oldVersion,
@@ -495,7 +743,9 @@ async function createFixture(): Promise<Omit<Fixture, "candidate">> {
   return { root, base, authorities };
 }
 
-async function createFailedFixture(): Promise<FailedFixture> {
+type FailedPhase = "checkout" | "source" | "lock" | "audit" | "check" | "build" | "verify" | "exercise" | "upload";
+
+async function createFailedFixture(failurePhase: FailedPhase = "check"): Promise<FailedFixture> {
   const root = await mkdtemp(join(tmpdir(), "borg-release-identity-failed-"));
   directories.push(root);
   const anchorVersion = "1.0.0";
@@ -504,6 +754,7 @@ async function createFailedFixture(): Promise<FailedFixture> {
   }, null, 2)}\n`);
   await writeFixture(root, "docs/release-records.json", "[]\n");
   await writeFixture(root, "README.md", "# Server fixture\n");
+  await writeFixture(root, ".github/workflows/release.yml", fixtureReleaseWorkflow);
   await writeFixture(root, "package.json", `${JSON.stringify({
     name: "borgmcp-server",
     version: anchorVersion,
@@ -575,7 +826,7 @@ async function createFailedFixture(): Promise<FailedFixture> {
           conclusion: "failure",
           path: ".github/workflows/release.yml",
         },
-    githubRunJobs: () => failedRunJobs(base),
+    githubRunJobs: () => failedRunJobs(base, failurePhase),
     artifactIntegrity: (_root, version) => {
       artifactRequests.push(version);
       return integrity;
@@ -596,7 +847,31 @@ async function createFailedFixture(): Promise<FailedFixture> {
   };
 }
 
-function failedRunJobs(commit: string): Record<string, unknown> {
+function failedRunJobs(commit: string, failurePhase: FailedPhase = "check"): Record<string, unknown> {
+  const phaseByName = new Map([
+    ["Check out tagged source", "checkout"],
+    ["Verify immutable release source and readiness boundaries", "source"],
+    ["Verify source lock before dependency installation", "lock"],
+    ["Audit locked dependency tree", "audit"],
+    ["Check, test, and build once", "check"],
+    ["Build exact release tarball once", "build"],
+    ["Verify exact release tarball once", "verify"],
+    ["Exercise exact tarball once", "exercise"],
+    ["Upload same-run release artifact", "upload"],
+  ]);
+  const failureIndex = authoredReleaseStepNames.findIndex((name) =>
+    phaseByName.get(name) === failurePhase);
+  const steps = [
+    ...authoredReleaseStepNames.map((name, index) => ({
+      name,
+      number: index + 2,
+      status: "completed",
+      conclusion: index < failureIndex ? "success" : index === failureIndex ? "failure" : "skipped",
+    })),
+    { name: "Post Set up exact Node.js", number: 25, status: "completed", conclusion: "skipped" },
+    { name: "Post Check out tagged source", number: 26, status: "completed", conclusion: "success" },
+    { name: "Complete job", number: 27, status: "completed", conclusion: "success" },
+  ];
   return {
     total_count: 2,
     jobs: [
@@ -608,13 +883,7 @@ function failedRunJobs(commit: string): Record<string, unknown> {
         name: "verify",
         status: "completed",
         conclusion: "failure",
-        steps: [
-          { name: "Check, test, and build once", number: 9, status: "completed", conclusion: "failure" },
-          { name: "Build exact release tarball once", number: 10, status: "completed", conclusion: "skipped" },
-          { name: "Verify exact release tarball once", number: 11, status: "completed", conclusion: "skipped" },
-          { name: "Exercise exact tarball once", number: 12, status: "completed", conclusion: "skipped" },
-          { name: "Upload same-run release artifact", number: 13, status: "completed", conclusion: "skipped" },
-        ],
+        steps,
       },
       {
         id: failedPublishJobId,

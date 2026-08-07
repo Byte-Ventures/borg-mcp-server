@@ -351,6 +351,7 @@ export function startForegroundDashboard(input: {
         exitOnCtrlC: false,
         patchConsole: false,
         maxFps: 0,
+        interactive: true,
       },
     );
     flushInkStdout(inkStdout);

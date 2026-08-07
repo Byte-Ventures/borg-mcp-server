@@ -168,14 +168,15 @@ npm run release:prepare -- <next-version> \
 ```
 
 The recovery path independently verifies the failed tag workflow's `verify` and `publish` jobs,
-including the skipped tarball build, tarball verification, tarball exercise, and artifact upload
-steps. It checks the canonical npm version list to prove that the failed version has no published
-artifact or SRI, records the result as `failed-superseded`, and re-verifies the latest earlier
-published record as the provenance anchor. A failed record cannot carry an SRI, cannot describe a
-run that reached artifact or publication phases, and cannot be prepared if the failed version is
-present in the registry. Release identity accepts only workflow attempt 1: a rerun is never
-authoritative, even if its jobs independently show a pre-publication failure. Failed tags, runs,
-versions, and approvals remain immutable and must never be moved, reused, or rerun.
+including the failed release phase and requiring every later release phase to be completed and
+skipped; no later release phase may succeed. It checks the canonical npm version list to prove
+that the failed version has no published artifact or SRI, records the result as
+`failed-superseded`, and re-verifies the latest earlier published record as the provenance anchor.
+A failed record cannot carry an SRI, cannot describe a run that reached publication or successfully
+uploaded the same-run artifact, and cannot be prepared if the failed version is present in the
+registry. Release identity accepts only workflow attempt 1: a rerun is never authoritative, even
+if its jobs independently show a pre-publication failure. Failed tags, runs, versions, and
+approvals remain immutable and must never be moved, reused, or rerun.
 
 Release branches use the `release/` prefix and enter protected `main` through a pull request. A
 direct push only updates the staging branch; it does not produce a release-identity

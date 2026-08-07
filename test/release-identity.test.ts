@@ -142,8 +142,14 @@ describe("release identity automation", () => {
     });
   });
 
-  it("prepares failed-superseded recovery from the exact failed workflow and earlier anchor", async () => {
-    const fixture = await createFailedFixture();
+  it.each([
+    ["before the release phases", "check"],
+    ["during tarball build", "build"],
+    ["during tarball verification", "verify"],
+    ["during tarball exercise", "exercise"],
+    ["during artifact upload", "upload"],
+  ] as const)("prepares failed-superseded recovery %s", async (_description, failurePhase) => {
+    const fixture = await createFailedFixture(failurePhase);
     const prepared = await prepareRelease(
       fixture.root,
       newVersion,
@@ -495,7 +501,9 @@ async function createFixture(): Promise<Omit<Fixture, "candidate">> {
   return { root, base, authorities };
 }
 
-async function createFailedFixture(): Promise<FailedFixture> {
+type FailedPhase = "check" | "build" | "verify" | "exercise" | "upload";
+
+async function createFailedFixture(failurePhase: FailedPhase = "check"): Promise<FailedFixture> {
   const root = await mkdtemp(join(tmpdir(), "borg-release-identity-failed-"));
   directories.push(root);
   const anchorVersion = "1.0.0";
@@ -575,7 +583,7 @@ async function createFailedFixture(): Promise<FailedFixture> {
           conclusion: "failure",
           path: ".github/workflows/release.yml",
         },
-    githubRunJobs: () => failedRunJobs(base),
+    githubRunJobs: () => failedRunJobs(base, failurePhase),
     artifactIntegrity: (_root, version) => {
       artifactRequests.push(version);
       return integrity;
@@ -596,7 +604,21 @@ async function createFailedFixture(): Promise<FailedFixture> {
   };
 }
 
-function failedRunJobs(commit: string): Record<string, unknown> {
+function failedRunJobs(commit: string, failurePhase: FailedPhase = "check"): Record<string, unknown> {
+  const phaseSteps = [
+    { phase: "check", name: "Check, test, and build once", number: 9 },
+    { phase: "build", name: "Build exact release tarball once", number: 10 },
+    { phase: "verify", name: "Verify exact release tarball once", number: 11 },
+    { phase: "exercise", name: "Exercise exact tarball once", number: 12 },
+    { phase: "upload", name: "Upload same-run release artifact", number: 13 },
+  ] as const;
+  const failureIndex = phaseSteps.findIndex((step) => step.phase === failurePhase);
+  const steps = phaseSteps.map((step, index) => ({
+    name: step.name,
+    number: step.number,
+    status: "completed",
+    conclusion: index < failureIndex ? "success" : index === failureIndex ? "failure" : "skipped",
+  }));
   return {
     total_count: 2,
     jobs: [
@@ -608,13 +630,7 @@ function failedRunJobs(commit: string): Record<string, unknown> {
         name: "verify",
         status: "completed",
         conclusion: "failure",
-        steps: [
-          { name: "Check, test, and build once", number: 9, status: "completed", conclusion: "failure" },
-          { name: "Build exact release tarball once", number: 10, status: "completed", conclusion: "skipped" },
-          { name: "Verify exact release tarball once", number: 11, status: "completed", conclusion: "skipped" },
-          { name: "Exercise exact tarball once", number: 12, status: "completed", conclusion: "skipped" },
-          { name: "Upload same-run release artifact", number: 13, status: "completed", conclusion: "skipped" },
-        ],
+        steps,
       },
       {
         id: failedPublishJobId,

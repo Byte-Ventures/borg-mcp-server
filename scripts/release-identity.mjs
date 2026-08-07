@@ -13,7 +13,7 @@ const RECORDS_PATH = "docs/release-records.json";
 const PACKAGE_PATH = "package.json";
 const LOCK_PATH = "npm-shrinkwrap.json";
 const VERSION_CONSTANT_PATH = "src/runtime-identity.ts";
-const FAILED_RELEASE_SKIPPED_STEPS = Object.freeze([
+const FAILED_RELEASE_PHASES = Object.freeze([
   Object.freeze({ number: 10, name: "Build exact release tarball once" }),
   Object.freeze({ number: 11, name: "Verify exact release tarball once" }),
   Object.freeze({ number: 12, name: "Exercise exact tarball once" }),
@@ -340,12 +340,41 @@ function failedPhaseEvidence(root, record, authorities, requireRecordedIds = tru
       publishJob.steps.length !== 0) {
     fail("Failed-superseded release does not match authoritative pre-publication job evidence.");
   }
-  for (const expected of FAILED_RELEASE_SKIPPED_STEPS) {
+  const phases = FAILED_RELEASE_PHASES.map((expected) => {
     const matches = verifyJob.steps.filter((step) =>
       step?.name === expected.name && step.number === expected.number);
-    if (matches.length !== 1 || matches[0].status !== "completed" ||
-        matches[0].conclusion !== "skipped") {
-      fail(`Failed-superseded release step was not skipped: ${expected.name}`);
+    if (matches.length !== 1) {
+      fail(`Failed-superseded release phase is missing or duplicated: ${expected.name}`);
+    }
+    return matches[0];
+  });
+  const failedIndex = phases.findIndex((step) =>
+    step.status === "completed" && step.conclusion === "failure");
+  if (failedIndex === -1) {
+    const failedBeforePhases = verifyJob.steps.some((step) =>
+      step?.number < FAILED_RELEASE_PHASES[0].number &&
+      step.status === "completed" && step.conclusion === "failure");
+    if (!failedBeforePhases || phases.some((phase) =>
+      phase.status !== "completed" || phase.conclusion !== "skipped")) {
+      fail("Failed-superseded release has no failed release phase or pre-phase failure.");
+    }
+    return Object.freeze({ verifyJobId: verifyJob.id, publishJobId: publishJob.id });
+  }
+  for (let index = 0; index < phases.length; index += 1) {
+    const phase = phases[index];
+    const expectedConclusion = index < failedIndex
+      ? "success"
+      : index === failedIndex
+        ? "failure"
+        : "skipped";
+    if (phase.status !== "completed" || phase.conclusion !== expectedConclusion) {
+      if (index > failedIndex) {
+        fail(`Failed-superseded release step was not skipped: ${FAILED_RELEASE_PHASES[index].name}`);
+      }
+      if (index < failedIndex) {
+        fail(`Failed-superseded release phase succeeded out of order: ${FAILED_RELEASE_PHASES[index].name}`);
+      }
+      fail(`Failed-superseded release phase did not fail: ${FAILED_RELEASE_PHASES[index].name}`);
     }
   }
   return Object.freeze({ verifyJobId: verifyJob.id, publishJobId: publishJob.id });

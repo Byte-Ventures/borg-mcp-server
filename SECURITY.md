@@ -38,7 +38,7 @@ has been coordinated.
 - Create single-use invitations only in a private interactive terminal.
 - Client listing, rotation, revocation, and grant changes are operator-only
   live-safe operations; the running server observes committed changes on the next
-  request. Requests already in flight retain their established state.
+  request.
 - Back up sensitive state using encrypted storage and test restoration in a
   separate environment.
 - Review dependency and release provenance before upgrading.

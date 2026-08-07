@@ -257,6 +257,57 @@ describe("release identity automation", () => {
     })).rejects.toThrow(/pre-publication job evidence/);
   });
 
+  it("rejects multiple authored failures and failures outside the authored chain", async () => {
+    const doubleFailureFixture = await createFailedFixture("verify");
+    const doubleFailureJobs = failedRunJobs(doubleFailureFixture.base, "verify") as {
+      jobs: Array<{
+        steps: Array<{ name: string; number: number; status: string; conclusion: string }>;
+      }>;
+    };
+    doubleFailureJobs.jobs[0]!.steps.find((step) => step.name === "Check, test, and build once")!.conclusion = "failure";
+    await expect(prepareRelease(
+      doubleFailureFixture.root,
+      newVersion,
+      doubleFailureFixture.evidence,
+      { ...doubleFailureFixture.authorities, githubRunJobs: () => doubleFailureJobs },
+    )).rejects.toThrow("Failed-superseded release requires exactly one authored failure.");
+
+    const unknownFailureFixture = await createFailedFixture("check");
+    const unknownFailureJobs = failedRunJobs(unknownFailureFixture.base, "check") as typeof doubleFailureJobs;
+    const authoredCheck = unknownFailureJobs.jobs[0]!.steps.find(
+      (step) => step.name === "Check, test, and build once",
+    )!;
+    authoredCheck.status = "completed";
+    authoredCheck.conclusion = "skipped";
+    unknownFailureJobs.jobs[0]!.steps.unshift({
+      name: "Audit locked dependency tree",
+      number: 7,
+      status: "completed",
+      conclusion: "failure",
+    });
+    await expect(prepareRelease(
+      unknownFailureFixture.root,
+      newVersion,
+      unknownFailureFixture.evidence,
+      { ...unknownFailureFixture.authorities, githubRunJobs: () => unknownFailureJobs },
+    )).rejects.toThrow("Failed-superseded release has no failed authored step.");
+
+    const mixedFailureFixture = await createFailedFixture("verify");
+    const mixedFailureJobs = failedRunJobs(mixedFailureFixture.base, "verify") as typeof doubleFailureJobs;
+    mixedFailureJobs.jobs[0]!.steps.unshift({
+      name: "Audit locked dependency tree",
+      number: 7,
+      status: "completed",
+      conclusion: "failure",
+    });
+    await expect(prepareRelease(
+      mixedFailureFixture.root,
+      newVersion,
+      mixedFailureFixture.evidence,
+      { ...mixedFailureFixture.authorities, githubRunJobs: () => mixedFailureJobs },
+    )).rejects.toThrow("Failed-superseded release requires exactly one authored failure.");
+  });
+
   it("rejects a failed record with an SRI or a registry-present version", async () => {
     const fixture = await createFailedFixture();
     await expect(prepareRelease(fixture.root, newVersion, {

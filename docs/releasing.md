@@ -168,9 +168,10 @@ npm run release:prepare -- <next-version> \
 ```
 
 The recovery path independently verifies the failed tag workflow's `verify` and `publish` jobs,
-including the failed release phase and requiring every later release phase to be completed and
-skipped; no later release phase may succeed. It checks the canonical npm version list to prove
-that the failed version has no published artifact or SRI, records the result as
+including exactly one failed authored release step, requiring every earlier authored step to have
+succeeded and every later authored step to be completed and skipped; no later release step may
+succeed. Runner cleanup steps are not release steps. It checks the canonical npm version list to
+prove that the failed version has no published artifact or SRI, records the result as
 `failed-superseded`, and re-verifies the latest earlier published record as the provenance anchor.
 A failed record cannot carry an SRI, cannot describe a run that reached publication or successfully
 uploaded the same-run artifact, and cannot be prepared if the failed version is present in the

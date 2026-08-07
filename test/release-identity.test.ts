@@ -22,6 +22,36 @@ const failedRunId = 456;
 const failedVerifyJobId = 789;
 const failedPublishJobId = 790;
 const directories: string[] = [];
+const authoredReleaseStepNames = [
+  "Check out tagged source",
+  "Reject immutable release reruns and repository npm configuration",
+  "Set up exact Node.js",
+  "Verify immutable release source and readiness boundaries",
+  "Verify source lock before dependency installation",
+  "Install locked dependencies without lifecycle scripts",
+  "Audit locked dependency tree",
+  "Check, test, and build once",
+  "Build exact release tarball once",
+  "Verify exact release tarball once",
+  "Exercise exact tarball once",
+  "Upload same-run release artifact",
+] as const;
+const fixtureReleaseWorkflow = [
+  "name: Verify and publish npm release",
+  "jobs:",
+  "  verify:",
+  "    steps:",
+  ...authoredReleaseStepNames.flatMap((name) => [
+    `      - name: ${name}`,
+    "        run: true",
+  ]),
+  "  publish:",
+  "    needs: verify",
+  "    steps:",
+  "      - name: Publish package",
+  "        run: true",
+  "",
+].join("\n");
 
 // Git-backed fixture tests are correctness checks, not performance gates on busy dev machines.
 vi.setConfig({ testTimeout: 30_000 });
@@ -63,6 +93,14 @@ describe("release identity automation", () => {
     expect(allowlist.versionPins).toEqual([...allowlist.versionPins].sort());
     for (const path of allowlist.versionPins) {
       expect((await readFile(path, "utf8")).split(manifest.version).length - 1).toBeGreaterThan(0);
+    }
+  });
+
+  it("keeps the authored verify-step names synchronized with the release workflow", async () => {
+    const workflow = await readFile(".github/workflows/release.yml", "utf8");
+
+    for (const name of authoredReleaseStepNames) {
+      expect(workflow).toContain(`      - name: ${name}`);
     }
   });
 
@@ -143,6 +181,10 @@ describe("release identity automation", () => {
   });
 
   it.each([
+    ["during checkout", "checkout"],
+    ["during source verification", "source"],
+    ["during source lock verification", "lock"],
+    ["during dependency audit", "audit"],
     ["before the release phases", "check"],
     ["during tarball build", "build"],
     ["during tarball verification", "verify"],
@@ -280,8 +322,8 @@ describe("release identity automation", () => {
     authoredCheck.status = "completed";
     authoredCheck.conclusion = "skipped";
     unknownFailureJobs.jobs[0]!.steps.unshift({
-      name: "Audit locked dependency tree",
-      number: 7,
+      name: "Set up job",
+      number: 1,
       status: "completed",
       conclusion: "failure",
     });
@@ -295,8 +337,8 @@ describe("release identity automation", () => {
     const mixedFailureFixture = await createFailedFixture("verify");
     const mixedFailureJobs = failedRunJobs(mixedFailureFixture.base, "verify") as typeof doubleFailureJobs;
     mixedFailureJobs.jobs[0]!.steps.unshift({
-      name: "Audit locked dependency tree",
-      number: 7,
+      name: "Set up job",
+      number: 1,
       status: "completed",
       conclusion: "failure",
     });
@@ -306,6 +348,22 @@ describe("release identity automation", () => {
       mixedFailureFixture.evidence,
       { ...mixedFailureFixture.authorities, githubRunJobs: () => mixedFailureJobs },
     )).rejects.toThrow("Failed-superseded release requires exactly one authored failure.");
+  });
+
+  it("ignores a runner cleanup failure after a valid authored burn", async () => {
+    const fixture = await createFailedFixture("verify");
+    const jobs = failedRunJobs(fixture.base, "verify") as {
+      jobs: Array<{
+        steps: Array<{ name: string; number: number; status: string; conclusion: string }>;
+      }>;
+    };
+    jobs.jobs[0]!.steps.find((step) => step.name === "Post Check out tagged source")!.conclusion = "failure";
+
+    const prepared = await prepareRelease(fixture.root, newVersion, fixture.evidence, {
+      ...fixture.authorities,
+      githubRunJobs: () => jobs,
+    });
+    expect(prepared.record.outcome).toBe("failed-superseded");
   });
 
   it("rejects a failed record with an SRI or a registry-present version", async () => {
@@ -490,6 +548,7 @@ async function createFixture(): Promise<Omit<Fixture, "candidate">> {
   await writeFixture(root, "scripts/release-identity-allowlist.json", `${JSON.stringify(allowlist, null, 2)}\n`);
   await writeFixture(root, "docs/release-records.json", "[]\n");
   await writeFixture(root, "README.md", "# Server fixture\n");
+  await writeFixture(root, ".github/workflows/release.yml", fixtureReleaseWorkflow);
   await writeFixture(root, "package.json", `${JSON.stringify({
     name: "borgmcp-server",
     version: oldVersion,
@@ -554,7 +613,7 @@ async function createFixture(): Promise<Omit<Fixture, "candidate">> {
   return { root, base, authorities };
 }
 
-type FailedPhase = "check" | "build" | "verify" | "exercise" | "upload";
+type FailedPhase = "checkout" | "source" | "lock" | "audit" | "check" | "build" | "verify" | "exercise" | "upload";
 
 async function createFailedFixture(failurePhase: FailedPhase = "check"): Promise<FailedFixture> {
   const root = await mkdtemp(join(tmpdir(), "borg-release-identity-failed-"));
@@ -565,6 +624,7 @@ async function createFailedFixture(failurePhase: FailedPhase = "check"): Promise
   }, null, 2)}\n`);
   await writeFixture(root, "docs/release-records.json", "[]\n");
   await writeFixture(root, "README.md", "# Server fixture\n");
+  await writeFixture(root, ".github/workflows/release.yml", fixtureReleaseWorkflow);
   await writeFixture(root, "package.json", `${JSON.stringify({
     name: "borgmcp-server",
     version: anchorVersion,
@@ -658,18 +718,23 @@ async function createFailedFixture(failurePhase: FailedPhase = "check"): Promise
 }
 
 function failedRunJobs(commit: string, failurePhase: FailedPhase = "check"): Record<string, unknown> {
-  const phaseSteps = [
-    { phase: "check", name: "Check, test, and build once", number: 9 },
-    { phase: "build", name: "Build exact release tarball once", number: 10 },
-    { phase: "verify", name: "Verify exact release tarball once", number: 11 },
-    { phase: "exercise", name: "Exercise exact tarball once", number: 12 },
-    { phase: "upload", name: "Upload same-run release artifact", number: 13 },
-  ] as const;
-  const failureIndex = phaseSteps.findIndex((step) => step.phase === failurePhase);
+  const phaseByName = new Map([
+    ["Check out tagged source", "checkout"],
+    ["Verify immutable release source and readiness boundaries", "source"],
+    ["Verify source lock before dependency installation", "lock"],
+    ["Audit locked dependency tree", "audit"],
+    ["Check, test, and build once", "check"],
+    ["Build exact release tarball once", "build"],
+    ["Verify exact release tarball once", "verify"],
+    ["Exercise exact tarball once", "exercise"],
+    ["Upload same-run release artifact", "upload"],
+  ]);
+  const failureIndex = authoredReleaseStepNames.findIndex((name) =>
+    phaseByName.get(name) === failurePhase);
   const steps = [
-    ...phaseSteps.map((step, index) => ({
-      name: step.name,
-      number: step.number,
+    ...authoredReleaseStepNames.map((name, index) => ({
+      name,
+      number: index + 2,
       status: "completed",
       conclusion: index < failureIndex ? "success" : index === failureIndex ? "failure" : "skipped",
     })),

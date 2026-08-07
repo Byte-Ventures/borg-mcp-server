@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, join, relative, sep } from "node:path";
+import { basename, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -71,6 +71,30 @@ describe("packed release artifact", () => {
       .sort();
     expect(packedSourceFiles).toEqual(sourceFiles);
     expect(packedSourceFiles.every((path) => path.endsWith(".ts"))).toBe(true);
+  });
+
+  it("verifies the freshly built repository artifact and its exact source set", async () => {
+    const repository = resolve(".");
+    const destination = await mkdtemp(join(tmpdir(), "borg-release-repository-pack-"));
+    directories.push(destination);
+    await execute("npm", ["run", "build"], { cwd: repository });
+    const tarball = await pack(repository, destination);
+    const report = await verifyPackedArtifact(tarball);
+    const manifest = JSON.parse(await readFile(join(repository, "package.json"), "utf8")) as {
+      name: string;
+      version: string;
+    };
+    expect(report).toMatchObject({ name: manifest.name, version: manifest.version });
+
+    const expectedSourceFiles = (await listFiles(join(repository, "src")))
+      .filter((path) => path.endsWith(".ts"))
+      .map((path) => `package/src/${path}`);
+    const { stdout } = await execute("tar", ["-tf", tarball]);
+    const packedSourceFiles = stdout.split("\n")
+      .filter((path) => path.startsWith("package/src/"))
+      .sort();
+    expect(packedSourceFiles.filter((path) => !path.endsWith(".ts"))).toEqual([]);
+    expect(packedSourceFiles).toEqual(expectedSourceFiles);
   });
 
   it("ships the trust and provisioning guide in the package", async () => {
@@ -421,10 +445,10 @@ async function packageFixture(overrides: Record<string, unknown> = {}): Promise<
   return directory;
 }
 
-async function pack(directory: string): Promise<string> {
+async function pack(directory: string, destination = directory): Promise<string> {
   const { stdout } = await execute("npm", [
-    "pack", "--ignore-scripts", "--json", "--pack-destination", directory,
+    "pack", "--ignore-scripts", "--json", "--pack-destination", destination,
   ], { cwd: directory });
   const [result] = JSON.parse(stdout) as Array<{ filename: string }>;
-  return join(directory, result!.filename);
+  return join(destination, result!.filename);
 }

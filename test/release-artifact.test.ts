@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, join, relative, sep } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -10,6 +10,17 @@ import { verifyPackedArtifact } from "../scripts/verify-packed-artifact.mjs";
 
 const execute = promisify(execFile);
 const directories: string[] = [];
+
+async function listFiles(root: string, directory = root): Promise<string[]> {
+  const entries = await readdir(directory, { withFileTypes: true });
+  const files: string[] = [];
+  for (const entry of entries) {
+    const absolute = join(directory, entry.name);
+    if (entry.isDirectory()) files.push(...await listFiles(root, absolute));
+    else if (entry.isFile()) files.push(relative(root, absolute).split(sep).join("/"));
+  }
+  return files.sort();
+}
 
 afterEach(async () => {
   vi.unstubAllGlobals();
@@ -46,22 +57,20 @@ describe("packed release artifact", () => {
     ], { cwd: fixture })).resolves.toBeDefined();
   });
 
-  it("accepts only the source adapters used by checkout-less dashboard gates", async () => {
+  it("keeps every TypeScript source file in the packed source tree", async () => {
     const fixture = await packageFixture();
-    await Promise.all([
-      writeFile(join(fixture, "src", "dashboard.js"), 'export * from "./dashboard.ts";\n'),
-      writeFile(join(fixture, "src", "dashboard-ink.js"), 'export * from "./dashboard-ink.ts";\n'),
-      writeFile(join(fixture, "src", "dashboard-plain.js"), 'export * from "./dashboard-plain.ts";\n'),
-    ]);
-    await expect(verifyPackedArtifact(await pack(fixture))).resolves.toBeDefined();
-  });
-
-  it("rejects an unlisted source JavaScript artifact", async () => {
-    const fixture = await packageFixture();
-    await writeFile(join(fixture, "src", "unreviewed.js"), "export const unsafe = true;\n");
-    await expect(verifyPackedArtifact(await pack(fixture))).rejects.toThrow(
-      "Unexpected source artifact: src/unreviewed.js",
-    );
+    const nested = join(fixture, "src", "nested");
+    await execute("mkdir", ["-p", nested]);
+    await writeFile(join(nested, "extra.ts"), "export const extra = true;\n");
+    const sourceFiles = (await listFiles(join(fixture, "src")))
+      .filter((path) => path.endsWith(".ts"))
+      .map((path) => `package/src/${path}`);
+    const { stdout } = await execute("tar", ["-tf", await pack(fixture)]);
+    const packedSourceFiles = stdout.split("\n")
+      .filter((path) => path.startsWith("package/src/"))
+      .sort();
+    expect(packedSourceFiles).toEqual(sourceFiles);
+    expect(packedSourceFiles.every((path) => path.endsWith(".ts"))).toBe(true);
   });
 
   it("ships the trust and provisioning guide in the package", async () => {
@@ -375,7 +384,7 @@ async function packageFixture(overrides: Record<string, unknown> = {}): Promise<
     engines: { node: ">=22.18.0", npm: ">=10.0.0" },
     files: [
       "dist",
-      "src",
+      "src/**/*.ts",
       "LICENSE",
       "NOTICE",
       "README.md",

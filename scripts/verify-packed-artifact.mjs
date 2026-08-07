@@ -35,7 +35,7 @@ const ALLOWED_ROOTS = new Set([
 ]);
 const EXPECTED_MANIFEST_FILES = [
   'dist',
-  'src',
+  'src/**/*.ts',
   'LICENSE',
   'NOTICE',
   'README.md',
@@ -44,11 +44,6 @@ const EXPECTED_MANIFEST_FILES = [
   'THIRD_PARTY_NOTICES.md',
   'npm-shrinkwrap.json',
 ];
-const ALLOWED_SOURCE_ADAPTERS = new Set([
-  'src/dashboard-ink.js',
-  'src/dashboard-plain.js',
-  'src/dashboard.js',
-]);
 const FORBIDDEN_HOOKS = [
   'preinstall', 'install', 'postinstall', 'prepublish', 'preprepare', 'prepare',
   'postprepare', 'prepack', 'postpack', 'prepublishOnly', 'publish', 'postpublish',
@@ -162,7 +157,7 @@ export async function verifyPackedArtifact(tarballPath) {
       if (rootEntry === 'dist' && !/\.(?:js|d\.ts)(?:\.map)?$/u.test(path)) {
         throw new Error(`Unexpected dist artifact: ${path}`);
       }
-      if (rootEntry === 'src' && !/\.ts$/u.test(path) && !ALLOWED_SOURCE_ADAPTERS.has(path)) {
+      if (rootEntry === 'src' && !/\.ts$/u.test(path)) {
         throw new Error(`Unexpected source artifact: ${path}`);
       }
       if (/(^|\/)(\.env(?:\.|$)|\.npmrc$|node_modules|[^/]+\.(?:pem|key|p12|pfx))/.test(path)) {

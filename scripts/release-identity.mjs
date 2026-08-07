@@ -354,9 +354,13 @@ function failedPhaseEvidence(root, record, authorities, requireRecordedIds = tru
     const failedBeforePhases = verifyJob.steps.some((step) =>
       step?.number < FAILED_RELEASE_PHASES[0].number &&
       step.status === "completed" && step.conclusion === "failure");
-    if (!failedBeforePhases || phases.some((phase) =>
-      phase.status !== "completed" || phase.conclusion !== "skipped")) {
+    if (!failedBeforePhases) {
       fail("Failed-superseded release has no failed release phase or pre-phase failure.");
+    }
+    const firstNonSkipped = phases.findIndex((phase) =>
+      phase.status !== "completed" || phase.conclusion !== "skipped");
+    if (firstNonSkipped !== -1) {
+      fail(`Failed-superseded release step was not skipped: ${FAILED_RELEASE_PHASES[firstNonSkipped].name}`);
     }
     return Object.freeze({ verifyJobId: verifyJob.id, publishJobId: publishJob.id });
   }

@@ -227,7 +227,8 @@ describe("release identity automation", () => {
   });
 
   it("rejects failed recovery when artifact or publication phases were reached", async () => {
-    const jobs = failedRunJobs("base") as {
+    const fixture = await createFailedFixture();
+    const jobs = failedRunJobs(fixture.base) as {
       jobs: Array<{
         name: string;
         conclusion: string;
@@ -235,11 +236,12 @@ describe("release identity automation", () => {
       }>;
     };
     jobs.jobs[0]!.steps.find((step) => step.name === "Upload same-run release artifact")!.conclusion = "success";
-    const fixture = await createFailedFixture();
     await expect(prepareRelease(fixture.root, newVersion, fixture.evidence, {
       ...fixture.authorities,
       githubRunJobs: () => jobs,
-    })).rejects.toThrow(/pre-publication job evidence|step was not skipped/);
+    })).rejects.toThrow(
+      "Failed-superseded release step was not skipped: Upload same-run release artifact",
+    );
 
     const publishedJobs = failedRunJobs(fixture.base) as typeof jobs;
     publishedJobs.jobs[1]!.conclusion = "success";
@@ -613,12 +615,17 @@ function failedRunJobs(commit: string, failurePhase: FailedPhase = "check"): Rec
     { phase: "upload", name: "Upload same-run release artifact", number: 13 },
   ] as const;
   const failureIndex = phaseSteps.findIndex((step) => step.phase === failurePhase);
-  const steps = phaseSteps.map((step, index) => ({
-    name: step.name,
-    number: step.number,
-    status: "completed",
-    conclusion: index < failureIndex ? "success" : index === failureIndex ? "failure" : "skipped",
-  }));
+  const steps = [
+    ...phaseSteps.map((step, index) => ({
+      name: step.name,
+      number: step.number,
+      status: "completed",
+      conclusion: index < failureIndex ? "success" : index === failureIndex ? "failure" : "skipped",
+    })),
+    { name: "Post Set up exact Node.js", number: 25, status: "completed", conclusion: "skipped" },
+    { name: "Post Check out tagged source", number: 26, status: "completed", conclusion: "success" },
+    { name: "Complete job", number: 27, status: "completed", conclusion: "success" },
+  ];
   return {
     total_count: 2,
     jobs: [

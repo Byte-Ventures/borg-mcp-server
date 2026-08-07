@@ -381,6 +381,39 @@ describe("release identity automation", () => {
       { ...conflictingUploadFixture.authorities, githubRunJobs: () => conflictingUploadJobs },
     )).rejects.toThrow("Failed-superseded release requires exactly one authored failure.");
 
+    const residualCleanupFixture = await createFailedFixture("verify");
+    const residualCleanupJobs = failedRunJobs(residualCleanupFixture.base, "verify") as typeof doubleFailureJobs;
+    residualCleanupJobs.jobs[0]!.steps.push({
+      name: "Complete job",
+      number: 20,
+      status: "completed",
+      conclusion: "failure",
+    });
+    const residualPrepared = await prepareRelease(
+      residualCleanupFixture.root,
+      newVersion,
+      residualCleanupFixture.evidence,
+      { ...residualCleanupFixture.authorities, githubRunJobs: () => residualCleanupJobs },
+    );
+    expect(residualPrepared.record.outcome).toBe("failed-superseded");
+
+    const renumberedTailFixture = await createFailedFixture("verify");
+    const renumberedTailJobs = failedRunJobs(renumberedTailFixture.base, "verify") as typeof doubleFailureJobs;
+    renumberedTailJobs.jobs[0]!.steps.find((step) => step.name === "Post Set up exact Node.js")!.number = 30;
+    const renumberedFailure = renumberedTailJobs.jobs[0]!.steps.find(
+      (step) => step.name === "Post Check out tagged source",
+    )!;
+    renumberedFailure.number = 31;
+    renumberedFailure.conclusion = "failure";
+    renumberedTailJobs.jobs[0]!.steps.find((step) => step.name === "Complete job")!.number = 32;
+    const renumberedPrepared = await prepareRelease(
+      renumberedTailFixture.root,
+      newVersion,
+      renumberedTailFixture.evidence,
+      { ...renumberedTailFixture.authorities, githubRunJobs: () => renumberedTailJobs },
+    );
+    expect(renumberedPrepared.record.outcome).toBe("failed-superseded");
+
     const unknownNumberFixture = await createFailedFixture("verify");
     const unknownNumberJobs = failedRunJobs(unknownNumberFixture.base, "verify") as typeof doubleFailureJobs;
     unknownNumberJobs.jobs[0]!.steps.push({

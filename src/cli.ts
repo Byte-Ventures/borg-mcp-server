@@ -51,7 +51,7 @@ TLS files:
 Invitation minting is an additive local operation and may run while the server is
 live. Client listing, rotation, revocation, and grant changes are operator-only
 live-safe operations; the running server observes committed changes on the next
-request. Requests already in flight retain their established state.
+request.
 
 Stop the server before setup or reinitialization.
 

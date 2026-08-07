@@ -161,7 +161,7 @@ private local sink. The log level cannot be changed through the network API.
 Invitation minting is an additive local operation and may run while the server is
 live. Client listing, rotation, revocation, and grant changes are operator-only
 live-safe operations; the running server observes committed changes on the next
-request. Requests already in flight retain their established state.
+request.
 
 ```sh
 borg-mcp-server client-rotate <client-id>
@@ -193,8 +193,8 @@ name. Existing client UUIDs remain accepted.
 Invitations and rotation output are secrets; do not paste them into issues, logs,
 or chat. Client grant, ungrant, revoke, and rotate operations are operator-only
 and may run while the server is live. The running server observes the committed
-SQLite write on the next request; requests already in flight are not retroactively
-changed. A concurrent database write fails closed and can be retried.
+SQLite write on the next request. A concurrent database write fails closed and
+can be retried.
 
 ## Capacity controls
 

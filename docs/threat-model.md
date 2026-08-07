@@ -84,8 +84,9 @@ v1 scope.
   `borg-mcp-server client-revoke <client-name-or-handle>` while the server is live; securely
   deliver any one-time rotated credential. Live operations commit through the same SQLite store
   while the service runs; request-time authorization observes the commit on the next request, with
-  no polling window. Requests already in flight retain their established state. A concurrent write
-  fails closed and can be retried; no stale cross-process authorization cache exists.
+  no polling window. Credential rotation/revocation in the running authority aborts registered
+  streams. A concurrent write fails closed and can be retried; no stale cross-process authorization
+  cache exists.
 - Client and pre-claim owner invitation minting remain local CLI operations with no network route, but
   may execute beside a live server because they invalidate no live authority. Client minting adds one
   purpose-bound digest row; owner replacement revokes prior

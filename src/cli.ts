@@ -24,11 +24,11 @@ Commands:
   recover-stale-lock [--json]  Preserve a safely identified stale runtime lock
   invite [<client-name>]  Create a named client enrollment invitation interactively.
            An enrolled client has no cube access until it is granted.
-  client-rotate <client-id>  Rotate one client credential offline
-  client-list  List clients, ID-derived handles, states, and cube grants offline
-  client-revoke <client-name-or-handle>  Revoke one client and its credentials offline
-  client-grant <client-name-or-handle> <cube-id> <read|write|manage>  Set one offline cube grant
-  client-ungrant <client-name-or-handle> <cube-id>  Remove one offline cube grant
+  client-rotate <client-id>  Rotate one client credential while the server is live
+  client-list  List clients, ID-derived handles, states, and cube grants while the server is live
+  client-revoke <client-name-or-handle>  Revoke one client and its credentials while the server is live
+  client-grant <client-name-or-handle> <cube-id> <read|write|manage>  Set one cube grant while the server is live
+  client-ungrant <client-name-or-handle> <cube-id>  Remove one cube grant while the server is live
   help     Show this help
 
 Start options:
@@ -48,8 +48,12 @@ TLS files:
   BORG_SERVER_DATA_DIR (default: ~/.borg/server), or explicit
   BORG_SERVER_TLS_KEY_FILE, BORG_SERVER_TLS_CERT_FILE, and BORG_SERVER_TLS_CA_FILE
 
-Invitation commands may run alongside a live server. Stop the server before
-setup, rotation, revocation, grant changes, or reinitialization.
+Invitation minting is an additive local operation and may run while the server is
+live. Client listing, rotation, revocation, and grant changes are operator-only
+live-safe operations; the running server observes committed changes on the next
+request. Requests already in flight retain their established state.
+
+Stop the server before setup or reinitialization.
 
 Invitation access:
   read    observe: discover, attach as observer, and read

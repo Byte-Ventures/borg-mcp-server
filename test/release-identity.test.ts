@@ -104,6 +104,8 @@ describe("release identity automation", () => {
   it("keeps the authored verify-step names synchronized with the release workflow", async () => {
     const workflow = await readFile(".github/workflows/release.yml", "utf8");
 
+    expect(workflow).toContain("\n  verify:\n");
+    expect(workflow).toContain("\n  publish:\n");
     for (const name of authoredReleaseStepNames) {
       expect(workflow).toContain(`      - name: ${name}`);
     }
@@ -347,6 +349,36 @@ describe("release identity automation", () => {
       newVersion,
       conflictingCleanupFixture.evidence,
       { ...conflictingCleanupFixture.authorities, githubRunJobs: () => conflictingCleanupJobs },
+    )).rejects.toThrow("Failed-superseded release requires exactly one authored failure.");
+
+    const conflictingCompleteFixture = await createFailedFixture("verify");
+    const conflictingCompleteJobs = failedRunJobs(conflictingCompleteFixture.base, "verify") as typeof doubleFailureJobs;
+    conflictingCompleteJobs.jobs[0]!.steps.push({
+      name: "Complete job",
+      number: 9,
+      status: "completed",
+      conclusion: "failure",
+    });
+    await expect(prepareRelease(
+      conflictingCompleteFixture.root,
+      newVersion,
+      conflictingCompleteFixture.evidence,
+      { ...conflictingCompleteFixture.authorities, githubRunJobs: () => conflictingCompleteJobs },
+    )).rejects.toThrow("Failed-superseded release requires exactly one authored failure.");
+
+    const conflictingUploadFixture = await createFailedFixture("verify");
+    const conflictingUploadJobs = failedRunJobs(conflictingUploadFixture.base, "verify") as typeof doubleFailureJobs;
+    conflictingUploadJobs.jobs[0]!.steps.push({
+      name: "Post Upload same-run release artifact",
+      number: 11,
+      status: "completed",
+      conclusion: "failure",
+    });
+    await expect(prepareRelease(
+      conflictingUploadFixture.root,
+      newVersion,
+      conflictingUploadFixture.evidence,
+      { ...conflictingUploadFixture.authorities, githubRunJobs: () => conflictingUploadJobs },
     )).rejects.toThrow("Failed-superseded release requires exactly one authored failure.");
 
     const unknownNumberFixture = await createFailedFixture("verify");

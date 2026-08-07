@@ -173,10 +173,15 @@ tag. A burn at any authored step, including a pre-build source, lock, install, o
 recordable when exactly one authored step failed, every earlier authored step succeeded, and every
 later authored step completed and skipped; no later authored step may succeed. Unrecognized
 runner/infrastructure failures are rejected, while runner cleanup steps are not authored release
-steps. A failed tarball exercise is still pre-publication and is recordable when upload and publish
-remain skipped; it carries no SRI. The canonical npm version list proves that the failed version
-has no published artifact, records the result as `failed-superseded`, and re-verifies the latest
-earlier published record as the provenance anchor.
+steps. Cleanup names come from the failed tag's workflow `uses` steps and are accepted only after
+every authored step by runner order (`step.number > max(authored step number)`); the exact numeric
+tail positions are runner output, not workflow data, so this ordering is the deliberate bound.
+An allow-listed cleanup name above that authored maximum can still be classified as cleanup even
+if it is not one of the observed tail positions. `Set up job` remains a pre-authored failure
+boundary and is rejected by design. A failed tarball exercise is still pre-publication and is
+recordable when upload and publish remain skipped; it carries no SRI. The canonical npm version
+list proves that the failed version has no published artifact, records the result as
+`failed-superseded`, and re-verifies the latest earlier published record as the provenance anchor.
 A failed record cannot carry an SRI, cannot describe a run that reached publication or successfully
 uploaded the same-run artifact, and cannot be prepared if the failed version is present in the
 registry. Release identity accepts only workflow attempt 1: a rerun is never authoritative, even

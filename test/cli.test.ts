@@ -717,6 +717,24 @@ describe("runCli", () => {
     expect(io.stdout).toHaveBeenCalledOnce();
   });
 
+  it("describes client administration as live-safe in help", async () => {
+    const service: ServerService = { start: vi.fn() };
+    const io = createIo();
+
+    expect(await runCli(["help"], service, io)).toBe(0);
+
+    const help = io.stdout.mock.calls[0]![0];
+    expect(help).toContain("client-rotate <client-id>  Rotate one client credential while the server is live");
+    expect(help).toContain("client-list  List clients, ID-derived handles, states, and cube grants while the server is live");
+    expect(help).toContain("client-revoke <client-name-or-handle>  Revoke one client and its credentials while the server is live");
+    expect(help).toContain("client-grant <client-name-or-handle> <cube-id> <read|write|manage>  Set one cube grant while the server is live");
+    expect(help).toContain("client-ungrant <client-name-or-handle> <cube-id>  Remove one cube grant while the server is live");
+    expect(help).toContain("Client listing, rotation, revocation, and grant changes are operator-only\nlive-safe operations; the running server observes committed changes on the next\nrequest.");
+    expect(help).toContain("Stop the server before setup or reinitialization.");
+    expect(help).not.toContain("Rotate one client credential offline");
+    expect(help).not.toContain("Stop the server before\nsetup, rotation, revocation, grant changes, or reinitialization.");
+  });
+
   it("rejects unknown commands", async () => {
     const service: ServerService = { start: vi.fn() };
     const io = createIo();

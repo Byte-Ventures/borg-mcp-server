@@ -46,6 +46,24 @@ describe("packed release artifact", () => {
     ], { cwd: fixture })).resolves.toBeDefined();
   });
 
+  it("accepts only the source adapters used by checkout-less dashboard gates", async () => {
+    const fixture = await packageFixture();
+    await Promise.all([
+      writeFile(join(fixture, "src", "dashboard.js"), 'export * from "./dashboard.ts";\n'),
+      writeFile(join(fixture, "src", "dashboard-ink.js"), 'export * from "./dashboard-ink.ts";\n'),
+      writeFile(join(fixture, "src", "dashboard-plain.js"), 'export * from "./dashboard-plain.ts";\n'),
+    ]);
+    await expect(verifyPackedArtifact(await pack(fixture))).resolves.toBeDefined();
+  });
+
+  it("rejects an unlisted source JavaScript artifact", async () => {
+    const fixture = await packageFixture();
+    await writeFile(join(fixture, "src", "unreviewed.js"), "export const unsafe = true;\n");
+    await expect(verifyPackedArtifact(await pack(fixture))).rejects.toThrow(
+      "Unexpected source artifact: src/unreviewed.js",
+    );
+  });
+
   it("ships the trust and provisioning guide in the package", async () => {
     const fixture = await packageFixture();
     const tarball = await pack(fixture);

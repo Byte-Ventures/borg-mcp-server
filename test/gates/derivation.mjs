@@ -2,7 +2,7 @@
 // Drives the real startForegroundDashboard through its injected source/terminal.
 // Ratified condition: continuous positive per-tick counts produce NO observed-zero
 // marker in ANY slot INCLUDING THE FIRST; a zero-count control produces the marker.
-import { startForegroundDashboard, createDashboardRenderer, EMBEDDED_DASHBOARD_FOOTER } from "./dashboard.ts";
+import { startForegroundDashboard, createDashboardRenderer, EMBEDDED_DASHBOARD_FOOTER } from "../../src/dashboard.ts";
 const STEPS = 40, TICK_MS = 5000;
 const T0 = Date.parse("2026-08-06T14:00:00.000Z");
 const iso = (ms) => new Date(ms).toISOString();

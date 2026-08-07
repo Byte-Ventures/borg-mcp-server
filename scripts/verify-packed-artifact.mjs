@@ -35,7 +35,7 @@ const ALLOWED_ROOTS = new Set([
 ]);
 const EXPECTED_MANIFEST_FILES = [
   'dist',
-  'src',
+  'src/**/*.ts',
   'LICENSE',
   'NOTICE',
   'README.md',

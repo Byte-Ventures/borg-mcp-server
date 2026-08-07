@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -10,6 +10,17 @@ import { verifyPackedArtifact } from "../scripts/verify-packed-artifact.mjs";
 
 const execute = promisify(execFile);
 const directories: string[] = [];
+
+async function listFiles(root: string, directory = root): Promise<string[]> {
+  const entries = await readdir(directory, { withFileTypes: true });
+  const files: string[] = [];
+  for (const entry of entries) {
+    const absolute = join(directory, entry.name);
+    if (entry.isDirectory()) files.push(...await listFiles(root, absolute));
+    else if (entry.isFile()) files.push(relative(root, absolute).split(sep).join("/"));
+  }
+  return files.sort();
+}
 
 afterEach(async () => {
   vi.unstubAllGlobals();
@@ -44,6 +55,48 @@ describe("packed release artifact", () => {
       "public",
       "--registry=https://registry.npmjs.org",
     ], { cwd: fixture })).resolves.toBeDefined();
+  });
+
+  it("keeps every TypeScript source file in the packed source tree", async () => {
+    const fixture = await packageFixture();
+    const nested = join(fixture, "src", "nested");
+    await execute("mkdir", ["-p", nested]);
+    await writeFile(join(nested, "extra.ts"), "export const extra = true;\n");
+    const sourceFiles = (await listFiles(join(fixture, "src")))
+      .filter((path) => path.endsWith(".ts"))
+      .map((path) => `package/src/${path}`);
+    const { stdout } = await execute("tar", ["-tf", await pack(fixture)]);
+    const packedSourceFiles = stdout.split("\n")
+      .filter((path) => path.startsWith("package/src/"))
+      .sort();
+    expect(packedSourceFiles).toEqual(sourceFiles);
+    expect(packedSourceFiles.every((path) => path.endsWith(".ts"))).toBe(true);
+  });
+
+  it("verifies the freshly built repository artifact and its exact source set", async () => {
+    const repository = resolve(".");
+    const destination = await mkdtemp(join(tmpdir(), "borg-release-repository-pack-"));
+    directories.push(destination);
+    await execute("npm", ["run", "build"], { cwd: repository });
+    const tarball = await pack(repository, destination);
+    const report = await verifyPackedArtifact(tarball);
+    const manifest = JSON.parse(await readFile(join(repository, "package.json"), "utf8")) as {
+      name: string;
+      version: string;
+    };
+    expect(report).toMatchObject({ name: manifest.name, version: manifest.version });
+
+    const expectedSourceFiles = (await listFiles(join(repository, "src")))
+      .filter((path) => path.endsWith(".ts"))
+      .map((path) => `package/src/${path}`);
+    expect(expectedSourceFiles).not.toHaveLength(0);
+    const { stdout } = await execute("tar", ["-tf", tarball]);
+    const packedSourceFiles = stdout.split("\n")
+      .filter((path) => path.startsWith("package/src/"))
+      .sort();
+    expect(packedSourceFiles).not.toHaveLength(0);
+    expect(packedSourceFiles.filter((path) => !path.endsWith(".ts"))).toEqual([]);
+    expect(packedSourceFiles).toEqual(expectedSourceFiles);
   });
 
   it("ships the trust and provisioning guide in the package", async () => {
@@ -357,7 +410,7 @@ async function packageFixture(overrides: Record<string, unknown> = {}): Promise<
     engines: { node: ">=22.18.0", npm: ">=10.0.0" },
     files: [
       "dist",
-      "src",
+      "src/**/*.ts",
       "LICENSE",
       "NOTICE",
       "README.md",
@@ -394,10 +447,10 @@ async function packageFixture(overrides: Record<string, unknown> = {}): Promise<
   return directory;
 }
 
-async function pack(directory: string): Promise<string> {
+async function pack(directory: string, destination = directory): Promise<string> {
   const { stdout } = await execute("npm", [
-    "pack", "--ignore-scripts", "--json", "--pack-destination", directory,
+    "pack", "--ignore-scripts", "--json", "--pack-destination", destination,
   ], { cwd: directory });
   const [result] = JSON.parse(stdout) as Array<{ filename: string }>;
-  return join(directory, result!.filename);
+  return join(destination, result!.filename);
 }

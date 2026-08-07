@@ -31,7 +31,7 @@
   },
   "files": [
     "dist",
-    "src",
+    "src/**/*.ts",
     "LICENSE",
     "NOTICE",
     "README.md",

@@ -1,4 +1,4 @@
-import { createDashboardRenderer, rankDashboardSnapshot, EMBEDDED_DASHBOARD_FOOTER } from "./dashboard.ts";
+import { createDashboardRenderer, rankDashboardSnapshot, EMBEDDED_DASHBOARD_FOOTER } from "../../src/dashboard.ts";
 import { SERVER, DATA, PREVIOUS_RANKS, VIEW } from "./fixture2.mjs";
 
 const snapshot = rankDashboardSnapshot(DATA, SERVER, PREVIOUS_RANKS);

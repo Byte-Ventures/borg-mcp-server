@@ -1,4 +1,4 @@
-import { access, chmod, copyFile, mkdtemp, readFile, readdir, realpath, rm, stat, symlink } from "node:fs/promises";
+import { chmod, copyFile, mkdtemp, readFile, readdir, realpath, rm, stat, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { X509Certificate } from "node:crypto";
@@ -48,8 +48,7 @@ describe("offline bootstrap", () => {
     await expect(bootstrapServer(directory, "127.0.0.1", () => new Date(), async () => {
       throw new Error("credential persistence failed");
     })).rejects.toThrow("credential persistence failed");
-    await expect(access(join(directory, "server.json"))).rejects.toMatchObject({ code: "ENOENT" });
-    await expect(access(join(directory, "borg.db"))).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(readdir(directory)).resolves.toEqual([]);
   });
 
   it("creates private trust, identity, digest, and one-time bootstrap material", async () => {
@@ -97,12 +96,21 @@ describe("offline bootstrap", () => {
     runtime.close();
   });
 
-  it("fails closed instead of replacing existing trust material", async () => {
+  it("leaves every existing installation file byte-intact when a rerun fails", async () => {
     const parent = await temporaryDirectory();
     const dataDirectory = join(parent, "server");
     await bootstrapServer(dataDirectory);
+    const existingNames = (await readdir(dataDirectory)).sort();
+    const existingFiles = new Map(await Promise.all(existingNames.map(async (name) => [
+      name,
+      await readFile(join(dataDirectory, name)),
+    ] as const)));
 
     await expect(bootstrapServer(dataDirectory)).rejects.toThrow();
+    expect((await readdir(dataDirectory)).sort()).toEqual(existingNames);
+    for (const [name, bytes] of existingFiles) {
+      expect(await readFile(join(dataDirectory, name)), name).toEqual(bytes);
+    }
   });
 
   it("reissues only the leaf certificate while preserving the server identity", async () => {

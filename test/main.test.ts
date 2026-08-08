@@ -42,7 +42,7 @@ describe("main operator errors", () => {
     [
       "SETUP_BIND_SCOPE_UNSUPPORTED",
       "The IPv6 address includes a zone index. No newly generated server identity was kept.\n" +
-      "Next: use a unique local IPv6 address that starts with fd, or the machine's private IPv4 address, then rerun setup.",
+      "Next: use the machine's private IPv4 address, then rerun setup.",
     ],
     [
       "SETUP_OWNER_CREDENTIAL_FAILED",

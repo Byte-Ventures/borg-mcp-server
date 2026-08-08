@@ -73,7 +73,7 @@ const publicMessages: Readonly<Record<OperatorErrorCode, string>> = Object.freez
   BIND_LAN_CONSENT: "Add --lan to consent to this private-LAN start.",
   SERVER_FILES_MISSING: "Configure BORG_SERVER_DATA_DIR or the required TLS file variables.",
   DATA_PATH_SYMLINK: "Choose a BORG_SERVER_DATA_DIR path that contains no symbolic links.",
-  SETUP_BIND_SCOPE_UNSUPPORTED: "The IPv6 address includes a zone index. No newly generated server identity was kept.\nNext: use a unique local IPv6 address that starts with fd, or the machine's private IPv4 address, then rerun setup.",
+  SETUP_BIND_SCOPE_UNSUPPORTED: "The IPv6 address includes a zone index. No newly generated server identity was kept.\nNext: use the machine's private IPv4 address, then rerun setup.",
   SETUP_OWNER_CREDENTIAL_FAILED: "Setup could not save the local owner credential. No newly generated server identity was kept.\nNext: confirm ~/.borg/credentials is private and writable, then rerun setup.",
   INSTALLATION_EXISTS: "An installation already exists in BORG_SERVER_DATA_DIR. To destroy and recreate it, stop the server and run borg-mcp-server setup --reinitialize.",
   OWNER_CREDENTIAL_UNAVAILABLE: "The local owner credential is unavailable. Restore the local credential store from backup, or preserve any needed server data and run borg-mcp-server setup --reinitialize to create a new database and leaf identity while preserving the CA when present.",

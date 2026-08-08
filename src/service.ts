@@ -126,6 +126,7 @@ export type ServerSetupResult =
     })
   | {
       readonly existing: true;
+      readonly bindHost: string;
       readonly artifact?: { readonly version: string; readonly integrity: string; readonly sourceSha: string | null };
     };
 
@@ -224,7 +225,11 @@ interface ServiceDependencies {
   readonly readFile: (path: string) => Promise<Buffer>;
   readonly readPrivateKey: (path: string) => Promise<Buffer>;
   readonly startServer: (options: HttpsServerOptions) => Promise<RunningServer>;
-  readonly onStarted: (origin: string, identity: RuntimeBuildIdentity) => void;
+  readonly onStarted: (
+    origin: string,
+    identity: RuntimeBuildIdentity,
+    binding: ServerBindOutput,
+  ) => void;
   readonly bindOwnerCredential?: (origin: string) => Promise<void>;
   readonly startForegroundDashboard?: (input: {
     readonly source: DashboardSnapshotSource;
@@ -241,6 +246,12 @@ interface ServiceDependencies {
   readonly onStartupPhase?: (
     phase: "pre-lock" | "post-lock" | "pre-listen",
   ) => Promise<void>;
+}
+
+export interface ServerBindOutput {
+  readonly bindHost: string | null;
+  readonly bindMode: "loopback" | "lan";
+  readonly remedy: string | null;
 }
 
 interface RuntimeResources {
@@ -291,6 +302,9 @@ export function createNodeServerService(dependencies: ServiceDependencies): Serv
       let storageLimits: StorageLimits;
       let asciiRequested = false;
       let compatibilityLoopbackHost: "127.0.0.1" | "::1" | undefined;
+      let bindMode: "loopback" | "lan";
+      let preparedBindHost: string | null = null;
+      let bindRemedy: string | null = null;
       try {
         throwIfShutdown(shutdown?.signal);
         await dependencies.onStartupPhase?.("pre-lock");
@@ -300,7 +314,7 @@ export function createNodeServerService(dependencies: ServiceDependencies): Serv
         asciiRequested = parsed.ascii;
         debugLogger = createDebugLogger(parsed.logLevel === "debug" ? dependencies.debugOutput : undefined);
         const resolvedBind = resolveBindOptions(bind);
-        const bindMode = resolvedBind.mode;
+        bindMode = resolvedBind.mode;
         dataDirectory = dependencies.environment.BORG_SERVER_DATA_DIR;
         storageLimits = resolveStorageLimits(dependencies.environment);
         debugLogger.emit({
@@ -309,16 +323,26 @@ export function createNodeServerService(dependencies: ServiceDependencies): Serv
           port: resolvedBind.port,
           dataDirectory: dataDirectory === undefined ? "tls_only" : "configured",
         });
-        if (bindMode === "lan" && dataDirectory !== undefined) {
+        if (dataDirectory !== undefined) {
           const installationConfig = JSON.parse(
-            (await dependencies.readFile(join(dataDirectory, "server.json"))).toString("utf8"),
+            (await readFile(join(dataDirectory, "server.json"))).toString("utf8"),
           ) as { readonly bind_host?: unknown };
           if (typeof installationConfig.bind_host !== "string") {
             throw new Error("Server identity is invalid.");
           }
-          compatibilityLoopbackHost = installationConfig.bind_host.includes(":") ? "::1" : "127.0.0.1";
-          await assertLanCaKeyOffline(dataDirectory);
-          throwIfShutdown(shutdown?.signal);
+          preparedBindHost = installationConfig.bind_host;
+          const preparedBind = resolveBindOptions({
+            host: installationConfig.bind_host,
+            lanConsent: true,
+          });
+          if (bindMode === "loopback" && preparedBind.mode === "lan") {
+            bindRemedy = `borg server start --host ${installationConfig.bind_host} --lan`;
+          }
+          if (bindMode === "lan") {
+            compatibilityLoopbackHost = installationConfig.bind_host.includes(":") ? "::1" : "127.0.0.1";
+            await assertLanCaKeyOffline(dataDirectory);
+            throwIfShutdown(shutdown?.signal);
+          }
         }
       } catch (error) {
         shutdown?.dispose();
@@ -490,7 +514,11 @@ export function createNodeServerService(dependencies: ServiceDependencies): Serv
         await dependencies.bindOwnerCredential?.(running.origin);
         throwIfShutdown(shutdown?.signal);
         await runtimeLock?.updateOrigin?.(running.origin);
-        dependencies.onStarted(running.origin, runtimeIdentity);
+        dependencies.onStarted(running.origin, runtimeIdentity, {
+          bindHost: preparedBindHost,
+          bindMode,
+          remedy: bindRemedy,
+        });
         if (authRuntime !== undefined) {
           dashboard = dependencies.startForegroundDashboard?.({
             source: authRuntime.dashboard,
@@ -498,6 +526,7 @@ export function createNodeServerService(dependencies: ServiceDependencies): Serv
               name: "borgmcp-server",
               version: runtimeIdentity.package_version,
               endpoint: running.origin,
+              bind_mode: bindMode,
               state: "online",
               started_at: new Date().toISOString(),
             }),
@@ -648,17 +677,16 @@ const startOnlyService = createNodeServerService({
     const running = await startHttpsServer(options);
     return nodeServerTestHooks?.wrapRunningServer?.(running) ?? running;
   },
-  onStarted: (origin, identity) => {
-    if (!supportsForegroundDashboard()) {
-      console.error(JSON.stringify({
-        status: "running",
-        artifact: `borgmcp-server@${identity.package_version}`,
-        artifact_integrity: identity.artifact_integrity,
-        build_identity: identity.source_sha,
-        endpoint: origin,
-        mode: serverEnvironment.BORG_SERVER_PROCESS_MODE ?? "foreground",
-        data_identity: "available",
-      }));
+  onStarted: (origin, identity, binding) => {
+    if (supportsForegroundDashboard()) {
+      if (binding.remedy !== null) console.error(renderBindIntentMismatch(binding));
+    } else {
+      console.error(renderStartMachineOutput(
+        origin,
+        identity,
+        binding,
+        serverEnvironment.BORG_SERVER_PROCESS_MODE ?? "foreground",
+      ));
     }
     nodeServerTestHooks?.onListening?.(origin);
   },
@@ -774,6 +802,7 @@ async function runNodeDashboardViewer(
       name: "borgmcp-server",
       version: runtime.identity.package_version,
       endpoint: runtime.endpoint,
+      bind_mode: bindModeForOrigin(runtime.endpoint),
       state: "online",
       started_at: runtime.identity.started_at,
     });
@@ -1128,7 +1157,7 @@ export async function setupNodeServerInstallation(
   bindHost: string,
   options: SetupOptions,
   credentialRoot?: string,
-): Promise<BootstrapResult | { readonly existing: true }> {
+): Promise<BootstrapResult | { readonly existing: true; readonly bindHost: string }> {
   const directory = await preparePrivateDataDirectory(setupDataDirectory);
   const runtimeLock = await acquireRuntimeLock(directory);
   let invitationLock: RuntimeLock | undefined;
@@ -1149,7 +1178,11 @@ export async function setupNodeServerInstallation(
       if (credentialRoot !== undefined) {
         await readPortableOwnerCredentialForInstallation(directory, credentialRoot, 7_091);
       }
-      return Object.freeze({ existing: true });
+      const config = JSON.parse((await readFile(join(directory, "server.json"))).toString("utf8")) as {
+        readonly bind_host?: unknown;
+      };
+      if (typeof config.bind_host !== "string") throw new Error("Server identity is invalid.");
+      return Object.freeze({ existing: true, bindHost: config.bind_host });
     }
     if (options.reinitialize) {
       const names = new Set(existing.map((path) => basename(path)));
@@ -1316,6 +1349,40 @@ function resolveSetupBindHost(environment: ServerEnvironment): string {
       : { host: environment.BORG_SERVER_BIND_HOST }),
     lanConsent: true,
   }).host;
+}
+
+export function renderBindIntentMismatch(binding: ServerBindOutput): string {
+  if (binding.bindHost === null || binding.remedy === null) {
+    throw new Error("Bind intent mismatch output is incomplete.");
+  }
+  return `WARNING: This server is prepared for ${binding.bindHost}, but this start is listening on loopback only.\n` +
+    "To use the prepared bind address, stop the server, then run:\n" +
+    `  ${binding.remedy}`;
+}
+
+export function renderStartMachineOutput(
+  origin: string,
+  identity: RuntimeBuildIdentity,
+  binding: ServerBindOutput,
+  processMode: "foreground" | "managed",
+): string {
+  return JSON.stringify({
+    status: "running",
+    artifact: `borgmcp-server@${identity.package_version}`,
+    artifact_integrity: identity.artifact_integrity,
+    build_identity: identity.source_sha,
+    endpoint: origin,
+    bind_host: binding.bindHost,
+    bind_mode: binding.bindMode,
+    bind_remedy: binding.remedy,
+    mode: processMode,
+    data_identity: "available",
+  });
+}
+
+function bindModeForOrigin(origin: string): "loopback" | "lan" {
+  const hostname = new URL(origin).hostname.replace(/^\[|\]$/gu, "");
+  return resolveBindOptions({ host: hostname, lanConsent: true }).mode;
 }
 
 export function createOfflineCredentialService(

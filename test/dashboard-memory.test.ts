@@ -58,6 +58,7 @@ const server = {
   name: "borgmcp-server",
   version: "0.14.2",
   endpoint: "https://127.0.0.1:7091",
+  bind_mode: "loopback",
   state: "online",
   started_at: "2026-07-25T09:00:00.000Z",
 } as const;

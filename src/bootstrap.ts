@@ -10,6 +10,7 @@ import { openStore } from "./store.js";
 export interface BootstrapResult {
   readonly serverId: string;
   readonly caFingerprint: string;
+  readonly bindHost: string;
   /** @deprecated Retained for offline administrative compatibility; never rendered by setup. */
   readonly recoveryCredential: string;
   /** @deprecated The already-consumed bootstrap invitation; never rendered by setup. */
@@ -123,6 +124,7 @@ export async function bootstrapServer(
       const result = {
         serverId,
         caFingerprint,
+        bindHost,
         recoveryCredential,
         initialInvitation: invitation,
         ownerAccess: {

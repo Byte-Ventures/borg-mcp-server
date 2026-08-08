@@ -25,6 +25,8 @@ import {
   inspectNodeRuntime,
   inspectRuntimeLock,
   recoverStaleRuntimeLock,
+  renderBindIntentMismatch,
+  renderStartMachineOutput,
   stopServerRuntime,
   resolveStorageLimits,
   selectServerEnvironment,
@@ -220,7 +222,7 @@ describe("node server service", () => {
       const credentials = join(parent, "credentials");
       const first = await setupNodeServerInstallation(
         directory,
-        "127.0.0.1",
+        "192.168.1.20",
         { reinitialize: false },
         credentials,
       );
@@ -232,7 +234,7 @@ describe("node server service", () => {
         { reinitialize: false },
         credentials,
       );
-      expect(second).toEqual({ existing: true });
+      expect(second).toEqual({ existing: true, bindHost: "192.168.1.20" });
       expect(await readFile(credentials)).toEqual(before);
     } finally {
       await rm(parent, { recursive: true, force: true });
@@ -568,10 +570,103 @@ describe("node server service", () => {
     expect(options?.tls.ca).toEqual(Buffer.from("test-certificate"));
     expect(onStarted).toHaveBeenCalledWith(
       "https://127.0.0.1:7091",
-        expect.objectContaining({ package_version: "0.15.1" }),
+      expect.objectContaining({ package_version: "0.15.1" }),
+      { bindHost: null, bindMode: "loopback", remedy: null },
     );
     expect(waitForShutdown).toHaveBeenCalledOnce();
     expect(keyBuffer.every((byte) => byte === 0)).toBe(true);
+  });
+
+  it("warns when a LAN-prepared installation starts on loopback without changing the bind", async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-lan-prepared-loopback-")));
+    try {
+      await bootstrapServer(directory, "192.168.1.20");
+      const onStarted = vi.fn();
+      const startServer = vi.fn().mockResolvedValue({
+        origin: "https://127.0.0.1:7091",
+        limits: {} as never,
+        close: vi.fn().mockResolvedValue(undefined),
+      });
+      const service = createNodeServerService({
+        environment: { BORG_SERVER_DATA_DIR: directory },
+        readFile,
+        readPrivateKey: vi.fn().mockResolvedValue(Buffer.from("private-key")),
+        startServer,
+        onStarted,
+        bindOwnerCredential: vi.fn().mockResolvedValue(undefined),
+        waitForShutdown: vi.fn().mockResolvedValue(undefined),
+      });
+
+      await service.start([]);
+
+      expect(startServer).toHaveBeenCalledOnce();
+      expect(startServer.mock.calls[0]![0].bind).toEqual({});
+      expect(onStarted).toHaveBeenCalledWith(
+        "https://127.0.0.1:7091",
+        expect.objectContaining({ package_version: "0.15.1" }),
+        {
+          bindHost: "192.168.1.20",
+          bindMode: "loopback",
+          remedy: "borg server start --host 192.168.1.20 --lan",
+        },
+      );
+      expect(renderBindIntentMismatch(onStarted.mock.calls[0]![2])).toBe(
+        "WARNING: This server is prepared for 192.168.1.20, but this start is listening on loopback only.\n" +
+        "To use the prepared bind address, stop the server, then run:\n" +
+        "  borg server start --host 192.168.1.20 --lan",
+      );
+      expect(renderBindIntentMismatch({
+        bindHost: "fd00::20",
+        bindMode: "loopback",
+        remedy: "borg server start --host fd00::20 --lan",
+      })).toContain("\n  borg server start --host fd00::20 --lan");
+      const machineOutput = renderStartMachineOutput(
+        onStarted.mock.calls[0]![0],
+        onStarted.mock.calls[0]![1],
+        onStarted.mock.calls[0]![2],
+        "foreground",
+      );
+      expect(JSON.parse(machineOutput)).toMatchObject({
+        endpoint: "https://127.0.0.1:7091",
+        bind_host: "192.168.1.20",
+        bind_mode: "loopback",
+        bind_remedy: "borg server start --host 192.168.1.20 --lan",
+      });
+      expect(machineOutput).not.toContain("WARNING");
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("does not warn when a loopback-prepared installation starts bare", async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-loopback-prepared-")));
+    try {
+      await bootstrapServer(directory, "127.0.0.1");
+      const onStarted = vi.fn();
+      const service = createNodeServerService({
+        environment: { BORG_SERVER_DATA_DIR: directory },
+        readFile,
+        readPrivateKey: vi.fn().mockResolvedValue(Buffer.from("private-key")),
+        startServer: vi.fn().mockResolvedValue({
+          origin: "https://127.0.0.1:7091",
+          limits: {} as never,
+          close: vi.fn().mockResolvedValue(undefined),
+        }),
+        onStarted,
+        bindOwnerCredential: vi.fn().mockResolvedValue(undefined),
+        waitForShutdown: vi.fn().mockResolvedValue(undefined),
+      });
+
+      await service.start([]);
+
+      expect(onStarted.mock.calls[0]![2]).toEqual({
+        bindHost: "127.0.0.1",
+        bindMode: "loopback",
+        remedy: null,
+      });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
   it("wipes the key buffer when server startup fails", async () => {
@@ -1473,7 +1568,7 @@ describe("node server service", () => {
       const before = await Promise.all(Object.values(first.paths).map((path) => readFile(path)));
 
       await expect(setupNodeServerInstallation(directory, "127.0.0.1", { reinitialize: false }))
-        .resolves.toEqual({ existing: true });
+        .resolves.toEqual({ existing: true, bindHost: "127.0.0.1" });
       const after = await Promise.all(Object.values(first.paths).map((path) => readFile(path)));
       expect(after).toEqual(before);
       await expect(access(join(directory, "runtime.lock"))).rejects.toMatchObject({ code: "ENOENT" });

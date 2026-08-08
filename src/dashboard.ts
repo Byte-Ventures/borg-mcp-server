@@ -45,6 +45,7 @@ export interface DashboardServerIdentity {
   readonly name: string;
   readonly version: string;
   readonly endpoint: string;
+  readonly bind_mode: "loopback" | "lan";
   readonly state: "online" | "degraded" | "shutting-down";
   readonly started_at: string;
 }

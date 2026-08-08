@@ -40,8 +40,11 @@ const server: DashboardServerIdentity = Object.freeze({
   name: "borgmcp-server",
   version: "0.15.1",
   endpoint: "https://127.0.0.1:7091",
+  bind_mode: "loopback",
   state: "online",
   started_at: "2026-07-25T09:00:00.000Z",
+} satisfies DashboardServerIdentity & {
+  readonly bind_mode: "loopback" | "lan";
 });
 
 const ids = {
@@ -192,7 +195,7 @@ describe("dashboard renderer", () => {
     expect(tiny).toContain("Data saved. Read-only view.");
     expect(tiny).not.toContain("\u001b[");
     expect(tiny).not.toContain("┌");
-    expect(tiny.split("\n")).toHaveLength(7);
+    expect(tiny.split("\n")).toHaveLength(8);
     expect(tiny.split("\n").every((line) => [...line].length <= 39)).toBe(true);
 
     const narrow = createDashboardRenderer({ glyphMode: "box", color: true })(snapshot, 20, 9);
@@ -211,7 +214,7 @@ describe("dashboard renderer", () => {
     expect(tinyViewer).toContain("Ctrl-C closes this viewer.");
     expect(tinyViewer).toContain("Server stays up. View is read-only.");
     expect(tinyViewer).not.toContain("stops this server");
-    expect(tinyViewer.split("\n")).toHaveLength(7);
+    expect(tinyViewer.split("\n")).toHaveLength(8);
     expect(tinyViewer.split("\n").every((line) => [...line].length <= 39)).toBe(true);
 
     const oneShotViewer = renderPlainDashboard(snapshot, 39, 9);
@@ -271,7 +274,7 @@ describe("dashboard renderer", () => {
       80,
       24,
     );
-    const detail = frame.split("\n").slice(2, -3);
+    const detail = frame.split("\n").slice(3, -3);
     expect(detail[0]).toContain("DRONE ACTIVITY");
     expect(detail.every((line) => [...line].length === 80)).toBe(true);
     expect(frame).not.toContain("/......");
@@ -364,6 +367,21 @@ describe("dashboard renderer", () => {
     expect(auto).not.toContain("< > switch");
     expect(pinned).toContain("DRONE ACTIVITY");
     expect(empty).not.toContain("< > switch");
+  });
+
+  it("names the effective endpoint and bind mode", () => {
+    const snapshot = rankDashboardSnapshot(snapshotData(1), server);
+    const frame = createDashboardRenderer({ glyphMode: "ascii", color: false })(
+      snapshot,
+      200,
+      24,
+    );
+    const fallback = renderPlainDashboard(snapshot, 200, 20);
+
+    for (const output of [frame, fallback]) {
+      expect(output).toContain("Endpoint: https://127.0.0.1:7091");
+      expect(output).toContain("Bind mode: loopback");
+    }
   });
 
   it("keeps volume, pulse, and rank in separate global channels", () => {
@@ -902,7 +920,7 @@ describe("foreground dashboard lifecycle", () => {
   it("pulses on snapshot deltas and supports pinned navigation with explicit auto return", async () => {
     vi.useFakeTimers();
     const harness = terminalHarness();
-    harness.setDimensions(80, 12);
+    harness.setDimensions(80, 13);
     const source = sourceHarness(snapshotData(3));
     const renderer = vi.fn(createDashboardRenderer({
       glyphMode: "ascii",

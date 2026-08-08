@@ -99,6 +99,7 @@ export async function runCli(
           status: "prepared",
           artifact: artifactIdentity,
           build_identity: result.artifact?.sourceSha ?? null,
+          bind_host: result.bindHost,
           owner_access: "prepared",
           process: "stopped",
         }));
@@ -108,6 +109,8 @@ export async function runCli(
         const lines = [
           "Your local server is already prepared.",
           "Your server data and identity are unchanged.",
+          `Prepared bind address: ${result.bindHost}`,
+          "This address is written into the server certificate.",
           "Setup did not start the server.",
         ];
         if (!clientOnboarding) {
@@ -123,6 +126,8 @@ export async function runCli(
       const lines = [
         "Local server setup completed.",
         "Your server data and identity are ready.",
+        `Prepared bind address: ${result.bindHost}`,
+        "This address is written into the server certificate.",
       ];
       if (!clientOnboarding) {
         lines.push(

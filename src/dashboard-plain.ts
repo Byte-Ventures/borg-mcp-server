@@ -25,8 +25,12 @@ export function renderPlainDashboard(
   const totalPosts = snapshot.cubes.reduce((sum, cube) => sum + cube.posts_15m, 0);
   const lines = [
     plainCell(
-      `${sanitizeTerminalText(snapshot.server.name)} ${snapshot.server.state} ` +
-      `${sanitizeTerminalText(snapshot.server.endpoint)}`,
+      `${sanitizeTerminalText(snapshot.server.name)} ${snapshot.server.state}`,
+      width,
+      ASCII_GLYPHS.ellipsis,
+    ),
+    plainCell(
+      `Endpoint: ${sanitizeTerminalText(snapshot.server.endpoint)}  Bind mode: ${snapshot.server.bind_mode}`,
       width,
       ASCII_GLYPHS.ellipsis,
     ),

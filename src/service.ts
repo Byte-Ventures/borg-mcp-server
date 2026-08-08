@@ -1941,7 +1941,14 @@ export function installProcessShutdownHandlers(): {
   readonly dispose: () => void;
 } {
   const controller = new AbortController();
-  const stop = (): void => controller.abort();
+  const stop = (signal: NodeJS.Signals): void => {
+    if (controller.signal.aborted) {
+      if (signal === "SIGINT") process.exit(130);
+      if (signal === "SIGTERM") process.exit(143);
+      return;
+    }
+    controller.abort();
+  };
   // Keep the listener present through signal dispatch so Ink's signal-exit hook
   // does not mistake the one-shot wrapper's removal for an unhandled signal.
   process.on("SIGINT", stop);

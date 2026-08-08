@@ -4,15 +4,43 @@ import { connect, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { bootstrapServer } from "../src/bootstrap.js";
+import { installProcessShutdownHandlers } from "../src/service.js";
 
 const fixture = fileURLToPath(new URL("fixtures/process-signal-child.mjs", import.meta.url));
 const startedChildren = new WeakSet<ChildProcess>();
 const pendingMessages = new WeakMap<ChildProcess, unknown[]>();
 
 describe("production process signal lifecycle", () => {
+  it.each([
+    { signal: "SIGINT" as const, exitCode: 130 },
+    { signal: "SIGTERM" as const, exitCode: 143 },
+  ])("force exits on a second %s while shutdown is in progress", ({ signal, exitCode }) => {
+    const exit = vi.spyOn(process, "exit").mockImplementation((code) => {
+      throw new Error(`process.exit(${String(code)})`);
+    });
+    const previousListeners = new Set(process.listeners(signal));
+    const handlers = installProcessShutdownHandlers();
+    const addedListeners = process.listeners(signal).filter((listener) => !previousListeners.has(listener));
+    try {
+      expect(addedListeners).toHaveLength(1);
+      const handler = addedListeners[0];
+      expect(handler).toBeDefined();
+
+      handler!.call(process, signal);
+      expect(handlers.signal.aborted).toBe(true);
+      expect(exit).not.toHaveBeenCalled();
+
+      expect(() => handler!.call(process, signal)).toThrow(`process.exit(${exitCode})`);
+      expect(exit).toHaveBeenLastCalledWith(exitCode);
+    } finally {
+      handlers.dispose();
+      exit.mockRestore();
+    }
+  });
+
   it("cleans a post-lock foreground start when terminal teardown sends SIGHUP", async () => {
     const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-process-sighup-")));
     try {

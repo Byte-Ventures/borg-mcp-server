@@ -618,14 +618,17 @@ function recordDashboardActivity(
   if (!Number.isFinite(capturedAt)) return;
   recordActivityBucket(observation, { capturedAt: snapshot.captured_at, sentRate: 0 });
   while (observation.length > 0 && Date.parse(observation[0]!.capturedAt) < capturedAt - Math.max(windowMs, 60 * 60_000)) observation.shift();
+  const activeKeys = new Set<string>();
   for (const cube of snapshot.cubes) for (const drone of cube.drones) {
     const key = `${cube.id}:${drone.id}`;
+    activeKeys.add(key);
     const samples = history.get(key) ?? [];
     recordActivityBucket(samples, { capturedAt: snapshot.captured_at, sentRate: drone.sent_5s });
     const oldest = capturedAt - Math.max(windowMs, 60 * 60_000);
     while (samples.length > 0 && Date.parse(samples[0]!.capturedAt) < oldest) samples.shift();
     history.set(key, samples);
   }
+  for (const key of history.keys()) if (!activeKeys.has(key)) history.delete(key);
 }
 
 function recordActivityBucket(

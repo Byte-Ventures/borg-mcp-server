@@ -755,6 +755,42 @@ describe("dashboard renderer", () => {
 });
 
 describe("foreground dashboard lifecycle", () => {
+  it("bounds activity history when the live drone set rotates", async () => {
+    vi.useFakeTimers();
+    const harness = terminalHarness();
+    const initial = snapshotData(1);
+    const source = sourceHarness(initial);
+    const renderer = vi.fn(createDashboardRenderer({ glyphMode: "ascii", color: false }));
+    const dashboard = startForegroundDashboard({
+      source,
+      server,
+      terminal: harness.terminal,
+      renderer,
+      idleRefreshMs: 100,
+    });
+    const cube = initial.cubes[0]!;
+    const originalDrone = cube.drones[0]!;
+    let latestDroneId = originalDrone.id;
+
+    for (let index = 1; index <= 20; index += 1) {
+      latestDroneId = `10000000-0000-4000-8000-${String(index + 10).padStart(12, "0")}`;
+      source.set({
+        ...initial,
+        captured_at: new Date(Date.parse(initial.captured_at) + (index * 100)).toISOString(),
+        cubes: [{
+          ...cube,
+          drones: [{ ...originalDrone, id: latestDroneId }],
+        }],
+      });
+      await vi.advanceTimersByTimeAsync(100);
+    }
+
+    const activity = renderer.mock.lastCall?.[3]?.activity;
+    expect(activity).toHaveProperty("size", 1);
+    expect(activity?.has(`${cube.id}:${latestDroneId}`)).toBe(true);
+    dashboard.close();
+  });
+
   it("collapses event refreshes into one poll bucket at record time", async () => {
     vi.useFakeTimers();
     const harness = terminalHarness();

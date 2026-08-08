@@ -62,12 +62,11 @@ v1 scope.
   atomic, never echo rejected input, and do not modify grants, role, posture, routing, liveness,
   `last_seen`, activity logs, wake state, timers, or model execution.
 - Role creation, sparse role update, granular role-section patch, and role deletion routes require
-  the cube's `manage` grant. For create, update, and section-patch routes, drone sessions and lesser
-  client grants receive `404 NOT_FOUND`, matching foreign or missing cube/role tuples. Role deletion
-  likewise returns `404 NOT_FOUND` for foreign or missing tuples; when the cube is read-visible but
-  the grant is insufficient, it returns `403 ACCESS_DENIED`. Default promotion and role mutation
-  recheck authority inside one immediate transaction. Role deletion applies the default, required,
-  taxonomy-reference, and active-drone guards, then retargets evicted drones to the default role and
+  the cube's `manage` grant. All four routes return `403 ACCESS_DENIED` when the cube is read-visible
+  but the grant is insufficient, and `404 NOT_FOUND` when the cube or role is inaccessible, foreign,
+  or missing. Default promotion and role mutation recheck authority inside one immediate transaction.
+  Role deletion applies the default, required, taxonomy-reference, and active-drone guards, then
+  retargets evicted drones to the default role and
   deletes the role in that same transaction. A current default cannot be explicitly demoted;
   promoting another role is the only default transition, preserving exactly one default. Section
   patches alter one plain-label section while preserving the remainder of the stored playbook. The

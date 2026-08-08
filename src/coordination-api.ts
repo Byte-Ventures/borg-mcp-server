@@ -11,11 +11,13 @@ import {
   decodeAttachRequestEnvelope,
   decodeCreateCubeRequestEnvelope,
   decodeDeleteCubeRequestEnvelope,
+  decodeDeleteRoleRequestEnvelope,
   decodeDroneRuntimeMetadataPatch,
   decodeEvictDroneRequestEnvelope,
   decodeProtocolEnvelope,
   decodeReassignDroneRequestEnvelope,
   decodeResolveRepositoryCubeRequestEnvelope,
+  decodeRoleRationaleRequestEnvelope,
 } from "borgmcp-shared/protocol";
 import type { Principal } from "./principal.js";
 import { assertServerDerivedPrincipal } from "./principal.js";
@@ -438,20 +440,19 @@ export class CoordinationApi {
         });
       }
       if (resource === "role" && !sectionPatch && request.method === "DELETE") {
-        const envelope = decodeEnvelope(request.body);
-        exactKeys(envelope.payload, []);
+        const envelope = decodeDeleteRoleRequestEnvelope(request.body);
         try {
           store.deleteRole(cubeId, roleId!);
         } catch (error) {
           if (error instanceof ScopedStoreError) {
-            return failure(404, error.code, error.message, envelope.requestId);
+            return failure(404, error.code, error.message, envelope.request_id);
           }
           if (error instanceof AccessDeniedError) {
-            return failure(403, error.code, error.message, envelope.requestId);
+            return failure(403, error.code, error.message, envelope.request_id);
           }
           throw error;
         }
-        return success(200, envelope.requestId, { role_id: roleId!, deleted: true });
+        return success(200, envelope.request_id, { role_id: roleId!, deleted: true });
       }
       if (resource === "role" && sectionPatch && request.method === "POST") {
         const envelope = decodeEnvelope(request.body);
@@ -492,18 +493,19 @@ export class CoordinationApi {
         });
       }
       if (resource === "role-rationale" && request.method === "POST") {
-        const envelope = decodeEnvelope(request.body);
-        exactKeys(envelope.payload, ["role", "section"]);
-        const role = requiredString(envelope.payload, "role", 64);
-        const section = requiredSectionHeading(envelope.payload, "section");
+        const envelope = decodeRoleRationaleRequestEnvelope(request.body);
         try {
-          return success(200, envelope.requestId, store.readRoleRationale(cubeId, role, section));
+          return success(200, envelope.request_id, store.readRoleRationale(
+            cubeId,
+            envelope.payload.role,
+            envelope.payload.section,
+          ));
         } catch (error) {
           if (error instanceof ScopedStoreError) {
-            return failure(404, error.code, error.message, envelope.requestId);
+            return failure(404, error.code, error.message, envelope.request_id);
           }
           if (error instanceof AccessDeniedError) {
-            return failure(403, error.code, error.message, envelope.requestId);
+            return failure(403, error.code, error.message, envelope.request_id);
           }
           throw error;
         }

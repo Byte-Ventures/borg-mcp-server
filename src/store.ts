@@ -14,6 +14,7 @@ import {
   decodeAssociateRepositoryCubeRequest,
   decodeCreateCubeRequest,
   decodeResolveRepositoryCubeRequest,
+  ROLE_TEXT_MAX_BYTES,
 } from "borgmcp-shared/protocol";
 import { getTemplate, type TemplateRole } from "borgmcp-shared/templates";
 
@@ -1716,7 +1717,7 @@ class SqliteScopedStore implements ScopedStore {
     sectionHeading: string,
   ): RoleRationaleRecord {
     assertCanonicalUuid(cubeId, "Cube id");
-    validateRoleName(roleSelector);
+    validateRoleSelector(roleSelector);
     this.#requireCube(cubeId, "read");
     const roles = this.listRoles(cubeId);
     const normalizedSelector = roleSelector.toLowerCase();
@@ -4646,6 +4647,12 @@ function validateRoleName(value: string): void {
   }
 }
 
+function validateRoleSelector(value: string): void {
+  if (typeof value !== "string" || Buffer.byteLength(value) < 1 || Buffer.byteLength(value) > 120) {
+    throw new TypeError("Role selector must contain 1 to 120 bytes.");
+  }
+}
+
 function canonicalUuidOrNull(value: string): string | null {
   try {
     assertCanonicalUuid(value, "Role id");
@@ -4661,7 +4668,7 @@ function validateRoleShortDescription(value: string): void {
   }
 }
 
-export const MAX_ROLE_DETAILED_DESCRIPTION_BYTES = 51_200;
+export const MAX_ROLE_DETAILED_DESCRIPTION_BYTES = ROLE_TEXT_MAX_BYTES;
 
 export function assertRoleTextWriteAllowed(value: string, previous?: string): void {
   if (typeof value !== "string") throw new TypeError("Role detailed description must be text.");

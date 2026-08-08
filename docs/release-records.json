@@ -188,5 +188,19 @@
     "verify_job_id": null,
     "publish_job_id": null,
     "artifact_integrity": "sha512-4lmKixxf5MwyYmm9Yz6eckk9FeZEbmdnMe5ULuq0JTou2SocMl6mMMSx4a5bxTW9OyYspiZhrtG2bxEyFSmgvw=="
+  },
+  {
+    "outcome": "published",
+    "version": "0.14.2",
+    "tag": "v0.14.2",
+    "tag_object": "36dd3ee72cb74cd1ff14060a2f9bab3edc04b350",
+    "commit": "519c52413dd09a8b35e7e4a196f6c22db269a478",
+    "tree": "c22f3f490c33d239a97ac3afde5e3ae49d6e2135",
+    "workflow_run_id": 31185460675,
+    "workflow_run_attempt": 1,
+    "workflow_conclusion": "success",
+    "verify_job_id": null,
+    "publish_job_id": null,
+    "artifact_integrity": "sha512-2giA4B5tMD9nSZAwDeXYF6f31WNGjw9IpvGvKFsCLw8j5iL+yUn65I6cnGPVKC6trJyyZLfnGjSliSLzsEtkJw=="
   }
 ]

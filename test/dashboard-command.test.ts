@@ -9,6 +9,7 @@ import { bootstrapServer } from "../src/bootstrap.js";
 import { inspectRuntimeLock } from "../src/service.js";
 
 const mainPath = fileURLToPath(new URL("../dist/main.js", import.meta.url));
+const dashboardPtyRunner = fileURLToPath(new URL("./fixtures/dashboard-pty-runner.py", import.meta.url));
 const sqliteExperimentalWarning =
   /\(node:\d+\) ExperimentalWarning: SQLite is an experimental feature and might change at any time\r?\n\(Use `node --trace-warnings \.\.\.` to show where the warning was created\)\r?\n?/u;
 let directory: string | undefined;
@@ -25,6 +26,41 @@ afterEach(async () => {
 });
 
 describe("dashboard command", () => {
+  it.each(["start", "dashboard"] as const)(
+    "restores the alternate screen and exits cleanly on Ctrl-C from %s",
+    async (command) => {
+      directory = await realpath(await mkdtemp(join(tmpdir(), `borg-dashboard-pty-${command}-`)));
+      await bootstrapServer(directory);
+      if (command === "dashboard") {
+        server = spawn(process.execPath, [mainPath, "start", "--port", "0"], {
+          env: childEnvironment(directory),
+          stdio: ["ignore", "ignore", "ignore"],
+        });
+        await waitForLiveRuntime(directory);
+      }
+
+      const result = await runDashboardInPty(command, directory);
+
+      expect({
+        code: result.code,
+        signal: result.signal,
+        enteredAlternateScreen: result.output.includes("\u001b[?1049h"),
+        exitedAlternateScreen: result.output.includes("\u001b[?1049l"),
+      }).toEqual({
+        code: 0,
+        signal: null,
+        enteredAlternateScreen: true,
+        exitedAlternateScreen: true,
+      });
+
+      if (server !== undefined) {
+        server.kill("SIGTERM");
+        await expect(waitForExit(server)).resolves.toMatchObject({ code: 0, signal: null });
+        server = undefined;
+      }
+    },
+  );
+
   it("reads the live server in a separate non-TTY process and leaves it running", async () => {
     directory = await realpath(await mkdtemp(join(tmpdir(), "borg-dashboard-command-")));
     await bootstrapServer(directory);
@@ -90,6 +126,26 @@ async function runDashboard(dataDirectory: string): Promise<{
   child.stdout.on("data", (chunk: Buffer) => { stdout += chunk.toString("utf8"); });
   child.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString("utf8"); });
   return { ...await waitForExit(child), stdout, stderr };
+}
+
+async function runDashboardInPty(command: "start" | "dashboard", dataDirectory: string): Promise<{
+  readonly code: number | null;
+  readonly signal: NodeJS.Signals | null;
+  readonly output: string;
+}> {
+  const child = spawn(process.env["PYTHON"] ?? "python3", [
+    dashboardPtyRunner,
+    process.execPath,
+    mainPath,
+    ...(command === "start" ? ["start", "--port", "0"] : ["dashboard"]),
+  ], {
+    env: { ...childEnvironment(dataDirectory), BORG_PTY_READY_MARKER: "online" },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let output = "";
+  child.stdout.on("data", (chunk: Buffer) => { output += chunk.toString("utf8"); });
+  child.stderr.on("data", (chunk: Buffer) => { output += chunk.toString("utf8"); });
+  return { ...await waitForExit(child), output };
 }
 
 function childEnvironment(dataDirectory: string): NodeJS.ProcessEnv {

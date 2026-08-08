@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { randomUUID, X509Certificate } from "node:crypto";
 import { rmSync, writeFileSync } from "node:fs";
 import { access, mkdtemp, readFile, readdir, realpath, rm, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -236,6 +236,116 @@ describe("node server service", () => {
       );
       expect(second).toEqual({ existing: true, bindHost: "192.168.1.20" });
       expect(await readFile(credentials)).toEqual(before);
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
+  it.each(["fd00::1", "fe80::1"])(
+    "completes IPv6 LAN setup with a portable owner credential at %s",
+    async (bindHost) => {
+      const parent = await realpath(await mkdtemp(join(tmpdir(), "borg-ipv6-lan-setup-")));
+      try {
+        const directory = join(parent, "server");
+        const credentials = join(parent, "credentials");
+        const installation = requireFreshSetup(await setupNodeServerInstallation(
+          directory,
+          bindHost,
+          { reinitialize: false },
+          credentials,
+        ));
+        expect(installation.bindHost).toBe(bindHost);
+        const certificate = new X509Certificate(await readFile(installation.paths.serverCertificate));
+        expect(certificate.checkIP(bindHost)).toBe(bindHost);
+        expect(JSON.parse(await readFile(installation.paths.config, "utf8"))).toMatchObject({
+          bind_host: bindHost,
+        });
+        await expect(readPortableServerCredential(
+          credentials,
+          `https://[${bindHost}]:7091`,
+          `spki-sha256:${installation.caFingerprint}`,
+        )).resolves.toMatchObject({
+          clientId: installation.ownerAccess.clientId,
+          serverCapabilities: ["create_cube"],
+        });
+        await expect(setupNodeServerInstallation(
+          directory,
+          "fe80::1%en0",
+          { reinitialize: false },
+          credentials,
+        )).resolves.toEqual({ existing: true, bindHost });
+        await bindPortableOwnerCredentialPort(directory, credentials, 7_391);
+        await expect(readPortableServerCredential(
+          credentials,
+          `https://[${bindHost}]:7391`,
+          `spki-sha256:${installation.caFingerprint}`,
+        )).resolves.toMatchObject({ clientId: installation.ownerAccess.clientId });
+        await expect(createOfflineCredentialService(directory, credentials).invite())
+          .resolves.toMatchObject({ invitation: expect.stringMatching(/^[A-Za-z0-9_-]{43,1024}$/u) });
+        expect((await readdir(directory)).sort()).toEqual([
+          "borg.db",
+          "ca.crt",
+          "ca.key",
+          "credential-digest.key",
+          "server.crt",
+          "server.json",
+          "server.key",
+        ]);
+      } finally {
+        await rm(parent, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it("rejects a zone-indexed IPv6 setup cleanly at the credential origin boundary", async () => {
+    const parent = await realpath(await mkdtemp(join(tmpdir(), "borg-ipv6-zone-setup-")));
+    const directory = join(parent, "server");
+    try {
+      await expect(setupNodeServerInstallation(
+        directory,
+        "fe80::1%en0",
+        { reinitialize: false },
+        join(parent, "credentials"),
+      )).rejects.toBe(operatorErrors.SETUP_BIND_SCOPE_UNSUPPORTED);
+      await expect(readdir(directory)).resolves.toEqual([]);
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
+  it("recovers a CA-only partial installation through explicit reinitialization", async () => {
+    const parent = await realpath(await mkdtemp(join(tmpdir(), "borg-ipv6-partial-recovery-")));
+    const directory = join(parent, "server");
+    try {
+      const first = requireFreshSetup(await setupNodeServerInstallation(
+        directory,
+        "127.0.0.1",
+        { reinitialize: false },
+      ));
+      const caKey = await readFile(first.paths.caKey);
+      const caCertificate = await readFile(first.paths.caCertificate);
+
+      await expect(setupNodeServerInstallation(
+        directory,
+        "fd00::1",
+        { reinitialize: true },
+        "relative-credential-path",
+      )).rejects.toBe(operatorErrors.SETUP_OWNER_CREDENTIAL_FAILED);
+      expect((await readdir(directory)).sort()).toEqual(["ca.crt", "ca.key"]);
+
+      const recovered = requireFreshSetup(await setupNodeServerInstallation(
+        directory,
+        "fd00::1",
+        { reinitialize: true },
+        join(parent, "credentials"),
+      ));
+      expect(await readFile(recovered.paths.caKey)).toEqual(caKey);
+      expect(await readFile(recovered.paths.caCertificate)).toEqual(caCertificate);
+      await expect(readPortableServerCredential(
+        join(parent, "credentials"),
+        "https://[fd00::1]:7091",
+        `spki-sha256:${recovered.caFingerprint}`,
+      )).resolves.toMatchObject({ clientId: recovered.ownerAccess.clientId });
     } finally {
       await rm(parent, { recursive: true, force: true });
     }

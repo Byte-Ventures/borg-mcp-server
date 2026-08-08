@@ -1,4 +1,4 @@
-import { access, chmod, copyFile, mkdtemp, readFile, readdir, realpath, rm, stat, symlink } from "node:fs/promises";
+import { chmod, copyFile, mkdtemp, readFile, readdir, realpath, rm, stat, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { X509Certificate } from "node:crypto";
@@ -48,8 +48,7 @@ describe("offline bootstrap", () => {
     await expect(bootstrapServer(directory, "127.0.0.1", () => new Date(), async () => {
       throw new Error("credential persistence failed");
     })).rejects.toThrow("credential persistence failed");
-    await expect(access(join(directory, "server.json"))).rejects.toMatchObject({ code: "ENOENT" });
-    await expect(access(join(directory, "borg.db"))).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(readdir(directory)).resolves.toEqual([]);
   });
 
   it("creates private trust, identity, digest, and one-time bootstrap material", async () => {

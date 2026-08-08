@@ -32,6 +32,7 @@ import {
   portableCredentialAccountHasNonOwner,
   readPortableServerCredentialForTrustIdentity,
   rebindPortableServerCredential,
+  type PortableServerCredential,
   writePortableServerCredential,
 } from "./portable-credential-store.js";
 import { operatorErrors, type OperatorErrorCode } from "./operator-error.js";
@@ -1184,6 +1185,7 @@ export async function setupNodeServerInstallation(
       if (typeof config.bind_host !== "string") throw new Error("Server identity is invalid.");
       return Object.freeze({ existing: true, bindHost: config.bind_host });
     }
+    if (bindHost.includes("%")) throw operatorErrors.SETUP_BIND_SCOPE_UNSUPPORTED;
     if (options.reinitialize) {
       const names = new Set(existing.map((path) => basename(path)));
       const preservedCertificateAuthority = existing.length === 0
@@ -1200,7 +1202,7 @@ export async function setupNodeServerInstallation(
         () => new Date(),
         credentialRoot === undefined
           ? async () => undefined
-          : (record) => writePortableServerCredential(credentialRoot, record),
+          : (record) => persistSetupOwnerCredential(credentialRoot, record),
         preservedCertificateAuthority,
       );
     }
@@ -1210,11 +1212,22 @@ export async function setupNodeServerInstallation(
       () => new Date(),
       credentialRoot === undefined
         ? async () => undefined
-        : (record) => writePortableServerCredential(credentialRoot, record),
+        : (record) => persistSetupOwnerCredential(credentialRoot, record),
     );
   } finally {
     if (invitationLock === undefined) await runtimeLock.release();
     else await invitationLock.release().finally(() => runtimeLock.release());
+  }
+}
+
+async function persistSetupOwnerCredential(
+  credentialRoot: string,
+  record: PortableServerCredential,
+): Promise<void> {
+  try {
+    await writePortableServerCredential(credentialRoot, record);
+  } catch {
+    throw operatorErrors.SETUP_OWNER_CREDENTIAL_FAILED;
   }
 }
 
@@ -1269,8 +1282,9 @@ export async function bindPortableOwnerCredentialPort(
   );
   if (portableOwner === null) return;
   const { config, record } = portableOwner;
-  const origin = runningOrigin ?? `https://${config.bind_host === "::1" ? "[::1]" : config.bind_host}:${port}`;
-  const legacyOrigin = `https://${config.bind_host === "::1" ? "[::1]" : config.bind_host}:7091`;
+  const displayHost = config.bind_host.includes(":") ? `[${config.bind_host}]` : config.bind_host;
+  const origin = runningOrigin ?? `https://${displayHost}:${port}`;
+  const legacyOrigin = `https://${displayHost}:7091`;
   await rebindPortableServerCredential(
     credentialRoot,
     { ...record, origin },
@@ -1304,7 +1318,7 @@ async function readPortableOwnerCredentialForInstallation(
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
     if (error instanceof Error && error.message === "Local owner credential is unavailable.") {
-      const displayHost = config.bind_host === "::1" ? "[::1]" : config.bind_host;
+      const displayHost = config.bind_host.includes(":") ? `[${config.bind_host}]` : config.bind_host;
       for (const candidatePort of new Set([7_091, port])) {
         if (await portableCredentialAccountHasNonOwner(
           credentialRoot,
@@ -1471,7 +1485,7 @@ export function createOfflineCredentialService(
         const record = await readPortableServerCredentialForTrustIdentity(credentialRoot, trustIdentity);
         const endpoint = runtime.running && runtime.endpoint !== null
           ? runtime.endpoint
-          : `https://${config.bind_host === "::1" ? "[::1]" : config.bind_host}:7091`;
+          : `https://${config.bind_host.includes(":") ? `[${config.bind_host}]` : config.bind_host}:7091`;
         const invitation = authority.createInvitationArtifactForOwnerCredential(
           record.credential,
           15 * 60_000,

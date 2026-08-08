@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, realpath, rm, symlink } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, realpath, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -14,6 +14,7 @@ import {
   createNodeServerService,
   createOfflineCredentialService,
   nodeServerService,
+  setupNodeServerInstallation,
   type ServerService,
 } from "../src/service.js";
 import { isFatalTeardownError } from "../src/service.js";
@@ -38,6 +39,16 @@ describe("main operator errors", () => {
     ["START_PORT_INVALID", "Provide --port as an integer from 0 to 65535."],
     ["BIND_LAN_CONSENT", "Add --lan to consent to this private-LAN start."],
     ["SERVER_FILES_MISSING", "Configure BORG_SERVER_DATA_DIR or the required TLS file variables."],
+    [
+      "SETUP_BIND_SCOPE_UNSUPPORTED",
+      "The IPv6 address includes a zone index. No newly generated server identity was kept.\n" +
+      "Next: use a private IPv6 address without a zone index, then rerun setup.",
+    ],
+    [
+      "SETUP_OWNER_CREDENTIAL_FAILED",
+      "Setup could not save the local owner credential. No newly generated server identity was kept.\n" +
+      "Next: confirm ~/.borg/credentials is private and writable, then rerun setup.",
+    ],
     ["INSTALLATION_EXISTS", "An installation already exists in BORG_SERVER_DATA_DIR. To destroy and recreate it, stop the server and run borg-mcp-server setup --reinitialize."],
     ["OWNER_CREDENTIAL_UNAVAILABLE", "The local owner credential is unavailable. Restore the local credential store from backup, or preserve any needed server data and run borg-mcp-server setup --reinitialize to create a new database and leaf identity while preserving the CA when present."],
     ["RUNTIME_ACTIVE", "Stop the server before running setup or offline administration."],
@@ -150,6 +161,36 @@ describe("main operator errors", () => {
 
       expect(stderr).toHaveBeenCalledWith("Server command failed.");
       expect(JSON.stringify(stderr.mock.calls)).not.toContain(parent);
+      expect(process.exitCode).toBe(1);
+    } finally {
+      process.exitCode = previousExitCode;
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
+  it("surfaces a safe setup cause and removes the failed installation", async () => {
+    const previousExitCode = process.exitCode;
+    const parent = await realpath(await mkdtemp(join(tmpdir(), "borg-main-setup-cause-")));
+    const dataDirectory = join(parent, "server");
+    const stderr = vi.fn();
+    const service: ServerService = {
+      start: vi.fn(),
+      setup: () => setupNodeServerInstallation(
+        dataDirectory,
+        "127.0.0.1",
+        { reinitialize: false },
+        "relative-credential-path",
+      ),
+    };
+    try {
+      await runMain(["setup"], service, { stdout: vi.fn(), stderr });
+
+      expect(stderr).toHaveBeenCalledWith(
+        "Server command failed: Setup could not save the local owner credential. " +
+        "No newly generated server identity was kept.\n" +
+        "Next: confirm ~/.borg/credentials is private and writable, then rerun setup.",
+      );
+      await expect(readdir(dataDirectory)).resolves.toEqual([]);
       expect(process.exitCode).toBe(1);
     } finally {
       process.exitCode = previousExitCode;

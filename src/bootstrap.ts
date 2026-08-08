@@ -115,7 +115,7 @@ export async function bootstrapServer(
       }
       await persistOwnerCredential(Object.freeze({
         version: 2,
-        origin: `https://${bindHost === "::1" ? "[::1]" : bindHost}:7091`,
+        origin: `https://${bindHost.includes(":") ? `[${bindHost}]` : bindHost}:7091`,
         trustIdentity: `spki-sha256:${caFingerprint}`,
         credential,
         clientId: enrollment.clientId,
@@ -145,6 +145,7 @@ export async function bootstrapServer(
       await Promise.all([
         paths.database,
         paths.digestKey,
+        ...(preservedCertificateAuthority === undefined ? [paths.caKey, paths.caCertificate] : []),
         paths.serverKey,
         paths.serverCertificate,
         paths.config,

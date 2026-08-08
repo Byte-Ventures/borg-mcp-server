@@ -35,7 +35,7 @@ const ids = {
   roleA: "00000000-0000-4000-8000-000000000005",
   droneA: "00000000-0000-4000-8000-000000000006",
   sessionA: "00000000-0000-4000-8000-000000000007",
-  expiredSession: "00000000-0000-4000-8000-000000000008",
+  longLivedSession: "00000000-0000-4000-8000-000000000008",
 } as const;
 
 let directory: string;
@@ -87,7 +87,7 @@ beforeEach(async () => {
     droneId: ids.droneA,
   });
   runtime.maintenance.createDroneSession({
-    id: ids.expiredSession,
+    id: ids.longLivedSession,
     clientId: ids.clientA,
     cubeId: ids.cubeA,
     droneId: ids.droneA,
@@ -203,7 +203,7 @@ describe("Principal to ScopedStore isolation", () => {
     );
 
     const longLived = runtime.forPrincipal(droneSessionPrincipal({
-      id: ids.expiredSession,
+      id: ids.longLivedSession,
       clientId: ids.clientA,
       cubeId: ids.cubeA,
       droneId: ids.droneA,

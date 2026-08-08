@@ -1747,6 +1747,12 @@ describe("coordination stream setup", () => {
       status: 400,
       body: { request_id: "role-rationale-ambiguous", error: { code: "INVALID_INPUT" } },
     });
+    expect(await request("role-rationale-id-exact", {
+      role: role.id, section: "Workflow rationale",
+    }, clientPrincipal(readerId))).toMatchObject({
+      status: 200,
+      body: { request_id: "role-rationale-id-exact", payload: { role_id: role.id } },
+    });
     expect(await request("role-rationale-foreign", {
       role: role.id, section: "Workflow rationale",
     }, clientPrincipal(foreignId))).toMatchObject({

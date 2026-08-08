@@ -1737,6 +1737,16 @@ describe("coordination stream setup", () => {
         error: { code: "ROLE_SECTION_NOT_FOUND" },
       },
     });
+    runtime.forPrincipal(clientPrincipal(managerId)).createRole(cubeId, {
+      name: "builder",
+      detailedDescription: "Workflow rationale:\nAmbiguous role.\n",
+    });
+    expect(await request("role-rationale-ambiguous", {
+      role: "BUILDER", section: "Workflow rationale",
+    }, clientPrincipal(readerId))).toMatchObject({
+      status: 400,
+      body: { request_id: "role-rationale-ambiguous", error: { code: "INVALID_INPUT" } },
+    });
     expect(await request("role-rationale-foreign", {
       role: role.id, section: "Workflow rationale",
     }, clientPrincipal(foreignId))).toMatchObject({

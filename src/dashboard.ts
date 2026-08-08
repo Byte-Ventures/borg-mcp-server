@@ -399,28 +399,23 @@ export function startForegroundDashboard(input: {
         activityWindowMs,
         page,
       } satisfies DashboardViewState;
-      const frame = input.renderer(lastSnapshot, dimensions.columns, dimensions.rows, view);
-      if (frame === lastFrame) return;
       const inkOptions = inkRenderers.has(input.renderer) ? input.renderer.inkOptions : undefined;
       if (inkOptions !== undefined && usesInkDashboard(dimensions.columns, dimensions.rows)) {
-        const element = createInkDashboardElement(
-          lastSnapshot,
-          dimensions.columns,
-          dimensions.rows,
-          view,
-          inkOptions,
-        );
+        const frameKey = dashboardFrameKey(lastSnapshot, dimensions, view, inkOptions);
+        if (frameKey === lastFrame) return;
         if (inkInstance === undefined || inkStdout === undefined) {
           if (lastFrame !== undefined) input.terminal.write(clearScreen);
           mountInk(lastSnapshot, dimensions, view, inkOptions);
         } else {
-          inkInstance.rerender(element);
-          flushInkStdout(inkStdout);
+          unmountInk();
+          mountInk(lastSnapshot, dimensions, view, inkOptions);
         }
-        lastFrame = frame;
+        lastFrame = frameKey;
         return;
       }
       if (inkInstance !== undefined || inkStdout !== undefined) unmountInk();
+      const frame = input.renderer(lastSnapshot, dimensions.columns, dimensions.rows, view);
+      if (frame === lastFrame) return;
       input.terminal.write(`${clearScreen}${frame}`);
       lastFrame = frame;
     } catch (error) {
@@ -606,6 +601,79 @@ function createInkStdout(terminal: DashboardTerminal): NodeJS.WriteStream {
 
 function flushInkStdout(stream: NodeJS.WriteStream): void {
   (stream as NodeJS.WriteStream & { readonly flushInk?: () => void }).flushInk?.();
+}
+
+// The live Ink route cannot call the synchronous renderer to compare frames:
+// renderToString creates a throwaway reconciler tree that is retained by Ink.
+// Project the state that can reach the current viewport instead, so invisible
+// cube churn does not trigger an unnecessary remount.
+function dashboardFrameKey(
+  snapshot: DashboardSnapshot,
+  dimensions: { readonly columns: number; readonly rows: number },
+  view: DashboardViewState,
+  options: NonNullable<DashboardRenderer["inkOptions"]>,
+): string {
+  const width = Math.min(500, Math.max(20, finiteDashboardDimension(dimensions.columns, 20)));
+  const height = Math.min(200, Math.max(4, finiteDashboardDimension(dimensions.rows, 4)));
+  const lifecycleRows = options.footer === EMBEDDED_DASHBOARD_FOOTER
+    ? dashboardLifecycleFooterRows(EMBEDDED_DASHBOARD_LIFECYCLE_FOOTER, width)
+    : 0;
+  const listCap = Math.max(1, Math.floor(Math.max(0, height - (3 + lifecycleRows + 1)) * 0.42));
+  const pageCount = Math.max(1, Math.ceil(snapshot.cubes.length / listCap));
+  const page = Math.max(0, view.page ?? 0) % pageCount;
+  const summaryCubes = snapshot.cubes.slice(page * listCap, page * listCap + Math.min(snapshot.cubes.length, listCap));
+  const focus = view.autoFollow || view.focusedCubeId === null
+    ? snapshot.cubes[0]
+    : snapshot.cubes.find((cube) => cube.id === view.focusedCubeId) ?? snapshot.cubes[0];
+  const focusActivity = [...(view.activity?.entries() ?? [])]
+    .filter(([key]) => focus !== undefined && key.startsWith(`${focus.id}:`))
+    .sort(([left], [right]) => left.localeCompare(right));
+  const visiblePulseCubeIds = summaryCubes
+    .filter((cube) => view.pulseCubeIds.has(cube.id))
+    .map((cube) => cube.id)
+    .sort();
+  const activityWindowMs = view.activityWindowMs ?? DASHBOARD_ACTIVITY_WINDOW_MS;
+  return JSON.stringify({
+    kind: "ink-dashboard",
+    dimensions: { columns: width, rows: height },
+    options,
+    snapshot: {
+      captured_at: snapshot.captured_at,
+      server: snapshot.server,
+      cubeCount: snapshot.cubes.length,
+      totalPosts: snapshot.cubes.reduce((sum, cube) => sum + cube.posts_15m, 0),
+      maximumPosts: Math.max(...snapshot.cubes.map((cube) => cube.posts_15m), 0),
+      summaryCubes,
+      focus,
+    },
+    view: {
+      autoFollow: view.autoFollow,
+      focusedCubeId: view.focusedCubeId,
+      pulseCubeIds: visiblePulseCubeIds,
+      pulsePhase: visiblePulseCubeIds.length > 0 ? view.pulsePhase : 0,
+      activity: focusActivity,
+      observation: view.observation ?? [],
+      activityWindowMs,
+      page,
+    },
+  });
+}
+
+function dashboardLifecycleFooterRows(value: string, width: number): number {
+  const sentences = value.match(/[^.]+(?:\.|$)/gu)?.map((sentence) => sentence.trim()) ?? [value];
+  return sentences.reduce((total, sentence) => {
+    let rows = 0;
+    let current = "";
+    for (const word of sentence.split(/\s+/u)) {
+      if (current === "" || `${current} ${word}`.length > width) {
+        rows += 1;
+        current = word;
+      } else {
+        current = `${current} ${word}`;
+      }
+    }
+    return total + rows;
+  }, 0);
 }
 
 function recordDashboardActivity(

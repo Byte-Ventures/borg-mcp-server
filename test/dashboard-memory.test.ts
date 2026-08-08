@@ -1,4 +1,8 @@
 import { afterEach, expect, it, vi } from "vitest";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+
+const execFileAsync = promisify(execFile);
 
 const inkProbe = {
   mounts: 0,
@@ -95,4 +99,73 @@ it("does not retain redundant live Ink renders for a stable roster and snapshot"
   } finally {
     dashboard.close();
   }
+});
+
+it("bounds live Ink paints for an active production-shaped roster", async () => {
+  vi.useFakeTimers();
+  let reads = 0;
+  const source = {
+    read: () => {
+      reads += 1;
+      const capturedAt = new Date(
+        Date.parse(snapshot.captured_at) + reads * 5_000,
+      ).toISOString();
+      return {
+        ...snapshot,
+        captured_at: capturedAt,
+        cubes: [{
+          ...snapshot.cubes[0]!,
+          posts_15m: reads,
+          last_post_at: capturedAt,
+          drones: [{
+            ...snapshot.cubes[0]!.drones[0]!,
+            last_seen: capturedAt,
+            sent: reads,
+            sent_5s: reads,
+            received: reads,
+          }],
+        }],
+      };
+    },
+    subscribe: () => () => undefined,
+  };
+  const terminal = {
+    write: () => undefined,
+    dimensions: () => ({ columns: 80, rows: 24 }),
+    onResize: () => () => undefined,
+  };
+  const dashboard = startForegroundDashboard({
+    source,
+    server,
+    terminal,
+    renderer: createDashboardRenderer({
+      glyphMode: "ascii",
+      color: false,
+      footer: "^C stop server  |  read-only",
+    }),
+    idleRefreshMs: 100,
+    pulseFrameMs: 25,
+  });
+  try {
+    const initialRerenders = inkProbe.rerenders;
+    await vi.advanceTimersByTimeAsync(100 * 8);
+
+    expect(reads).toBe(9);
+    expect(inkProbe.rerenders - initialRerenders).toBeLessThanOrEqual(8);
+  } finally {
+    dashboard.close();
+  }
+});
+
+it("bounds retained heap for an active production-shaped roster", async () => {
+  const { stdout } = await execFileAsync(
+    process.execPath,
+    ["--expose-gc", "test/dashboard-memory-probe.mjs"],
+    { cwd: process.cwd(), maxBuffer: 1024 * 1024 },
+  );
+  const line = stdout.split("\n").find((value) => value.startsWith("{"));
+  expect(line).toBeDefined();
+  const result = JSON.parse(line!);
+  expect(result.reads).toBeGreaterThanOrEqual(150);
+  expect(result.delta).toBeLessThan(8 * 1024 * 1024);
 });

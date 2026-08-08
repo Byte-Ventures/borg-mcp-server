@@ -61,12 +61,16 @@ v1 scope.
   seat, and makes foreign and unknown cubes indistinguishable. Attach and sparse self-heal updates are
   atomic, never echo rejected input, and do not modify grants, role, posture, routing, liveness,
   `last_seen`, activity logs, wake state, timers, or model execution.
-- Role creation, sparse role update, and granular role-section patch routes require the cube's
-  `manage` grant. Drone sessions and lesser client grants receive the same `NOT_FOUND` response as
-  foreign or missing cube/role tuples. Default promotion and role mutation recheck authority inside
-  one immediate transaction. A current default cannot be explicitly demoted; promoting another role
-  is the only default transition, preserving exactly one default. Section patches alter one
-  plain-label section while preserving the remainder of the stored playbook.
+- Role creation, sparse role update, granular role-section patch, and role deletion routes require
+  the cube's `manage` grant. Drone sessions and lesser client grants receive the same `NOT_FOUND`
+  response as foreign or missing cube/role tuples. Default promotion and role mutation recheck
+  authority inside one immediate transaction. Role deletion applies the default, required,
+  taxonomy-reference, and active-drone guards, then retargets evicted drones to the default role and
+  deletes the role in that same transaction. A current default cannot be explicitly demoted;
+  promoting another role is the only default transition, preserving exactly one default. Section
+  patches alter one plain-label section while preserving the remainder of the stored playbook. The
+  role-rationale route uses the cube's `read` scope and returns one named section, bounded to 51,200
+  bytes.
 - `credential-digest.key`, `server.key`, and `borg.db` are runtime secrets. They remain mode `0600`
   under an operator-controlled mode `0700` directory. The long-running service does not load
   `ca.key`. After setup, operators deploying on a LAN must move `ca.key` to offline storage that the
@@ -187,7 +191,7 @@ v1 scope.
 | Client attach/retry | Permanent retry binding, eligible prior-seat reattachment or drone insertion, session/credential insertion, and prior-session revocation |
 | Own-seat runtime metadata | Sparse advisory metadata replacement or explicit-null clearing, with repository identity updated as one pair |
 | Cube directive update | Directive replacement and SQLite index/page growth |
-| Role create/update/section patch | Role insertion, sparse field replacement, default transition, or targeted playbook fragment replacement |
+| Role create/update/section patch/delete; role rationale read | Role insertion, sparse field replacement, default transition, targeted playbook fragment replacement, guarded deletion with evicted-drone retarget, or one named section read without mutation, bounded to 51,200 bytes |
 | Activity append | Log/recipient insertion, cursor tombstone insertion, and pruning cascades |
 | Activity acknowledgement/claim | Acknowledgement insertion |
 | Decision ratification | Active-decision supersession and immutable history insertion |

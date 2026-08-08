@@ -1561,6 +1561,196 @@ describe("coordination stream setup", () => {
       .toEqual(["Queen", "Release Quality", "Security Auditor"]);
   });
 
+  it("deletes an unused role after eviction while preserving the evicted drone's activity attribution", async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-api-role-delete-")));
+    directories.push(directory);
+    runtime = await openStore({ path: join(directory, "borg.db") });
+    digester = new CredentialDigester(Buffer.alloc(32, 31));
+    const api = new CoordinationApi(runtime, new CredentialAuthority(runtime.credentials, digester));
+    const managerId = "00000000-0000-4000-8000-000000000201";
+    const cubeId = "00000000-0000-4000-8000-000000000202";
+    const droneId = "00000000-0000-4000-8000-000000000203";
+    const sessionId = "00000000-0000-4000-8000-000000000204";
+    runtime.maintenance.createClient({ id: managerId, name: "Manager" });
+    runtime.maintenance.createCube({ id: cubeId, name: "Role deletion", directive: "" });
+    runtime.maintenance.grantClientCube({ clientId: managerId, cubeId, access: "manage" });
+    const manager = runtime.forPrincipal(clientPrincipal(managerId));
+    const fallback = manager.createRole(cubeId, { name: "Builder", isDefault: true });
+    const obsolete = manager.createRole(cubeId, { name: "Obsolete" });
+    runtime.maintenance.createDrone({
+      id: droneId, cubeId, roleId: obsolete.id, clientId: managerId, label: "obsolete-one",
+    });
+    runtime.maintenance.createDroneSession({ id: sessionId, clientId: managerId, cubeId, droneId });
+    const entry = runtime.forPrincipal(droneSessionPrincipal({
+      id: sessionId, clientId: managerId, cubeId, droneId,
+    })).appendLog(cubeId, { message: "historical attribution" });
+    const request = (requestId: string) => ({
+      method: "DELETE" as const,
+      path: `/api/cubes/${cubeId}/roles/${obsolete.id}`,
+      principal: clientPrincipal(managerId),
+      body: { protocol_version: "7", request_id: requestId, payload: {} },
+      signal: new AbortController().signal,
+    });
+
+    expect(await api.handle(request("role-delete-in-use"))).toMatchObject({
+      status: 409,
+      body: {
+        request_id: "role-delete-in-use",
+        error: {
+          code: "ROLE_IN_USE",
+          message: "Reassign or evict every drone assigned to this role before deleting it.",
+        },
+      },
+    });
+    manager.evictDrone(cubeId, droneId);
+
+    expect(await api.handle(request("role-delete-success"))).toMatchObject({
+      status: 200,
+      body: {
+        request_id: "role-delete-success",
+        payload: { role_id: obsolete.id, deleted: true },
+      },
+    });
+    expect(manager.listRoles(cubeId).map((role) => role.id)).not.toContain(obsolete.id);
+    expect(manager.listDrones(cubeId)).toEqual([]);
+    expect(manager.readLogEntry(cubeId, entry.id)).toMatchObject({
+      drone_id: droneId,
+      drone_label: "obsolete-one",
+      role_name: fallback.name,
+      message: "historical attribution",
+    });
+  });
+
+  it("refuses role deletion when cube integrity still references the role", async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-api-role-delete-guards-")));
+    directories.push(directory);
+    runtime = await openStore({ path: join(directory, "borg.db") });
+    digester = new CredentialDigester(Buffer.alloc(32, 32));
+    const api = new CoordinationApi(runtime, new CredentialAuthority(runtime.credentials, digester));
+    const managerId = "00000000-0000-4000-8000-000000000211";
+    const readerId = "00000000-0000-4000-8000-000000000212";
+    const cubeId = "00000000-0000-4000-8000-000000000213";
+    runtime.maintenance.createClient({ id: managerId, name: "Manager" });
+    runtime.maintenance.createClient({ id: readerId, name: "Reader" });
+    runtime.maintenance.createCube({ id: cubeId, name: "Role guards", directive: "" });
+    runtime.maintenance.grantClientCube({ clientId: managerId, cubeId, access: "manage" });
+    runtime.maintenance.grantClientCube({ clientId: readerId, cubeId, access: "read" });
+    const manager = runtime.forPrincipal(clientPrincipal(managerId));
+    const defaultRole = manager.createRole(cubeId, { name: "Builder", isDefault: true });
+    const mandatoryRole = manager.createRole(cubeId, { name: "Coordinator", isMandatory: true });
+    const humanRole = manager.createRole(cubeId, { name: "Human", isHumanSeat: true });
+    const routedRole = manager.createRole(cubeId, { name: "Code Reviewer" });
+    manager.updateCube(cubeId, { messageTaxonomy: [{
+      class: "review", prefixes: ["REVIEW"], routing: "directed", default_to: ["code-reviewer"],
+    }] });
+    const deletion = (roleId: string, requestId: string, principal: Principal = clientPrincipal(managerId)) =>
+      api.handle({
+        method: "DELETE",
+        path: `/api/cubes/${cubeId}/roles/${roleId}`,
+        principal,
+        body: { protocol_version: "7", request_id: requestId, payload: {} },
+        signal: new AbortController().signal,
+      });
+
+    for (const [roleId, requestId, code] of [
+      [defaultRole.id, "role-delete-default", "DEFAULT_ROLE_REQUIRED"],
+      [mandatoryRole.id, "role-delete-mandatory", "ROLE_REQUIRED"],
+      [humanRole.id, "role-delete-human", "ROLE_REQUIRED"],
+      [routedRole.id, "role-delete-routed", "ROLE_REFERENCED"],
+    ] as const) {
+      expect(await deletion(roleId, requestId)).toMatchObject({
+        status: 409,
+        body: { request_id: requestId, error: { code } },
+      });
+    }
+    expect(await deletion(randomUUID(), "role-delete-missing")).toMatchObject({
+      status: 404,
+      body: { request_id: "role-delete-missing", error: { code: "NOT_FOUND" } },
+    });
+    expect(await deletion(routedRole.id, "role-delete-reader", clientPrincipal(readerId)))
+      .toMatchObject({
+        status: 403,
+        body: { request_id: "role-delete-reader", error: { code: "ACCESS_DENIED" } },
+      });
+    expect(manager.listRoles(cubeId).map((role) => role.id)).toEqual(expect.arrayContaining([
+      defaultRole.id, mandatoryRole.id, humanRole.id, routedRole.id,
+    ]));
+  });
+
+  it("reads one named role rationale section with typed missing-role and missing-section refusals", async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-api-role-rationale-")));
+    directories.push(directory);
+    runtime = await openStore({ path: join(directory, "borg.db") });
+    digester = new CredentialDigester(Buffer.alloc(32, 33));
+    const api = new CoordinationApi(runtime, new CredentialAuthority(runtime.credentials, digester));
+    const managerId = "00000000-0000-4000-8000-000000000221";
+    const readerId = "00000000-0000-4000-8000-000000000222";
+    const foreignId = "00000000-0000-4000-8000-000000000223";
+    const cubeId = "00000000-0000-4000-8000-000000000224";
+    runtime.maintenance.createClient({ id: managerId, name: "Manager" });
+    runtime.maintenance.createClient({ id: readerId, name: "Reader" });
+    runtime.maintenance.createClient({ id: foreignId, name: "Foreign" });
+    runtime.maintenance.createCube({ id: cubeId, name: "Role rationale", directive: "" });
+    runtime.maintenance.grantClientCube({ clientId: managerId, cubeId, access: "manage" });
+    runtime.maintenance.grantClientCube({ clientId: readerId, cubeId, access: "read" });
+    const role = runtime.forPrincipal(clientPrincipal(managerId)).createRole(cubeId, {
+      name: "Builder",
+      detailedDescription: "Build changes.\n\nWorkflow rationale:\nKeep the patch narrow.\n\nLimits:\nNo release.\n",
+    });
+    const request = (requestId: string, payload: Record<string, unknown>, principal: Principal) =>
+      api.handle({
+        method: "POST",
+        path: `/api/cubes/${cubeId}/role-rationale`,
+        principal,
+        body: { protocol_version: "7", request_id: requestId, payload },
+        signal: new AbortController().signal,
+      });
+
+    expect(await request("role-rationale-read", {
+      role: "builder", section: "workflow rationale",
+    }, clientPrincipal(readerId))).toMatchObject({
+      status: 200,
+      body: {
+        request_id: "role-rationale-read",
+        payload: {
+          role_id: role.id,
+          role_name: "Builder",
+          section: {
+            heading: "Workflow rationale",
+            body: "Workflow rationale:\nKeep the patch narrow.\n\n",
+          },
+        },
+      },
+    });
+    expect(await request("role-rationale-missing-role", {
+      role: "Missing", section: "Workflow rationale",
+    }, clientPrincipal(readerId))).toMatchObject({
+      status: 404,
+      body: { request_id: "role-rationale-missing-role", error: { code: "ROLE_NOT_FOUND" } },
+    });
+    expect(await request("role-rationale-missing-section", {
+      role: role.id, section: "Missing",
+    }, clientPrincipal(readerId))).toMatchObject({
+      status: 404,
+      body: {
+        request_id: "role-rationale-missing-section",
+        error: { code: "ROLE_SECTION_NOT_FOUND" },
+      },
+    });
+    expect(await request("role-rationale-foreign", {
+      role: role.id, section: "Workflow rationale",
+    }, clientPrincipal(foreignId))).toMatchObject({
+      status: 404,
+      body: { request_id: "role-rationale-foreign", error: { code: "NOT_FOUND" } },
+    });
+    expect(await request("role-rationale-invalid", {
+      role: role.id, section: "**Markdown**",
+    }, clientPrincipal(readerId))).toMatchObject({
+      status: 400,
+      body: { request_id: "role-rationale-invalid", error: { code: "INVALID_INPUT" } },
+    });
+  });
+
   it("distinguishes known non-managers from undisclosed cubes across administration routes", async () => {
     const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-api-manage-access-")));
     directories.push(directory);

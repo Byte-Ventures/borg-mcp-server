@@ -99,6 +99,16 @@ export function patchMessageTaxonomy(
   ]);
 }
 
+export function messageTaxonomyReferencesRole(
+  taxonomy: MessageTaxonomy | null,
+  roleName: string,
+): boolean {
+  const target = roleSlug(roleName);
+  return taxonomy?.some((entry) =>
+    (entry.default_to ?? []).some((selector) => roleSlug(selector) === target)
+  ) ?? false;
+}
+
 export function resolveMessageRouting(
   input: {
     readonly message: string;

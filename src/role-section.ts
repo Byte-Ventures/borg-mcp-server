@@ -25,6 +25,22 @@ interface RoleSection {
   readonly body: string;
 }
 
+export interface NamedRoleSection {
+  readonly heading: string;
+  readonly body: string;
+}
+
+export function readRoleSectionText(text: string, heading: string): NamedRoleSection | null {
+  validateHeading(heading);
+  const target = normalizedHeading(heading);
+  const section = parseSections(text).find((candidate) =>
+    candidate.heading !== null && normalizedHeading(candidate.heading) === target
+  );
+  return section?.heading === null || section === undefined
+    ? null
+    : { heading: section.heading, body: section.body };
+}
+
 export function patchRoleSectionText(text: string, operation: RoleSectionPatchOp): string {
   validateHeading(operation.heading);
   const sections = parseSections(text);

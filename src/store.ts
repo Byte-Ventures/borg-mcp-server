@@ -27,10 +27,11 @@ import {
 import {
   RoleSectionPatchConflictError,
   patchRoleSectionText,
+  readRoleSectionText,
   type RoleSectionPatchConflictReason,
   type RoleSectionPatchOp,
 } from "./role-section.js";
-import { validateMessageTaxonomy } from "./message-taxonomy.js";
+import { messageTaxonomyReferencesRole, validateMessageTaxonomy } from "./message-taxonomy.js";
 import {
   PLATFORM_QUEEN_DETAILED_DESCRIPTION,
   PLATFORM_QUEEN_SHORT_DESCRIPTION,
@@ -146,6 +147,15 @@ export interface RoleRecord {
   readonly receives_all_direct: boolean;
   readonly role_class: "queen" | "worker";
   readonly created_at: string;
+}
+
+export interface RoleRationaleRecord {
+  readonly role_id: string;
+  readonly role_name: string;
+  readonly section: {
+    readonly heading: string;
+    readonly body: string;
+  };
 }
 
 export interface DroneRecord {
@@ -324,6 +334,12 @@ export interface ScopedStore {
   readonly createRole: (cubeId: string, input: CreateRoleInput) => RoleRecord;
   readonly updateRole: (cubeId: string, roleId: string, input: UpdateRoleInput) => RoleRecord;
   readonly patchRoleSection: (cubeId: string, roleId: string, input: RoleSectionPatchOp) => RoleRecord;
+  readonly deleteRole: (cubeId: string, roleId: string) => void;
+  readonly readRoleRationale: (
+    cubeId: string,
+    roleSelector: string,
+    sectionHeading: string,
+  ) => RoleRationaleRecord;
   readonly listDrones: (cubeId: string) => DroneRecord[];
   readonly listDronesSince: (cubeId: string, since: string) => {
     readonly drones: DroneRecord[];
@@ -667,9 +683,45 @@ function roleSectionConflictMessage(reason: RoleSectionPatchConflictReason): str
 export class RoleInUseError extends Error {
   readonly code = "ROLE_IN_USE";
 
-  constructor() {
-    super("The human-seat role is already occupied.");
+  constructor(message = "The human-seat role is already occupied.") {
+    super(message);
     this.name = "RoleInUseError";
+  }
+}
+
+export class RoleRequiredError extends Error {
+  readonly code = "ROLE_REQUIRED";
+
+  constructor() {
+    super("A required cube role cannot be deleted.");
+    this.name = "RoleRequiredError";
+  }
+}
+
+export class RoleReferencedError extends Error {
+  readonly code = "ROLE_REFERENCED";
+
+  constructor() {
+    super("A message taxonomy default recipient still references this role.");
+    this.name = "RoleReferencedError";
+  }
+}
+
+export class RoleNotFoundError extends Error {
+  readonly code = "ROLE_NOT_FOUND";
+
+  constructor() {
+    super("The requested role was not found.");
+    this.name = "RoleNotFoundError";
+  }
+}
+
+export class RoleSectionNotFoundError extends Error {
+  readonly code = "ROLE_SECTION_NOT_FOUND";
+
+  constructor() {
+    super("The requested role section was not found.");
+    this.name = "RoleSectionNotFoundError";
   }
 }
 
@@ -1598,6 +1650,90 @@ class SqliteScopedStore implements ScopedStore {
       try { this.#database.exec("ROLLBACK"); } catch { /* Preserve the original failure. */ }
       throw error;
     }
+  }
+
+  deleteRole(cubeId: string, roleId: string): void {
+    assertCanonicalUuid(cubeId, "Cube id");
+    assertCanonicalUuid(roleId, "Role id");
+    this.#requireCube(cubeId, "manage");
+    this.#database.exec("BEGIN IMMEDIATE");
+    try {
+      this.#requireCube(cubeId, "manage");
+      const roleRow = this.#database.prepare(`
+        SELECT id, name, is_default, is_mandatory, is_human_seat
+        FROM roles WHERE id = ? AND cube_id = ?
+      `).get(roleId, cubeId);
+      if (roleRow === undefined) throw new ScopedStoreError();
+      if (requiredInteger(roleRow, "is_default") === 1) throw new DefaultRoleRequiredError();
+      if (requiredInteger(roleRow, "is_mandatory") === 1 ||
+          requiredInteger(roleRow, "is_human_seat") === 1) {
+        throw new RoleRequiredError();
+      }
+      const cubeRow = this.#database.prepare(
+        "SELECT message_taxonomy FROM cubes WHERE id = ?",
+      ).get(cubeId);
+      if (cubeRow === undefined) throw new ScopedStoreError();
+      if (messageTaxonomyReferencesRole(
+        parseTaxonomy(nullableText(cubeRow, "message_taxonomy")),
+        requiredText(roleRow, "name"),
+      )) {
+        throw new RoleReferencedError();
+      }
+      const activeDrone = this.#database.prepare(`
+        SELECT 1 AS present FROM drones
+        WHERE cube_id = ? AND role_id = ? AND evicted_at IS NULL
+      `).get(cubeId, roleId);
+      if (activeDrone !== undefined) {
+        throw new RoleInUseError(
+          "Reassign or evict every drone assigned to this role before deleting it.",
+        );
+      }
+      const defaultRole = this.#database.prepare(`
+        SELECT id FROM roles WHERE cube_id = ? AND is_default = 1
+      `).get(cubeId);
+      if (defaultRole === undefined) throw new DefaultRoleRequiredError();
+      const retargeted = this.#database.prepare(`
+        UPDATE drones SET role_id = ?
+        WHERE cube_id = ? AND role_id = ? AND evicted_at IS NOT NULL
+      `).run(requiredText(defaultRole, "id"), cubeId, roleId);
+      if (retargeted.changes > 0) this.#mutationHook?.("role.retarget-evicted");
+      const deleted = this.#database.prepare(
+        "DELETE FROM roles WHERE id = ? AND cube_id = ?",
+      ).run(roleId, cubeId);
+      if (deleted.changes !== 1) throw new ScopedStoreError();
+      this.#mutationHook?.("role.delete");
+      this.#database.exec("COMMIT");
+      this.#mutationHook?.("role.after-commit");
+    } catch (error) {
+      try { this.#database.exec("ROLLBACK"); } catch { /* Preserve the original failure. */ }
+      throw error;
+    }
+  }
+
+  readRoleRationale(
+    cubeId: string,
+    roleSelector: string,
+    sectionHeading: string,
+  ): RoleRationaleRecord {
+    assertCanonicalUuid(cubeId, "Cube id");
+    validateRoleName(roleSelector);
+    this.#requireCube(cubeId, "read");
+    const roles = this.listRoles(cubeId);
+    const normalizedSelector = roleSelector.toLowerCase();
+    const roleId = canonicalUuidOrNull(roleSelector);
+    const matching = roleId !== null
+      ? roles.filter((role) => role.id === roleId)
+      : roles.filter((role) => role.name.toLowerCase() === normalizedSelector);
+    if (matching.length === 0) throw new RoleNotFoundError();
+    if (matching.length > 1) throw new TypeError("Role selector is ambiguous.");
+    const role = matching[0]!;
+    const section = readRoleSectionText(role.detailed_description, sectionHeading);
+    if (section === null) throw new RoleSectionNotFoundError();
+    return {
+      role_id: role.id,
+      role_name: role.name,
+      section,
+    };
   }
 
   listDrones(cubeId: string): DroneRecord[] {
@@ -4504,6 +4640,15 @@ function validatePresentationName(value: string): void {
 function validateRoleName(value: string): void {
   if (typeof value !== "string" || value.length < 1 || value.length > 64) {
     throw new Error("Role name must contain 1 to 64 characters.");
+  }
+}
+
+function canonicalUuidOrNull(value: string): string | null {
+  try {
+    assertCanonicalUuid(value, "Role id");
+    return value.toLowerCase();
+  } catch {
+    return null;
   }
 }
 

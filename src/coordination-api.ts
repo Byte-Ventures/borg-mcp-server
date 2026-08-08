@@ -38,7 +38,11 @@ import {
   DefaultRoleRequiredError,
   RoleConflictError,
   RoleInUseError,
+  RoleNotFoundError,
+  RoleReferencedError,
+  RoleRequiredError,
   RoleSectionConflictError,
+  RoleSectionNotFoundError,
   ActivityEntryPrefixConflictError,
   ScopedStoreError,
   StorageCapacityError,
@@ -275,7 +279,7 @@ export class CoordinationApi {
       .exec(request.path);
     const selfMetadataMatch =
       /^\/api\/cubes\/([0-9a-f-]{36})\/drones\/self\/metadata$/u.exec(request.path);
-    const match = /^\/api\/cubes\/([0-9a-f-]{36})(?:\/(roles|drones|logs|acks|decisions|stream|taxonomy-patch))?$/u
+    const match = /^\/api\/cubes\/([0-9a-f-]{36})(?:\/(roles|drones|logs|acks|decisions|stream|taxonomy-patch|role-rationale))?$/u
       .exec(request.path);
     if (match === null && roleMatch === null && logEntryMatch === null && droneMatch === null && selfMetadataMatch === null) {
       return failure(404, "NOT_FOUND", "The requested resource was not found.");
@@ -433,6 +437,22 @@ export class CoordinationApi {
             : { advisory: contextAdvisory("Playbook", role.detailed_description, this.#contextGuidelineBytes) }),
         });
       }
+      if (resource === "role" && !sectionPatch && request.method === "DELETE") {
+        const envelope = decodeEnvelope(request.body);
+        exactKeys(envelope.payload, []);
+        try {
+          store.deleteRole(cubeId, roleId!);
+        } catch (error) {
+          if (error instanceof ScopedStoreError) {
+            return failure(404, error.code, error.message, envelope.requestId);
+          }
+          if (error instanceof AccessDeniedError) {
+            return failure(403, error.code, error.message, envelope.requestId);
+          }
+          throw error;
+        }
+        return success(200, envelope.requestId, { role_id: roleId!, deleted: true });
+      }
       if (resource === "role" && sectionPatch && request.method === "POST") {
         const envelope = decodeEnvelope(request.body);
         const action = envelope.payload["action"];
@@ -470,6 +490,23 @@ export class CoordinationApi {
           role,
           advisory: contextAdvisory("Playbook", role.detailed_description, this.#contextGuidelineBytes),
         });
+      }
+      if (resource === "role-rationale" && request.method === "POST") {
+        const envelope = decodeEnvelope(request.body);
+        exactKeys(envelope.payload, ["role", "section"]);
+        const role = requiredString(envelope.payload, "role", 64);
+        const section = requiredSectionHeading(envelope.payload, "section");
+        try {
+          return success(200, envelope.requestId, store.readRoleRationale(cubeId, role, section));
+        } catch (error) {
+          if (error instanceof ScopedStoreError) {
+            return failure(404, error.code, error.message, envelope.requestId);
+          }
+          if (error instanceof AccessDeniedError) {
+            return failure(403, error.code, error.message, envelope.requestId);
+          }
+          throw error;
+        }
       }
       if (resource === "drones" && request.method === "GET") {
         if (request.since === undefined) {
@@ -631,6 +668,12 @@ export class CoordinationApi {
       }
       if (error instanceof RoleInUseError) {
         return failure(409, error.code, error.message, safeRequestId(request.body));
+      }
+      if (error instanceof RoleRequiredError || error instanceof RoleReferencedError) {
+        return failure(409, error.code, error.message, safeRequestId(request.body));
+      }
+      if (error instanceof RoleNotFoundError || error instanceof RoleSectionNotFoundError) {
+        return failure(404, error.code, error.message, safeRequestId(request.body));
       }
       if (error instanceof StorageCapacityError) {
         return failure(507, "CAPACITY_EXCEEDED", error.message, safeRequestId(request.body));

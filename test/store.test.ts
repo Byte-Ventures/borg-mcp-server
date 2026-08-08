@@ -474,6 +474,10 @@ describe("Principal to ScopedStore isolation", () => {
       name: "Oversized",
       detailedDescription: "x".repeat(51_201),
     })).toThrow(RangeError);
+    expect(() => client.createRole(ids.cubeA, {
+      name: "Oversized bytes",
+      detailedDescription: "é".repeat(25_601),
+    })).toThrow(RangeError);
     const roles = client.listRoles(ids.cubeA);
     expect(roles.find((role) => role.id === defaultRole.id)?.is_default).toBe(true);
     expect(roles.filter((role) => role.is_default)).toHaveLength(1);

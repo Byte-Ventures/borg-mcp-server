@@ -22,6 +22,7 @@ import { CoordinationApi } from "../src/coordination-api.js";
 import { CredentialAuthority, CredentialDigester, generateSecret } from "../src/credentials.js";
 import { createEnrollmentExchange } from "../src/enrollment.js";
 import { startHttpsServer, type RunningServer } from "../src/https-server.js";
+import { operatorPrincipal } from "../src/principal.js";
 import { openStore, type StoreRuntime } from "../src/store.js";
 
 const directories: string[] = [];
@@ -62,7 +63,7 @@ describe("borgmcp-shared server adapter", () => {
           observations: {},
         },
       ]);
-      expect(report.results).toHaveLength(29);
+      expect(report.results).toHaveLength(31);
     } finally {
       await fixture.server.close();
       fixture.digester.destroy();
@@ -156,15 +157,32 @@ async function conformanceEnvironment(): Promise<{
         if (clientId !== undefined) runtime.maintenance.removeClientCubeGrant(clientId, cube.id);
       },
       createRole: async (cube, input) => {
-        const id = randomUUID();
-        runtime.maintenance.createRole({
-          id,
-          cubeId: cube.id,
-          name: `Conformance ${id.slice(-8)}`,
+        const role = runtime.forPrincipal(operatorPrincipal(
+          "00000000-0000-4000-8000-000000000399",
+        )).createRole(cube.id, {
+          name: input.name ?? `Conformance ${randomUUID().slice(-8)}`,
           roleClass: input.roleClass,
           isHumanSeat: input.isHumanSeat,
+          ...(input.detailedDescription === undefined
+            ? {}
+            : { detailedDescription: input.detailedDescription }),
+          ...(input.isDefault === undefined ? {} : { isDefault: input.isDefault }),
+          ...(input.isMandatory === undefined ? {} : { isMandatory: input.isMandatory }),
         });
-        return { id };
+        return { id: role.id };
+      },
+      referenceRoleFromTaxonomy: async (cube, role) => {
+        const store = runtime.forPrincipal(operatorPrincipal(
+          "00000000-0000-4000-8000-000000000399",
+        ));
+        const roleName = store.listRoles(cube.id).find((candidate) => candidate.id === role.id)?.name;
+        if (roleName === undefined) throw new Error("Conformance role is unavailable.");
+        store.updateCube(cube.id, { messageTaxonomy: [{
+          class: "role-reference",
+          prefixes: ["ROLE-REFERENCE"],
+          routing: "directed",
+          default_to: [roleName],
+        }] });
       },
       createDrone: async (principal, cube, role) => {
         const credential = principalCredentials.get(principal.id);
@@ -406,6 +424,18 @@ async function conformanceEnvironment(): Promise<{
       evictDrone: async (credential, cube, drone, request) => transport.request(
         "DELETE",
         `/api/cubes/${cube.id}/drones/${drone.id}`,
+        JSON.stringify(request),
+        credential,
+      ),
+      deleteRole: async (credential, cube, role, request) => transport.request(
+        "DELETE",
+        `/api/cubes/${cube.id}/roles/${role.id}`,
+        JSON.stringify(request),
+        credential,
+      ),
+      roleRationale: async (credential, cube, request) => transport.request(
+        "POST",
+        `/api/cubes/${cube.id}/role-rationale`,
         JSON.stringify(request),
         credential,
       ),

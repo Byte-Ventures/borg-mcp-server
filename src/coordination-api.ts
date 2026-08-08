@@ -11,11 +11,13 @@ import {
   decodeAttachRequestEnvelope,
   decodeCreateCubeRequestEnvelope,
   decodeDeleteCubeRequestEnvelope,
+  decodeDeleteRoleRequestEnvelope,
   decodeDroneRuntimeMetadataPatch,
   decodeEvictDroneRequestEnvelope,
   decodeProtocolEnvelope,
   decodeReassignDroneRequestEnvelope,
   decodeResolveRepositoryCubeRequestEnvelope,
+  decodeRoleRationaleRequestEnvelope,
 } from "borgmcp-shared/protocol";
 import type { Principal } from "./principal.js";
 import { assertServerDerivedPrincipal } from "./principal.js";
@@ -38,7 +40,11 @@ import {
   DefaultRoleRequiredError,
   RoleConflictError,
   RoleInUseError,
+  RoleNotFoundError,
+  RoleReferencedError,
+  RoleRequiredError,
   RoleSectionConflictError,
+  RoleSectionNotFoundError,
   ActivityEntryPrefixConflictError,
   ScopedStoreError,
   StorageCapacityError,
@@ -275,7 +281,7 @@ export class CoordinationApi {
       .exec(request.path);
     const selfMetadataMatch =
       /^\/api\/cubes\/([0-9a-f-]{36})\/drones\/self\/metadata$/u.exec(request.path);
-    const match = /^\/api\/cubes\/([0-9a-f-]{36})(?:\/(roles|drones|logs|acks|decisions|stream|taxonomy-patch))?$/u
+    const match = /^\/api\/cubes\/([0-9a-f-]{36})(?:\/(roles|drones|logs|acks|decisions|stream|taxonomy-patch|role-rationale))?$/u
       .exec(request.path);
     if (match === null && roleMatch === null && logEntryMatch === null && droneMatch === null && selfMetadataMatch === null) {
       return failure(404, "NOT_FOUND", "The requested resource was not found.");
@@ -433,6 +439,21 @@ export class CoordinationApi {
             : { advisory: contextAdvisory("Playbook", role.detailed_description, this.#contextGuidelineBytes) }),
         });
       }
+      if (resource === "role" && !sectionPatch && request.method === "DELETE") {
+        const envelope = decodeDeleteRoleRequestEnvelope(request.body);
+        try {
+          store.deleteRole(cubeId, roleId!);
+        } catch (error) {
+          if (error instanceof ScopedStoreError) {
+            return failure(404, error.code, error.message, envelope.request_id);
+          }
+          if (error instanceof AccessDeniedError) {
+            return failure(403, error.code, error.message, envelope.request_id);
+          }
+          throw error;
+        }
+        return success(200, envelope.request_id, { role_id: roleId!, deleted: true });
+      }
       if (resource === "role" && sectionPatch && request.method === "POST") {
         const envelope = decodeEnvelope(request.body);
         const action = envelope.payload["action"];
@@ -470,6 +491,24 @@ export class CoordinationApi {
           role,
           advisory: contextAdvisory("Playbook", role.detailed_description, this.#contextGuidelineBytes),
         });
+      }
+      if (resource === "role-rationale" && request.method === "POST") {
+        const envelope = decodeRoleRationaleRequestEnvelope(request.body);
+        try {
+          return success(200, envelope.request_id, store.readRoleRationale(
+            cubeId,
+            envelope.payload.role,
+            envelope.payload.section,
+          ));
+        } catch (error) {
+          if (error instanceof ScopedStoreError) {
+            return failure(404, error.code, error.message, envelope.request_id);
+          }
+          if (error instanceof AccessDeniedError) {
+            return failure(403, error.code, error.message, envelope.request_id);
+          }
+          throw error;
+        }
       }
       if (resource === "drones" && request.method === "GET") {
         if (request.since === undefined) {
@@ -631,6 +670,12 @@ export class CoordinationApi {
       }
       if (error instanceof RoleInUseError) {
         return failure(409, error.code, error.message, safeRequestId(request.body));
+      }
+      if (error instanceof RoleRequiredError || error instanceof RoleReferencedError) {
+        return failure(409, error.code, error.message, safeRequestId(request.body));
+      }
+      if (error instanceof RoleNotFoundError || error instanceof RoleSectionNotFoundError) {
+        return failure(404, error.code, error.message, safeRequestId(request.body));
       }
       if (error instanceof StorageCapacityError) {
         return failure(507, "CAPACITY_EXCEEDED", error.message, safeRequestId(request.body));

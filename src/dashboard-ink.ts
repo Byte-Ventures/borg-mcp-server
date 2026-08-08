@@ -79,7 +79,7 @@ function InkDashboard(input: {
     : 0;
   const maximumPosts = Math.max(...snapshot.cubes.map((cube) => cube.posts_15m), 0);
   const footerRows = lifecycleRows + 1;
-  const chromeRows = 3 + footerRows;
+  const chromeRows = 4 + footerRows;
   const bodyRows = Math.max(0, height - chromeRows);
   const listCap = Math.max(1, Math.floor(bodyRows * 0.42));
   const listRows = Math.min(snapshot.cubes.length, listCap);
@@ -94,6 +94,7 @@ function InkDashboard(input: {
 
   const children: ReactNode[] = [
     h(InkRail, { key: "rail", snapshot, width, glyphs, color: options.color }),
+    h(InkBindStatus, { key: "bind", snapshot, width }),
     h(InkRule, { key: "separator-top", width, glyphs }),
     focus === undefined
       ? h(InkEmptyPanel, { key: "empty-panel", width, glyphs })
@@ -154,13 +155,12 @@ function InkRail(input: {
   const { snapshot, width, glyphs, color } = input;
   const identity = sanitizeTerminalText(snapshot.server.name).toUpperCase();
   const version = sanitizeTerminalText(snapshot.server.version);
-  const endpoint = sanitizeTerminalText(snapshot.server.endpoint);
   const uptime = formatUptime(snapshot.captured_at, snapshot.server.started_at);
   const totalPosts = snapshot.cubes.reduce((sum, cube) => sum + cube.posts_15m, 0);
   const state = snapshot.server.state.toUpperCase();
   const brand = `${glyphs.rail}${glyphs.rail} ${identity} ${glyphs.rail}${glyphs.rail}`;
   const body = `${brand} ${state}  ${snapshot.cubes.length} ${plural(snapshot.cubes.length, "cube")}  ` +
-    `${totalPosts}/15m  ${endpoint}  v${version}`;
+    `${totalPosts}/15m  v${version}`;
   const uptimeSuffix = `  up ${uptime}`;
   const bodyWidth = Math.max(0, width - terminalCellWidth(uptimeSuffix));
   const visibleBody = truncateCell(body, bodyWidth, glyphs.ellipsis);
@@ -174,6 +174,17 @@ function InkRail(input: {
       h(Box, { flexGrow: 1 }),
     ),
     h(Text, null, uptimeSuffix),
+  );
+}
+
+function InkBindStatus(input: {
+  readonly snapshot: DashboardSnapshot;
+  readonly width: number;
+}): ReactNode {
+  const endpoint = sanitizeTerminalText(input.snapshot.server.endpoint);
+  const value = `Endpoint: ${endpoint}  Bind mode: ${input.snapshot.server.bind_mode}`;
+  return h(Box, { width: input.width, height: 1, overflow: "hidden" },
+    h(Text, { wrap: "truncate-end" }, value),
   );
 }
 

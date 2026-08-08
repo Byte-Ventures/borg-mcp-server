@@ -15,8 +15,10 @@ fails closed and is never reclaimed automatically; remove it only after confirmi
 that no Borg process is running.
 
 Setup verifies and prepares the latest immutable npm artifact, but starts no
-listener or managed service. Running `setup` again is idempotent: it preserves
-the existing data and identity and never repeats credentials. After stopping the
+listener or managed service. Its output names the prepared bind address that is
+written into the server certificate. Running `setup` again is idempotent: it
+preserves the existing data and identity, reports the address persisted in
+`server.json`, and never repeats credentials. After stopping the
 server, `borg-mcp-server setup --reinitialize` recreates the database and leaf
 identity while preserving the existing CA. It refuses to run if either `ca.key`
 or `ca.crt` is absent or invalid, before deleting any server state. Use the
@@ -27,6 +29,7 @@ genuinely unavailable.
 
 `borg-mcp-server start` remains a foreground command. In an interactive
 terminal it opens a read-only dashboard showing the verified server identity,
+the effective endpoint and bind mode,
 the most active cube in an auto-following per-drone activity panel, and a paged
 cube list ranked by coordination posts in the trailing 15 minutes. Distinct
 posting drones break ties. New activity produces a short, event-driven cube
@@ -55,7 +58,9 @@ single-column box outline with no perspective cube art.
 Ctrl-C or terminal teardown stops the server, restores the prior terminal screen and cursor, and
 does not install or enable persistence. Redirected output and managed-service
 execution never enter the alternate screen or emit ANSI rendering; they retain
-the existing single bounded machine-readable startup record.
+the existing single bounded machine-readable startup record. That record includes
+`endpoint`, the prepared `bind_host`, the effective `bind_mode`, and a runnable
+`bind_remedy` when the prepared and effective bind intent differ.
 
 To observe an already-running local server from a second terminal, run
 `borg-mcp-server dashboard` (or add `--ascii`). This viewer opens the existing
@@ -80,6 +85,10 @@ borg-mcp-server start --host 192.168.1.20 --port 7091 --lan
 
 Public, wildcard,
 unspecified, multicast, and otherwise unsafe bind addresses are rejected.
+The prepared address is certificate configuration, not persisted consent to a
+LAN bind. If an installation prepared for a private-LAN address starts without
+`--host` and `--lan`, it remains on loopback and prints the exact command that
+starts it on the prepared address with fresh LAN consent.
 
 TLS files may instead be supplied explicitly with
 `BORG_SERVER_TLS_KEY_FILE`, `BORG_SERVER_TLS_CERT_FILE`, and

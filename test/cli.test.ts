@@ -21,6 +21,7 @@ describe("runCli", () => {
     const service: ServerService = {
       start: vi.fn(),
       setup: vi.fn().mockResolvedValue({
+        bindHost: "192.168.1.20",
         recoveryCredential: "a".repeat(43),
         initialInvitation: "b".repeat(43),
       }),
@@ -34,7 +35,7 @@ describe("runCli", () => {
     expect(service.setup).toHaveBeenCalledWith({ reinitialize: false });
     expect(listen).not.toHaveBeenCalled();
     expect(io.stdout).toHaveBeenCalledWith(
-      "Local server setup completed.\nYour server data and identity are ready.\nNext, run:\n  borg-mcp-server start\nLeave that terminal open while the server is running.\nAfter installing the borg client, open a second terminal in your Git repository and run:\n  borg assimilate",
+      "Local server setup completed.\nYour server data and identity are ready.\nPrepared bind address: 192.168.1.20\nThis address is written into the server certificate.\nNext, run:\n  borg server start\nLeave that terminal open while the server is running.\nAfter installing the borg client, open a second terminal in your Git repository and run:\n  borg assimilate",
     );
   });
 
@@ -43,6 +44,7 @@ describe("runCli", () => {
       start: vi.fn(),
       setup: vi.fn().mockResolvedValue({
         existing: true,
+        bindHost: "::1",
         artifact: {
           version: "0.1.8",
           integrity: `sha512-${"A".repeat(86)}==`,
@@ -55,7 +57,7 @@ describe("runCli", () => {
     expect(await runCli(["setup"], service, io)).toBe(0);
     const output = io.stdout.mock.calls[0]![0];
     expect(output).toBe(
-      "Your local server is already prepared.\nYour server data and identity are unchanged.\nSetup did not start the server.\nNext, run:\n  borg-mcp-server start\nLeave that terminal open while the server is running.",
+      "Your local server is already prepared.\nYour server data and identity are unchanged.\nPrepared bind address: ::1\nThis address is written into the server certificate.\nSetup did not start the server.\nNext, run:\n  borg server start\nLeave that terminal open while the server is running.",
     );
     expect(output).not.toMatch(/credential|invitation/iu);
   });
@@ -64,6 +66,7 @@ describe("runCli", () => {
     const service: ServerService = {
       start: vi.fn(),
       setup: vi.fn().mockResolvedValue({
+        bindHost: "127.0.0.1",
         recoveryCredential: "a".repeat(43),
         initialInvitation: "b".repeat(43),
       }),
@@ -74,7 +77,7 @@ describe("runCli", () => {
     try {
       expect(await runCli(["setup"], service, io)).toBe(0);
       expect(io.stdout).toHaveBeenCalledWith(
-        "Local server setup completed.\nYour server data and identity are ready.",
+        "Local server setup completed.\nYour server data and identity are ready.\nPrepared bind address: 127.0.0.1\nThis address is written into the server certificate.",
       );
 
       const existingIo = createIo();
@@ -82,12 +85,13 @@ describe("runCli", () => {
         start: vi.fn(),
         setup: vi.fn().mockResolvedValue({
           existing: true,
+          bindHost: "192.168.1.20",
           artifact: { version: "0.15.1", integrity: "sha512-safe", sourceSha: "abc123" },
         }),
       };
       expect(await runCli(["setup"], existingService, existingIo)).toBe(0);
       expect(existingIo.stdout).toHaveBeenCalledWith(
-        "Your local server is already prepared.\nYour server data and identity are unchanged.\nSetup did not start the server.",
+        "Your local server is already prepared.\nYour server data and identity are unchanged.\nPrepared bind address: 192.168.1.20\nThis address is written into the server certificate.\nSetup did not start the server.",
       );
     } finally {
       if (previous === undefined) delete process.env["BORG_CLIENT_ONBOARDING"];
@@ -100,6 +104,7 @@ describe("runCli", () => {
       start: vi.fn(),
       setup: vi.fn().mockResolvedValue({
         existing: true,
+        bindHost: "192.168.1.20",
         artifact: { version: "0.1.8", integrity: "sha512-safe", sourceSha: "abc123" },
       }),
     };
@@ -109,6 +114,7 @@ describe("runCli", () => {
       status: "prepared",
       artifact: "borgmcp-server@0.1.8",
       build_identity: "abc123",
+      bind_host: "192.168.1.20",
       owner_access: "prepared",
       process: "stopped",
     }));

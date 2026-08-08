@@ -1753,6 +1753,18 @@ describe("coordination stream setup", () => {
       status: 200,
       body: { request_id: "role-rationale-id-exact", payload: { role_id: role.id } },
     });
+    const database = new DatabaseSync(join(directory, "borg.db"));
+    database.prepare("UPDATE roles SET detailed_description = ? WHERE id = ?").run(
+      `Oversized rationale:\n${"x".repeat(51_200)}`,
+      role.id,
+    );
+    database.close();
+    expect(await request("role-rationale-oversized", {
+      role: role.id, section: "Oversized rationale",
+    }, clientPrincipal(readerId))).toMatchObject({
+      status: 400,
+      body: { request_id: "role-rationale-oversized", error: { code: "INVALID_INPUT" } },
+    });
     expect(await request("role-rationale-foreign", {
       role: role.id, section: "Workflow rationale",
     }, clientPrincipal(foreignId))).toMatchObject({

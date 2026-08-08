@@ -1729,6 +1729,9 @@ class SqliteScopedStore implements ScopedStore {
     const role = matching[0]!;
     const section = readRoleSectionText(role.detailed_description, sectionHeading);
     if (section === null) throw new RoleSectionNotFoundError();
+    if (Buffer.byteLength(section.body) > MAX_ROLE_DETAILED_DESCRIPTION_BYTES) {
+      throw new RangeError("Role rationale section is too large.");
+    }
     return {
       role_id: role.id,
       role_name: role.name,
@@ -4658,13 +4661,14 @@ function validateRoleShortDescription(value: string): void {
   }
 }
 
-export const MAX_ROLE_DETAILED_DESCRIPTION_CHARS = 51_200;
+export const MAX_ROLE_DETAILED_DESCRIPTION_BYTES = 51_200;
 
 export function assertRoleTextWriteAllowed(value: string, previous?: string): void {
   if (typeof value !== "string") throw new TypeError("Role detailed description must be text.");
-  if (value.length <= MAX_ROLE_DETAILED_DESCRIPTION_CHARS) return;
-  if (previous !== undefined && previous.length > MAX_ROLE_DETAILED_DESCRIPTION_CHARS &&
-      value.length < previous.length) return;
+  const bytes = Buffer.byteLength(value);
+  if (bytes <= MAX_ROLE_DETAILED_DESCRIPTION_BYTES) return;
+  if (previous !== undefined && Buffer.byteLength(previous) > MAX_ROLE_DETAILED_DESCRIPTION_BYTES &&
+      bytes < Buffer.byteLength(previous)) return;
   throw new RangeError("Role detailed description is too large.");
 }
 

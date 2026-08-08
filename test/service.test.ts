@@ -431,7 +431,7 @@ describe("node server service", () => {
         }),
         server: expect.objectContaining({
           name: "borgmcp-server",
-          version: "0.15.0",
+          version: "0.15.1",
           endpoint: "https://127.0.0.1:7091",
           state: "online",
         }),
@@ -568,7 +568,7 @@ describe("node server service", () => {
     expect(options?.tls.ca).toEqual(Buffer.from("test-certificate"));
     expect(onStarted).toHaveBeenCalledWith(
       "https://127.0.0.1:7091",
-        expect.objectContaining({ package_version: "0.15.0" }),
+        expect.objectContaining({ package_version: "0.15.1" }),
     );
     expect(waitForShutdown).toHaveBeenCalledOnce();
     expect(keyBuffer.every((byte) => byte === 0)).toBe(true);
@@ -941,7 +941,7 @@ describe("node server service", () => {
     const artifact = {
       artifactDirectory: "/runtime/artifacts/candidate",
       packageDirectory: "/runtime/artifacts/candidate/package",
-      version: "0.15.0",
+      version: "0.15.1",
       integrity: `sha512-${"A".repeat(86)}==`,
       sourceSha: "a".repeat(40),
       treeSha256: "b".repeat(64),
@@ -959,7 +959,7 @@ describe("node server service", () => {
       "/Users/operator/Library/LaunchAgents/ai.borgmcp.server.plist",
     ] as const;
 
-    expect(completeRuntimeUpdate(prepared, "0.15.0", {
+    expect(completeRuntimeUpdate(prepared, "0.15.1", {
       state: "inactive",
       adapter: "launchd",
       recoveryCommand: command,
@@ -968,7 +968,7 @@ describe("node server service", () => {
       serviceAdapter: "launchd",
       serviceRecoveryCommand: command,
     });
-    expect(completeRuntimeUpdate(prepared, "0.15.0", {
+    expect(completeRuntimeUpdate(prepared, "0.15.1", {
       state: "absent",
       adapter: null,
       recoveryCommand: null,
@@ -984,7 +984,7 @@ describe("node server service", () => {
         artifactIntegrity: artifact.integrity,
         startedAt: new Date("2026-07-26T12:00:00.000Z"),
       }),
-    }, "0.15.0", {
+    }, "0.15.1", {
       state: "active",
       adapter: "launchd",
       recoveryCommand: null,
@@ -992,7 +992,7 @@ describe("node server service", () => {
       serviceState: "active",
       serviceAdapter: "launchd",
       serviceRecoveryCommand: null,
-      runningIdentity: { package_version: "0.15.0" },
+      runningIdentity: { package_version: "0.15.1" },
     });
   });
 

@@ -116,7 +116,7 @@ export async function runCli(
         if (!clientOnboarding) {
           lines.push(
             "Next, run:",
-            "  borg server start",
+            "  borg-mcp-server start",
             "Leave that terminal open while the server is running.",
           );
         }
@@ -132,7 +132,7 @@ export async function runCli(
       if (!clientOnboarding) {
         lines.push(
           "Next, run:",
-          "  borg server start",
+          "  borg-mcp-server start",
           "Leave that terminal open while the server is running.",
           "After installing the borg client, open a second terminal in your Git repository and run:",
           "  borg assimilate",

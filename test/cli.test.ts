@@ -35,7 +35,7 @@ describe("runCli", () => {
     expect(service.setup).toHaveBeenCalledWith({ reinitialize: false });
     expect(listen).not.toHaveBeenCalled();
     expect(io.stdout).toHaveBeenCalledWith(
-      "Local server setup completed.\nYour server data and identity are ready.\nPrepared bind address: 192.168.1.20\nThis address is written into the server certificate.\nNext, run:\n  borg server start\nLeave that terminal open while the server is running.\nAfter installing the borg client, open a second terminal in your Git repository and run:\n  borg assimilate",
+      "Local server setup completed.\nYour server data and identity are ready.\nPrepared bind address: 192.168.1.20\nThis address is written into the server certificate.\nNext, run:\n  borg-mcp-server start\nLeave that terminal open while the server is running.\nAfter installing the borg client, open a second terminal in your Git repository and run:\n  borg assimilate",
     );
   });
 
@@ -57,7 +57,7 @@ describe("runCli", () => {
     expect(await runCli(["setup"], service, io)).toBe(0);
     const output = io.stdout.mock.calls[0]![0];
     expect(output).toBe(
-      "Your local server is already prepared.\nYour server data and identity are unchanged.\nPrepared bind address: ::1\nThis address is written into the server certificate.\nSetup did not start the server.\nNext, run:\n  borg server start\nLeave that terminal open while the server is running.",
+      "Your local server is already prepared.\nYour server data and identity are unchanged.\nPrepared bind address: ::1\nThis address is written into the server certificate.\nSetup did not start the server.\nNext, run:\n  borg-mcp-server start\nLeave that terminal open while the server is running.",
     );
     expect(output).not.toMatch(/credential|invitation/iu);
   });

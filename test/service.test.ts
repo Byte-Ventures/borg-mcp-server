@@ -638,6 +638,37 @@ describe("node server service", () => {
     }
   });
 
+  it("does not warn when a loopback-prepared installation starts bare", async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-loopback-prepared-")));
+    try {
+      await bootstrapServer(directory, "127.0.0.1");
+      const onStarted = vi.fn();
+      const service = createNodeServerService({
+        environment: { BORG_SERVER_DATA_DIR: directory },
+        readFile,
+        readPrivateKey: vi.fn().mockResolvedValue(Buffer.from("private-key")),
+        startServer: vi.fn().mockResolvedValue({
+          origin: "https://127.0.0.1:7091",
+          limits: {} as never,
+          close: vi.fn().mockResolvedValue(undefined),
+        }),
+        onStarted,
+        bindOwnerCredential: vi.fn().mockResolvedValue(undefined),
+        waitForShutdown: vi.fn().mockResolvedValue(undefined),
+      });
+
+      await service.start([]);
+
+      expect(onStarted.mock.calls[0]![2]).toEqual({
+        bindHost: "127.0.0.1",
+        bindMode: "loopback",
+        remedy: null,
+      });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("wipes the key buffer when server startup fails", async () => {
     const keyBuffer = Buffer.from("test-key-material");
     const service = createNodeServerService({

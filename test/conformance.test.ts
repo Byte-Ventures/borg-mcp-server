@@ -50,20 +50,8 @@ describe("borgmcp-shared server adapter", () => {
           error: "Cube-to-other-repository conflict returned HTTP 200; expected 409.",
           observations: {},
         },
-        {
-          id: "security.drone-session-rejection-causes",
-          ok: false,
-          error: "expired seat probe did not return AUTH_EXPIRED.",
-          observations: {},
-        },
-        {
-          id: "security.metadata-own-seat",
-          ok: false,
-          error: "expired metadata session did not return AUTH_EXPIRED.",
-          observations: {},
-        },
       ]);
-      expect(report.results).toHaveLength(31);
+      expect(report.results).toHaveLength(30);
     } finally {
       await fixture.server.close();
       fixture.digester.destroy();
@@ -207,11 +195,6 @@ async function conformanceEnvironment(): Promise<{
         return session.credential;
       },
       revokeManagedDroneSession: async (drone) => {
-        const session = managedSessions.get(drone.id);
-        if (session === undefined) throw new Error("Managed drone session is unavailable.");
-        runtime.maintenance.revokeDroneSession(session.sessionId);
-      },
-      expireManagedDroneSession: async (drone) => {
         const session = managedSessions.get(drone.id);
         if (session === undefined) throw new Error("Managed drone session is unavailable.");
         runtime.maintenance.revokeDroneSession(session.sessionId);

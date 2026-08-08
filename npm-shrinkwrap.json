@@ -9,7 +9,7 @@
       "version": "0.15.0",
       "license": "SEE LICENSE IN LICENSE",
       "dependencies": {
-        "borgmcp-shared": "0.10.0",
+        "borgmcp-shared": "0.10.1",
         "ink": "7.1.1",
         "react": "19.2.8",
         "selfsigned": "5.5.0"
@@ -1136,9 +1136,9 @@
       }
     },
     "node_modules/borgmcp-shared": {
-      "version": "0.10.0",
-      "resolved": "https://registry.npmjs.org/borgmcp-shared/-/borgmcp-shared-0.10.0.tgz",
-      "integrity": "sha512-NYZJi6z0g/Txb6ge+5NgRPNRszVEi0eNmICxkoZq5bGkJWm5qEvNSt3ws90Xz8IOKuWcyHC9i6sAK6cbZxwYDw==",
+      "version": "0.10.1",
+      "resolved": "https://registry.npmjs.org/borgmcp-shared/-/borgmcp-shared-0.10.1.tgz",
+      "integrity": "sha512-IAESc6+VpUGECNabFkO60agvga0B8Fx0hk2RMUkSDCnlIjMvDodMFKlqw+TOzdXtjf0Uk9LJi9ZCU4HfRYRRhw==",
       "license": "Apache-2.0",
       "engines": {
         "node": ">=22.12.0"

@@ -587,7 +587,7 @@ export interface MaintenanceStore {
     readonly metadata_revision: number;
     readonly cube_id: string;
     readonly role_id: string;
-    readonly session_state: "active" | "revoked" | "expired";
+    readonly session_state: "active" | "revoked";
     readonly evicted: boolean;
     readonly last_seen: string;
     readonly heartbeat_count: number;

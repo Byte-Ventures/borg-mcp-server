@@ -40,7 +40,7 @@ describe("server threat-model document and release metadata", () => {
     );
     expect(manifest).toMatchObject({
       private: false,
-      version: "0.15.1",
+      version: "0.16.0",
       license: "SEE LICENSE IN LICENSE",
     });
   });

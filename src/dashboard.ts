@@ -306,7 +306,7 @@ export function startForegroundDashboard(input: {
     readonly lastPostAt: string | null;
   }>();
   let lastSnapshot: DashboardSnapshot | undefined;
-  let lastPlainFrame: string | undefined;
+  let lastFrame: string | undefined;
   let rejectFailure!: (error: unknown) => void;
   const failure = new Promise<never>((_resolve, reject) => { rejectFailure = reject; });
 
@@ -399,6 +399,8 @@ export function startForegroundDashboard(input: {
         activityWindowMs,
         page,
       } satisfies DashboardViewState;
+      const frame = input.renderer(lastSnapshot, dimensions.columns, dimensions.rows, view);
+      if (frame === lastFrame) return;
       const inkOptions = inkRenderers.has(input.renderer) ? input.renderer.inkOptions : undefined;
       if (inkOptions !== undefined && usesInkDashboard(dimensions.columns, dimensions.rows)) {
         const element = createInkDashboardElement(
@@ -409,20 +411,18 @@ export function startForegroundDashboard(input: {
           inkOptions,
         );
         if (inkInstance === undefined || inkStdout === undefined) {
-          if (lastPlainFrame !== undefined) input.terminal.write(clearScreen);
+          if (lastFrame !== undefined) input.terminal.write(clearScreen);
           mountInk(lastSnapshot, dimensions, view, inkOptions);
         } else {
           inkInstance.rerender(element);
           flushInkStdout(inkStdout);
         }
-        lastPlainFrame = undefined;
+        lastFrame = frame;
         return;
       }
       if (inkInstance !== undefined || inkStdout !== undefined) unmountInk();
-      const frame = input.renderer(lastSnapshot, dimensions.columns, dimensions.rows, view);
-      if (frame === lastPlainFrame) return;
       input.terminal.write(`${clearScreen}${frame}`);
-      lastPlainFrame = frame;
+      lastFrame = frame;
     } catch (error) {
       fail(error);
     }
@@ -514,7 +514,7 @@ export function startForegroundDashboard(input: {
     unsubscribeInput();
     unsubscribeInput = (): void => undefined;
     unmountInk();
-    lastPlainFrame = undefined;
+    lastFrame = undefined;
     input.terminal.write(alternateScreenRestore);
     input.terminal.requestSuspend(() => {
       if (closed) return;

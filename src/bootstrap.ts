@@ -5,7 +5,7 @@ import { generate } from "selfsigned";
 
 import { CredentialAuthority, CredentialDigester, generateSecret } from "./credentials.js";
 import type { PortableServerCredential } from "./portable-credential-store.js";
-import { openStore } from "./store.js";
+import { openStore, preparePrivateDataDirectory, type StoreRuntime } from "./store.js";
 
 export interface BootstrapResult {
   readonly serverId: string;
@@ -79,24 +79,25 @@ export async function bootstrapServer(
     .update(caCertificate.publicKey.export({ type: "spki", format: "der" }))
     .digest("hex");
   const digestKey = randomBytes(32);
-  const runtime = await openStore({ path: paths.database, clock });
+  const createdPaths = new Set<string>();
+  let runtime: StoreRuntime | undefined;
   let completed = false;
   try {
-    const files = [
-      writePrivate(paths.digestKey, digestKey),
-      writePrivate(paths.serverKey, server.private),
-      writePrivate(paths.serverCertificate, server.cert),
-      writePrivate(paths.config, JSON.stringify({
-        server_id: serverId,
-        ca_spki_sha256: caFingerprint,
-        bind_host: bindHost,
-      }, null, 2)),
-    ];
+    await preparePrivateDataDirectory(directory);
+    await writePrivate(paths.database, Buffer.alloc(0), createdPaths);
+    runtime = await openStore({ path: paths.database, clock });
+    await writePrivate(paths.digestKey, digestKey, createdPaths);
+    await writePrivate(paths.serverKey, server.private, createdPaths);
+    await writePrivate(paths.serverCertificate, server.cert, createdPaths);
+    await writePrivate(paths.config, JSON.stringify({
+      server_id: serverId,
+      ca_spki_sha256: caFingerprint,
+      bind_host: bindHost,
+    }, null, 2), createdPaths);
     if (preservedCertificateAuthority === undefined) {
-      files.push(writePrivate(paths.caKey, ca.private));
-      files.push(writePrivate(paths.caCertificate, ca.cert));
+      await writePrivate(paths.caKey, ca.private, createdPaths);
+      await writePrivate(paths.caCertificate, ca.cert, createdPaths);
     }
-    await Promise.all(files);
     const digester = new CredentialDigester(digestKey);
     digestKey.fill(0);
     try {
@@ -140,19 +141,9 @@ export async function bootstrapServer(
     }
   } finally {
     digestKey.fill(0);
-    runtime.close();
+    runtime?.close();
     if (!completed) {
-      await Promise.all([
-        paths.database,
-        paths.digestKey,
-        ...(preservedCertificateAuthority === undefined ? [paths.caKey, paths.caCertificate] : []),
-        paths.serverKey,
-        paths.serverCertificate,
-        paths.config,
-        `${paths.database}-wal`,
-        `${paths.database}-shm`,
-        `${paths.database}-journal`,
-      ].map((path) => unlink(path).catch(() => undefined)));
+      await Promise.all([...createdPaths].map((path) => unlink(path).catch(() => undefined)));
     }
   }
 }
@@ -209,8 +200,13 @@ function certificateHosts(bindHost: string): readonly string[] {
   return [...new Set([loopback, bindHost])];
 }
 
-async function writePrivate(path: string, value: string | Buffer): Promise<void> {
+async function writePrivate(
+  path: string,
+  value: string | Buffer,
+  createdPaths?: Set<string>,
+): Promise<void> {
   await writeFile(path, value, { flag: "wx", mode: 0o600 });
+  createdPaths?.add(path);
   if (((await stat(path)).mode & 0o777) !== 0o600) {
     throw new Error("Bootstrap file permissions are not private.");
   }

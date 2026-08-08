@@ -96,12 +96,21 @@ describe("offline bootstrap", () => {
     runtime.close();
   });
 
-  it("fails closed instead of replacing existing trust material", async () => {
+  it("leaves every existing installation file byte-intact when a rerun fails", async () => {
     const parent = await temporaryDirectory();
     const dataDirectory = join(parent, "server");
     await bootstrapServer(dataDirectory);
+    const existingNames = (await readdir(dataDirectory)).sort();
+    const existingFiles = new Map(await Promise.all(existingNames.map(async (name) => [
+      name,
+      await readFile(join(dataDirectory, name)),
+    ] as const)));
 
     await expect(bootstrapServer(dataDirectory)).rejects.toThrow();
+    expect((await readdir(dataDirectory)).sort()).toEqual(existingNames);
+    for (const [name, bytes] of existingFiles) {
+      expect(await readFile(join(dataDirectory, name)), name).toEqual(bytes);
+    }
   });
 
   it("reissues only the leaf certificate while preserving the server identity", async () => {

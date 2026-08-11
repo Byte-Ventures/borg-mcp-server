@@ -55,9 +55,7 @@ describe("offline bootstrap", () => {
     const parent = await temporaryDirectory();
     const result = await bootstrapServer(join(parent, "server"));
 
-    expect(result.recoveryCredential).toMatch(/^[A-Za-z0-9_-]{43}$/u);
     expect(result.initialInvitation).toMatch(/^[A-Za-z0-9_-]{43}$/u);
-    expect(result.recoveryCredential).not.toBe(result.initialInvitation);
     expect((await stat(join(parent, "server"))).mode & 0o777).toBe(0o700);
     for (const path of Object.values(result.paths)) {
       expect((await stat(path)).mode & 0o777).toBe(0o600);
@@ -83,7 +81,6 @@ describe("offline bootstrap", () => {
     ];
     for (const path of generatedFiles) {
       const bytes = await readFile(path).catch(() => Buffer.alloc(0));
-      expect(bytes.includes(Buffer.from(result.recoveryCredential)), path).toBe(false);
       expect(bytes.includes(Buffer.from(result.initialInvitation)), path).toBe(false);
     }
     const runtime = await openStore({ path: result.paths.database });

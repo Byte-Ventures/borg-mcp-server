@@ -713,6 +713,11 @@ export const STORE_MIGRATIONS: readonly Migration[] = Object.freeze([
         ON activity_wake_attempts (last_ping_at, entry_id, drone_id);
     `,
   },
+  {
+    version: 22,
+    name: "remove_recovery_credentials",
+    sql: "DROP TABLE recovery_credentials;",
+  },
 ]);
 
 interface AppliedMigrationRow {

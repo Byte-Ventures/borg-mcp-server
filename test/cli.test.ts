@@ -22,7 +22,6 @@ describe("runCli", () => {
       start: vi.fn(),
       setup: vi.fn().mockResolvedValue({
         bindHost: "192.168.1.20",
-        recoveryCredential: "a".repeat(43),
         initialInvitation: "b".repeat(43),
       }),
     };
@@ -67,7 +66,6 @@ describe("runCli", () => {
       start: vi.fn(),
       setup: vi.fn().mockResolvedValue({
         bindHost: "127.0.0.1",
-        recoveryCredential: "a".repeat(43),
         initialInvitation: "b".repeat(43),
       }),
     };
@@ -172,7 +170,6 @@ describe("runCli", () => {
 
   it("requires an explicit unambiguous setup reinitialization flag", async () => {
     const setup = vi.fn().mockResolvedValue({
-      recoveryCredential: "a".repeat(43),
       initialInvitation: "b".repeat(43),
     });
     const service: ServerService = { start: vi.fn(), setup };
@@ -618,71 +615,6 @@ describe("runCli", () => {
     ].join("\n"));
     expect(JSON.stringify(io.stdout.mock.calls)).not.toContain("\u001b");
     expect(listClients).toHaveBeenCalledTimes(1);
-  });
-
-  it("fails unsupported recovery invitation commands without prompting", async () => {
-    const recovery = "r".repeat(43);
-    const readSecret = vi.fn().mockResolvedValue(recovery);
-    const createClientInvitation = vi.fn().mockResolvedValue("i".repeat(43));
-    const replaceOwnerInvitation = vi.fn().mockResolvedValue("o".repeat(43));
-    const grantClient = vi.fn().mockResolvedValue(undefined);
-    const ungrantClient = vi.fn().mockResolvedValue(undefined);
-    const service: ServerService = {
-      start: vi.fn(), createClientInvitation, replaceOwnerInvitation, grantClient, ungrantClient,
-    };
-    const io = { ...createIo(), readSecret } satisfies CliIo;
-    const clientId = "00000000-0000-4000-8000-000000000001";
-    const cubeId = "00000000-0000-4000-8000-000000000002";
-
-    expect(await runCli(["client-invite"], service, io)).toBe(1);
-    expect(await runCli(["owner-invite"], service, io)).toBe(1);
-    expect(await runCli(["client-grant", clientId, cubeId, "write"], service, io)).toBe(0);
-    expect(await runCli(["client-ungrant", clientId, cubeId], service, io)).toBe(0);
-    expect(readSecret).not.toHaveBeenCalled();
-    expect(createClientInvitation).not.toHaveBeenCalled();
-    expect(replaceOwnerInvitation).not.toHaveBeenCalled();
-    expect(grantClient).toHaveBeenCalledWith(clientId, cubeId, "write");
-    expect(ungrantClient).toHaveBeenCalledWith(clientId, cubeId);
-    expect(io.stderr).toHaveBeenCalledWith(
-      "client-invite is not supported. Creating a scoped invitation requires a recovery credential, and this server does not issue one.\n" +
-      "To enroll an additional client or device, run `borg server invite` in an interactive terminal. An enrolled client has no cube access until the server operator grants it.",
-    );
-    expect(io.stderr).toHaveBeenCalledWith(
-      "owner-invite is not supported. Replacing an owner enrollment invitation requires a recovery credential, and this server does not issue one.\n" +
-      "To enroll an additional client or device, run `borg server invite` in an interactive terminal.",
-    );
-    expect(JSON.stringify(io.stderr.mock.calls)).not.toContain(recovery);
-    expect(await runCli(["owner-invite", recovery], service, io)).toBe(1);
-
-    const help = createIo();
-    expect(await runCli(["help"], service, help)).toBe(0);
-    expect(help.stdout).toHaveBeenCalledWith(expect.stringContaining(
-      "invite [<client-name>]  Create a named client enrollment invitation interactively.\n" +
-      "           An enrolled client has no cube access until it is granted.",
-    ));
-    expect(help.stdout).toHaveBeenCalledWith(expect.not.stringContaining("client-invite"));
-    expect(help.stdout).toHaveBeenCalledWith(expect.not.stringContaining("owner-invite"));
-  });
-
-  it("keeps scoped invitation operations unreachable", async () => {
-    const cubeId = "00000000-0000-4000-8000-000000000042";
-    const createClientInvitation = vi.fn().mockResolvedValue("i".repeat(43));
-    const io = {
-      ...createIo(),
-      readSecret: vi.fn().mockResolvedValue("r".repeat(43)),
-    } satisfies CliIo;
-    const service: ServerService = { start: vi.fn(), createClientInvitation };
-
-    expect(await runCli(["client-invite", "release-tooling"], service, io)).toBe(1);
-    expect(await runCli(
-      ["client-invite", cubeId, "--access", "manage"],
-      service,
-      io,
-    )).toBe(1);
-    expect(await runCli(["client-invite", "release-tooling", "--access", "owner"], service, io))
-      .toBe(1);
-    expect(io.readSecret).not.toHaveBeenCalled();
-    expect(createClientInvitation).not.toHaveBeenCalled();
   });
 
   it("rejects malformed offline credential commands without exposing a service", async () => {

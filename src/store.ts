@@ -284,8 +284,6 @@ export type StoredDroneSessionDigest =
   | StoredDeletedCubeSessionDigest;
 
 export interface CredentialStore {
-  readonly createRecoveryCredential: (id: string, digest: DigestPair) => void;
-  readonly findRecoveryCredential: (lookup: Buffer) => StoredSecretDigest | null;
   readonly createInvitation: (input: {
     readonly id: string;
     readonly digest: DigestPair;
@@ -3467,26 +3465,6 @@ class SqliteCredentialStore implements CredentialStore {
     this.#clock = clock;
     this.#capacityGuard = capacityGuard;
     this.#mutationHook = mutationHook;
-  }
-
-  createRecoveryCredential(id: string, digest: DigestPair): void {
-    assertCanonicalUuid(id, "Recovery credential id");
-    validateDigest(digest);
-    this.#database.prepare(`
-      INSERT INTO recovery_credentials (
-        id, lookup_digest, verifier_digest, created_at
-      ) VALUES (?, ?, ?, ?)
-    `).run(id, digest.lookup, digest.verifier, this.#now());
-  }
-
-  findRecoveryCredential(lookup: Buffer): StoredSecretDigest | null {
-    validateLookup(lookup);
-    const row = this.#database.prepare(`
-      SELECT id, lookup_digest, verifier_digest, revoked_at
-      FROM recovery_credentials
-      WHERE lookup_digest = ? AND revoked_at IS NULL
-    `).get(lookup);
-    return row === undefined ? null : storedDigest(row);
   }
 
   createInvitation(input: {

@@ -6,7 +6,6 @@ import { SERVER_PACKAGE_VERSION } from "./runtime-identity.js";
 export interface CliIo {
   readonly stdout: (message: string) => void;
   readonly stderr: (message: string) => void;
-  readonly readSecret?: (prompt: string) => Promise<string>;
   readonly isTTY?: boolean;
 }
 
@@ -326,30 +325,6 @@ export async function runCli(
       await service.ungrantClient(extraArgs[0]!, extraArgs[1]!);
       io.stdout("Client cube grant removed.");
       return 0;
-    case "client-invite":
-    case "owner-invite": {
-      if (!recoveryCredentialIsOperatorAvailable()) {
-        io.stderr(command === "client-invite"
-          ? "client-invite is not supported. Creating a scoped invitation requires a recovery credential, and this server does not issue one.\n" +
-            "To enroll an additional client or device, run `borg server invite` in an interactive terminal. An enrolled client has no cube access until the server operator grants it."
-          : "owner-invite is not supported. Replacing an owner enrollment invitation requires a recovery credential, and this server does not issue one.\n" +
-            "To enroll an additional client or device, run `borg server invite` in an interactive terminal.");
-        return 1;
-      }
-
-      if (io.readSecret === undefined) return invalidArguments(io);
-      if (extraArgs.length !== 0) return invalidArguments(io);
-      const operation = command === "client-invite"
-        ? service.createClientInvitation
-        : service.replaceOwnerInvitation;
-      if (operation === undefined) return invalidArguments(io);
-      const recovery = await io.readSecret("Recovery credential (hidden input): ");
-      const result = await operation(recovery);
-      io.stdout(command === "client-invite"
-        ? `Client enrollment invitation (single-use, shown once): ${result}`
-        : `Owner enrollment invitation (single-use, shown once): ${result}`);
-      return 0;
-    }
     case "invite": {
       if (extraArgs.length > 1 || service.invite === undefined) return invalidArguments(io);
       if (io.isTTY !== true) {
@@ -376,10 +351,6 @@ export async function runCli(
       io.stderr("Unknown command.");
       return 1;
   }
-}
-
-function recoveryCredentialIsOperatorAvailable(): boolean {
-  return false;
 }
 
 function renderUpdateFailure(failure: RuntimeUpdateFailure, io: CliIo, machine: boolean): void {

@@ -28,7 +28,7 @@ import { disabledDebugLogger, type DebugLogger } from "./debug-log.js";
 
 const tokenPattern = /^[A-Za-z0-9_-]{43,1024}$/u;
 const dummyVerifier = Buffer.alloc(32);
-type CredentialPurpose = "recovery" | "invitation" | "client" | "drone-session";
+type CredentialPurpose = "invitation" | "client" | "drone-session";
 
 function createInvitationArtifactIntegrity(
   artifact: Pick<InvitationArtifact, "endpoint" | "ca_spki_sha256" | "authority" | "secret">,
@@ -168,24 +168,8 @@ export class CredentialAuthority {
     this.#debugLogger = debugLogger;
   }
 
-  createRecoveryCredential(): string {
-    const secret = generateSecret();
-    this.#store.createRecoveryCredential(
-      randomUUID(),
-      this.#digester.digest(secret, "recovery"),
-    );
-    return secret;
-  }
-
   createBootstrapInvitation(ttlMs: number): string {
     return this.#createInvitation("owner", ttlMs);
-  }
-
-  createInvitation(recoveryCredential: string, ttlMs: number, clientName?: string): string | null {
-    const digest = safeDigest(this.#digester, recoveryCredential, "recovery");
-    const stored = this.#store.findRecoveryCredential(digest.lookup);
-    if (!this.#digester.verify(recoveryCredential, "recovery", stored?.verifier)) return null;
-    return this.#createInvitation("client", ttlMs, clientName);
   }
 
   createInvitationForOwnerCredential(
@@ -220,13 +204,6 @@ export class CredentialAuthority {
       ...artifact,
       integrity: createInvitationArtifactIntegrity(artifact),
     });
-  }
-
-  replaceOwnerInvitation(recoveryCredential: string, ttlMs: number): string | null {
-    const digest = safeDigest(this.#digester, recoveryCredential, "recovery");
-    const stored = this.#store.findRecoveryCredential(digest.lookup);
-    if (!this.#digester.verify(recoveryCredential, "recovery", stored?.verifier)) return null;
-    return this.#createInvitation("owner", ttlMs);
   }
 
   #createInvitation(purpose: "owner" | "client", ttlMs: number, clientName?: string): string {

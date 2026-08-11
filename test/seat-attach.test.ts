@@ -38,7 +38,7 @@ beforeEach(async () => {
   runtime = await openStore({ path: databasePath, clock: () => new Date(now) });
   ({ digester, authority, api } = authorityRuntime(runtime));
   clientA = enroll(authority, "Client A");
-  clientB = enroll(authority, "Client B");
+  clientB = enroll(authority, "Client B", clientA.credential);
   runtime.maintenance.createCube({ id: ids.cubeA, ownerId: clientA.clientId, name: "Cube A", directive: "" });
   runtime.maintenance.createCube({ id: ids.cubeB, ownerId: clientB.clientId, name: "Cube B", directive: "" });
   runtime.maintenance.createRole({ id: ids.roleA, cubeId: ids.cubeA, name: "Builder" });
@@ -458,9 +458,10 @@ function authorityRuntime(store: StoreRuntime) {
   };
 }
 
-function enroll(nextAuthority: CredentialAuthority, name: string) {
-  const recovery = nextAuthority.createRecoveryCredential();
-  const invitation = nextAuthority.createInvitation(recovery, 60_000);
+function enroll(nextAuthority: CredentialAuthority, name: string, ownerCredential?: string) {
+  const invitation = ownerCredential === undefined
+    ? nextAuthority.createBootstrapInvitation(60_000)
+    : nextAuthority.createInvitationForOwnerCredential(ownerCredential, 60_000);
   if (invitation === null) throw new Error("Invitation failed.");
   const credential = generateSecret();
   const enrollment = nextAuthority.exchangeInvitation({

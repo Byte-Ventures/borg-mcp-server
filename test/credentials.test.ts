@@ -18,6 +18,7 @@ let directory: string;
 let runtime: StoreRuntime;
 let authority: CredentialAuthority;
 let now: Date;
+let ownerCredential: string | undefined;
 
 beforeEach(async () => {
   directory = await realpath(await mkdtemp(join(tmpdir(), "borg-credentials-")));
@@ -28,6 +29,7 @@ beforeEach(async () => {
     new CredentialDigester(Buffer.alloc(32, 7)),
     () => now,
   );
+  ownerCredential = undefined;
 });
 
 afterEach(async () => {
@@ -45,8 +47,7 @@ describe("credential authority", () => {
       undefined,
       createDebugLogger((line) => lines.push(line)),
     );
-    const recovery = debugAuthority.createRecoveryCredential();
-    const invitation = debugAuthority.createInvitation(recovery, 60_000)!;
+    const invitation = debugAuthority.createBootstrapInvitation(60_000);
     const clientCredential = generateSecret();
     const retryKey = randomUUID();
     const enrolled = debugAuthority.exchangeInvitation({
@@ -66,7 +67,7 @@ describe("credential authority", () => {
     debugAuthority.revokeClient(enrolled!.clientId);
 
     const output = lines.join("\n");
-    for (const secret of [recovery, invitation, clientCredential, retryKey, "secret-client-name", "rejected-secret-name"]) {
+    for (const secret of [invitation, clientCredential, retryKey, "secret-client-name", "rejected-secret-name"]) {
       expect(output).not.toContain(secret);
     }
     expect(lines.map((line) => JSON.parse(line).action)).toEqual([
@@ -88,9 +89,7 @@ describe("credential authority", () => {
   });
 
   it("returns a stable non-secret identity for an exact credential-proven retry", () => {
-    const recovery = authority.createRecoveryCredential();
-    const invitation = authority.createInvitation(recovery, 60_000);
-    if (invitation === null) throw new Error("Recovery authorization failed.");
+    const invitation = createClientInvitation(60_000);
 
     const credential = generateSecret();
     const request = {
@@ -116,9 +115,7 @@ describe("credential authority", () => {
   });
 
   it("persists the owner's invitation label instead of the enrolling client's hint", () => {
-    const recovery = authority.createRecoveryCredential();
-    const invitation = authority.createInvitation(recovery, 60_000, "Alice laptop");
-    if (invitation === null) throw new Error("Recovery authorization failed.");
+    const invitation = createClientInvitation(60_000, "Alice laptop");
 
     const enrolled = authority.exchangeInvitation({
       ...enrollmentRequest(invitation),
@@ -139,12 +136,8 @@ describe("credential authority", () => {
   });
 
   it("gives separate unnamed invitations distinct client names", () => {
-    const recovery = authority.createRecoveryCredential();
-    const firstInvitation = authority.createInvitation(recovery, 60_000);
-    const secondInvitation = authority.createInvitation(recovery, 60_000);
-    if (firstInvitation === null || secondInvitation === null) {
-      throw new Error("Recovery authorization failed.");
-    }
+    const firstInvitation = createClientInvitation(60_000);
+    const secondInvitation = createClientInvitation(60_000);
 
     const first = authority.exchangeInvitation(enrollmentRequest(firstInvitation));
     const second = authority.exchangeInvitation(enrollmentRequest(secondInvitation));
@@ -164,14 +157,13 @@ describe("credential authority", () => {
   });
 
   it("validates client labels at mint and leaves owner-purpose invitations unlabeled", () => {
-    const recovery = authority.createRecoveryCredential();
-    expect(() => authority.createInvitation(recovery, 60_000, "\u001b]8;;unsafe"))
+    const owner = ensureOwnerCredential();
+    expect(() => authority.createInvitationForOwnerCredential(owner, 60_000, "\u001b]8;;unsafe"))
       .toThrow("Presentation name is invalid.");
-    expect(() => authority.createInvitation(recovery, 60_000, "a".repeat(121)))
+    expect(() => authority.createInvitationForOwnerCredential(owner, 60_000, "a".repeat(121)))
       .toThrow("Presentation name is invalid.");
 
-    authority.createBootstrapInvitation(60_000);
-    expect(authority.createInvitation(recovery, 60_000, "Alice laptop")).not.toBeNull();
+    expect(authority.createInvitationForOwnerCredential(owner, 60_000, "Alice laptop")).not.toBeNull();
 
     const database = new DatabaseSync(join(directory, "borg.db"));
     try {
@@ -187,38 +179,37 @@ describe("credential authority", () => {
   });
 
   it("refuses a label already held by an active client at mint", () => {
-    const recovery = authority.createRecoveryCredential();
-    const invitation = authority.createInvitation(recovery, 60_000, "Alice laptop");
-    if (invitation === null) throw new Error("Recovery authorization failed.");
+    const invitation = createClientInvitation(60_000, "Alice laptop");
     const enrolled = authority.exchangeInvitation(enrollmentRequest(invitation));
     if (enrolled === null) throw new Error("Test enrollment failed.");
 
-    expect(() => authority.createInvitation(recovery, 60_000, "Alice laptop"))
+    expect(() => authority.createInvitationForOwnerCredential(
+      ensureOwnerCredential(), 60_000, "Alice laptop",
+    ))
       .toThrow(
         "A client with this name already exists. Choose another name, or revoke the existing client before reusing it.",
       );
 
     authority.revokeClient(enrolled.clientId);
-    expect(authority.createInvitation(recovery, 60_000, "Alice laptop")).not.toBeNull();
+    expect(createClientInvitation(60_000, "Alice laptop")).toMatch(/^[A-Za-z0-9_-]{43}$/u);
   });
 
   it("refuses a label held by an outstanding invitation at mint", () => {
-    const recovery = authority.createRecoveryCredential();
-    expect(authority.createInvitation(recovery, 1_000, "Alice laptop")).not.toBeNull();
+    expect(createClientInvitation(1_000, "Alice laptop")).toMatch(/^[A-Za-z0-9_-]{43}$/u);
 
-    expect(() => authority.createInvitation(recovery, 60_000, "Alice laptop"))
+    expect(() => authority.createInvitationForOwnerCredential(
+      ensureOwnerCredential(), 60_000, "Alice laptop",
+    ))
       .toThrow(
         "An unclaimed invitation with this label is outstanding. Choose another name, or wait for it to expire before reusing the label.",
       );
 
     now = new Date("2026-07-14T12:00:01.001Z");
-    expect(authority.createInvitation(recovery, 60_000, "Alice laptop")).not.toBeNull();
+    expect(createClientInvitation(60_000, "Alice laptop")).toMatch(/^[A-Za-z0-9_-]{43}$/u);
   });
 
   it("rejects expired invitations with the same null result", () => {
-    const recovery = authority.createRecoveryCredential();
-    const invitation = authority.createInvitation(recovery, 1_000);
-    if (invitation === null) throw new Error("Recovery authorization failed.");
+    const invitation = createClientInvitation(1_000);
     now = new Date("2026-07-14T12:00:01.001Z");
 
     expect(authority.exchangeInvitation(enrollmentRequest(invitation))).toBeNull();
@@ -315,18 +306,15 @@ describe("credential authority", () => {
     expect(digester.verify(secret, "client", invitation.verifier)).toBe(false);
   });
 
-  it("requires the recovery credential to create later invitations", () => {
-    const recovery = authority.createRecoveryCredential();
-    expect(authority.createInvitation(generateSecret(), 60_000)).toBeNull();
-    expect(authority.createInvitation(recovery, 60_000)).toMatch(/^[A-Za-z0-9_-]{43}$/u);
+  it("requires an active owner credential to create later invitations", () => {
+    expect(authority.createInvitationForOwnerCredential(generateSecret(), 60_000)).toBeNull();
+    expect(createClientInvitation(60_000)).toMatch(/^[A-Za-z0-9_-]{43}$/u);
   });
 
   it("does not turn legacy invitation scope into a cube grant", () => {
     const cubeId = randomUUID();
     runtime.maintenance.createCube({ id: cubeId, name: "legacy-scope", directive: "" });
-    const recovery = authority.createRecoveryCredential();
-    const invitation = authority.createInvitation(recovery, 60_000);
-    if (invitation === null) throw new Error("Invitation creation failed.");
+    const invitation = createClientInvitation(60_000);
 
     const database = new DatabaseSync(join(directory, "borg.db"));
     const columns = database.prepare("PRAGMA table_info(enrollment_invitations)").all()
@@ -347,8 +335,8 @@ describe("credential authority", () => {
     const enrolled = authority.exchangeInvitation(request);
     expect(enrolled).toMatchObject({ purpose: "client", serverCapabilities: [] });
     expect(runtime.maintenance.observeAuthorityState()).toMatchObject({
-      enrolled_clients: 1,
-      enrollment_claims: 1,
+      enrolled_clients: 2,
+      enrollment_claims: 2,
       grants: 0,
     });
     const principal = authority.authenticate(`Bearer ${request.clientCredential}`);
@@ -357,10 +345,8 @@ describe("credential authority", () => {
   });
 
   it("purpose-binds owner authority and revokes the prior owner epoch on replacement", () => {
-    const recovery = authority.createRecoveryCredential();
     const first = authority.createBootstrapInvitation(60_000);
-    const replacement = authority.replaceOwnerInvitation(recovery, 60_000);
-    if (replacement === null) throw new Error("Owner invitation replacement failed.");
+    const replacement = authority.createBootstrapInvitation(60_000);
     expect(authority.exchangeInvitation(enrollmentRequest(first))).toBeNull();
 
     const credential = generateSecret();
@@ -378,18 +364,19 @@ describe("credential authority", () => {
       grants: 0,
       server_capabilities: 1,
     });
-    expect(() => authority.replaceOwnerInvitation(recovery, 60_000)).toThrow("Access denied.");
+    expect(() => authority.createBootstrapInvitation(60_000)).toThrow("Access denied.");
   });
 
   it("keeps rejected invitation states on one verification and claim path", () => {
-    const recovery = authority.createRecoveryCredential();
     const revoked = authority.createBootstrapInvitation(60_000);
-    if (authority.replaceOwnerInvitation(recovery, 60_000) === null) {
-      throw new Error("Owner invitation replacement failed.");
+    const ownerInvitation = authority.createBootstrapInvitation(60_000);
+    const owner = generateSecret();
+    if (authority.exchangeInvitation(enrollmentRequest(ownerInvitation, owner)) === null) {
+      throw new Error("Owner enrollment failed.");
     }
-    const expired = authority.createInvitation(recovery, 1_000);
-    const consumed = authority.createInvitation(recovery, 60_000);
-    if (expired === null || consumed === null) throw new Error("Invitation creation failed.");
+    ownerCredential = owner;
+    const expired = createClientInvitation(1_000);
+    const consumed = createClientInvitation(60_000);
     const consumedRequest = enrollmentRequest(consumed);
     expect(authority.exchangeInvitation(consumedRequest)).not.toBeNull();
     now = new Date("2026-07-14T12:00:01.001Z");
@@ -428,13 +415,33 @@ describe("credential authority", () => {
 });
 
 function enroll(): { readonly id: string; readonly credential: string } {
-  const recovery = authority.createRecoveryCredential();
-  const invitation = authority.createInvitation(recovery, 60_000);
-  if (invitation === null) throw new Error("Recovery authorization failed.");
+  const invitation = authority.createBootstrapInvitation(60_000);
   const credential = generateSecret();
   const response = authority.exchangeInvitation(enrollmentRequest(invitation, credential));
   if (response === null) throw new Error("Test enrollment failed.");
   return { id: response.clientId, credential };
+}
+
+function ensureOwnerCredential(): string {
+  if (ownerCredential !== undefined) return ownerCredential;
+  const credential = generateSecret();
+  const owner = authority.exchangeInvitation(enrollmentRequest(
+    authority.createBootstrapInvitation(60_000),
+    credential,
+  ));
+  if (owner?.purpose !== "owner") throw new Error("Owner enrollment failed.");
+  ownerCredential = credential;
+  return credential;
+}
+
+function createClientInvitation(ttlMs: number, clientName?: string): string {
+  const invitation = authority.createInvitationForOwnerCredential(
+    ensureOwnerCredential(),
+    ttlMs,
+    clientName,
+  );
+  if (invitation === null) throw new Error("Invitation creation failed.");
+  return invitation;
 }
 
 function enrollmentRequest(invitation: string, clientCredential = generateSecret()) {

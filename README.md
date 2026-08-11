@@ -17,29 +17,15 @@ Verify current package metadata through
 
 ## Install and quickstart
 
-Install from npm:
+Follow the [Get started guide](https://borgmcp.ai/get-started/) for installation,
+initial setup, server startup, and creation of the first cube.
+
+For direct access to this package's server executable and version-specific help:
 
 ```sh
 npm install --global borgmcp-server
-borg-mcp-server setup
-borg-mcp-server start
+borg-mcp-server help
 ```
-
-Setup initializes local storage and identity, but does not start the server or
-create a cube. The server runs in the foreground; Ctrl-C stops it without
-deleting stored data.
-
-With the server running, open another terminal and change to the Git repository
-you want Borg to coordinate. Then use the installed
-[`borg` client](https://github.com/Byte-Ventures/borg-mcp-client) to connect:
-
-```sh
-cd /path/to/your/project
-borg assimilate
-```
-
-The server listens on `https://127.0.0.1:7091` by default. Use
-`BORG_SERVER_DATA_DIR` to select another data directory.
 
 ## How it fits together
 
@@ -52,13 +38,10 @@ The server listens on `https://127.0.0.1:7091` by default. Use
 
 ## Security posture
 
-Loopback is the safe default. Binding to a private LAN address requires both an
-explicit address and `--lan` consent.
-
-Before LAN startup, move `ca.key` out of the runtime data directory. Keep the
-CA private key offline; the running service does not need it.
-
-Read [SECURITY.md](SECURITY.md) before exposing the service beyond loopback.
+Follow the current [security guidance](https://borgmcp.ai/docs/security/) and
+[server operations guide](https://borgmcp.ai/docs/run-server/) before exposing
+the service beyond loopback. Read [SECURITY.md](SECURITY.md) for the security
+policy and private vulnerability-reporting instructions.
 
 For trust artifacts and the operator-side steps for provisioning a client on
 another machine, read [docs/trust-and-provisioning.md](docs/trust-and-provisioning.md).
@@ -66,21 +49,19 @@ That guide is included in the installed package.
 
 ## Reference and support
 
-- [Operator reference](https://github.com/Byte-Ventures/borg-mcp-server/blob/main/docs/operator-reference.md):
+- [Operator reference](docs/operator-reference.md):
   setup, dashboard, networking, debugging, credential administration, and
   capacity controls.
-- [Protocol reference](https://github.com/Byte-Ventures/borg-mcp-server/blob/main/docs/protocol-reference.md):
+- [Protocol reference](docs/protocol-reference.md):
   API and runtime metadata details.
-
-Historical release notes are available in
-[`RELEASES.md`](https://github.com/Byte-Ventures/borg-mcp-server/blob/main/RELEASES.md).
 
 Run `borg-mcp-server help` for the complete command summary.
 
 ### Library entry point
 
-The package exports `runCli`, `CliIo`, and `ServerService` for controlled
-embedding. Most installations should use the `borg-mcp-server` executable.
+The package also exposes a library entry point for controlled embedding. See
+[`src/index.ts`](src/index.ts) for the exact exports in this version. Most
+installations should use the `borg-mcp-server` executable.
 
 ### Support
 

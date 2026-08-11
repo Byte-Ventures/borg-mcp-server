@@ -2,7 +2,7 @@
 
 ## Advisory runtime metadata
 
-Protocol v5 attach requests may include the complete shared
+Protocol v8 attach requests may include the complete shared
 `runtime_metadata` report: Agent CLI kind, reported model, canonical public
 repository name, and canonical HTTPS origin. An omitted first report is stored
 as not reported; an explicit all-null report is stored as reported unknown.

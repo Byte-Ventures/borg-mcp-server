@@ -6,7 +6,6 @@ import { SERVER_PACKAGE_VERSION } from "./runtime-identity.js";
 export interface CliIo {
   readonly stdout: (message: string) => void;
   readonly stderr: (message: string) => void;
-  readonly readSecret?: (prompt: string) => Promise<string>;
   readonly isTTY?: boolean;
 }
 

@@ -1602,6 +1602,10 @@ describe("node server service", () => {
       await invitationLock.release();
 
       const exclusive = await acquireRuntimeLock(directory);
+      await expect(administration.invite())
+        .rejects.toThrow(
+          "A live process owns runtime.lock. Stop the server through a supported command; do not remove the lock.",
+        );
       await exclusive.release();
       const recovered = await acquireRuntimeLock(directory);
       await recovered.release();

@@ -3,6 +3,7 @@ import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { request as httpsRequest } from "node:https";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import {
   runAdapterConformance,
   type ConformanceEnvironment,
@@ -81,7 +82,6 @@ async function conformanceEnvironment(): Promise<{
   const createdByPrincipal = new Map<string, CreateCubeResponse>();
   const pendingCreateCapability = new Set<string>();
   const managedSessions = new Map<string, { sessionId: string; credential: string }>();
-  const recovery = authority.createRecoveryCredential();
   const material = await generate([{ name: "commonName", value: "localhost" }], {
     algorithm: "sha256",
     keyType: "ec",
@@ -230,7 +230,7 @@ async function conformanceEnvironment(): Promise<{
       issueSingleUseInvitation: async (principal, purpose) => {
         const invitation = purpose === "owner"
           ? authority.createBootstrapInvitation(60_000)
-          : authority.createInvitation(recovery, 60_000);
+          : createFixtureClientInvitation(runtime, authority, digester, databasePath);
         if (invitation === null) throw new Error("Invitation creation failed.");
         invitations.set(invitation, principal.id);
         return invitation;
@@ -434,6 +434,42 @@ async function conformanceEnvironment(): Promise<{
     digester,
     server,
   };
+}
+
+function createFixtureClientInvitation(
+  runtime: StoreRuntime,
+  authority: CredentialAuthority,
+  digester: CredentialDigester,
+  databasePath: string,
+): string {
+  const clientId = randomUUID();
+  const credentialId = randomUUID();
+  const credential = generateSecret();
+  runtime.maintenance.createClient({ id: clientId, name: `Issuer ${clientId.slice(-8)}` });
+  runtime.maintenance.grantCreateCubeCapability(clientId);
+  const digest = digester.digest(credential, "client");
+  const database = new DatabaseSync(databasePath);
+  database.exec("PRAGMA foreign_keys = ON");
+  let invitation: string | null = null;
+  try {
+    database.prepare(`
+      INSERT INTO client_credentials (
+        id, client_id, lookup_digest, verifier_digest, created_at
+      ) VALUES (?, ?, ?, ?, ?)
+    `).run(
+      credentialId,
+      clientId,
+      digest.lookup,
+      digest.verifier,
+      "2026-08-11T00:00:00.000Z",
+    );
+    invitation = authority.createInvitationForOwnerCredential(credential, 60_000);
+  } finally {
+    database.prepare("DELETE FROM clients WHERE id = ?").run(clientId);
+    database.close();
+  }
+  if (invitation === null) throw new Error("Invitation creation failed.");
+  return invitation;
 }
 
 function opaqueCursor(cursor: LogCursor): string {

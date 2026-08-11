@@ -11,8 +11,6 @@ export interface BootstrapResult {
   readonly serverId: string;
   readonly caFingerprint: string;
   readonly bindHost: string;
-  /** @deprecated Retained for offline administrative compatibility; never rendered by setup. */
-  readonly recoveryCredential: string;
   /** @deprecated The already-consumed bootstrap invitation; never rendered by setup. */
   readonly initialInvitation: string;
   readonly ownerAccess: {
@@ -102,7 +100,6 @@ export async function bootstrapServer(
     digestKey.fill(0);
     try {
       const authority = new CredentialAuthority(runtime.credentials, digester, clock);
-      const recoveryCredential = authority.createRecoveryCredential();
       const invitation = authority.createBootstrapInvitation(15 * 60_000);
       const credential = generateSecret();
        const enrollment = authority.exchangeInvitation({
@@ -126,7 +123,6 @@ export async function bootstrapServer(
         serverId,
         caFingerprint,
         bindHost,
-        recoveryCredential,
         initialInvitation: invitation,
         ownerAccess: {
           clientId: enrollment.clientId,

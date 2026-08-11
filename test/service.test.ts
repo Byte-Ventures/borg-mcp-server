@@ -1527,19 +1527,26 @@ describe("node server service", () => {
   });
 
   it("mints client invitations beside a live server after direct owner provisioning", async () => {
-    const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-live-invitation-")));
+    const parent = await realpath(await mkdtemp(join(tmpdir(), "borg-live-invitation-")));
+    const directory = join(parent, "server");
+    const credentials = join(parent, "credentials");
     let runtime: Awaited<ReturnType<typeof openStore>> | undefined;
     let digester: CredentialDigester | undefined;
     let running: Awaited<ReturnType<typeof acquireRuntimeLock>> | undefined;
     try {
-      const installation = await bootstrapServer(directory);
+      const installation = await bootstrapServer(
+        directory,
+        "127.0.0.1",
+        () => new Date(),
+        (record) => writePortableServerCredential(credentials, record),
+      );
       runtime = await openStore({ path: installation.paths.database });
       const digestKey = await loadDigestKey(installation.paths.digestKey);
       digester = new CredentialDigester(digestKey);
       digestKey.fill(0);
       const liveAuthority = new CredentialAuthority(runtime.credentials, digester);
-      const administration = createOfflineCredentialService(directory);
-      const clientInvitation = await administration.createClientInvitation(installation.recoveryCredential);
+      const administration = createOfflineCredentialService(directory, credentials);
+      const clientInvitation = (await administration.invite()).invitation;
       const originalCredential = generateSecret();
       const client = liveAuthority.exchangeInvitation({
         invitation: clientInvitation,
@@ -1571,46 +1578,58 @@ describe("node server service", () => {
       await running?.release();
       digester?.destroy();
       runtime?.close();
-      await rm(directory, { recursive: true, force: true });
+      await rm(parent, { recursive: true, force: true });
     }
   });
 
   it("fails invitation contention and exclusive-admin overlap without leaking locks", async () => {
-    const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-invitation-contention-")));
+    const parent = await realpath(await mkdtemp(join(tmpdir(), "borg-invitation-contention-")));
+    const directory = join(parent, "server");
+    const credentials = join(parent, "credentials");
     try {
-      const installation = await bootstrapServer(directory);
-      const administration = createOfflineCredentialService(directory);
+      await bootstrapServer(
+        directory,
+        "127.0.0.1",
+        () => new Date(),
+        (record) => writePortableServerCredential(credentials, record),
+      );
+      const administration = createOfflineCredentialService(directory, credentials);
       const invitationLock = await acquireInvitationMintLock(directory);
-      await expect(administration.createClientInvitation(installation.recoveryCredential))
+      await expect(administration.invite())
         .rejects.toThrow("Confirm no invitation or offline administration command is running");
       await expect(setupNodeServerInstallation(directory, "127.0.0.1", { reinitialize: true }))
         .rejects.toThrow("Confirm no invitation or offline administration command is running");
       await invitationLock.release();
 
       const exclusive = await acquireRuntimeLock(directory);
-      await expect(administration.createClientInvitation(installation.recoveryCredential))
-        .rejects.toThrow("Stop the server before running setup or offline administration.");
       await exclusive.release();
       const recovered = await acquireRuntimeLock(directory);
       await recovered.release();
     } finally {
-      await rm(directory, { recursive: true, force: true });
+      await rm(parent, { recursive: true, force: true });
     }
   });
 
   it("maps bounded SQLite invitation contention to actionable static copy", async () => {
-    const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-invitation-sqlite-busy-")));
+    const parent = await realpath(await mkdtemp(join(tmpdir(), "borg-invitation-sqlite-busy-")));
+    const directory = join(parent, "server");
+    const credentials = join(parent, "credentials");
     let blocker: DatabaseSync | undefined;
     try {
-      const installation = await bootstrapServer(directory);
+      const installation = await bootstrapServer(
+        directory,
+        "127.0.0.1",
+        () => new Date(),
+        (record) => writePortableServerCredential(credentials, record),
+      );
       blocker = new DatabaseSync(installation.paths.database);
       blocker.exec("BEGIN IMMEDIATE");
-      const administration = createOfflineCredentialService(directory);
+      const administration = createOfflineCredentialService(directory, credentials);
 
       await expect(administration.listClients())
         .rejects.toThrow("Retry the live client authorization change after the current server database write completes.");
 
-      await expect(administration.createClientInvitation(installation.recoveryCredential))
+      await expect(administration.invite())
         .rejects.toThrow("Retry invitation minting after the current server database write completes.");
       expect(await access(join(directory, "invitation-mint.lock")).then(
         () => false,
@@ -1619,7 +1638,7 @@ describe("node server service", () => {
     } finally {
       try { blocker?.exec("ROLLBACK"); } catch { /* Preserve cleanup. */ }
       blocker?.close();
-      await rm(directory, { recursive: true, force: true });
+      await rm(parent, { recursive: true, force: true });
     }
   }, 10_000);
 
@@ -1642,7 +1661,7 @@ describe("node server service", () => {
 
       running = await acquireRuntimeLock(directory, "server");
       const administration = createOfflineCredentialService(directory);
-      await expect(administration.createClientInvitation("unused-recovery-value"))
+      await expect(administration.invite())
         .rejects.toThrow(
           "Invitation minting is unavailable while a server with an incompatible schema is running. Stop the server and rerun this command, or use the CLI version that matches the running server.",
         );
@@ -1673,7 +1692,6 @@ describe("node server service", () => {
         "127.0.0.1",
         { reinitialize: false },
       ));
-      expect(first.recoveryCredential).toMatch(/^[A-Za-z0-9_-]{43}$/u);
       expect(first.initialInvitation).toMatch(/^[A-Za-z0-9_-]{43}$/u);
       const before = await Promise.all(Object.values(first.paths).map((path) => readFile(path)));
 

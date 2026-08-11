@@ -14,11 +14,10 @@ v1 scope.
 
 ## Assets and trust boundaries
 
-- Setup creates an internal recovery credential and persists its HMAC verifier, but the operator-facing
-  setup path strips the raw value from its result and never renders it. Setup then consumes one internal
-  bootstrap invitation to create the same-machine owner client with `create_cube`. The owner can create
-  short-lived, purpose-bound client invitations. Clients generate and persist their own credential and
-  retry key before exchange; exact credential-proven retries return stable non-secret identity. A client
+- Setup consumes one internal bootstrap invitation to create the same-machine owner client with
+  `create_cube`. The owner can create short-lived, purpose-bound client invitations. Clients generate
+  and persist their own credential and retry key before exchange; exact credential-proven retries
+  return stable non-secret identity. A client
   invitation enrolls a client without server capabilities or cube grants. Its
   allowlisted mint-time client name becomes the stored identity; the enrolling peer's
   self-description remains a claim hint. Explicit names are atomically refused at mint while
@@ -47,7 +46,7 @@ v1 scope.
   role layouts use static messages that disclose no cube or repository identity, and authorization,
   validation, capacity, mutation-hook, or SQLite contention failures roll back without partial state.
 - Credential records in the server database are keyed lookup and verifier digests, never plaintext.
-  Recovery, invitation, client, and drone-session digests use separate HMAC domains. The portable owner
+  Invitation, client, and drone-session digests use separate HMAC domains. The portable owner
   bearer is stored separately in the owner-only `~/.borg/credentials` file. Rotation revokes prior
   client credentials; revocation also invalidates child sessions. Unknown, expired, revoked, and
   consumed-with-another-tuple invitation claims execute the same sentinel-row lookup, tuple checks,

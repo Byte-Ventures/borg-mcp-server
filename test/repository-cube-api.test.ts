@@ -243,7 +243,7 @@ describe("repository cube API", () => {
     });
     expect(JSON.stringify(invalidRoles)).not.toContain(invalidRolesCubeId);
 
-    const readClient = await enrollClient(fixture.authority);
+    const readClient = await enrollClient(fixture.authority, false, fixture.ownerCredential);
     fixture.runtime.maintenance.grantClientCube({
       clientId: readClient.principal.id,
       cubeId: otherCubeId,
@@ -330,6 +330,7 @@ async function apiFixture(options: Omit<OpenStoreOptions, "path"> = {}) {
     authority,
     api: new CoordinationApi(runtime, authority),
     principal: enrollment.principal,
+    ownerCredential: enrollment.credential,
     cubeId,
     ...roles,
   };
@@ -338,11 +339,12 @@ async function apiFixture(options: Omit<OpenStoreOptions, "path"> = {}) {
 async function enrollClient(
   authority: CredentialAuthority,
   owner = false,
+  ownerCredential?: string,
 ) {
   const credential = generateSecret();
   const invitation = owner
     ? authority.createBootstrapInvitation(60_000)
-    : authority.createInvitation(authority.createRecoveryCredential(), 60_000)!;
+    : authority.createInvitationForOwnerCredential(ownerCredential ?? "", 60_000)!;
   authority.exchangeInvitation({
     invitation,
     retryKey: randomUUID(),
@@ -350,7 +352,7 @@ async function enrollClient(
   });
   const principal = authority.authenticate(`Bearer ${credential}`)!;
   if (principal.kind !== "client") throw new Error("Expected a client principal.");
-  return { principal };
+  return { principal, credential };
 }
 
 function addRequiredRoles(runtime: StoreRuntime, clientId: string, cubeId: string) {

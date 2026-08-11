@@ -33,14 +33,14 @@ describe("offline operator flow", () => {
   it("returns DRONE_EVICTED before dispatching any coordination route", async () => {
     const parent = await realpath(await mkdtemp(join(tmpdir(), "borg-operator-evicted-")));
     directories.push(parent);
-    const bootstrap = await bootstrapServer(join(parent, "server"));
+    const { installation: bootstrap, ownerCredential } = await bootstrapWithOwner(join(parent, "server"));
     const runtime = await openStore({ path: bootstrap.paths.database });
     const digestKey = await loadDigestKey(bootstrap.paths.digestKey);
     const digester = new CredentialDigester(digestKey);
     digestKey.fill(0);
     const authority = new CredentialAuthority(runtime.credentials, digester);
     const credential = generateSecret();
-    const invitation = authority.createInvitation(bootstrap.recoveryCredential, 60_000)!;
+    const invitation = authority.createInvitationForOwnerCredential(ownerCredential, 60_000)!;
     const enrolled = authority.exchangeInvitation({
       invitation,
       retryKey: randomUUID(),
@@ -103,10 +103,10 @@ describe("offline operator flow", () => {
     const parent = await realpath(await mkdtemp(join(tmpdir(), "borg-operator-grant-")));
     directories.push(parent);
     const dataDirectory = join(parent, "server");
-    const bootstrap = await bootstrapServer(dataDirectory);
+    const { installation: bootstrap, ownerCredential } = await bootstrapWithOwner(dataDirectory);
     const credential = generateSecret();
     const enrolled = await withAuthority(dataDirectory, (authority) => {
-      const invitation = authority.createInvitation(bootstrap.recoveryCredential, 60_000)!;
+      const invitation = authority.createInvitationForOwnerCredential(ownerCredential, 60_000)!;
       return authority.exchangeInvitation({
         invitation,
         retryKey: randomUUID(),
@@ -403,11 +403,11 @@ describe("offline operator flow", () => {
     const parent = await realpath(await mkdtemp(join(tmpdir(), "borg-operator-credential-")));
     directories.push(parent);
     const dataDirectory = join(parent, "server");
-    const bootstrap = await bootstrapServer(dataDirectory);
+    const { ownerCredential } = await bootstrapWithOwner(dataDirectory);
     const credential = generateSecret();
     const enrolled = await withAuthority(dataDirectory, (authority) => {
-      const invitation = authority.createInvitation(
-        bootstrap.recoveryCredential,
+      const invitation = authority.createInvitationForOwnerCredential(
+        ownerCredential,
         60_000,
         "operator",
       )!;
@@ -439,14 +439,14 @@ describe("offline operator flow", () => {
   it("shares request quota across issued sessions and actual client rotation", async () => {
     const parent = await realpath(await mkdtemp(join(tmpdir(), "borg-operator-quota-")));
     directories.push(parent);
-    const bootstrap = await bootstrapServer(join(parent, "server"));
+    const { installation: bootstrap, ownerCredential } = await bootstrapWithOwner(join(parent, "server"));
     const runtime = await openStore({ path: bootstrap.paths.database });
     const digestKey = await loadDigestKey(bootstrap.paths.digestKey);
     const digester = new CredentialDigester(digestKey);
     digestKey.fill(0);
     const authority = new CredentialAuthority(runtime.credentials, digester);
     const credential = generateSecret();
-    const invitation = authority.createInvitation(bootstrap.recoveryCredential, 60_000)!;
+    const invitation = authority.createInvitationForOwnerCredential(ownerCredential, 60_000)!;
     const enrolled = authority.exchangeInvitation({
       invitation,
       retryKey: randomUUID(),
@@ -542,7 +542,7 @@ describe("offline operator flow", () => {
     });
 
     try {
-      const invitation = authority.createInvitation(bootstrap.recoveryCredential, 60_000)!;
+      const invitation = authority.createInvitationForOwnerCredential(ownerRecord.credential, 60_000)!;
       const authCube = "00000000-0000-4000-8000-000000000011";
       for (const [path, body, method] of [
         ["/api/cubes", undefined, "GET"],
@@ -805,6 +805,21 @@ function openEventStream(
     outgoing.on("error", reject);
     outgoing.end();
   });
+}
+
+async function bootstrapWithOwner(dataDirectory: string): Promise<{
+  readonly installation: Awaited<ReturnType<typeof bootstrapServer>>;
+  readonly ownerCredential: string;
+}> {
+  let ownerCredential: string | undefined;
+  const installation = await bootstrapServer(
+    dataDirectory,
+    "127.0.0.1",
+    () => new Date(),
+    async (record) => { ownerCredential = record.credential; },
+  );
+  if (ownerCredential === undefined) throw new Error("Owner credential was not provisioned.");
+  return { installation, ownerCredential };
 }
 
 function request(

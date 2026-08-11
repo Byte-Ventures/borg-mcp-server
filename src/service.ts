@@ -96,8 +96,6 @@ export interface ServerService {
   readonly revokeClient?: (clientSelector: string) => Promise<void>;
   readonly grantClient?: (clientSelector: string, cubeId: string, access: CubeAccess) => Promise<void>;
   readonly ungrantClient?: (clientSelector: string, cubeId: string) => Promise<void>;
-  readonly createClientInvitation?: (recoveryCredential: string) => Promise<string>;
-  readonly replaceOwnerInvitation?: (recoveryCredential: string) => Promise<string>;
   readonly invite?: (clientName?: string) => Promise<InvitationResult>;
   readonly reissueCertificate?: (additionalHost: string) => Promise<CertificateReissueResult>;
 }
@@ -122,7 +120,7 @@ export interface InvitationResult {
 }
 
 export type ServerSetupResult =
-  | (Omit<BootstrapResult, "recoveryCredential" | "initialInvitation"> & {
+  | (Omit<BootstrapResult, "initialInvitation"> & {
       readonly artifact?: { readonly version: string; readonly integrity: string; readonly sourceSha: string | null };
     })
   | {
@@ -737,7 +735,7 @@ export const nodeServerService: ServerService = {
       credentialFile,
     );
     if (!("existing" in result)) {
-      const { recoveryCredential: _recovery, initialInvitation: _invitation, ...publicResult } = result;
+      const { initialInvitation: _invitation, ...publicResult } = result;
       return {
         ...publicResult,
         artifact: {
@@ -1403,8 +1401,7 @@ export function createOfflineCredentialService(
   offlineDataDirectory: string,
   credentialRoot?: string,
 ): Pick<Required<ServerService>,
-  "rotateClient" | "listClients" | "revokeClient" | "grantClient" | "ungrantClient" |
-  "createClientInvitation" | "replaceOwnerInvitation" | "invite"
+  "rotateClient" | "listClients" | "revokeClient" | "grantClient" | "ungrantClient" | "invite"
 > {
   const withInvitationAuthority = async <T>(
     operation: (
@@ -1460,16 +1457,6 @@ export function createOfflineCredentialService(
         throw operatorErrors.GRANT_NOT_FOUND;
       }
     }, operatorErrors.LIVE_ADMIN_CONTENTION),
-    createClientInvitation: (recoveryCredential) => withInvitationAuthority((authority) => {
-      const invitation = authority.createInvitation(recoveryCredential, 15 * 60_000);
-      if (invitation === null) throw operatorErrors.RECOVERY_INVALID;
-      return invitation;
-    }),
-    replaceOwnerInvitation: (recoveryCredential) => withInvitationAuthority((authority) => {
-      const invitation = authority.replaceOwnerInvitation(recoveryCredential, 15 * 60_000);
-      if (invitation === null) throw operatorErrors.RECOVERY_INVALID;
-      return invitation;
-    }),
     invite: async (clientName) => {
       const runtime = await inspectRuntimeLock(offlineDataDirectory);
       return withInvitationAuthority(async (authority) => {

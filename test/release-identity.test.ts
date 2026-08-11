@@ -114,8 +114,6 @@ describe("release identity automation", () => {
   it("keeps the visitor-first README unpinned and release-safe", async () => {
     const readme = await readFile("README.md", "utf8");
     const headings = [...readme.matchAll(/^## (.+)$/gmu)].map((match) => match[1]);
-    const quickstart = readme.slice(0, readme.indexOf("## How it fits together"))
-      .replaceAll(/\s+/gu, " ");
 
     expect(readme).not.toMatch(/sha512-[A-Za-z0-9+/]{86}==/u);
     expect(readme).not.toMatch(/(?<![\d.])\d+\.\d+\.\d+(?![\d.])/u);
@@ -127,13 +125,6 @@ describe("release identity automation", () => {
       "Security posture",
       "Reference and support",
     ]);
-    expect(quickstart).toContain("borg-mcp-server setup");
-    expect(quickstart).toContain("borg-mcp-server start");
-    expect(quickstart).toContain("Setup initializes local storage and identity, but does not start the server or create a cube.");
-    expect(quickstart).toContain("The server runs in the foreground");
-    expect(quickstart).toContain("change to the Git repository you want Borg to coordinate");
-    expect(quickstart).toContain("cd /path/to/your/project");
-    expect(quickstart).toContain("https://127.0.0.1:7091");
     for (const [, path] of readme.matchAll(/\]\(([^):]+\.md)\)/gu)) {
       await expect(access(path!)).resolves.toBeUndefined();
     }

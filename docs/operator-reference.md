@@ -79,12 +79,14 @@ installations and never displays activity message bodies.
 
 ## Network configuration
 
+Follow the website's [server operations guide](https://borgmcp.ai/docs/run-server/)
+for the complete loopback and private-LAN sequence. The direct server start
+syntax for a private address is:
+
 ```sh
 borg-mcp-server start --host 192.168.1.20 --port 7091 --lan
 ```
 
-Public, wildcard,
-unspecified, multicast, and otherwise unsafe bind addresses are rejected.
 The prepared address is certificate configuration, not persisted consent to a
 LAN bind. If an installation prepared for a private-LAN address starts without
 `--host` and `--lan`, it remains on loopback and prints the exact command that
@@ -96,15 +98,9 @@ TLS files may instead be supplied explicitly with
 
 ### LAN address changes
 
-The server certificate contains IP subject-alternative names. If the server's
-LAN address changes, older clients that perform the standard leaf SAN check can
-reject the new address even though the server's CA identity is unchanged.
-Clients that support CA-pinned address changes use the CA SPKI trust identity
-and do not require a leaf reissue. Do not put `ca.key` online just to handle an
-address change.
-
-For an older client, perform the manual leaf-reissue procedure while the server
-is stopped:
+The server certificate contains IP subject-alternative names, and startup
+requires an exact SAN for the requested bind address. If the server's LAN
+address changes, perform the leaf-reissue procedure while the server is stopped:
 
 1. Retrieve `ca.key` from offline protected storage into the private server data
    directory. Confirm mode `0600` and do not copy it to the client machine.
@@ -138,9 +134,10 @@ reinitialize the CA.
 ## Activity log lookup
 
 Activity log point lookups and paginated cursors accept a full entry UUID or a
-unique eight-hex-character prefix. Cursor timestamps accept ISO-8601 values with
-or without fractional seconds; malformed selectors identify the accepted forms.
-Point lookups retain the same cube visibility rules as paginated reads.
+unique eight-hex-character prefix. Cursor timestamps accept UTC ISO-8601 values
+ending in `Z`, with no fractional seconds or with one to three fractional digits;
+malformed selectors identify the accepted forms. Point lookups retain the same
+cube visibility rules as paginated reads.
 
 Roster `wake_state` is `idle` when no directed dispatch is pending, `pending`
 while an unacknowledged dispatch is within the three-minute wake window, `awake`
@@ -207,14 +204,10 @@ can be retried.
 
 ## Capacity controls
 
-The server accepts positive integer values for these optional environment
-variables:
-
-- `BORG_SERVER_MAX_ACTIVITY_ENTRIES_PER_CUBE`
-- `BORG_SERVER_MAX_ACTIVE_DECISION_BYTES_PER_CUBE` (default: 16384 bytes of active decision text)
-- `BORG_SERVER_CONTEXT_GUIDELINE_BYTES` (default: 16384 bytes for directive and playbook review advisories)
-- `BORG_SERVER_MAX_DATABASE_BYTES`
-- `BORG_SERVER_MIN_FREE_DISK_BYTES`
+The website's [capacity-controls reference](https://borgmcp.ai/docs/self-hosting/#capacity-controls)
+lists the operator-facing storage and growth settings and their defaults. This
+server also accepts `BORG_SERVER_CONTEXT_GUIDELINE_BYTES` (default: 16384 bytes)
+for directive and playbook review advisories.
 
 Invalid values fail closed before the server starts.
 The active decision text budget sums UTF-8 bytes from each active decision's topic,
@@ -227,5 +220,3 @@ seat's context while allowing ordinary collections of substantive rulings.
 The context guideline is advisory only: successful directive and role-playbook
 updates report their resulting UTF-8 byte size, with pointed compaction guidance
 at or above the configured value. It never rejects or changes a write.
-Cube creation is additionally bounded to 100 cubes per creating client and
-1,000 cubes per server. Exact idempotent retries do not consume quota twice.

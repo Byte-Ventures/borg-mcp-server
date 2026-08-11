@@ -24,7 +24,7 @@ The client trust identity is the literal value
 `spki-sha256:<64 lowercase hexadecimal characters>`. It is the SHA-256 digest
 of the CA public-key SPKI, not the digest of `ca.crt` and not a password. The
 same value is recorded as `ca_spki_sha256` in `server.json` and is included in
-the signed enrollment artifact.
+the enrollment artifact.
 
 Never copy `ca.key`, `server.key`, `credential-digest.key`, `borg.db`, or the
 owner credential to the client machine. Never place an invitation in a command
@@ -42,8 +42,9 @@ borg-mcp-server cert-reissue --host 192.168.1.20
 
 The `--host` value must be the server's private-LAN IP address. The command
 keeps the existing CA and reissues only `server.crt` and `server.key`, so the
-CA fingerprint and already-issued trust identities remain stable. Start the
-server with explicit LAN consent:
+CA fingerprint and already-issued trust identities remain stable. Move
+`ca.key` to encrypted offline storage and confirm that it no longer exists in
+the server data directory. Then start the server with explicit LAN consent:
 
 ```sh
 borg-mcp-server start --host 192.168.1.20 --port 7091 --lan
@@ -64,7 +65,7 @@ borg-mcp-server invite "Alice laptop"
 ```
 
 The command displays the enrollment artifact once. It contains the server
-endpoint, the CA SPKI fingerprint, the server authority, and a short-lived
+endpoint, the CA SPKI fingerprint, the enrollment authority, and a short-lived
 secret. Share the complete artifact only with the intended operator through a
 trusted private channel. It expires after 15 minutes and grants no cube access
 by itself; grant the enrolled client access with `client-grant` after enrollment.
@@ -78,8 +79,8 @@ and mint a new invitation after the server is reachable on the LAN.
 The receiving machine must use the enrollment command supported by its
 installed `borg` client. Do not invent a URL, disable certificate verification,
 or substitute the server private key. The client must verify both the HTTPS
-certificate chain and the exact `spki-sha256` trust identity from the signed
-artifact before sending the invitation.
+certificate chain and the exact `spki-sha256` trust identity from the artifact
+before sending the invitation.
 
 ## Grant Cube Access
 

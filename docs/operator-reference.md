@@ -204,7 +204,7 @@ can be retried.
 
 ## Capacity controls
 
-The website's [capacity-controls reference](https://borgmcp.ai/docs/self-hosting/#capacity-controls)
+The website's [self-hosting reference](https://borgmcp.ai/docs/self-hosting/)
 lists the operator-facing storage and growth settings and their defaults. This
 server also accepts `BORG_SERVER_CONTEXT_GUIDELINE_BYTES` (default: 16384 bytes)
 for directive and playbook review advisories.

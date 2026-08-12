@@ -129,10 +129,13 @@ any preview.
    does not mean the version is public and must not trigger announcements, issue closure, consumer
    pins, documentation sync, a GitHub Release, or a `published` release record.
 8. Before promotion, the operator uses authenticated `npm stage list` and `npm stage view` to record
-   and verify the shared, server, and client stage UUIDs, package versions, eventual `latest` tags,
-   source runs, tags, commits, and artifact provenance. The exact staged set may be downloaded and
-   exercised. Public `latest` and public `versions` must still expose the prior coherent set. If a
-   pending stage appears on either public surface, approve nothing and halt the staged design.
+   and verify each stage UUID, package name, version, and eventual `latest` tag. For every package,
+   `npm stage download <UUID>` is mandatory: compute the downloaded tarball's SHA-512 SRI and require
+   exact equality with that tag workflow's same-run artifact report before exercising the staged
+   coupled set. Separately bind the source run, annotated tag object, and peeled commit from GitHub's
+   tag and workflow evidence; stage inspection does not provide those fields. Public `latest` and
+   public `versions` must still expose the prior coherent set. If a pending stage appears on either
+   public surface, approve nothing and halt the staged design.
 9. In one operator session, approve the verified UUIDs with interactive two-factor authentication:
    shared first, server second, client third. Do not repeat an ambiguous approval; resolve it from
    authenticated stage state and canonical public version and integrity evidence. Before any approval,
@@ -148,12 +151,12 @@ any preview.
     identity change append the canonical `published` record; successful stage workflow state is
     operationally pending and has no durable release-record outcome.
 11. There is no post-approval registry readback job because interactive stage approval cannot use the
-     workflow's OIDC credential. Once the release is installable from the canonical registry, verify
-     canonical integrity, install it into an isolated prefix, and exercise the real user path end to
-     end. This is product verification, not publication validation: failure routes a new reviewed fix
-     and never invalidates, rebuilds, retags, or reruns the immutable release. Do not repeat byte
-     comparisons, integrity/SRI checks, packed-version checks, source-tree verification, dist-tag
-     readback, or provenance readback.
+     workflow's OIDC credential. Once the release is installable from the canonical registry, the
+     operator verifies canonical integrity and inspects the registry's provenance attestation for the
+     approved tag and commit, then installs it into an isolated prefix and exercises the real user path
+     end to end. This is product verification, not publication validation: failure routes a new
+     reviewed fix and never invalidates, rebuilds, retags, or reruns the immutable release. Do not
+     repeat packed-byte, packed-version, source-tree, or dist-tag checks.
 12. Useful SBOM or supplemental report generation may run separately, but cannot gate, invalidate, or
    make an otherwise authentic immutable publication ambiguous.
 13. After successful publication, update the README and this runbook in a fresh reviewed
@@ -595,10 +598,10 @@ propagation completed. The run and tag remain immutable and must not be rerun, m
 Releases through `0.1.17` used bounded postpublish version reads for propagation, integrity,
 signatures, and attestations. That workflow policy is retired: the active workflow stages the exact
 tarball and performs no read of an approved version. Interactive approval and canonical npm-live
-integrity establish publication; the operator then performs one product check: registry install and
-real-path exercise, without dist-tag or provenance readback and without repeating byte, integrity,
-or packed-version verification. The prior runs remain immutable historical evidence and must not be
-rerun.
+integrity establish publication; the operator then inspects the live provenance attestation and
+performs one product check: registry install and real-path exercise, without dist-tag readback or
+repeating packed-byte or packed-version verification. The prior runs remain immutable historical
+evidence and must not be rerun.
 
 The immutable annotated `v0.1.0` tag object
 `0f454997ced06802f0d3a0518c2e294af5a73b56` and first-attempt workflow run `29494436948`

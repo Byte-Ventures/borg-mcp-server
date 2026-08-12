@@ -7,6 +7,25 @@ import { describe, expect, it } from "vitest";
 
 const execute = promisify(execFile);
 
+function expectStagedPublicationLane(workflow: string): void {
+  const stageCommand = 'npm stage publish "./release/${{ needs.verify.outputs.tarball }}" --ignore-scripts --access public --provenance --registry=https://registry.npmjs.org';
+  expect(workflow.match(/^\s*npm stage publish\b.*$/gmu)).toEqual([
+    `          ${stageCommand}`,
+  ]);
+  expect(workflow).not.toMatch(/^\s*npm publish\b/mu);
+  expect(workflow).not.toContain("--tag staging");
+  expect(workflow).not.toContain("npm dist-tag");
+  expect(workflow).not.toContain("secrets.NPM_TOKEN");
+  expect(workflow).not.toContain("NPM_TOKEN_PRESENT");
+
+  const exercise = workflow.indexOf("Exercise exact tarball once");
+  const preflight = workflow.indexOf("verify-registry-release.mjs prepublish release/artifact-report.json");
+  const stage = workflow.indexOf(stageCommand);
+  expect(exercise).toBeGreaterThan(-1);
+  expect(preflight).toBeGreaterThan(exercise);
+  expect(stage).toBeGreaterThan(preflight);
+}
+
 describe("server release lane", () => {
   it("uses one package authority and one protected publish with no post-publish readback", async () => {
     const workflow = await readFile(".github/workflows/release.yml", "utf8");
@@ -28,7 +47,7 @@ describe("server release lane", () => {
     expect(workflow.match(/npm pack --ignore-scripts/g)).toHaveLength(1);
     expect(workflow.match(/verify-packed-artifact\.mjs/g)).toHaveLength(1);
     expect(workflow.match(/exercise-packed-artifact\.mjs/g)).toHaveLength(1);
-    expect(workflow.match(/npm publish "\.\/release\//g)).toHaveLength(1);
+    expectStagedPublicationLane(workflow);
     expect(workflow.match(/npm install --prefix "\$\{npm_prefix\}"/g)).toHaveLength(1);
 
     expect(verification).toContain("Upload same-run release artifact");
@@ -78,6 +97,13 @@ describe("server release lane", () => {
     for (const line of workflow.split("\n").filter((value) => value.trim().startsWith("uses:"))) {
       expect(line).toMatch(/@[0-9a-f]{40}(?:\s+#.*)?$/u);
     }
+  });
+
+  it("rejects replacing staged publication with bare npm publish", async () => {
+    const workflow = await readFile(".github/workflows/release.yml", "utf8");
+    const mutant = workflow.replace("npm stage publish", "npm publish");
+
+    expect(() => expectStagedPublicationLane(mutant)).toThrow();
   });
 
   it("rejects reruns of an immutable release tag", async () => {
@@ -134,7 +160,7 @@ describe("server release lane", () => {
       "Never move, reuse, force-update, or rerun a failed release tag",
       "one build, test, package, and artifact-verification authority",
       "same-run tarball and verifier report",
-      "npm Trusted Publishing with provenance",
+      "`npm stage publish` through Trusted Publishing with provenance",
       "terminal release boundary",
       'GITHUB_TOKEN="$(gh auth token)" node scripts/verify-main-ruleset.mjs',
       "tag authorization record must name the reviewed verifier commit",
@@ -239,7 +265,8 @@ describe("server release lane", () => {
       "manage-authorized atomic association",
       "foreground and operator-local read-only",
       "per-drone activity histories",
-      "successful completion of `npm publish` is the terminal release boundary",
+      "successful `npm stage approve` plus canonical",
+      "registry visibility and integrity is the terminal release boundary",
       "github.com/Byte-Ventures/borg-mcp-client",
       "github.com/Byte-Ventures/borg-mcp-shared",
     ]) {

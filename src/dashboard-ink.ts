@@ -94,7 +94,7 @@ function InkDashboard(input: {
 
   const children: ReactNode[] = [
     h(InkRail, { key: "rail", snapshot, width, glyphs, color: options.color }),
-    h(InkBindStatus, { key: "bind", snapshot, width }),
+    h(InkBindStatus, { key: "bind", snapshot, width, glyphs }),
     h(InkRule, { key: "separator-top", width, glyphs }),
     focus === undefined
       ? h(InkEmptyPanel, { key: "empty-panel", width, glyphs })
@@ -180,11 +180,12 @@ function InkRail(input: {
 function InkBindStatus(input: {
   readonly snapshot: DashboardSnapshot;
   readonly width: number;
+  readonly glyphs: Glyphs;
 }): ReactNode {
   const endpoint = sanitizeTerminalText(input.snapshot.server.endpoint);
   const value = `Endpoint: ${endpoint}  Bind mode: ${input.snapshot.server.bind_mode}`;
   return h(Box, { width: input.width, height: 1, overflow: "hidden" },
-    h(Text, { wrap: "truncate-end" }, value),
+    h(Text, null, truncateCell(value, input.width, input.glyphs.ellipsis)),
   );
 }
 
@@ -381,7 +382,7 @@ function InkDroneBand(input: {
 
   const detailWidth = Math.max(0, width - terminalCellWidth(label) - 1 - terminalCellWidth(role) - 2);
   const details = height >= 3
-    ? `SENT ${drone.sent}  RECV ${drone.received}  LAST ${last}`
+    ? `SENT ${drone.sent}  DIRECTED ${drone.received}  LAST ${last}`
     : `SENT ${drone.sent}  LAST ${last}`;
   const identityChildren: ReactNode[] = [
     h(InkFixedText, { key: "label", value: label, width: terminalCellWidth(label), ellipsis: glyphs.ellipsis, style: graphStyle }),

@@ -35,7 +35,7 @@ cube list ranked by coordination posts in the trailing 15 minutes. Distinct
 posting drones break ties. New activity produces a short, event-driven cube
 pulse. The panel shows per-drone labels, sent counts, last-active age, and an
 in-process activity history over the selected window; at full density it also
-shows role and received counts. The dashboard never displays activity message
+shows role and directed-entry counts. The dashboard never displays activity message
 bodies. The panel absorbs the terminal rows left after the cube list and fixed
 chrome. It refreshes on committed activity, on terminal resize, and on a
 bounded five-second age tick.

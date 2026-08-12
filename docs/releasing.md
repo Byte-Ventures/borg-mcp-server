@@ -157,11 +157,19 @@ any preview.
      end to end. This is product verification, not publication validation: failure routes a new
      reviewed fix and never invalidates, rebuilds, retags, or reruns the immutable release. Do not
      repeat packed-byte, packed-version, source-tree, or dist-tag checks.
-12. Useful SBOM or supplemental report generation may run separately, but cannot gate, invalidate, or
-   make an otherwise authentic immutable publication ambiguous.
-13. After successful publication, update the README and this runbook in a fresh reviewed
-   documentation change so public release claims match the shipped package.
-14. Stop immediately on any mismatch before publication. Preserve every run and tag as immutable
+12. After approved-live integrity verification and provenance inspection, create the GitHub Releases
+    in the same operator session in shared, server, then client order. Run this command in each package
+    repository with its released version:
+
+    ```sh
+    GITHUB_TOKEN="$(gh auth token)" node scripts/create-github-release.mjs <version>
+    ```
+
+13. Useful SBOM or supplemental report generation may run separately, but cannot gate, invalidate, or
+    make an otherwise authentic immutable publication ambiguous.
+14. After successful publication, update the README and this runbook in a fresh reviewed
+    documentation change so public release claims match the shipped package.
+15. Stop immediately on any mismatch before publication. Preserve every run and tag as immutable
     evidence; recovery uses a newly reviewed source fix, a new version, and a newly authorized tag.
     If the post-publication check fails, preserve the published identity and route a new reviewed
     fix; never rerun, replace, or hide the immutable publication.

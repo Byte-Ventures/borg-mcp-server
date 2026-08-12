@@ -143,6 +143,39 @@ describe("read-only dashboard snapshot source", () => {
     source.close();
   });
 
+  it("counts only directed entries in the per-drone directed total", async () => {
+    directory = await realpath(await mkdtemp(join(tmpdir(), "borg-dashboard-directed-")));
+    await bootstrapServer(directory);
+    writer = await openStore({
+      path: join(directory, "borg.db"),
+      clock: () => new Date("2026-07-25T12:00:00.000Z"),
+      migrationMode: "require-current",
+    });
+    seed(writer);
+    const drone = writer.forPrincipal(droneSessionPrincipal({
+      id: ids.session,
+      clientId: ids.client,
+      cubeId: ids.cube,
+      droneId: ids.drone,
+    }));
+    drone.appendLog(ids.cube, { message: "broadcast" });
+    drone.appendLog(ids.cube, {
+      message: "directed",
+      visibility: "direct",
+      recipientDroneIds: [ids.drone],
+    });
+
+    const source = await openReadonlyDashboardSnapshotSource({
+      dataDirectory: directory,
+      clock: () => new Date("2026-07-25T12:00:00.000Z"),
+    });
+    expect(source.read().cubes[0]?.drones[0]).toMatchObject({
+      sent: 2,
+      received: 1,
+    });
+    source.close();
+  });
+
   it("turns a failed live-runtime validation into a source read failure", async () => {
     vi.useFakeTimers();
     directory = await realpath(await mkdtemp(join(tmpdir(), "borg-dashboard-stop-")));

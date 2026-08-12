@@ -180,10 +180,18 @@ describe("dashboard renderer", () => {
     );
     expect(ascii).toContain("== BORGMCP-SERVER ==");
     expect(ascii).toContain("+");
-    expect(ascii).not.toMatch(/[─│┌┐└┘█▢▤▥▣…]/u);
     for (const line of ascii.split("\n")) expect([...line]).toHaveLength(60);
     expect(ascii).toContain("DRONE ACTIVITY");
     expect(ascii).toContain("collecting -");
+
+    for (let width = 20; width <= 100; width += 1) {
+      const rendered = createDashboardRenderer({ glyphMode: "ascii", color: true })(
+        snapshot,
+        width,
+        18,
+      );
+      expect(rendered).not.toMatch(/[^\x00-\x7F]/u);
+    }
 
     const tiny = createDashboardRenderer({ glyphMode: "box", color: true })(
       snapshot,
@@ -562,7 +570,7 @@ describe("dashboard renderer", () => {
     expect(sanitizeTerminalText("a\nb\u001b[2Jc")).toBe("a bc");
   });
 
-  it("renders sanitized wide drone labels with sent, received, last-active, and right-edge activity", () => {
+  it("renders sanitized wide drone labels with sent, directed, last-active, and right-edge activity", () => {
     const data = snapshotData(1);
     const cube = data.cubes[0]!;
     const snapshot = rankDashboardSnapshot({
@@ -588,7 +596,7 @@ describe("dashboard renderer", () => {
       activityWindowMs: 15 * 60_000,
     });
     expect(frame).toContain("東京🚀-red");
-    expect(frame).toContain("SENT 12  RECV 8");
+    expect(frame).toContain("SENT 12  DIRECTED 8");
     expect(frame).toContain("LAST 1m");
     expect(frame).toContain("██");
     expect(frame).not.toContain("\u001b");

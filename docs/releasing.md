@@ -71,12 +71,15 @@ Before any tag is authorized, the Coordinator configures and verifies:
 - An active tag ruleset protects `refs/tags/v*.*.*` from update, deletion, and non-fast-forward;
   only the designated release operator may create a tag after exact authorization by the Coordinator.
 - The `npm-publish` environment allows only protected `v*.*.*` tags, has no admin bypass, and
-  requires the designated Queen operator to approve publication after the exact-artifact `verify`
-  job succeeds.
+  requires the designated Queen operator to authorize the staging submission after the exact-artifact
+  `verify` job succeeds.
 - npm ownership is verified and Trusted Publishing is bound to this repository,
   `.github/workflows/release.yml`, and the `npm-publish` environment. Owned-package releases use
   tokenless OIDC; the environment contains only the reviewed `NPM_EXPECTED_OWNER` variable and no
-  npm token. Bootstrap mode and long-lived credentials must never be restored for an owned package.
+  npm token. The package's Trusted Publisher allows `npm stage publish`, disallows direct
+  `npm publish`, and retains the exact organization, repository, workflow, and environment binding.
+  Publishing access requires two-factor authentication and disallows tokens. Bootstrap mode and
+  long-lived credentials must never be restored for an owned package.
 
 Repository visibility must not be changed under this runbook. Visibility requires its own explicit
 authorization after all public-boundary and license gates.
@@ -116,33 +119,54 @@ any preview.
    package identity, version, and canonical SHA-512 SRI; no checksum bundle, run tuple, rebuild,
    duplicate verification, or critical-path SBOM is needed.
 6. After `verify` succeeds, the designated Queen operator alone approves the `npm-publish`
-   environment. There is no separate pre-publication exact-artifact Security gate: `verify` is the
-   mechanical authority for the exact bytes that the publish job consumes.
+   environment to authorize staging. There is no separate pre-staging exact-artifact Security gate:
+   `verify` is the mechanical authority for the exact bytes that the staging job consumes.
 7. The protected publish job downloads that same-run tarball and verifier report. Its read-only
    preflight rejects a wrong package or version, an existing immutable version, an unclaimed package,
-   or ownership other than the sole reviewed `NPM_EXPECTED_OWNER`. It then publishes the tarball once
-   through npm Trusted Publishing with provenance, lifecycle scripts disabled, and no long-lived npm
-   token.
-8. For immutable package bytes, successful completion of `npm publish` is the terminal release boundary.
-   There is no post-publication registry readback job: registry metadata and install visibility propagate
-   asynchronously and cannot invalidate an immutable publication after npm accepts it. Separately,
-   once the release is installable from the canonical registry, install it into an isolated prefix
-   and exercise the real user path end to end. This is product verification, not publication
-   validation: failure routes a new reviewed fix and never invalidates, rebuilds, retags, or reruns
-   the immutable release. Do not repeat byte comparisons, integrity/SRI checks, packed-version
-   checks, source-tree verification, dist-tag readback, or provenance readback.
-9. Useful SBOM or supplemental report generation may run separately, but cannot gate, invalidate, or
+   or ownership other than the sole reviewed `NPM_EXPECTED_OWNER`. It then submits the tarball once
+   with `npm stage publish` through Trusted Publishing with provenance, lifecycle scripts disabled,
+   and no long-lived npm token. Workflow success means npm accepted the immutable staged tarball; it
+   does not mean the version is public and must not trigger announcements, issue closure, consumer
+   pins, documentation sync, a GitHub Release, or a `published` release record.
+8. Before promotion, the operator uses authenticated `npm stage list` and `npm stage view` to record
+   and verify the shared, server, and client stage UUIDs, package versions, eventual `latest` tags,
+   source runs, tags, commits, and artifact provenance. The exact staged set may be downloaded and
+   exercised. Public `latest` and public `versions` must still expose the prior coherent set. If a
+   pending stage appears on either public surface, approve nothing and halt the staged design.
+9. In one operator session, approve the verified UUIDs with interactive two-factor authentication:
+   shared first, server second, client third. Do not repeat an ambiguous approval; resolve it from
+   authenticated stage state and canonical public version and integrity evidence. Before any approval,
+   abandon a bad coupled set by rejecting all three and burning all three tagged versions under this
+   project's stricter immutability rule. After shared approval, stopping before server is compatibility-
+   safe but recovery uses fresh versions. After server approval, prioritize the already-verified client;
+   if it cannot be approved, recover with newly reviewed server and client versions.
+10. The three approvals are not atomic. Shared-first does not change existing exact consumer pins;
+    server-second opens a bounded latest-server/latest-client mismatch window; client-third closes it.
+    Staging minimizes this residual race by completing all builds and gates before promotion, but does
+    not eliminate it. For immutable package bytes, successful `npm stage approve` plus canonical
+    registry visibility and integrity is the terminal release boundary. Only then may a later release-
+    identity change append the canonical `published` record; successful stage workflow state is
+    operationally pending and has no durable release-record outcome.
+11. There is no post-approval registry readback job because interactive stage approval cannot use the
+     workflow's OIDC credential. Once the release is installable from the canonical registry, verify
+     canonical integrity, install it into an isolated prefix, and exercise the real user path end to
+     end. This is product verification, not publication validation: failure routes a new reviewed fix
+     and never invalidates, rebuilds, retags, or reruns the immutable release. Do not repeat byte
+     comparisons, integrity/SRI checks, packed-version checks, source-tree verification, dist-tag
+     readback, or provenance readback.
+12. Useful SBOM or supplemental report generation may run separately, but cannot gate, invalidate, or
    make an otherwise authentic immutable publication ambiguous.
-10. After successful publication, update the README and this runbook in a fresh reviewed
+13. After successful publication, update the README and this runbook in a fresh reviewed
    documentation change so public release claims match the shipped package.
-11. Stop immediately on any mismatch before publication. Preserve every run and tag as immutable
+14. Stop immediately on any mismatch before publication. Preserve every run and tag as immutable
     evidence; recovery uses a newly reviewed source fix, a new version, and a newly authorized tag.
     If the post-publication check fails, preserve the published identity and route a new reviewed
     fix; never rerun, replace, or hide the immutable publication.
 
 ## Deterministic release identity preparation
 
-After a successful immutable publication, prepare the next package identity from a clean branch
+After interactive approval and npm-live integrity verification establish a successful immutable
+publication, prepare the next package identity from a clean branch
 whose base contains the annotated tag for the currently recorded package version:
 
 ```sh
@@ -188,10 +212,12 @@ registry. Release identity accepts only workflow attempt 1: a rerun is never aut
 if its jobs independently show a pre-publication failure. Failed tags, runs, versions, and
 approvals remain immutable and must never be moved, reused, or rerun.
 
-This recovery shape requires the `verify` job itself to have failed and the `publish` job to be
-skipped. If verification succeeds and publication or a postpublication check fails, that run is
-not a `failed-superseded` verify burn and this command rejects it; preserve that immutable run as
-publication-stage evidence and use the applicable publication recovery procedure instead.
+This recovery shape requires the `verify` job itself to have failed and the staging job to be
+skipped. A successful staging job is pending operational state, not publication and not a
+`failed-superseded` verify burn. If its stage is rejected or cannot be approved, preserve the
+immutable run, tag, version, and authenticated stage evidence; recover with a newly reviewed version
+under the staged-publication procedure. Only an approved version with npm-live integrity may be
+recorded as `published` or serve as a provenance anchor.
 
 The authored step set is read from the workflow committed at the failed tag; recovery does not
 backfill historical runs using the current workflow or infer a missing workflow shape. A tag whose
@@ -458,7 +484,8 @@ built, published, and registry-verified the exact reviewed artifact. npm reports
 and `latest` resolves to `0.1.17`. The tokenless OIDC publication and then-active
 postpublication checks verified registry integrity and ownership, provenance, signatures, and the
 Trusted Publishing attestation. Those registry readbacks are immutable historical evidence; current
-releases terminate when npm accepts the single publish operation.
+workflows terminate when npm accepts the single staged submission, while releases terminate only
+after interactive approval and canonical registry visibility and integrity.
 
 The immutable annotated `v0.1.18` tag object
 `e676d7524d622aa931727e9522f01ac7c27330b4` peels to protected-main commit
@@ -566,11 +593,12 @@ concluded `failure` when the immediate postpublish ownership read returned HTTP 
 propagation completed. The run and tag remain immutable and must not be rerun, moved, or reused.
 
 Releases through `0.1.17` used bounded postpublish version reads for propagation, integrity,
-signatures, and attestations. That policy is retired: the active workflow performs no read of the
-just-published version. The active release procedure instead performs one operator product check
-after publication: registry install and real-path exercise, without dist-tag or provenance readback
-and without repeating byte, integrity, or packed-version verification. The prior runs remain
-immutable historical evidence and must not be rerun.
+signatures, and attestations. That workflow policy is retired: the active workflow stages the exact
+tarball and performs no read of an approved version. Interactive approval and canonical npm-live
+integrity establish publication; the operator then performs one product check: registry install and
+real-path exercise, without dist-tag or provenance readback and without repeating byte, integrity,
+or packed-version verification. The prior runs remain immutable historical evidence and must not be
+rerun.
 
 The immutable annotated `v0.1.0` tag object
 `0f454997ced06802f0d3a0518c2e294af5a73b56` and first-attempt workflow run `29494436948`

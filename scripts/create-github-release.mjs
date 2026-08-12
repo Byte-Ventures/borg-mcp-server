@@ -7,7 +7,6 @@ import { fileURLToPath } from "node:url";
 import { verifyPostpublish } from "./verify-registry-release.mjs";
 
 const REPOSITORY = "Byte-Ventures/borg-mcp-server";
-const PACKAGE_NAME = "borgmcp-server";
 const WORKFLOW_PATH = ".github/workflows/release.yml";
 const API = "https://api.github.com";
 const VERSION_RE = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/u;

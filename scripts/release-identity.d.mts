@@ -18,6 +18,7 @@ export interface ReleaseRecord {
   readonly verify_job_id: number | null;
   readonly publish_job_id: number | null;
   readonly artifact_integrity: string | null;
+  readonly reconstructed?: true;
 }
 
 export interface ReleaseAuthorities {

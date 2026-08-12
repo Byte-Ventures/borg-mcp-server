@@ -178,6 +178,71 @@ describe("release identity automation", () => {
     });
   });
 
+  it("accepts a reconstructed published release record", async () => {
+    const fixture = await createFixture();
+    const record: ReleaseRecord = {
+      outcome: "published",
+      version: oldVersion,
+      tag: `v${oldVersion}`,
+      tag_object: git(fixture.root, ["rev-parse", `v${oldVersion}^{tag}`]),
+      commit: fixture.base,
+      tree: git(fixture.root, ["rev-parse", `${fixture.base}^{tree}`]),
+      workflow_run_id: 123,
+      workflow_run_attempt: 1,
+      workflow_conclusion: "success",
+      verify_job_id: null,
+      publish_job_id: null,
+      artifact_integrity: integrity,
+      reconstructed: true,
+    };
+
+    expect(verifyReleaseProvenance(fixture.root, record, fixture.authorities))
+      .toMatchObject({ version: oldVersion, reconstructed: true });
+
+    expect(() => verifyReleaseProvenance(fixture.root, {
+      ...record,
+      reconstructed: false,
+    } as unknown as ReleaseRecord, fixture.authorities)).toThrow(
+      "Release record has an invalid or non-canonical shape.",
+    );
+    const { reconstructed, ...fields } = record;
+    expect(() => verifyReleaseProvenance(fixture.root, {
+      reconstructed,
+      ...fields,
+    } as ReleaseRecord, fixture.authorities)).toThrow(
+      "Release record has an invalid or non-canonical shape.",
+    );
+  });
+
+  it("rejects preparation when the immediately previous published version is unrecorded", async () => {
+    const fixture = await createFixture();
+    const skippedAuthorities = {
+      ...fixture.authorities,
+      publishedVersions: () => ["1.2.2", oldVersion],
+    };
+
+    await expect(prepareRelease(fixture.root, newVersion, {
+      workflowRunId: 123,
+      workflowRunAttempt: 1,
+      artifactIntegrity: integrity,
+    }, skippedAuthorities)).rejects.toThrow(
+      "Immediately previous published version is missing from release records: 1.2.2",
+    );
+
+    await prepareRelease(fixture.root, newVersion, {
+      workflowRunId: 123,
+      workflowRunAttempt: 1,
+      artifactIntegrity: integrity,
+    }, fixture.authorities);
+    const candidate = commitAll(fixture.root, "prepare release with skipped predecessor");
+    expect(() => verifyReleaseIdentity(
+      fixture.root,
+      fixture.base,
+      candidate,
+      skippedAuthorities,
+    )).toThrow("Immediately previous published version is missing from release records: 1.2.2");
+  });
+
   it.each([
     ["during checkout", "checkout"],
     ["during source verification", "source"],
@@ -623,6 +688,7 @@ interface ReleaseRecordFixture {
   verify_job_id?: number | null;
   publish_job_id?: number | null;
   artifact_integrity: string | null;
+  reconstructed?: true;
 }
 
 interface Fixture {

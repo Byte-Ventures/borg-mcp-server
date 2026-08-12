@@ -171,9 +171,12 @@ function decodeRecord(record) {
     "workflow_run_id", "workflow_run_attempt", "workflow_conclusion",
     "verify_job_id", "publish_job_id", "artifact_integrity",
   ];
+  const reconstructedKeys = [...canonicalKeys, "reconstructed"];
   const keys = JSON.stringify(Object.keys(record));
   const isLegacy = keys === JSON.stringify(legacyKeys);
   const isCanonical = keys === JSON.stringify(canonicalKeys);
+  const isReconstructed = keys === JSON.stringify(reconstructedKeys) &&
+    record.reconstructed === true;
   const decoded = isLegacy
     ? {
         outcome: "published",
@@ -202,6 +205,7 @@ function decodeRecord(record) {
         verify_job_id: record.verify_job_id,
         publish_job_id: record.publish_job_id,
         artifact_integrity: record.artifact_integrity,
+        ...(isReconstructed ? { reconstructed: true } : {}),
       };
   const published = decoded.outcome === "published" &&
     decoded.workflow_conclusion === "success" &&
@@ -218,7 +222,7 @@ function decodeRecord(record) {
       "Release record workflow run attempt",
     );
   }
-  if ((!isLegacy && !isCanonical) || (!published && !failedSuperseded) ||
+  if ((!isLegacy && !isCanonical && !isReconstructed) || (!published && !failedSuperseded) ||
       typeof decoded.version !== "string" ||
       !stableVersionPattern.test(decoded.version) ||
       decoded.version.split(".").some((part) => !Number.isSafeInteger(Number(part))) ||
@@ -228,7 +232,10 @@ function decodeRecord(record) {
       !shaPattern.test(decoded.tree) ||
       !Number.isSafeInteger(decoded.workflow_run_id) || decoded.workflow_run_id <= 0 ||
       !Number.isSafeInteger(decoded.workflow_run_attempt) ||
-      (isCanonical && JSON.stringify(Object.keys(record)) !== JSON.stringify(canonicalKeys)) ||
+      ((isCanonical || isReconstructed) &&
+        JSON.stringify(Object.keys(record)) !== JSON.stringify(
+          isReconstructed ? reconstructedKeys : canonicalKeys,
+        )) ||
       (isLegacy && JSON.stringify(Object.keys(record)) !== JSON.stringify(legacyKeys))) {
     fail("Release record has an invalid or non-canonical shape.");
   }
@@ -648,11 +655,27 @@ function publishedAnchorForRecord(root, files, version, record, authorities) {
   return { record, anchor: verifiedAnchor };
 }
 
+function requirePreviousPublishedRecord(root, files, version, authorities) {
+  const previous = decodePublishedVersions(authorities.publishedVersions(root))
+    .filter((candidate) => stableVersionPattern.test(candidate) &&
+      compareVersions(candidate, version) < 0)
+    .sort(compareVersions)
+    .at(-1);
+  if (previous === undefined) return;
+  const recorded = decodeRecords(requireFile(files, RECORDS_PATH))
+    .map((candidate) => decodeRecord(candidate))
+    .some((candidate) => candidate.version === previous && candidate.outcome === "published");
+  if (!recorded) {
+    fail(`Immediately previous published version is missing from release records: ${previous}`);
+  }
+}
+
 export async function prepareRelease(root, targetVersion, evidence, authorities = systemAuthorities) {
   const clean = git(root, ["status", "--porcelain"]);
   if (clean !== "") fail("release:prepare requires a clean working tree.");
   const baseFiles = await readWorkingFiles(root);
   const oldVersion = readVersion(baseFiles);
+  requirePreviousPublishedRecord(root, baseFiles, oldVersion, authorities);
   const record = createReleaseRecord(root, {
     version: oldVersion,
     workflowRunId: evidence.workflowRunId,
@@ -722,6 +745,7 @@ export function verifyReleaseIdentity(
   const candidateFiles = readRefFiles(root, candidate);
   const oldVersion = readVersion(baseFiles);
   const newVersion = readVersion(candidateFiles);
+  requirePreviousPublishedRecord(root, candidateFiles, oldVersion, authorities);
   const baseAllowlist = requireFile(baseFiles, ALLOWLIST_PATH);
   if (requireFile(candidateFiles, ALLOWLIST_PATH) !== baseAllowlist) {
     fail("Release identity allowlist changed.");

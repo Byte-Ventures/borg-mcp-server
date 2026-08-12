@@ -183,6 +183,12 @@ The command derives the annotated tag object, peeled commit, and release tree fr
 run and artifact integrity are explicit operator inputs because they are not present in the base
 tree. It validates every input against GitHub Actions and the immutable npm package, updates only the
 generated version surfaces, and appends a canonical entry to `docs/release-records.json`.
+Before preparation or trusted verification can pass, the greatest stable npm version below the
+current package version must already have a `published` ledger entry; this prevents a later release
+from silently skipping the immediately previous publication. A final `"reconstructed": true` marker
+means the entry was recovered later from the same annotated-tag, Actions-run, and npm-integrity
+authorities rather than written contemporaneously. It does not weaken provenance verification or
+make the record a different outcome.
 
 If the superseded tag attempt failed before artifact creation or publication, prepare the recovery
 identity with `--workflow-conclusion failure` and omit `--artifact-integrity`:

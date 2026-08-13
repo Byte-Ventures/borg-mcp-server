@@ -24,8 +24,8 @@ Releases are immutable npm packages built from annotated tags on protected `main
 1. Confirm the target version does not exist on npm and the tag does not exist.
 2. Create and push the annotated `v<version>` tag on current protected `main`.
 3. The tag workflow audits, typechecks, builds, packs, verifies, and exercises one tarball. A rerun before staging is allowed after infrastructure failure; never move or reuse a tag.
-4. Approve the protected `npm-publish` environment only after the verification job succeeds.
-5. Inspect and approve the npm stage. The stage publishes the exact verified tarball through Trusted Publishing with provenance.
+4. The tag-restricted `npm-publish` environment stages automatically after verification succeeds.
+5. Inspect and approve the npm stage, the sole human publication boundary. The stage publishes the exact verified tarball through Trusted Publishing with provenance.
 
 Do not rebuild or retag a published version. A source defect requires a new version.
 

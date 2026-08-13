@@ -4,13 +4,13 @@ import { createScanner, SyntaxKind } from "typescript/unstable/ast";
 import { describe, expect, it } from "vitest";
 
 describe("clean-checkout verification", () => {
-  it("builds ignored dist artifacts before typecheck and compiled-artifact tests", async () => {
+  it("builds ignored dist artifacts once through the test prehook", async () => {
     const packageJson = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8")) as {
       scripts: Record<string, string>;
     };
     const gitignore = await readFile(new URL("../.gitignore", import.meta.url), "utf8");
 
-    expect(packageJson.scripts["check"]).toBe("npm run build && npm run typecheck && npm test");
+    expect(packageJson.scripts["check"]).toBe("npm run typecheck && npm test");
     expect(packageJson.scripts["pretest"]).toBe("npm run build");
     expect(gitignore.split(/\r?\n/u)).toContain("dist/");
   });

@@ -226,7 +226,6 @@ async function conformanceEnvironment(): Promise<{
         let resolvedClientId = clientId;
         if (resolvedClientId === undefined) {
           const invitation = createFixtureClientInvitation(runtime, authority, digester, databasePath);
-          if (invitation === null) throw new Error("Invitation creation failed.");
           const credential = generateSecret();
           const enrolled = authority.exchangeInvitation({
             invitation,

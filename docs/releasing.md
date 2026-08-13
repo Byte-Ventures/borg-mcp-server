@@ -159,7 +159,10 @@ any preview.
      repeat packed-byte, packed-version, source-tree, or dist-tag checks.
 12. After approved-live integrity verification and provenance inspection, create the GitHub Releases
     in the same operator session in shared, server, then client order. Run this command in each package
-    repository with its released version:
+    repository with its released version. The operator reads the curated
+    `docs/releases/<version>.md` bytes from the exact tagged commit, refuses missing or blank notes,
+    renders them under `News and fixes`, and retains the Release PR link without requiring or rendering
+    the PR body:
 
     ```sh
     GITHUB_TOKEN="$(gh auth token)" node scripts/create-github-release.mjs <version>

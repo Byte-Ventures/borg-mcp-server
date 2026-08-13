@@ -718,6 +718,19 @@ export const STORE_MIGRATIONS: readonly Migration[] = Object.freeze([
     name: "remove_recovery_credentials",
     sql: "DROP TABLE recovery_credentials;",
   },
+  {
+    version: 23,
+    name: "reliable_coordination_replay",
+    sql: `
+      ALTER TABLE activity_log ADD COLUMN post_id TEXT;
+      ALTER TABLE activity_log ADD COLUMN post_author_id TEXT;
+      ALTER TABLE activity_log ADD COLUMN routing_class TEXT;
+      CREATE UNIQUE INDEX activity_log_author_post_idx
+        ON activity_log (cube_id, post_author_id, post_id) WHERE post_id IS NOT NULL;
+      ALTER TABLE drone_sessions ADD COLUMN initial_log_cursor_id TEXT;
+      ALTER TABLE drone_sessions ADD COLUMN initial_log_cursor_created_at TEXT;
+    `,
+  },
 ]);
 
 interface AppliedMigrationRow {

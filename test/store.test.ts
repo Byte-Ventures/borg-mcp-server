@@ -18,6 +18,7 @@ import {
   DefaultRoleRequiredError,
   RoleConflictError,
   RoleSectionConflictError,
+  PostIdConflictError,
   ScopedStoreError,
   StorageCapacityError,
   type ActivityStreamRecord,
@@ -97,6 +98,33 @@ beforeEach(async () => {
 afterEach(async () => {
   runtime.close();
   await rm(directory, { recursive: true, force: true });
+});
+
+describe("reliable log append", () => {
+  it("deduplicates exact author-scoped retries and rejects tuple conflicts", () => {
+    const author = runtime.forPrincipal(clientPrincipal(ids.clientA));
+    const postId = "00000000-0000-4000-8000-000000000099";
+    const events: ActivityStreamRecord[] = [];
+    const unsubscribe = author.subscribeActivity(ids.cubeA, (entry) => events.push(entry));
+
+    const created = author.appendLog(ids.cubeA, { postId, message: "stable", routingKey: "work" });
+    const retried = author.appendLog(ids.cubeA, { postId, message: "stable", routingKey: "work" });
+    expect(retried).toMatchObject({ id: created.id, deduplicated: true });
+    expect(events).toHaveLength(1);
+    expect(() => author.appendLog(ids.cubeA, { postId, message: "changed", routingKey: "work" }))
+      .toThrow(PostIdConflictError);
+    expect(events).toHaveLength(1);
+
+    runtime.maintenance.grantClientCube({ clientId: ids.clientB, cubeId: ids.cubeA, access: "write" });
+    const independent = runtime.forPrincipal(clientPrincipal(ids.clientB)).appendLog(ids.cubeA, {
+      postId,
+      message: "stable",
+      routingKey: "work",
+    });
+    expect(independent).toMatchObject({ deduplicated: false });
+    expect(independent.id).not.toBe(created.id);
+    unsubscribe();
+  });
 });
 
 describe("Principal to ScopedStore isolation", () => {

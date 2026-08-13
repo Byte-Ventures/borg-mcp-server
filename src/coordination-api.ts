@@ -13,6 +13,7 @@ import {
   decodeDeleteCubeRequestEnvelope,
   decodeDeleteRoleRequestEnvelope,
   decodeDroneRuntimeMetadataPatch,
+  decodeAppendLogRequest,
   decodeEvictDroneRequestEnvelope,
   decodeProtocolEnvelope,
   decodeReassignDroneRequestEnvelope,
@@ -46,6 +47,7 @@ import {
   RoleSectionConflictError,
   RoleSectionNotFoundError,
   ActivityEntryPrefixConflictError,
+  PostIdConflictError,
   ScopedStoreError,
   StorageCapacityError,
   type DroneRecord,
@@ -150,6 +152,7 @@ export class CoordinationApi {
           session: {
             id: attachment.sessionId,
           },
+          initial_log_cursor: attachment.initialLogCursor,
         });
       } catch (error) {
         if (error instanceof ProtocolContractError) {
@@ -533,41 +536,54 @@ export class CoordinationApi {
         return success(200, envelope.request_id, { drone_id: droneId!, evicted: true });
       }
       if (resource === "logs" && request.method === "POST") {
-        const envelope = decodeEnvelope(request.body);
-        exactKeys(envelope.payload, ["message"], [
-          "visibility", "recipientDroneIds", "class", "to",
-        ]);
-        const message = requiredString(envelope.payload, "message", 10_240);
-        const visibility = optionalVisibility(envelope.payload["visibility"]);
-        const recipientDroneIds = optionalUuidArray(envelope.payload["recipientDroneIds"]);
-        const className = optionalString(envelope.payload, "class", 64);
-        const to = optionalStringArray(envelope.payload["to"]);
+        const envelope = decodeProtocolEnvelope(request.body, decodeAppendLogRequest);
+        const { post_id: postId, message, visibility, recipientDroneIds, class: className, to } = envelope.payload as typeof envelope.payload & { post_id: string };
         const cube = store.getCube(cubeId);
         if (cube === null) throw new ScopedStoreError();
-        const resolved = resolveMessageRouting({
-          message,
-          ...(visibility === undefined ? {} : { visibility }),
-          ...(recipientDroneIds === undefined ? {} : { recipientDroneIds }),
-          ...(className === undefined ? {} : { className }),
-          ...(to === undefined ? {} : { to }),
-        }, cube.messageTaxonomy, store.listRoles(cubeId), store.listDrones(cubeId));
-        const entry = store.appendLog(cubeId, {
+        let resolved;
+        try {
+          resolved = resolveMessageRouting({
+            message,
+            ...(visibility === undefined ? {} : { visibility }),
+            ...(recipientDroneIds === undefined ? {} : { recipientDroneIds }),
+            ...(className === undefined ? {} : { className }),
+            ...(to === undefined ? {} : { to }),
+          }, cube.messageTaxonomy, store.listRoles(cubeId), store.listDrones(cubeId));
+        } catch (error) {
+          if (store.hasLogPost(cubeId, postId)) throw new PostIdConflictError();
+          throw error;
+        }
+        const appended = store.appendLog(cubeId, {
+          postId,
           message,
           visibility: resolved.visibility,
           ...(resolved.visibility === "direct"
             ? { recipientDroneIds: resolved.recipientDroneIds }
             : {}),
+          routingKey: JSON.stringify({
+            visibility: resolved.visibility,
+            recipientDroneIds: [...resolved.recipientDroneIds].sort(),
+            routing: resolved.routing,
+            requestedClass: className ?? null,
+            requestedTo: to === undefined ? null : [...to].sort(),
+          }),
         });
-        this.#debugLogger.emit({
-          event: "activity_append",
-          cubeId,
-          entryId: entry.id,
-          principal: authentication,
-          droneId: entry.drone_id,
-          visibility: entry.visibility,
-          recipientDroneIds: entry.recipient_drone_ids,
+        if (!appended.deduplicated) {
+          this.#debugLogger.emit({
+            event: "activity_append",
+            cubeId,
+            entryId: appended.id,
+            principal: authentication,
+            droneId: appended.drone_id,
+            visibility: appended.visibility,
+            recipientDroneIds: appended.recipient_drone_ids,
+          });
+        }
+        return success(201, envelope.request_id, {
+          entry: (({ deduplicated: _, ...entry }) => entry)(appended),
+          deduplicated: appended.deduplicated,
+          routing: resolved.routing,
         });
-        return success(201, envelope.requestId, { entry });
       }
       if (resource === "logs" && request.method === "PUT") {
         const envelope = decodeEnvelope(request.body);
@@ -643,7 +659,10 @@ export class CoordinationApi {
         return await this.#openStream(authentication, cubeId, decodeOpaqueCursor(request.cursor), request.signal);
       }
       return failure(405, "INVALID_INPUT", "Method not allowed.");
-    } catch (error) {
+      } catch (error) {
+        if (error instanceof PostIdConflictError) {
+          return failure(409, error.code, error.message, safeRequestId(request.body));
+        }
       if (error instanceof CubeDeletedError) {
         return failure(410, ErrorCode.CUBE_DELETED, error.message, safeRequestId(request.body));
       }
@@ -992,17 +1011,6 @@ function optionalMessageTaxonomy(value: unknown) {
   return value === undefined ? undefined : validateMessageTaxonomy(value);
 }
 
-function optionalStringArray(value: unknown): string[] | undefined {
-  if (value === undefined) return undefined;
-  if (!Array.isArray(value) || value.length < 1 || value.length > 100 ||
-      value.some((entry) => typeof entry !== "string" || entry.length < 1 || entry.length > 120)) {
-    throw new InputError();
-  }
-  const entries = value as string[];
-  if (new Set(entries).size !== entries.length) throw new InputError();
-  return entries;
-}
-
 function requiredSectionHeading(record: Record<string, unknown>, key: string): string {
   const value = requiredString(record, key, 60);
   const heading = value.trim();
@@ -1026,19 +1034,6 @@ function requiredLogEntrySelector(value: string): string {
   if (uuidPattern.test(value)) return value.toLowerCase();
   if (/^[0-9a-f]{8}$/iu.test(value)) return value.toLowerCase();
   throw new InputError("Activity entry selector must be a full UUID or unique 8-hex prefix.");
-}
-
-function optionalVisibility(value: unknown): "broadcast" | "direct" | undefined {
-  if (value === undefined) return undefined;
-  if (value !== "broadcast" && value !== "direct") throw new InputError();
-  return value;
-}
-
-function optionalUuidArray(value: unknown): string[] | undefined {
-  if (value === undefined) return undefined;
-  if (!Array.isArray(value) || value.length > 100 ||
-      value.some((item) => typeof item !== "string" || !uuidPattern.test(item))) throw new InputError();
-  return value as string[];
 }
 
 function optionalLimit(value: unknown): number {

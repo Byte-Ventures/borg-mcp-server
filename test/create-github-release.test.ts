@@ -55,7 +55,7 @@ describe("GitHub Release operator", () => {
     )).toThrow("local merge subject");
   });
 
-  it("assembles framed evidence and preserves the merged PR body verbatim", () => {
+  it("assembles framed evidence from exact tagged notes without the PR body", () => {
     const integrity = `sha512-${createHash("sha512").update("release").digest("base64")}`;
     const body = assembleReleaseBody({
       packageName: "borgmcp-server",
@@ -64,6 +64,7 @@ describe("GitHub Release operator", () => {
       tag: "v1.2.3",
       commit,
       pullRequest,
+      releaseNotes: "TAGGED-NOTES-SENTINEL",
     });
 
     expect(body).toBe([
@@ -79,10 +80,11 @@ describe("GitHub Release operator", () => {
       `- Commit: https://github.com/Byte-Ventures/borg-mcp-server/commit/${commit}`,
       "- Pull request: https://github.com/Byte-Ventures/borg-mcp-server/pull/42",
       "",
-      "## Release PR body (as merged)",
+      "## News and fixes",
       "",
-      pullRequest.body,
+      "TAGGED-NOTES-SENTINEL",
     ].join("\n"));
+    expect(body).not.toContain(pullRequest.body);
   });
 
   it("verifies the workflow artifact against npm-live before creating the release", async () => {
@@ -94,7 +96,10 @@ describe("GitHub Release operator", () => {
         if (args[0] === "cat-file") return "tag";
         if (args[0] === "rev-parse") return commit;
         if (args[0] === "for-each-ref") return "borgmcp-server 1.2.3";
-        return "Merge pull request #42 from Byte-Ventures/release/1.2.3";
+        if (args[0] === "show" && args.includes("--format=%s")) {
+          return "Merge pull request #42 from Byte-Ventures/release/1.2.3";
+        }
+        return "TAGGED-NOTES-SENTINEL";
       },
       githubApi: (_root: string, endpoint: string) => endpoint.includes("/pulls")
         ? [pullRequest]
@@ -132,6 +137,36 @@ describe("GitHub Release operator", () => {
       name: "borgmcp-server 1.2.3",
       make_latest: "true",
     });
+    const createdBody = JSON.parse(requests.at(1)?.options.body as string).body as string;
+    expect(createdBody).toContain("TAGGED-NOTES-SENTINEL");
+    expect(createdBody).not.toContain(pullRequest.body);
+  });
+
+  it.each([
+    ["missing", () => { throw new Error("missing"); }, "missing"],
+    ["blank", () => "  \n", "blank"],
+  ])("refuses %s tagged release notes before external verification", async (_case, notes, message) => {
+    let artifactCalls = 0;
+    const authorities = {
+      git: (_root: string, args: string[]) => {
+        if (args[0] === "cat-file") return "tag";
+        if (args[0] === "rev-parse") return commit;
+        if (args[0] === "for-each-ref") return "borgmcp-server 1.2.3";
+        if (args[0] === "show" && args.includes("--format=%s")) {
+          return "Merge pull request #42 from Byte-Ventures/release/1.2.3";
+        }
+        return notes();
+      },
+      githubApi: () => { throw new Error("must not reach GitHub"); },
+      artifactReport: async () => { artifactCalls += 1; return {}; },
+      verifyPostpublish: async () => { throw new Error("must not verify"); },
+      request: async () => { throw new Error("must not request"); },
+    };
+    await expect(createGithubRelease("1.2.3", {
+      token: "test-token",
+      authorities,
+    })).rejects.toThrow(message);
+    expect(artifactCalls).toBe(0);
   });
 
   it("refuses to post when the GitHub Release already exists", async () => {
@@ -141,7 +176,10 @@ describe("GitHub Release operator", () => {
         if (args[0] === "cat-file") return "tag";
         if (args[0] === "rev-parse") return commit;
         if (args[0] === "for-each-ref") return "borgmcp-server 1.2.3";
-        return "Merge pull request #42 from Byte-Ventures/release/1.2.3";
+        if (args[0] === "show" && args.includes("--format=%s")) {
+          return "Merge pull request #42 from Byte-Ventures/release/1.2.3";
+        }
+        return "TAGGED-NOTES-SENTINEL";
       },
       githubApi: (_root: string, endpoint: string) => endpoint.includes("/pulls")
         ? [pullRequest]

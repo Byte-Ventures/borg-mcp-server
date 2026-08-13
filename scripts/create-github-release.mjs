@@ -23,6 +23,25 @@ function git(root, args) {
   return command("git", args, root);
 }
 
+function gitFile(root, refPath) {
+  return execFileSync("git", ["show", refPath], {
+    cwd: root,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+}
+
+export function readTaggedReleaseNotes(root, commit, version, authority = gitFile) {
+  let notes;
+  try {
+    notes = authority(root, `${commit}:docs/releases/${version}.md`);
+  } catch {
+    fail(`Tagged release notes are missing: docs/releases/${version}.md`);
+  }
+  if (!notes.trim()) fail(`Tagged release notes are blank: docs/releases/${version}.md`);
+  return notes;
+}
+
 function parseJson(value, description) {
   try {
     return JSON.parse(value);
@@ -76,6 +95,7 @@ export function assembleReleaseBody({ packageName, version, integrity, tag, comm
 
 const systemAuthorities = Object.freeze({
   git,
+  gitFile,
   githubApi(root, endpoint) {
     return parseJson(command("gh", ["api", endpoint], root), "GitHub API");
   },
@@ -114,13 +134,7 @@ export async function createGithubRelease(version, {
   const commit = authorities.git(root, ["rev-parse", `${ref}^{commit}`]);
   const tagMessage = authorities.git(root, ["for-each-ref", "--format=%(contents)", ref]);
   if (!tagMessage) fail(`Annotated release tag has no message: ${tag}`);
-  let releaseNotes;
-  try {
-    releaseNotes = authorities.git(root, ["show", `${commit}:docs/releases/${version}.md`]);
-  } catch {
-    fail(`Tagged release notes are missing: docs/releases/${version}.md`);
-  }
-  if (!releaseNotes.trim()) fail(`Tagged release notes are blank: docs/releases/${version}.md`);
+  const releaseNotes = readTaggedReleaseNotes(root, commit, version, authorities.gitFile);
   const mergeSubject = authorities.git(root, ["show", "-s", "--format=%s", commit]);
 
   const pullRequests = authorities.githubApi(root, `repos/${REPOSITORY}/commits/${commit}/pulls`);

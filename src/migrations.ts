@@ -727,6 +727,14 @@ export const STORE_MIGRATIONS: readonly Migration[] = Object.freeze([
       ALTER TABLE activity_log ADD COLUMN routing_class TEXT;
       CREATE UNIQUE INDEX activity_log_author_post_idx
         ON activity_log (cube_id, post_author_id, post_id) WHERE post_id IS NOT NULL;
+      CREATE TABLE activity_post_bindings (
+        cube_id TEXT NOT NULL REFERENCES cubes(id) ON DELETE CASCADE,
+        author_id TEXT NOT NULL,
+        post_id TEXT NOT NULL,
+        tuple_json TEXT NOT NULL,
+        entry_json TEXT NOT NULL,
+        PRIMARY KEY (cube_id, author_id, post_id)
+      ) STRICT, WITHOUT ROWID;
       ALTER TABLE drone_sessions ADD COLUMN initial_log_cursor_id TEXT;
       ALTER TABLE drone_sessions ADD COLUMN initial_log_cursor_created_at TEXT;
     `,

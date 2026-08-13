@@ -1,11 +1,15 @@
 import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
   assembleReleaseBody,
   assertReleasePullRequest,
   createGithubRelease,
+  readTaggedReleaseNotes,
 } from "../scripts/create-github-release.mjs";
 
 const commit = "a".repeat(40);
@@ -101,6 +105,7 @@ describe("GitHub Release operator", () => {
         }
         return "TAGGED-NOTES-SENTINEL";
       },
+      gitFile: () => "TAGGED-NOTES-SENTINEL",
       githubApi: (_root: string, endpoint: string) => endpoint.includes("/pulls")
         ? [pullRequest]
         : { workflow_runs: [{
@@ -157,6 +162,7 @@ describe("GitHub Release operator", () => {
         }
         return notes();
       },
+      gitFile: () => notes(),
       githubApi: () => { throw new Error("must not reach GitHub"); },
       artifactReport: async () => { artifactCalls += 1; return {}; },
       verifyPostpublish: async () => { throw new Error("must not verify"); },
@@ -181,6 +187,7 @@ describe("GitHub Release operator", () => {
         }
         return "TAGGED-NOTES-SENTINEL";
       },
+      gitFile: () => "TAGGED-NOTES-SENTINEL",
       githubApi: (_root: string, endpoint: string) => endpoint.includes("/pulls")
         ? [pullRequest]
         : { workflow_runs: [{
@@ -217,5 +224,27 @@ describe("GitHub Release operator", () => {
     expect(runbook).toContain(
       'GITHUB_TOKEN="$(gh auth token)" node scripts/create-github-release.mjs <version>',
     );
+  });
+
+  it("preserves tagged release-note whitespace through the default Git authority", async () => {
+    const root = await mkdtemp(join(tmpdir(), "borg-release-notes-"));
+    try {
+      execFileSync("git", ["init", "-q"], { cwd: root });
+      execFileSync("git", ["config", "user.name", "Test"], { cwd: root });
+      execFileSync("git", ["config", "user.email", "test@example.test"], { cwd: root });
+      await writeFile(join(root, "package.json"), "{\"private\":true}\n");
+      await writeFile(join(root, "notes.md"), "first line  \nsecond line\n");
+      execFileSync("git", ["add", "package.json", "notes.md"], { cwd: root });
+      execFileSync("git", ["commit", "-qm", "fixture"], { cwd: root });
+      const commit = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
+      expect(readTaggedReleaseNotes(root, commit, "1.2.3", (_root, refPath) =>
+        execFileSync("git", ["show", refPath.replace("docs/releases/1.2.3.md", "notes.md")], {
+          cwd: root,
+          encoding: "utf8",
+        })
+      )).toBe("first line  \nsecond line\n");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });

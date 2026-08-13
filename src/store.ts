@@ -1946,35 +1946,33 @@ class SqliteScopedStore implements ScopedStore {
 
     const scope = this.#scope("write");
     this.#requireCube(cubeId, "write");
-    this.#capacityGuard.assertCanGrow(Buffer.byteLength(input.message) + (recipients.length * 128));
-    const id = randomUUID();
-    const createdAt = this.#nextActivityTimestamp(cubeId);
     const droneId = this.#principal.kind === "drone-session" ? this.#principal.droneId : null;
     const postAuthorId = droneId ?? this.#principal.id;
+    const tupleJson = JSON.stringify({
+      message: input.message,
+      visibility,
+      recipients: [...recipients].sort(),
+      routing: input.routingKey ?? null,
+    });
     this.#database.exec("BEGIN IMMEDIATE");
     try {
       if (input.postId !== undefined) {
         const prior = this.#database.prepare(`
-          SELECT id, message, visibility, routing_class
-          FROM activity_log
-          WHERE cube_id = ? AND post_author_id = ? AND post_id = ?
+          SELECT tuple_json, entry_json FROM activity_post_bindings
+          WHERE cube_id = ? AND author_id = ? AND post_id = ?
         `).get(cubeId, postAuthorId, input.postId);
         if (prior !== undefined) {
-          const priorRecipients = this.#database.prepare(`
-            SELECT drone_id FROM activity_log_recipients WHERE entry_id = ? ORDER BY drone_id
-          `).all(requiredText(prior, "id")).map((row) => requiredText(row, "drone_id"));
-          const requestedRecipients = [...recipients].sort();
-          if (requiredText(prior, "message") !== input.message ||
-              requiredText(prior, "visibility") !== visibility ||
-              nullableText(prior, "routing_class") !== (input.routingKey ?? null) ||
-              priorRecipients.length !== requestedRecipients.length ||
-              priorRecipients.some((recipient, index) => recipient !== requestedRecipients[index])) {
+          if (requiredText(prior, "tuple_json") !== tupleJson) {
             throw new PostIdConflictError();
           }
+          const entry = JSON.parse(requiredText(prior, "entry_json")) as EnrichedActivityRecord;
           this.#database.exec("COMMIT");
-          return appendLogRecord(this.#enrichedEntry(cubeId, requiredText(prior, "id")), true);
+          return appendLogRecord(entry, true);
         }
       }
+      this.#capacityGuard.assertCanGrow(Buffer.byteLength(input.message) + (recipients.length * 128));
+      const id = randomUUID();
+      const createdAt = this.#nextActivityTimestamp(cubeId);
       const inserted = this.#database.prepare(`
         INSERT INTO activity_log (
           id, cube_id, drone_id, actor_kind, actor_id, message, created_at, visibility,
@@ -2015,15 +2013,22 @@ class SqliteScopedStore implements ScopedStore {
         );
         for (const recipient of recipients) addRecipient.run(id, recipient);
       }
+      const entry = this.#enrichedEntry(cubeId, id);
+      if (input.postId !== undefined) {
+        this.#database.prepare(`
+          INSERT INTO activity_post_bindings (
+            cube_id, author_id, post_id, tuple_json, entry_json
+          ) VALUES (?, ?, ?, ?, ?)
+        `).run(cubeId, postAuthorId, input.postId, tupleJson, JSON.stringify(entry));
+      }
       this.#pruneActivity(cubeId);
       this.#database.exec("COMMIT");
+      this.#activityHub.publish(cubeId, entry);
+      return appendLogRecord(entry, false);
     } catch (error) {
       try { this.#database.exec("ROLLBACK"); } catch { /* Preserve the original failure. */ }
       throw error;
     }
-    const entry = this.#enrichedEntry(cubeId, id);
-    this.#activityHub.publish(cubeId, entry);
-    return appendLogRecord(entry, false);
   }
 
   hasLogPost(cubeId: string, postId: string): boolean {
@@ -2034,8 +2039,8 @@ class SqliteScopedStore implements ScopedStore {
       ? this.#principal.droneId
       : this.#principal.id;
     return this.#database.prepare(`
-      SELECT 1 FROM activity_log
-      WHERE cube_id = ? AND post_author_id = ? AND post_id = ?
+      SELECT 1 FROM activity_post_bindings
+      WHERE cube_id = ? AND author_id = ? AND post_id = ?
     `).get(cubeId, authorId, postId) !== undefined;
   }
 

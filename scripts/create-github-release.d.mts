@@ -11,6 +11,7 @@ export interface ReleasePullRequest {
 
 export interface GithubReleaseAuthorities {
   readonly git: (root: string, args: string[]) => string;
+  readonly gitFile: (root: string, refPath: string) => string;
   readonly githubApi: (root: string, endpoint: string) => unknown;
   readonly artifactReport: (root: string, runId: number, version: string) => Promise<unknown>;
   readonly verifyPostpublish: (report: unknown, options: { expectedVersion: string }) => Promise<{
@@ -38,6 +39,13 @@ export function assembleReleaseBody(input: Readonly<{
   pullRequest: ReleasePullRequest;
   releaseNotes: string;
 }>): string;
+
+export function readTaggedReleaseNotes(
+  root: string,
+  commit: string,
+  version: string,
+  authority?: (root: string, refPath: string) => string,
+): string;
 
 export function createGithubRelease(version: string, options?: Readonly<{
   root?: string;

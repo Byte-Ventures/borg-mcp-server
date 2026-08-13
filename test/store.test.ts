@@ -125,6 +125,36 @@ describe("reliable log append", () => {
     expect(independent.id).not.toBe(created.id);
     unsubscribe();
   });
+
+  it("keeps replay and conflict authority after retention pruning and at capacity", async () => {
+    runtime.close();
+    let capacity = { databaseBytes: 0, freeDiskBytes: 2_000_000 };
+    runtime = await openStore({
+      path: join(directory, "reliable.db"),
+      storageLimits: {
+        maxDatabaseBytes: 1_000_000,
+        minFreeDiskBytes: 1,
+        maxActivityEntriesPerCube: 10,
+      },
+      capacityProbe: () => capacity,
+    });
+    runtime.maintenance.createClient({ id: ids.clientA, name: "Client A" });
+    runtime.maintenance.createCube({ id: ids.cubeA, name: "Cube A", directive: "" });
+    runtime.maintenance.grantClientCube({ clientId: ids.clientA, cubeId: ids.cubeA, access: "manage" });
+    const author = runtime.forPrincipal(clientPrincipal(ids.clientA));
+    const postId = "00000000-0000-4000-8000-000000000099";
+    const created = author.appendLog(ids.cubeA, { postId, message: "stable" });
+    for (let index = 0; index < 10; index += 1) {
+      author.appendLog(ids.cubeA, { message: `filler-${index}` });
+    }
+    expect(author.readLog(ids.cubeA, null, 20).entries.some((entry) => entry.id === created.id)).toBe(false);
+
+    capacity = { databaseBytes: 1_000_000, freeDiskBytes: 2_000_000 };
+    expect(author.appendLog(ids.cubeA, { postId, message: "stable" }))
+      .toMatchObject({ id: created.id, deduplicated: true });
+    expect(() => author.appendLog(ids.cubeA, { postId, message: "changed" }))
+      .toThrow(PostIdConflictError);
+  });
 });
 
 describe("Principal to ScopedStore isolation", () => {

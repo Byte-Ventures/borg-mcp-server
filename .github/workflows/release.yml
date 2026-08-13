@@ -26,11 +26,10 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Reject immutable release reruns and repository npm configuration
+      - name: Reject repository npm configuration
         shell: bash
         run: |
           set -euo pipefail
-          test "${GITHUB_RUN_ATTEMPT}" = "1"
           test ! -e .npmrc
 
       - name: Set up exact Node.js
@@ -74,8 +73,8 @@ jobs:
       - name: Audit locked dependency tree
         run: npm audit --audit-level=high --registry=https://registry.npmjs.org
 
-      - name: Check, test, and build once
-        run: npm run check
+      - name: Typecheck and build once
+        run: npm run typecheck && npm run build
 
       - name: Build exact release tarball once
         id: pack

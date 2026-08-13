@@ -42,7 +42,7 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
-    "check": "npm run build && npm run typecheck && npm test",
+    "check": "npm run typecheck && npm test",
     "pretest": "npm run build",
     "test": "vitest run",
     "test:watch": "vitest",

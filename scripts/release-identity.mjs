@@ -69,7 +69,7 @@ export async function prepareRelease(root, targetVersion) {
   const current = manifestVersion(canonicalJson(manifest), PACKAGE_PATH);
   if (compareVersions(target, current) <= 0) fail("Target version must be newer than the current version.");
   manifest.version = target;
-  await writeFile(join(root, PACKAGE_PATH), canonicalJson(manifest));
+  const transformed = new Map([[PACKAGE_PATH, canonicalJson(manifest)]]);
 
   const lock = parseJson(await readWorking(root, LOCK_PATH), LOCK_PATH);
   if (lock.name !== PACKAGE_NAME || lock.version !== current || lock.packages?.[""]?.version !== current) {
@@ -77,21 +77,22 @@ export async function prepareRelease(root, targetVersion) {
   }
   lock.version = target;
   lock.packages[""].version = target;
-  await writeFile(join(root, LOCK_PATH), canonicalJson(lock));
+  transformed.set(LOCK_PATH, canonicalJson(lock));
 
   const paths = [PACKAGE_PATH, LOCK_PATH, VERSION_CONSTANT_PATH];
   const constant = await readWorking(root, VERSION_CONSTANT_PATH);
   const oldLiteral = `export const SERVER_PACKAGE_VERSION = "${current}";`;
   if (constant.split(oldLiteral).length !== 2) fail(`${VERSION_CONSTANT_PATH} package version is invalid.`);
-  await writeFile(join(root, VERSION_CONSTANT_PATH), constant.replace(oldLiteral,
+  transformed.set(VERSION_CONSTANT_PATH, constant.replace(oldLiteral,
     `export const SERVER_PACKAGE_VERSION = "${target}";`));
 
   for (const path of decodePins(await readWorking(root, ALLOWLIST_PATH))) {
     const raw = await readWorking(root, path);
     if (!raw.includes(current)) fail(`Version pin is missing from ${path}.`);
-    await writeFile(join(root, path), raw.replaceAll(current, target));
+    transformed.set(path, raw.replaceAll(current, target));
     paths.push(path);
   }
+  await Promise.all([...transformed].map(([path, raw]) => writeFile(join(root, path), raw)));
   return Object.freeze({ oldVersion: current, newVersion: target, paths: Object.freeze(paths.sort()) });
 }
 

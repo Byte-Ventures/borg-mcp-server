@@ -37,4 +37,30 @@ describe("release identity", () => {
     expect(verifyReleaseIdentity(root, base, candidate)).toMatchObject({ oldVersion: "1.0.0", newVersion: "1.1.0" });
     expect(await readFile(join(root, "unrelated.txt"), "utf8")).toContain("post-prep");
   });
+
+  it("does not mutate release files when a late pin is stale", async () => {
+    const root = await mkdtemp(join(tmpdir(), "server-release-atomic-"));
+    roots.push(root);
+    await mkdir(join(root, "scripts"), { recursive: true });
+    await mkdir(join(root, "src"), { recursive: true });
+    await mkdir(join(root, "test"), { recursive: true });
+    const files = new Map([
+      ["package.json", JSON.stringify({ name: "borgmcp-server", version: "1.0.0" }, null, 2) + "\n"],
+      ["npm-shrinkwrap.json", JSON.stringify({
+        name: "borgmcp-server", version: "1.0.0", packages: { "": { name: "borgmcp-server", version: "1.0.0" } },
+      }, null, 2) + "\n"],
+      ["src/runtime-identity.ts", 'export const SERVER_PACKAGE_VERSION = "1.0.0";\n'],
+      ["test/pin.ts", "stale\n"],
+      ["scripts/release-identity-allowlist.json", JSON.stringify({ versionPins: ["test/pin.ts"] }, null, 2) + "\n"],
+    ]);
+    for (const [path, raw] of files) await writeFile(join(root, path), raw);
+    execFileSync("git", ["init", "-q"], { cwd: root });
+    execFileSync("git", ["config", "user.name", "Test"], { cwd: root });
+    execFileSync("git", ["config", "user.email", "test@example.test"], { cwd: root });
+    execFileSync("git", ["add", "."], { cwd: root });
+    execFileSync("git", ["commit", "-qm", "base"], { cwd: root });
+
+    await expect(prepareRelease(root, "1.1.0")).rejects.toThrow("Version pin is missing");
+    for (const [path, raw] of files) expect(await readFile(join(root, path), "utf8")).toBe(raw);
+  });
 });

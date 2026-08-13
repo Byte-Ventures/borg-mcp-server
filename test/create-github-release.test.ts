@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -233,16 +233,12 @@ describe("GitHub Release operator", () => {
       execFileSync("git", ["config", "user.name", "Test"], { cwd: root });
       execFileSync("git", ["config", "user.email", "test@example.test"], { cwd: root });
       await writeFile(join(root, "package.json"), "{\"private\":true}\n");
-      await writeFile(join(root, "notes.md"), "first line  \nsecond line\n");
-      execFileSync("git", ["add", "package.json", "notes.md"], { cwd: root });
+      await mkdir(join(root, "docs", "releases"), { recursive: true });
+      await writeFile(join(root, "docs", "releases", "1.2.3.md"), "first line  \nsecond line\n");
+      execFileSync("git", ["add", "package.json", "docs/releases/1.2.3.md"], { cwd: root });
       execFileSync("git", ["commit", "-qm", "fixture"], { cwd: root });
       const commit = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
-      expect(readTaggedReleaseNotes(root, commit, "1.2.3", (_root, refPath) =>
-        execFileSync("git", ["show", refPath.replace("docs/releases/1.2.3.md", "notes.md")], {
-          cwd: root,
-          encoding: "utf8",
-        })
-      )).toBe("first line  \nsecond line\n");
+      expect(readTaggedReleaseNotes(root, commit, "1.2.3")).toBe("first line  \nsecond line\n");
     } finally {
       await rm(root, { recursive: true, force: true });
     }

@@ -126,6 +126,47 @@ describe("reliable log append", () => {
     unsubscribe();
   });
 
+  it("treats direct recipient order as set identity", () => {
+    const author = runtime.forPrincipal(clientPrincipal(ids.clientA));
+    const roleB = "00000000-0000-4000-8000-000000000009";
+    const droneB = "00000000-0000-4000-8000-000000000010";
+    runtime.maintenance.createRole({ id: roleB, cubeId: ids.cubeA, name: "Builder" });
+    runtime.maintenance.createDrone({
+      id: droneB,
+      cubeId: ids.cubeA,
+      roleId: roleB,
+      clientId: ids.clientA,
+      label: "one-of-one-builder",
+    });
+    const postId = "00000000-0000-4000-8000-000000000098";
+    const events: ActivityStreamRecord[] = [];
+    const unsubscribe = author.subscribeActivity(ids.cubeA, (entry) => events.push(entry));
+    const created = author.appendLog(ids.cubeA, {
+      postId,
+      message: "direct",
+      visibility: "direct",
+      recipientDroneIds: [ids.droneA, droneB],
+      routingKey: "review",
+    });
+    expect(author.appendLog(ids.cubeA, {
+      postId,
+      message: "direct",
+      visibility: "direct",
+      recipientDroneIds: [droneB, ids.droneA],
+      routingKey: "review",
+    })).toMatchObject({ id: created.id, deduplicated: true });
+    expect(events).toHaveLength(1);
+    expect(() => author.appendLog(ids.cubeA, {
+      postId,
+      message: "direct",
+      visibility: "direct",
+      recipientDroneIds: [ids.droneA],
+      routingKey: "review",
+    })).toThrow(PostIdConflictError);
+    expect(events).toHaveLength(1);
+    unsubscribe();
+  });
+
   it("keeps replay and conflict authority after retention pruning and at capacity", async () => {
     runtime.close();
     let capacity = { databaseBytes: 0, freeDiskBytes: 2_000_000 };

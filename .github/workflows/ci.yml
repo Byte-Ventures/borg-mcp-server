@@ -32,9 +32,33 @@ jobs:
       - name: Install locked dependencies without lifecycle scripts
         run: npm ci --ignore-scripts
 
+      - name: Run tests
+        run: npm test
+
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Set up current Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24.19.0
+          cache: npm
+
+      - name: Install locked dependencies without lifecycle scripts
+        run: npm ci --ignore-scripts
+
       - name: Audit dependency tree
         run: npm audit --audit-level=high
 
-      - name: Check, test, and build
-        run: npm run check
+      - name: Typecheck and build
+        run: npm run typecheck && npm run build
 
+      - name: Verify package
+        run: |
+          mkdir release
+          npm pack --ignore-scripts --json --pack-destination release > release/pack-result.json
+          tarball="$(node -p 'JSON.parse(require("node:fs").readFileSync("release/pack-result.json","utf8"))[0].filename')"
+          node scripts/verify-packed-artifact.mjs "release/${tarball}"

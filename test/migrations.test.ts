@@ -54,7 +54,7 @@ describe("SQLite migrations", () => {
     expect(migrationChecksum(STORE_MIGRATIONS[16]!)).toBe(publishedV070.rows[16]![2]);
   });
 
-  it("replays a published 0.7.0 migration ledger and upgrades it to v22", async () => {
+  it("replays a published 0.7.0 migration ledger and upgrades it to v23", async () => {
     const fixtures = await publishedMigrationFixtures;
     const database = new DatabaseSync(":memory:");
     applyMigrations(database, STORE_MIGRATIONS.slice(0, 17));
@@ -124,7 +124,7 @@ describe("SQLite migrations", () => {
     expect(first.diagnostics()).toEqual({
       journalMode: "wal",
       foreignKeys: true,
-      schemaVersions: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22],
+      schemaVersions: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23],
     });
     expect((await stat(join(directory, "data"))).mode & 0o777).toBe(0o700);
     expect((await stat(databasePath)).mode & 0o777).toBe(0o600);
@@ -134,7 +134,7 @@ describe("SQLite migrations", () => {
 
     const second = await openStore({ path: databasePath });
     expect(second.diagnostics().schemaVersions)
-      .toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22]);
+      .toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]);
     second.close();
     await expect(access(databasePath)).resolves.toBeUndefined();
   });
@@ -760,7 +760,7 @@ describe("SQLite migrations", () => {
     ).get()).toBeUndefined();
     expect(database.prepare(
       "SELECT version, name FROM schema_migrations ORDER BY version DESC LIMIT 1",
-    ).get()).toEqual({ version: 22, name: "remove_recovery_credentials" });
+    ).get()).toEqual({ version: 23, name: "reliable_coordination_replay" });
     database.close();
   });
 

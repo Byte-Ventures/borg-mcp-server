@@ -52,7 +52,7 @@ describe("borgmcp-shared server adapter", () => {
           observations: {},
         },
       ]);
-      expect(report.results).toHaveLength(30);
+      expect(report.results).toHaveLength(31);
     } finally {
       await fixture.server.close();
       fixture.digester.destroy();
@@ -172,6 +172,18 @@ async function conformanceEnvironment(): Promise<{
           default_to: [roleName],
         }] });
       },
+      configureMessageClassRouting: async (cube, className, recipientDroneIds) => {
+        const store = runtime.forPrincipal(operatorPrincipal(
+          "00000000-0000-4000-8000-000000000399",
+        ));
+        const current = store.getCube(cube.id)?.messageTaxonomy ?? [];
+        store.updateCube(cube.id, { messageTaxonomy: [...current, {
+          class: className,
+          prefixes: [`${className.toUpperCase()}:`],
+          routing: "directed",
+          default_to: [...recipientDroneIds],
+        }] });
+      },
       createDrone: async (principal, cube, role) => {
         const credential = principalCredentials.get(principal.id);
         if (credential === undefined) throw new Error("Principal is not enrolled.");
@@ -211,12 +223,31 @@ async function conformanceEnvironment(): Promise<{
       },
       issueDroneSession: async (principal) => {
         const clientId = enrolledClients.get(principal.id);
-        if (clientId === undefined) throw new Error("Principal is not enrolled.");
-        const cubeId = randomUUID();
+        let resolvedClientId = clientId;
+        if (resolvedClientId === undefined) {
+          const invitation = createFixtureClientInvitation(runtime, authority, digester, databasePath);
+          const credential = generateSecret();
+          const enrolled = authority.exchangeInvitation({
+            invitation,
+            retryKey: randomUUID(),
+            clientCredential: credential,
+          });
+          if (enrolled === null) throw new Error("Principal enrollment failed.");
+          resolvedClientId = enrolled.clientId;
+          enrolledClients.set(principal.id, resolvedClientId);
+          principalCredentials.set(principal.id, credential);
+          for (const [grantedCubeId, access] of principalCubes.get(principal.id) ?? []) {
+            runtime.maintenance.grantClientCube({ clientId: resolvedClientId, cubeId: grantedCubeId, access });
+          }
+        }
+        const grantedCubeId = principalCubes.get(principal.id)?.keys().next().value as string | undefined;
+        const cubeId = grantedCubeId ?? randomUUID();
         const roleId = randomUUID();
-        runtime.maintenance.createCube({ id: cubeId, ownerId: clientId, name: "Session fixture", directive: "" });
-        runtime.maintenance.createRole({ id: roleId, cubeId, name: "Worker" });
-        runtime.maintenance.grantClientCube({ clientId, cubeId, access: "manage" });
+        if (grantedCubeId === undefined) {
+          runtime.maintenance.createCube({ id: cubeId, ownerId: resolvedClientId, name: "Session fixture", directive: "" });
+        }
+        runtime.maintenance.createRole({ id: roleId, cubeId, name: `Session ${roleId.slice(-8)}` });
+        runtime.maintenance.grantClientCube({ clientId: resolvedClientId, cubeId, access: "manage" });
         const sessionCredential = generateSecret();
         authority.attachSeat(runtime.forPrincipal(authority.authenticate(
           `Bearer ${principalCredentials.get(principal.id) ?? ""}`,

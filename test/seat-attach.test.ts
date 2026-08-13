@@ -113,7 +113,13 @@ describe("client seat attach", () => {
 
   it("reuses the matching active digest without mutating session identity", async () => {
     const sessionCredential = generateSecret();
+    const initial = runtime.forPrincipal(authenticatedPrincipal(clientA.credential)).appendLog(ids.cubeA, {
+      message: "before attach",
+    });
     const created = await attach(clientA.credential, ids.cubeA, ids.roleA, sessionCredential, "attach-reuse-1");
+    runtime.forPrincipal(authenticatedPrincipal(clientA.credential)).appendLog(ids.cubeA, {
+      message: "after attach",
+    });
     now = new Date("2126-07-14T13:00:00.000Z");
     const reused = await attach(clientA.credential, ids.cubeA, ids.roleA, sessionCredential, "attach-reuse-2");
 
@@ -123,6 +129,7 @@ describe("client seat attach", () => {
         result: "reused",
         drone: created.payload.drone,
         session: { id: created.payload.session.id },
+        initial_log_cursor: { id: initial.id, created_at: initial.created_at },
       },
     });
     expect(count("drones")).toBe(1);
@@ -142,6 +149,7 @@ describe("client seat attach", () => {
       status: 200,
       payload: { result: "reused", drone: created.payload.drone, session: reused.payload.session },
     });
+    expect(lostResponseRetry.payload.initial_log_cursor).toEqual(created.payload.initial_log_cursor);
   });
 
   it("recovers a lost first response after restart using only the persisted bearer", async () => {
@@ -406,7 +414,7 @@ describe("client seat attach", () => {
       method: "POST",
       path: `/api/cubes/${ids.cubeA}/logs`,
       principal: authenticatedPrincipal(sessionCredential),
-      body: envelope("append-stream", { message: "reuse did not close stream" }),
+      body: envelope("append-stream", { post_id: randomUUID(), message: "reuse did not close stream" }),
       signal: new AbortController().signal,
     });
     await expect(pending).resolves.toMatchObject({ done: false });
@@ -435,7 +443,7 @@ describe("client seat attach", () => {
     expect(response).toMatchObject({
       status: 426,
       body: {
-        protocol_version: "8",
+        protocol_version: "9",
         request_id: "attach-version-old",
         error: {
           code: "UNSUPPORTED_PROTOCOL_VERSION",
@@ -489,6 +497,7 @@ async function attach(
     readonly role: { readonly id: string; readonly name: string };
     readonly drone: { readonly id: string; readonly label: string };
     readonly session: { readonly id: string };
+    readonly initial_log_cursor: { readonly id: string; readonly created_at: string } | null;
   };
   readonly error?: { readonly code: string };
 }> {
@@ -522,7 +531,7 @@ function authenticatedPrincipal(credential: string) {
 }
 
 function envelope(requestId: string, payload: Record<string, unknown>) {
-  return { protocol_version: "8", request_id: requestId, payload };
+  return { protocol_version: "9", request_id: requestId, payload };
 }
 
 function count(table: "drones" | "drone_sessions" | "drone_session_credentials"): number {

@@ -36,7 +36,7 @@ describe("controller and runtime update completion", () => {
       package_version: "0.3.0",
       artifact_integrity: `sha512-${"A".repeat(86)}==`,
       source_sha: "a".repeat(40),
-      protocol_version: "8",
+      protocol_version: "9",
       started_at: "2026-07-26T12:00:00.000Z",
     }, "managed");
 
@@ -98,7 +98,7 @@ describe("controller and runtime update completion", () => {
       package_version: "0.2.0",
       artifact_integrity: `sha512-${"A".repeat(86)}==`,
       source_sha: "a".repeat(40),
-      protocol_version: "8",
+      protocol_version: "9",
       started_at: "2026-07-26T12:00:00.000Z",
     }, "managed");
 
@@ -156,7 +156,7 @@ describe("controller and runtime update completion", () => {
           package_version: "0.3.0",
           artifact_integrity: integrity,
           source_sha: artifact.sourceSha,
-          protocol_version: "8",
+          protocol_version: "9",
           started_at: "2026-07-26T12:00:00.000Z",
         })),
       },

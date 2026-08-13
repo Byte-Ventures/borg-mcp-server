@@ -347,10 +347,13 @@ export interface ScopedStore {
   readonly reassignDrone: (cubeId: string, droneId: string, roleId: string) => DroneRecord;
   readonly evictDrone: (cubeId: string, droneId: string) => void;
   readonly appendLog: (cubeId: string, input: {
+    readonly postId?: string;
     readonly message: string;
     readonly visibility?: "broadcast" | "direct";
     readonly recipientDroneIds?: readonly string[];
-  }) => EnrichedActivityRecord;
+    readonly routingKey?: string | null;
+  }) => AppendLogRecord;
+  readonly hasLogPost: (cubeId: string, postId: string) => boolean;
   readonly readLog: (cubeId: string, cursor: LogCursor | null, limit: number) => ActivityPage;
   readonly readLogEntry: (cubeId: string, selector: string) => EnrichedActivityRecord;
   readonly acknowledge: (cubeId: string, entryId: string, kind: "ack" | "claim") => void;
@@ -470,7 +473,12 @@ export interface SeatAttachRecord {
     readonly label: string;
   } & RuntimeMetadataState;
   readonly sessionId: string;
+  readonly initialLogCursor: LogCursor | null;
   readonly result: "created" | "reused";
+}
+
+export interface AppendLogRecord extends EnrichedActivityRecord {
+  readonly deduplicated: boolean;
 }
 
 export interface MaintenanceStore {
@@ -739,6 +747,15 @@ export class ActivityEntryPrefixConflictError extends Error {
   constructor() {
     super("The activity entry prefix is ambiguous; provide a full UUID.");
     this.name = "ActivityEntryPrefixConflictError";
+  }
+}
+
+export class PostIdConflictError extends Error {
+  readonly code = "POST_ID_CONFLICT";
+
+  constructor() {
+    super("The post id was already used with different content or routing.");
+    this.name = "PostIdConflictError";
   }
 }
 
@@ -1899,11 +1916,14 @@ class SqliteScopedStore implements ScopedStore {
   }
 
   appendLog(cubeId: string, input: {
+    readonly postId?: string;
     readonly message: string;
     readonly visibility?: "broadcast" | "direct";
     readonly recipientDroneIds?: readonly string[];
-  }): EnrichedActivityRecord {
+    readonly routingKey?: string | null;
+  }): AppendLogRecord {
     assertCanonicalUuid(cubeId, "Cube id");
+    if (input.postId !== undefined) assertCanonicalUuid(input.postId, "Post id");
     if (input.message.length === 0 || Buffer.byteLength(input.message) > 10_240) {
       throw new Error("Activity message must contain 1 to 10240 bytes.");
     }
@@ -1926,22 +1946,46 @@ class SqliteScopedStore implements ScopedStore {
 
     const scope = this.#scope("write");
     this.#requireCube(cubeId, "write");
-    this.#capacityGuard.assertCanGrow(Buffer.byteLength(input.message) + (recipients.length * 128));
-    const id = randomUUID();
-    const createdAt = this.#nextActivityTimestamp(cubeId);
     const droneId = this.#principal.kind === "drone-session" ? this.#principal.droneId : null;
+    const postAuthorId = droneId ?? this.#principal.id;
+    const tupleJson = JSON.stringify({
+      message: input.message,
+      visibility,
+      recipients: [...recipients].sort(),
+      routing: input.routingKey ?? null,
+    });
     this.#database.exec("BEGIN IMMEDIATE");
     try {
+      if (input.postId !== undefined) {
+        const prior = this.#database.prepare(`
+          SELECT tuple_json, entry_json FROM activity_post_bindings
+          WHERE cube_id = ? AND author_id = ? AND post_id = ?
+        `).get(cubeId, postAuthorId, input.postId);
+        if (prior !== undefined) {
+          if (requiredText(prior, "tuple_json") !== tupleJson) {
+            throw new PostIdConflictError();
+          }
+          const entry = JSON.parse(requiredText(prior, "entry_json")) as EnrichedActivityRecord;
+          this.#database.exec("COMMIT");
+          return appendLogRecord(entry, true);
+        }
+      }
+      this.#capacityGuard.assertCanGrow(Buffer.byteLength(input.message) + (recipients.length * 128));
+      const id = randomUUID();
+      const createdAt = this.#nextActivityTimestamp(cubeId);
       const inserted = this.#database.prepare(`
         INSERT INTO activity_log (
-          id, cube_id, drone_id, actor_kind, actor_id, message, created_at, visibility
+          id, cube_id, drone_id, actor_kind, actor_id, message, created_at, visibility,
+          post_id, post_author_id, routing_class
         )
-        SELECT ?, c.id, ?, ?, ?, ?, ?, ?
+        SELECT ?, c.id, ?, ?, ?, ?, ?, ?, ?, ?, ?
         FROM cubes AS c
         WHERE c.id = ? AND ${scope.sql}
       `).run(
         id, droneId, this.#principal.kind, this.#principal.id, input.message,
-        createdAt, visibility, cubeId, ...scope.parameters,
+        createdAt, visibility, input.postId ?? null,
+        input.postId === undefined ? null : postAuthorId, input.routingKey ?? null,
+        cubeId, ...scope.parameters,
       );
       if (inserted.changes !== 1) throw new ScopedStoreError();
       if (droneId !== null) {
@@ -1969,15 +2013,35 @@ class SqliteScopedStore implements ScopedStore {
         );
         for (const recipient of recipients) addRecipient.run(id, recipient);
       }
+      const entry = this.#enrichedEntry(cubeId, id);
+      if (input.postId !== undefined) {
+        this.#database.prepare(`
+          INSERT INTO activity_post_bindings (
+            cube_id, author_id, post_id, tuple_json, entry_json
+          ) VALUES (?, ?, ?, ?, ?)
+        `).run(cubeId, postAuthorId, input.postId, tupleJson, JSON.stringify(entry));
+      }
       this.#pruneActivity(cubeId);
       this.#database.exec("COMMIT");
+      this.#activityHub.publish(cubeId, entry);
+      return appendLogRecord(entry, false);
     } catch (error) {
       try { this.#database.exec("ROLLBACK"); } catch { /* Preserve the original failure. */ }
       throw error;
     }
-    const entry = this.#enrichedEntry(cubeId, id);
-    this.#activityHub.publish(cubeId, entry);
-    return entry;
+  }
+
+  hasLogPost(cubeId: string, postId: string): boolean {
+    assertCanonicalUuid(cubeId, "Cube id");
+    assertCanonicalUuid(postId, "Post id");
+    this.#requireCube(cubeId, "write");
+    const authorId = this.#principal.kind === "drone-session"
+      ? this.#principal.droneId
+      : this.#principal.id;
+    return this.#database.prepare(`
+      SELECT 1 FROM activity_post_bindings
+      WHERE cube_id = ? AND author_id = ? AND post_id = ?
+    `).get(cubeId, authorId, postId) !== undefined;
   }
 
   readLog(cubeId: string, cursor: LogCursor | null, limit: number): ActivityPage {
@@ -2239,7 +2303,9 @@ class SqliteScopedStore implements ScopedStore {
         SELECT credential.verifier_digest, credential.revoked_at AS credential_revoked_at,
                session.id AS session_id, session.client_id, session.cube_id, session.drone_id,
                session.revoked_at AS session_revoked_at,
-               session.superseded_at, drone.role_id, drone.label, drone.evicted_at
+               session.superseded_at, session.initial_log_cursor_id,
+               session.initial_log_cursor_created_at,
+               drone.role_id, drone.label, drone.evicted_at
         FROM drone_session_credentials AS credential
         JOIN drone_sessions AS session ON session.id = credential.session_id
         JOIN drones AS drone ON drone.id = session.drone_id
@@ -2266,6 +2332,11 @@ class SqliteScopedStore implements ScopedStore {
         }
         const droneId = requiredText(bound, "drone_id");
         const sessionId = requiredText(bound, "session_id");
+        const initialCursorId = optionalText(bound, "initial_log_cursor_id");
+        const initialCursorCreatedAt = optionalText(bound, "initial_log_cursor_created_at");
+        const initialLogCursor: LogCursor | null = initialCursorId === null || initialCursorCreatedAt === null
+          ? null
+          : { id: initialCursorId!, created_at: initialCursorCreatedAt! };
         if (input.runtimeMetadata !== undefined) {
           this.#database.prepare(`
             UPDATE drones SET agent_kind = ?, reported_model = ?,
@@ -2306,6 +2377,7 @@ class SqliteScopedStore implements ScopedStore {
             ...this.#runtimeMetadataState(droneId),
           },
           sessionId,
+          initialLogCursor,
           result: "reused",
         };
       }
@@ -2388,6 +2460,12 @@ class SqliteScopedStore implements ScopedStore {
       if (roleClass !== "queen" && roleClass !== "worker") {
         throw new Error("Database contains invalid role class.");
       }
+      const initialLogCursor = this.#cubeHeadCursor(input.cubeId);
+      this.#database.prepare(`
+        UPDATE drone_sessions
+        SET initial_log_cursor_id = ?, initial_log_cursor_created_at = ?
+        WHERE id = ?
+      `).run(initialLogCursor?.id ?? null, initialLogCursor?.created_at ?? null, input.sessionId);
       this.#database.exec("COMMIT");
       return {
         cube: {
@@ -2406,12 +2484,23 @@ class SqliteScopedStore implements ScopedStore {
           ...this.#runtimeMetadataState(droneId),
         },
         sessionId: input.sessionId,
+        initialLogCursor,
         result: "created",
       };
     } catch (error) {
       try { this.#database.exec("ROLLBACK"); } catch { /* Preserve the original failure. */ }
       throw error;
     }
+  }
+
+  #cubeHeadCursor(cubeId: string): LogCursor | null {
+    const row = this.#database.prepare(`
+      SELECT id, created_at FROM activity_log
+      WHERE cube_id = ? ORDER BY created_at DESC, id DESC LIMIT 1
+    `).get(cubeId);
+    return row === undefined
+      ? null
+      : { id: requiredText(row, "id"), created_at: requiredText(row, "created_at") };
   }
 
   updateOwnRuntimeMetadata(
@@ -4054,6 +4143,12 @@ function enrichedActivityRecord(
     recipient_drone_ids: recipientDroneIds,
     ...(wakeNonce === undefined ? {} : { wake_nonce: wakeNonce }),
   };
+}
+
+function appendLogRecord(entry: EnrichedActivityRecord, deduplicated: boolean): AppendLogRecord {
+  const result = { ...entry } as EnrichedActivityRecord & { deduplicated?: boolean };
+  Object.defineProperty(result, "deduplicated", { value: deduplicated, enumerable: false });
+  return result as AppendLogRecord;
 }
 
 function claimRecord(row: Record<string, unknown>): ClaimRecord {

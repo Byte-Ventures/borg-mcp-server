@@ -12,7 +12,7 @@ import {
   LiveCredentialRegistry,
   generateSecret,
 } from "../src/credentials.js";
-import { openStore, type StoreRuntime } from "../src/store.js";
+import { openStore, type ActivityStreamRecord, type StoreRuntime } from "../src/store.js";
 import { clientPrincipal, droneSessionPrincipal, type Principal } from "../src/principal.js";
 import { createDebugLogger, disabledDebugLogger } from "../src/debug-log.js";
 
@@ -32,6 +32,59 @@ afterEach(async () => {
 });
 
 describe("coordination stream setup", () => {
+  it("deduplicates equivalent resolved recipient sets and ignores unused request class", async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-api-routing-retry-")));
+    directories.push(directory);
+    runtime = await openStore({ path: join(directory, "borg.db") });
+    digester = new CredentialDigester(Buffer.alloc(32, 31));
+    const authority = new CredentialAuthority(runtime.credentials, digester);
+    const api = new CoordinationApi(runtime, authority);
+    const clientId = "00000000-0000-4000-8000-000000000301";
+    const cubeId = "00000000-0000-4000-8000-000000000302";
+    const roleId = "00000000-0000-4000-8000-000000000303";
+    const droneA = "00000000-0000-4000-8000-000000000304";
+    const droneB = "00000000-0000-4000-8000-000000000305";
+    runtime.maintenance.createClient({ id: clientId, name: "Retry manager" });
+    runtime.maintenance.createCube({ id: cubeId, name: "Retry", directive: "" });
+    runtime.maintenance.grantClientCube({ clientId, cubeId, access: "manage" });
+    runtime.maintenance.createRole({ id: roleId, cubeId, name: "Worker" });
+    runtime.maintenance.createDrone({ id: droneA, cubeId, roleId, clientId, label: "worker-a" });
+    runtime.maintenance.createDrone({ id: droneB, cubeId, roleId, clientId, label: "worker-b" });
+    const principal = clientPrincipal(clientId);
+    const events: ActivityStreamRecord[] = [];
+    const unsubscribe = runtime.forPrincipal(principal).subscribeActivity(cubeId, (entry) => events.push(entry));
+    const postId = "00000000-0000-4000-8000-000000000306";
+    const append = (recipients: string[], includeClass: boolean) => api.handle({
+      method: "POST",
+      path: `/api/cubes/${cubeId}/logs`,
+      principal,
+      body: {
+        protocol_version: "9",
+        request_id: randomUUID(),
+        payload: {
+          post_id: postId,
+          message: "direct retry",
+          visibility: "direct",
+          recipientDroneIds: recipients,
+          ...(includeClass ? { class: "request-shape-only" } : {}),
+        },
+      },
+      signal: new AbortController().signal,
+    });
+
+    const created = await append([droneA, droneB], true);
+    const replay = await append([droneB, droneA], false);
+    expect(replay).toMatchObject({
+      status: 201,
+      body: { payload: { entry: { id: (created.body as any).payload.entry.id }, deduplicated: true } },
+    });
+    expect(events).toHaveLength(1);
+    const conflict = await append([droneA], false);
+    expect(conflict).toMatchObject({ status: 409, body: { error: { code: "POST_ID_CONFLICT" } } });
+    expect(events).toHaveLength(1);
+    unsubscribe();
+  });
+
   it("emits a terminal CUBE_DELETED error before closing an active stream", async () => {
     const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-api-delete-stream-")));
     directories.push(directory);

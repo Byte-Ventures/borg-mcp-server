@@ -172,6 +172,18 @@ async function conformanceEnvironment(): Promise<{
           default_to: [roleName],
         }] });
       },
+      configureMessageClassRouting: async (cube, className, recipientDroneIds) => {
+        const store = runtime.forPrincipal(operatorPrincipal(
+          "00000000-0000-4000-8000-000000000399",
+        ));
+        const current = store.getCube(cube.id)?.messageTaxonomy ?? [];
+        store.updateCube(cube.id, { messageTaxonomy: [...current, {
+          class: className,
+          prefixes: [`${className.toUpperCase()}:`],
+          routing: "directed",
+          default_to: [...recipientDroneIds],
+        }] });
+      },
       createDrone: async (principal, cube, role) => {
         const credential = principalCredentials.get(principal.id);
         if (credential === undefined) throw new Error("Principal is not enrolled.");

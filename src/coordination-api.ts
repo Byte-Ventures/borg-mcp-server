@@ -560,7 +560,7 @@ export class CoordinationApi {
           ...(resolved.visibility === "direct"
             ? { recipientDroneIds: resolved.recipientDroneIds }
             : {}),
-          routingKey: resolved.routing.class ?? className ?? null,
+          routingKey: resolved.routing.class,
         });
         if (!appended.deduplicated) {
           this.#debugLogger.emit({

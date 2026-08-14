@@ -1,6 +1,6 @@
-import { chmod, lstat, mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, link, lstat, mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -218,6 +218,45 @@ describe("managed service installation", () => {
     expect(run).not.toHaveBeenCalled();
   });
 
+  it("requires canonical ownership markers and refuses hardlinked definitions and logs", async () => {
+    for (const platform of ["launchd", "systemd"] as const) {
+      const fixture = await installationFixture(platform);
+      await mkdir(dirname(fixture.definition.definitionPath), { recursive: true });
+      const embeddedMarker = platform === "launchd"
+        ? `<?xml version="1.0" encoding="UTF-8"?>\n<!-- not-${fixture.definition.ownershipMarker} -->\n<plist/>\n`
+        : `# not-${fixture.definition.ownershipMarker}\n[Unit]\nDescription=foreign\n`;
+      await writeFile(fixture.definition.definitionPath, embeddedMarker, { mode: 0o600 });
+      await expect(installManagedService(fixture.input))
+        .rejects.toThrow("not recognized as Borg-owned");
+    }
+
+    const definitionFixture = await installationFixture();
+    await mkdir(dirname(definitionFixture.definition.definitionPath), { recursive: true });
+    await writeFile(definitionFixture.definition.definitionPath, definitionFixture.definition.content, {
+      mode: 0o600,
+    });
+    const definitionAlias = join(definitionFixture.directory, "definition-alias");
+    await link(definitionFixture.definition.definitionPath, definitionAlias);
+    const definitionRun = vi.fn();
+    await expect(installManagedService({ ...definitionFixture.input, run: definitionRun }))
+      .rejects.toThrow("owner-private regular file");
+    expect(definitionRun).not.toHaveBeenCalled();
+    expect(await readFile(definitionAlias, "utf8")).toBe(definitionFixture.definition.content);
+    expect((await lstat(definitionAlias)).mode & 0o777).toBe(0o600);
+
+    const logFixture = await installationFixture();
+    await mkdir(dirname(logFixture.definition.stdoutPath), { recursive: true, mode: 0o700 });
+    await writeFile(logFixture.definition.stdoutPath, "sentinel\n", { mode: 0o600 });
+    const logAlias = join(logFixture.directory, "log-alias");
+    await link(logFixture.definition.stdoutPath, logAlias);
+    const logRun = vi.fn();
+    await expect(installManagedService({ ...logFixture.input, run: logRun }))
+      .rejects.toThrow("owner-owned regular files");
+    expect(logRun).not.toHaveBeenCalled();
+    expect(await readFile(logAlias, "utf8")).toBe("sentinel\n");
+    expect((await lstat(logAlias)).mode & 0o777).toBe(0o600);
+  });
+
   it("serializes concurrent installers without reclaiming an existing lock", async () => {
     const fixture = await installationFixture();
     await writeFile(join(fixture.directory, "data", "service-install.lock"), "123\n", { mode: 0o600 });
@@ -246,18 +285,19 @@ describe("managed service installation", () => {
 
   it("restores and restarts a replaced Borg-owned definition after startup failure", async () => {
     const fixture = await installationFixture();
-    const stale = `# ${fixture.definition.ownershipMarker}\nold definition\n`;
+    const stale = `# ${fixture.definition.ownershipMarker}\n[Unit]\nold definition\n`;
     await mkdir(join(fixture.directory, "systemd"), { recursive: true });
     await writeFile(fixture.definition.definitionPath, stale, { mode: 0o600 });
     let running = true;
     let installAttempts = 0;
+    const previousIdentity = { ...identity, package_version: "0.17.0" };
 
     let error: unknown;
     try {
       await installManagedService({
         ...fixture.input,
         inspectRuntime: async () => running
-          ? { running: true, mode: "managed", identity: { ...identity, package_version: "0.17.0" } }
+          ? { running: true, mode: "managed", identity: previousIdentity }
           : { running: false },
         inspectService: async () => ({ state: "active", recoveryCommand: null }),
         run: async (command) => {
@@ -271,6 +311,7 @@ describe("managed service installation", () => {
           }
           return { stdout: "", stderr: "" };
         },
+        probe: async () => ({ ...previousIdentity, started_at: "2026-08-14T13:00:00.000Z" }),
       });
     } catch (caught) {
       error = caught;
@@ -279,6 +320,36 @@ describe("managed service installation", () => {
     expect(error).toMatchObject({ recovery: "restored" });
     expect(await readFile(fixture.definition.definitionPath, "utf8")).toBe(stale);
     expect(installAttempts).toBe(2);
+  });
+
+  it("reports failed recovery when rollback starts a different runtime identity", async () => {
+    const fixture = await installationFixture();
+    const stale = `# ${fixture.definition.ownershipMarker}\n[Unit]\nold definition\n`;
+    await mkdir(join(fixture.directory, "systemd"), { recursive: true });
+    await writeFile(fixture.definition.definitionPath, stale, { mode: 0o600 });
+    let running = true;
+    let installAttempts = 0;
+
+    await expect(installManagedService({
+      ...fixture.input,
+      inspectRuntime: async () => running
+        ? { running: true, mode: "managed", identity: { ...identity, package_version: "0.17.0" } }
+        : { running: false },
+      inspectService: async () => ({ state: "active", recoveryCommand: null }),
+      run: async (command) => {
+        if (command === fixture.definition.unload || command === fixture.definition.rollbackRemove) {
+          running = false;
+        }
+        if (command === fixture.definition.install) {
+          installAttempts += 1;
+          if (installAttempts === 1) throw new Error("private controller error");
+          running = true;
+        }
+        return { stdout: "", stderr: "" };
+      },
+      probe: async () => ({ ...identity, package_version: "9.9.9" }),
+    })).rejects.toMatchObject({ recovery: "failed" });
+    expect(await readFile(fixture.definition.definitionPath, "utf8")).toBe(stale);
   });
 });
 

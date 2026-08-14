@@ -1,4 +1,5 @@
 import { chmod, lstat, mkdir, open, readFile, realpath, rename, unlink } from "node:fs/promises";
+import type { Stats } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 
 import type { ManagedServiceDefinition } from "./managed-service.js";
@@ -66,8 +67,13 @@ export async function installManagedService(
   await input.assertInstallation();
   const installLock = await acquireInstallLock(input.dataDirectory);
   try {
-    const definitionState = await inspectDefinition(input.definition, input.uid);
-    const [runtime, service] = await Promise.all([input.inspectRuntime(), input.inspectService()]);
+    const [definitionState, runtime, service] = await Promise.all([
+      inspectDefinition(input.definition, input.uid),
+      input.inspectRuntime(),
+      input.inspectService(),
+      assertExistingPrivateSink(input.definition.stdoutPath, input.uid),
+      assertExistingPrivateSink(input.definition.stderrPath, input.uid),
+    ]);
     if (runtime.stale === true) throw operatorErrors.RUNTIME_LOCK_STALE;
     if (runtime.running && runtime.mode !== "managed") {
       throw operatorErrors.MANAGED_SERVICE_FOREGROUND_ACTIVE;
@@ -86,6 +92,9 @@ export async function installManagedService(
     }
 
     const previousActive = service.state === "active";
+    const previousIdentity = previousActive && runtime.running
+      ? runtime.identity ?? null
+      : null;
     const previousContent = definitionState.kind === "absent" ? null : definitionState.content;
     const mustUnload = previousActive || (definitionState.kind === "stale" &&
       service.recoveryCommand === input.definition.recoverLoaded);
@@ -125,7 +134,12 @@ export async function installManagedService(
       return result("installed", input, identity);
     } catch {
       if (!mutationStarted) throw new ManagedServiceInstallError("stopped");
-      throw new ManagedServiceInstallError(await rollback(input, previousContent, previousActive));
+      throw new ManagedServiceInstallError(await rollback(
+        input,
+        previousContent,
+        previousActive,
+        previousIdentity,
+      ));
     }
   } finally {
     await installLock.release();
@@ -136,6 +150,7 @@ async function rollback(
   input: ManagedServiceInstallInput,
   previousContent: string | null,
   previousActive: boolean,
+  previousIdentity: RuntimeBuildIdentity | null,
 ): Promise<"restored" | "stopped" | "failed"> {
   try {
     await runWithDeadline(input.timeoutMs, (signal) => input.run(input.definition.rollbackRemove, signal))
@@ -156,7 +171,10 @@ async function rollback(
     }
     if (!previousActive) return "stopped";
     await runWithDeadline(input.timeoutMs, (signal) => input.run(input.definition.install, signal));
-    await runWithDeadline(input.timeoutMs, input.probe);
+    const restoredIdentity = await runWithDeadline(input.timeoutMs, input.probe);
+    if (previousIdentity === null || !runtimeIdentitiesMatch(restoredIdentity, previousIdentity)) {
+      return "failed";
+    }
     return "restored";
   } catch {
     return "failed";
@@ -170,20 +188,32 @@ async function inspectDefinition(
   try {
     const metadata = await lstat(definition.definitionPath);
     await assertCanonicalDirectory(dirname(definition.definitionPath), uid);
-    if (!metadata.isFile() || metadata.isSymbolicLink() ||
+    if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.nlink !== 1 ||
         metadata.size > 64 * 1024 || (uid !== undefined && metadata.uid !== uid) ||
         (metadata.mode & 0o077) !== 0) {
       throw operatorErrors.MANAGED_SERVICE_DEFINITION_UNSAFE;
     }
     const content = await readFile(definition.definitionPath, "utf8");
     if (content === definition.content) return { kind: "current", content };
-    if (content.includes(definition.ownershipMarker) ||
+    if (hasCanonicalOwnershipMarker(definition, content) ||
         isPublishedLegacyDefinition(definition, content)) return { kind: "stale", content };
     throw operatorErrors.MANAGED_SERVICE_DEFINITION_FOREIGN;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return { kind: "absent" };
     throw error;
   }
+}
+
+function hasCanonicalOwnershipMarker(
+  definition: ManagedServiceDefinition,
+  content: string,
+): boolean {
+  return definition.platform === "launchd"
+    ? content.startsWith(
+      `<?xml version="1.0" encoding="UTF-8"?>\n<!-- ${definition.ownershipMarker} -->\n` +
+      "<!DOCTYPE plist PUBLIC",
+    )
+    : content.startsWith(`# ${definition.ownershipMarker}\n[Unit]\n`);
 }
 
 function isPublishedLegacyDefinition(
@@ -275,8 +305,7 @@ async function ensurePrivateSink(path: string, uid = process.getuid?.()): Promis
   await ensurePrivateDirectory(dirname(path), uid);
   try {
     const metadata = await lstat(path);
-    if (!metadata.isFile() || metadata.isSymbolicLink() ||
-        (uid !== undefined && metadata.uid !== uid)) {
+    if (!privateSinkMetadata(metadata, uid)) {
       throw operatorErrors.MANAGED_SERVICE_LOG_UNSAFE;
     }
   } catch (error) {
@@ -285,6 +314,24 @@ async function ensurePrivateSink(path: string, uid = process.getuid?.()): Promis
   const handle = await open(path, "a", 0o600);
   await handle.close();
   await chmod(path, 0o600);
+}
+
+async function assertExistingPrivateSink(path: string, uid = process.getuid?.()): Promise<void> {
+  try {
+    if (!privateSinkMetadata(await lstat(path), uid)) {
+      throw operatorErrors.MANAGED_SERVICE_LOG_UNSAFE;
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+}
+
+function privateSinkMetadata(
+  metadata: Stats,
+  uid: number | undefined,
+): boolean {
+  return metadata.isFile() && !metadata.isSymbolicLink() && metadata.nlink === 1 &&
+    (metadata.mode & 0o077) === 0 && (uid === undefined || metadata.uid === uid);
 }
 
 async function writePrivateFile(
@@ -409,6 +456,12 @@ function runtimeMatchesArtifact(identity: RuntimeBuildIdentity, artifact: Verifi
   return identity.package_version === artifact.version &&
     identity.artifact_integrity === artifact.integrity &&
     identity.source_sha === artifact.sourceSha;
+}
+
+function runtimeIdentitiesMatch(left: RuntimeBuildIdentity, right: RuntimeBuildIdentity): boolean {
+  return left.package_version === right.package_version &&
+    left.artifact_integrity === right.artifact_integrity &&
+    left.source_sha === right.source_sha;
 }
 
 function result(

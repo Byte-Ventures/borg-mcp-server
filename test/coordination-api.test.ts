@@ -4,6 +4,7 @@ import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { getTemplate, NEW_CUBE_TEMPLATE_PRESENTATIONS } from "borgmcp-shared/templates";
 
 import { CoordinationApi } from "../src/coordination-api.js";
 import {
@@ -820,7 +821,7 @@ describe("coordination stream setup", () => {
     expect(runtime.maintenance.observeAuthorityState().cubes).toBe(0);
   });
 
-  it("strictly creates and authoritatively resolves a repository-associated cube", async () => {
+  it("creates and reads back the software-development template through the API", async () => {
     const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-api-create-cube-")));
     directories.push(directory);
     runtime = await openStore({ path: join(directory, "borg.db") });
@@ -851,7 +852,7 @@ describe("coordination stream setup", () => {
       name: "Example",
       working_repo_name: "example",
       repository,
-      template: "starter",
+      template: "software-dev",
     });
     expect(created).toMatchObject({
       status: 201,
@@ -863,7 +864,7 @@ describe("coordination stream setup", () => {
           name: "Example",
           working_repo_name: "example",
           repository,
-          template: "starter",
+          template: "software-dev",
           access: "manage",
         },
       },
@@ -871,13 +872,220 @@ describe("coordination stream setup", () => {
     const createdPayload = (created.body as {
       payload: { cube_id: string; human_seat_role_id: string; default_worker_role_id: string };
     }).payload;
+    const template = getTemplate("software-dev");
+    if (template === null) throw new Error("Shared software-development template is unavailable.");
+    const expectedRoles = [
+      {
+        name: "Coordinator",
+        short_description: "Orders authorized work to start, verifies progress, preserves scope, and asks before rescoping or integrating.",
+      },
+      {
+        name: "Builder",
+        short_description: "Implements explicitly assigned software changes within the stated slice and returns exact verification evidence.",
+      },
+      {
+        name: "Code Reviewer",
+        short_description: "Reviews routed exact revisions for correctness, scope, tests, and maintainability without creating work.",
+      },
+      {
+        name: "Release Quality",
+        short_description: "Performs routed exact-revision behavior and documentation verification proportionate to the changed surface.",
+      },
+      {
+        name: "Product Design",
+        short_description: "Reviews routed user-facing behavior, accessibility, states, and copy; creates mockups only when useful.",
+      },
+      {
+        name: "Product Strategy",
+        short_description: "Produces bounded, source-verified product analysis and advisory proposals when requested.",
+      },
+      {
+        name: "Security Auditor",
+        short_description: "Reviews routed security-relevant touched surfaces and explicit sweeps without broadening scope.",
+      },
+    ];
+    const expectedTaxonomy = [
+      {
+        class: "status-claim",
+        prefixes: ["STARTING", "PROGRESS", "ACK", "PONG", "PUSHING"],
+        routing: "directed",
+        default_to: ["coordinator", "queen"],
+      },
+      {
+        class: "completion-status",
+        prefixes: ["DONE"],
+        routing: "directed",
+        default_to: ["coordinator", "queen"],
+        lifecycle: "completion",
+      },
+      {
+        class: "review-request",
+        prefixes: ["REVIEW-READY"],
+        routing: "directed",
+        default_to: ["coordinator", "queen"],
+      },
+      {
+        class: "review-feedback",
+        prefixes: ["REVIEW-FEEDBACK", "RQ-FEEDBACK", "SECURITY-FEEDBACK", "PD-FEEDBACK", "PS-FEEDBACK"],
+        routing: "directed",
+        default_to: ["coordinator", "queen"],
+      },
+      {
+        class: "completion-gate",
+        prefixes: ["REVIEW-APPROVED", "RQ-APPROVED", "SECURITY-APPROVED", "PD-APPROVED", "PS-APPROVED"],
+        routing: "directed",
+        default_to: ["coordinator", "queen"],
+        lifecycle: "completion",
+      },
+      {
+        class: "blocked-signal",
+        prefixes: ["BLOCKED"],
+        routing: "directed",
+        default_to: ["coordinator", "queen"],
+      },
+      {
+        class: "dispatch-routing",
+        prefixes: ["START NOW", "RESUME NOW", "REVIEW NOW", "HOLD"],
+        routing: "directed",
+        default_to: ["coordinator", "queen"],
+        lifecycle: "dispatch",
+      },
+      {
+        class: "ping",
+        prefixes: ["PING"],
+        routing: "directed",
+        default_to: ["coordinator", "queen"],
+      },
+      {
+        class: "peer-question",
+        prefixes: ["QUESTION", "ASK"],
+        routing: "directed",
+        default_to: ["coordinator", "queen"],
+      },
+      {
+        class: "peer-answer",
+        prefixes: ["ANSWER"],
+        routing: "directed",
+        default_to: ["coordinator", "queen"],
+      },
+      {
+        class: "peer-heads-up",
+        prefixes: ["HEADS-UP"],
+        routing: "directed",
+        default_to: ["coordinator", "queen"],
+      },
+      {
+        class: "finding",
+        prefixes: ["PROPOSAL"],
+        routing: "directed",
+        default_to: ["coordinator", "queen"],
+      },
+      {
+        class: "cube-wide",
+        prefixes: ["DECISION", "HALT", "MERGED"],
+        routing: "broadcast",
+      },
+    ];
+    expect(NEW_CUBE_TEMPLATE_PRESENTATIONS[0]).toEqual({
+      name: "software-dev",
+      label: "Software Development",
+      short_description: "Recommended for code repositories.",
+    });
+    expect(template.roles.map(({ name, short_description }) => ({ name, short_description })))
+      .toEqual(expectedRoles);
+    expect(template.message_taxonomy).toEqual(expectedTaxonomy);
+
+    const cubeRead = await api.handle({
+      method: "GET",
+      path: `/api/cubes/${createdPayload.cube_id}`,
+      principal,
+      signal: new AbortController().signal,
+    });
+    expect(cubeRead).toMatchObject({
+      status: 200,
+      body: {
+        payload: {
+          cube: {
+            id: createdPayload.cube_id,
+            cube_directive: expect.stringContaining(
+              "A release tag starts the tag-restricted staging workflow automatically",
+            ),
+            message_taxonomy: expectedTaxonomy,
+          },
+        },
+      },
+    });
+    const rolesRead = await api.handle({
+      method: "GET",
+      path: `/api/cubes/${createdPayload.cube_id}/roles`,
+      principal,
+      signal: new AbortController().signal,
+    });
+    expect(rolesRead.status).toBe(200);
+    const roles = (rolesRead.body as {
+      payload: {
+        roles: Array<{
+          id: string;
+          name: string;
+          short_description: string;
+          detailed_description: string;
+          is_default: boolean;
+          is_human_seat: boolean;
+        }>;
+      };
+    }).payload.roles;
+    expect(roles).toHaveLength(expectedRoles.length);
+    expect(roles.map((role) => role.name).sort()).toEqual(
+      expectedRoles.map((role) => role.name).sort(),
+    );
+    expect(expectedRoles.map((expected) => roles.find((role) => role.name === expected.name)))
+      .toEqual(expectedRoles.map((expected) => expect.objectContaining(expected)));
+    const coordinator = roles.find((role) => role.name === "Coordinator")!;
+    const builder = roles.find((role) => role.name === "Builder")!;
+    expect(coordinator).toMatchObject({
+      id: createdPayload.human_seat_role_id,
+      is_default: false,
+      is_human_seat: true,
+    });
+    expect(builder).toMatchObject({
+      id: createdPayload.default_worker_role_id,
+      is_default: true,
+      is_human_seat: false,
+    });
+    for (const phrase of [
+      "Require one proof per property",
+      "Mechanical, version, lock, and generated changes require exact-revision CI plus one Code Review only",
+      "Give a successor revision delta review",
+      "Carry unchanged green evidence without rerunning it",
+    ]) {
+      expect(coordinator.detailed_description).toContain(phrase);
+    }
+    for (const phrase of [
+      "Omit PROGRESS for work expected to finish within 10 minutes",
+      "Run focused verification required by the touched surface",
+      "do not rerun green CI checks merely to duplicate exact-revision evidence",
+      "Check documentation or a separately published site only when the changed behavior, public API, package metadata, or named user claim belongs to that surface",
+    ]) {
+      expect(builder.detailed_description).toContain(phrase);
+    }
+    const directive = (cubeRead.body as {
+      payload: { cube: { cube_directive: string } };
+    }).payload.cube.cube_directive;
+    for (const phrase of [
+      "A release tag starts the tag-restricted staging workflow automatically",
+      "npm stage approval is the sole human publication boundary",
+      "Before npm accepts a stage, correct a failed workflow and retry the same immutable tag",
+      "Never move, replace, or force-update the tag",
+    ]) {
+      expect(directive).toContain(phrase);
+    }
 
     const resolved = await create("cube-resolve", {
       retry_key: randomUUID(),
       name: "Ignored replacement",
       working_repo_name: "ignored-display",
       repository,
-      template: "software-dev",
+      template: "starter",
     });
     expect(resolved).toMatchObject({
       status: 201,
@@ -888,7 +1096,7 @@ describe("coordination stream setup", () => {
           name: "Example",
           working_repo_name: "example",
           repository,
-          template: "starter",
+          template: "software-dev",
           human_seat_role_id: createdPayload.human_seat_role_id,
           default_worker_role_id: createdPayload.default_worker_role_id,
         },

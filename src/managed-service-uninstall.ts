@@ -74,11 +74,8 @@ export async function uninstallManagedService(
     try {
       service = await input.inspectService();
     } catch {
-      if (definitionState.kind === "absent") {
-        throw operatorErrors.MANAGED_SERVICE_REGISTRATION_LEFTOVER;
-      }
       throw new ManagedServiceUninstallError({
-        definitionState: "retained",
+        definitionState: definitionState.kind === "absent" ? "absent" : "retained",
         serviceState: "unknown",
         serviceRecoveryCommand: null,
         runningIdentityRestored: null,

@@ -137,7 +137,7 @@ describe("managed service uninstallation", () => {
     expect(run).not.toHaveBeenCalled();
   });
 
-  it("distinguishes leftover active, inactive, and unknown registrations from complete absence", async () => {
+  it("distinguishes leftover active and inactive registrations from complete absence", async () => {
     const fixture = await uninstallFixture("systemd");
     await unlink(fixture.definition.definitionPath);
 
@@ -152,7 +152,12 @@ describe("managed service uninstallation", () => {
     await expect(uninstallManagedService({
       ...fixture.input,
       inspectService: async () => { throw new Error("private controller probe failure"); },
-    })).rejects.toBe(operatorErrors.MANAGED_SERVICE_REGISTRATION_LEFTOVER);
+    })).rejects.toMatchObject({
+      definitionState: "absent",
+      serviceState: "unknown",
+      serviceRecoveryCommand: null,
+      runningIdentityRestored: null,
+    });
     await expect(uninstallManagedService(fixture.input)).resolves.toEqual({
       outcome: "already-absent",
       adapter: "systemd",

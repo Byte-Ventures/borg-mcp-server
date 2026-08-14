@@ -586,6 +586,29 @@ describe("runCli", () => {
       runtime_artifacts: "preserved",
       managed_logs: "preserved",
     });
+
+    const leftoverMessage =
+      "No Borg service definition is present, but the service manager still reports ai.borgmcp.server. " +
+      "Remove the leftover registration, then retry:\n" +
+      "  macOS: launchctl bootout gui/$(id -u)/ai.borgmcp.server\n" +
+      "  Linux: systemctl --user disable --now ai.borgmcp.server";
+    uninstallService.mockRejectedValueOnce(operatorErrors.MANAGED_SERVICE_REGISTRATION_LEFTOVER);
+    const leftoverTty = { ...createIo(), isTTY: true };
+    expect(await runCli(["service", "uninstall"], service, leftoverTty)).toBe(1);
+    expect(leftoverTty.stderr).toHaveBeenCalledWith(`Server command failed: ${leftoverMessage}`);
+    uninstallService.mockRejectedValueOnce(operatorErrors.MANAGED_SERVICE_REGISTRATION_LEFTOVER);
+    const leftoverJson = { ...createIo(), isTTY: false };
+    expect(await runCli(["service", "uninstall"], service, leftoverJson)).toBe(1);
+    expect(JSON.parse(leftoverJson.stdout.mock.calls[0]![0])).toEqual({
+      status: "failed",
+      error_code: "MANAGED_SERVICE_REGISTRATION_LEFTOVER",
+      message: leftoverMessage,
+      recovery: "not-started",
+      data_identity: "preserved",
+      credentials: "preserved",
+      runtime_artifacts: "preserved",
+      managed_logs: "preserved",
+    });
   });
 
   it("renders bounded verification and rollback failures without raw errors", async () => {

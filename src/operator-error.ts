@@ -33,6 +33,7 @@ export type OperatorErrorCode =
   | "RUNTIME_LOCK_RECOVERY_CONCURRENT"
   | "MANAGED_SERVICE_DEFINITION_UNSAFE"
   | "MANAGED_SERVICE_DEFINITION_FOREIGN"
+  | "MANAGED_SERVICE_REGISTRATION_LEFTOVER"
   | "MANAGED_SERVICE_LOG_UNSAFE"
   | "MANAGED_SERVICE_DATA_UNINITIALIZED"
   | "MANAGED_SERVICE_RUNTIME_UNPREPARED"
@@ -97,6 +98,7 @@ const publicMessages: Readonly<Record<OperatorErrorCode, string>> = Object.freez
   RUNTIME_LOCK_RECOVERY_CONCURRENT: "Another recovery already preserved runtime.lock. Rerun status.",
   MANAGED_SERVICE_DEFINITION_UNSAFE: "Ensure the managed service definition is an owner-private regular file, then retry.",
   MANAGED_SERVICE_DEFINITION_FOREIGN: "The existing service definition is not recognized as Borg-owned. Preserve or remove it manually before retrying.",
+  MANAGED_SERVICE_REGISTRATION_LEFTOVER: "No Borg service definition is present, but the service manager still reports ai.borgmcp.server. Remove the leftover registration, then retry:\n  macOS: launchctl bootout gui/$(id -u)/ai.borgmcp.server\n  Linux: systemctl --user disable --now ai.borgmcp.server",
   MANAGED_SERVICE_LOG_UNSAFE: "Ensure managed service log sinks are owner-owned regular files, then retry.",
   MANAGED_SERVICE_DATA_UNINITIALIZED: "Run borg-mcp-server setup before installing the managed service.",
   MANAGED_SERVICE_RUNTIME_UNPREPARED: "Run borg-mcp-server setup or update before installing the managed service.",

@@ -1,4 +1,4 @@
-import { chmod, link, lstat, mkdtemp, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { chmod, link, lstat, mkdtemp, mkdir, readFile, realpath, rm, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -9,6 +9,7 @@ import {
   uninstallManagedService,
   type ManagedServiceUninstallInput,
 } from "../src/managed-service-uninstall.js";
+import { operatorErrors } from "../src/operator-error.js";
 
 const directories: string[] = [];
 const identity = Object.freeze({
@@ -134,6 +135,28 @@ describe("managed service uninstallation", () => {
       run,
     })).resolves.toEqual({ outcome: "removed-inactive", adapter: "launchd" });
     expect(run).not.toHaveBeenCalled();
+  });
+
+  it("distinguishes leftover active, inactive, and unknown registrations from complete absence", async () => {
+    const fixture = await uninstallFixture("systemd");
+    await unlink(fixture.definition.definitionPath);
+
+    for (const serviceState of ["active", "inactive"] as const) {
+      await expect(uninstallManagedService({
+        ...fixture.input,
+        inspectService: async () => serviceState === "active"
+          ? { state: "active", recoveryCommand: null }
+          : { state: "inactive", recoveryCommand: fixture.definition.install },
+      })).rejects.toBe(operatorErrors.MANAGED_SERVICE_REGISTRATION_LEFTOVER);
+    }
+    await expect(uninstallManagedService({
+      ...fixture.input,
+      inspectService: async () => { throw new Error("private controller probe failure"); },
+    })).rejects.toBe(operatorErrors.MANAGED_SERVICE_REGISTRATION_LEFTOVER);
+    await expect(uninstallManagedService(fixture.input)).resolves.toEqual({
+      outcome: "already-absent",
+      adapter: "systemd",
+    });
   });
 
   it("removes marker-owned stale definitions but refuses foreign and hardlinked files before mutation", async () => {

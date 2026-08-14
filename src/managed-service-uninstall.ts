@@ -74,15 +74,18 @@ export async function uninstallManagedService(
     try {
       service = await input.inspectService();
     } catch {
+      if (definitionState.kind === "absent") {
+        throw operatorErrors.MANAGED_SERVICE_REGISTRATION_LEFTOVER;
+      }
       throw new ManagedServiceUninstallError({
-        definitionState: definitionState.kind === "absent" ? "absent" : "retained",
+        definitionState: "retained",
         serviceState: "unknown",
         serviceRecoveryCommand: null,
         runningIdentityRestored: null,
       });
     }
     if (definitionState.kind === "absent") {
-      if (service.state !== "absent") throw operatorErrors.MANAGED_SERVICE_DEFINITION_FOREIGN;
+      if (service.state !== "absent") throw operatorErrors.MANAGED_SERVICE_REGISTRATION_LEFTOVER;
       return result("already-absent", input.definition);
     }
 

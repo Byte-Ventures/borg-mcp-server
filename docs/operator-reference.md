@@ -52,9 +52,12 @@ with:
 borg-mcp-server service uninstall
 ```
 
-The command is idempotent for an absent definition. It removes only the same
-owner-private, single-link, Borg-owned regular-file shapes accepted by the
-installer; foreign, linked, permissively readable, or otherwise unsafe
+The command is an idempotent no-op when both the definition and service-manager
+registration are absent. If the definition is absent but the service manager
+still reports the service, the command identifies the leftover registration and
+prints the platform removal commands without changing it. Uninstall removes only
+the same owner-private, single-link, Borg-owned regular-file shapes accepted by
+the installer; foreign, linked, permissively readable, or otherwise unsafe
 definitions remain untouched. Data, server identity, credentials, verified
 runtime artifacts, and managed stdout/stderr logs are preserved. If controller
 or filesystem removal fails, human and `--json` output report the independently

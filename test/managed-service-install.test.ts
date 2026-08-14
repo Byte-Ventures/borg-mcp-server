@@ -131,6 +131,28 @@ describe("managed service installation", () => {
       await expect(installManagedService(fixture.input))
         .rejects.toThrow("not recognized as Borg-owned");
     }
+
+    const entityFixture = await installationFixture("launchd");
+    const entityLegacy = legacyDefinition(
+      entityFixture.directory,
+      "launchd",
+      "/opt/&amp;lt;/node",
+      "/old/&amp;quot;/runtime",
+    );
+    await mkdir(join(entityFixture.directory, "launchd"), { recursive: true });
+    await writeFile(entityFixture.definition.definitionPath, entityLegacy, { mode: 0o600 });
+    await expect(installManagedService(entityFixture.input)).resolves.toMatchObject({
+      outcome: "installed",
+      adapter: "launchd",
+    });
+
+    await writeFile(
+      entityFixture.definition.definitionPath,
+      entityLegacy.replace("<key>RunAtLoad</key><true/>", "<key>RunAtLoad</key><false/>"),
+      { mode: 0o600 },
+    );
+    await expect(installManagedService(entityFixture.input))
+      .rejects.toThrow("not recognized as Borg-owned");
   });
 
   it("enables an existing inactive systemd user definition instead of only restarting it", async () => {
@@ -263,13 +285,15 @@ describe("managed service installation", () => {
 function legacyDefinition(
   directory: string,
   platform: "launchd" | "systemd",
+  nodeExecutable = "/usr/bin/node",
+  runtimeRoot = "/old-runtime",
 ): string {
   if (platform === "launchd") {
     return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>Label</key><string>ai.borgmcp.server</string>
-  <key>ProgramArguments</key><array><string>/usr/bin/node</string><string>/old-runtime/current/package/dist/main.js</string><string>start</string></array>
+  <key>ProgramArguments</key><array><string>${nodeExecutable}</string><string>${runtimeRoot}/current/package/dist/main.js</string><string>start</string></array>
   <key>EnvironmentVariables</key><dict><key>BORG_SERVER_DATA_DIR</key><string>${directory}/data</string><key>BORG_SERVER_PROCESS_MODE</key><string>managed</string></dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>

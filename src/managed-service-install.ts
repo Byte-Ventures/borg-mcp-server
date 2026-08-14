@@ -240,12 +240,16 @@ function isLegacyPort(value: string | undefined): boolean {
 }
 
 function isCanonicalXmlPath(value: string, suffix = ""): boolean {
-  const decoded = value
-    .replaceAll("&amp;", "&")
-    .replaceAll("&lt;", "<")
-    .replaceAll("&gt;", ">")
-    .replaceAll("&quot;", '"')
-    .replaceAll("&apos;", "'");
+  const decoded = value.replace(/&(amp|lt|gt|quot|apos);/gu, (_entity, name: string) => {
+    switch (name) {
+      case "amp": return "&";
+      case "lt": return "<";
+      case "gt": return ">";
+      case "quot": return '"';
+      case "apos": return "'";
+      default: return "";
+    }
+  });
   return xmlEscape(decoded) === value && isLegacyPath(decoded, suffix);
 }
 

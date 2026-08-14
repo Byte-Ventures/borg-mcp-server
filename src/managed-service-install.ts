@@ -1,5 +1,5 @@
 import { chmod, lstat, mkdir, open, readFile, realpath, rename, unlink } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 
 import type { ManagedServiceDefinition } from "./managed-service.js";
 import type { RuntimeBuildIdentity } from "./runtime-identity.js";
@@ -177,12 +177,94 @@ async function inspectDefinition(
     }
     const content = await readFile(definition.definitionPath, "utf8");
     if (content === definition.content) return { kind: "current", content };
-    if (content.includes(definition.ownershipMarker)) return { kind: "stale", content };
+    if (content.includes(definition.ownershipMarker) ||
+        isPublishedLegacyDefinition(definition, content)) return { kind: "stale", content };
     throw operatorErrors.MANAGED_SERVICE_DEFINITION_FOREIGN;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return { kind: "absent" };
     throw error;
   }
+}
+
+function isPublishedLegacyDefinition(
+  definition: ManagedServiceDefinition,
+  content: string,
+): boolean {
+  const expected = legacyDefinitionContent(definition);
+  const normalizedExpected = normalizeLegacyCommand(definition.platform, expected);
+  const normalizedContent = normalizeLegacyCommand(definition.platform, content);
+  return normalizedExpected !== null && normalizedContent === normalizedExpected;
+}
+
+function legacyDefinitionContent(definition: ManagedServiceDefinition): string {
+  if (definition.platform === "launchd") {
+    return definition.content
+      .replace(`<!-- ${definition.ownershipMarker} -->\n`, "")
+      .replace(/^  <key>Standard(?:Out|Error)Path<\/key><string>.*<\/string>\n/gmu, "")
+      .replace("  <key>Umask</key><integer>63</integer>\n", "");
+  }
+  return definition.content
+    .replace(`# ${definition.ownershipMarker}\n`, "")
+    .replace("UMask=0077\n", "")
+    .replace(/^Standard(?:Output|Error)=.*\n/gmu, "")
+    .replaceAll("%%", "%");
+}
+
+function normalizeLegacyCommand(
+  platform: ManagedServiceDefinition["platform"],
+  content: string,
+): string | null {
+  if (platform === "launchd") {
+    const command = /<key>ProgramArguments<\/key><array><string>([^<]*)<\/string>(<string>--disable-warning=ExperimentalWarning<\/string>)?<string>([^<]*)<\/string><string>start<\/string>(<string>--port<\/string><string>[0-9]+<\/string>)?<\/array>/u;
+    const match = command.exec(content);
+    if (match === null || !isCanonicalXmlPath(match[1] ?? "") ||
+        !isCanonicalXmlPath(match[3] ?? "", "/current/package/dist/main.js") ||
+        !isLegacyPort(match[4]?.match(/[0-9]+/u)?.[0])) return null;
+    return content.replace(command,
+      "<key>ProgramArguments</key><array><string>{NODE}</string>" +
+      "<string>{RUNTIME}/current/package/dist/main.js</string><string>start</string></array>");
+  }
+  const command = /^ExecStart="((?:[^"\\\n]|\\["\\])*)"( "--disable-warning=ExperimentalWarning")? "((?:[^"\\\n]|\\["\\])*)" start( --port [0-9]+)?$/mu;
+  const match = command.exec(content);
+  if (match === null || !isCanonicalSystemdPath(match[1] ?? "") ||
+      !isCanonicalSystemdPath(match[3] ?? "", "/current/package/dist/main.js") ||
+      !isLegacyPort(match[4]?.slice(" --port ".length))) return null;
+  return content.replace(command,
+    'ExecStart="{NODE}" "{RUNTIME}/current/package/dist/main.js" start');
+}
+
+function isLegacyPort(value: string | undefined): boolean {
+  if (value === undefined) return true;
+  const port = Number(value);
+  return Number.isSafeInteger(port) && port >= 0 && port <= 65_535 && String(port) === value;
+}
+
+function isCanonicalXmlPath(value: string, suffix = ""): boolean {
+  const decoded = value
+    .replaceAll("&amp;", "&")
+    .replaceAll("&lt;", "<")
+    .replaceAll("&gt;", ">")
+    .replaceAll("&quot;", '"')
+    .replaceAll("&apos;", "'");
+  return xmlEscape(decoded) === value && isLegacyPath(decoded, suffix);
+}
+
+function isCanonicalSystemdPath(value: string, suffix = ""): boolean {
+  const decoded = value.replaceAll('\\"', '"').replaceAll("\\\\", "\\");
+  return systemdEscape(decoded) === value && isLegacyPath(decoded, suffix);
+}
+
+function isLegacyPath(value: string, suffix: string): boolean {
+  return isAbsolute(value) && !/[\u0000-\u001f\u007f]/u.test(value) && value.endsWith(suffix);
+}
+
+function xmlEscape(value: string): string {
+  return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;").replaceAll("'", "&apos;");
+}
+
+function systemdEscape(value: string): string {
+  return value.replaceAll("\\", "\\\\").replaceAll('"', '\\"');
 }
 
 async function ensurePrivateSink(path: string, uid = process.getuid?.()): Promise<void> {

@@ -38,7 +38,12 @@ The command requires a complete initialized data directory, a verified prepared
 runtime, and no foreground server process. It installs a launchd agent on macOS
 or a systemd user service on Linux. Repeating the command is idempotent. A stale
 definition is replaced only when it is an owner-private regular file carrying
-Borg's ownership marker; an unrecognized definition is left untouched.
+Borg's ownership marker, or when it exactly matches the markerless launchd or
+systemd definition family published by `borgmcp-server@0.18.1`: the expected
+label, data directory, managed process mode, absolute Node executable, runtime
+target ending in `/current/package/dist/main.js`, and platform start/restart
+controls must all match that generated shape. Other unmarked definitions are
+left untouched.
 
 The definition and its stdout/stderr sinks are owner-private, and the managed
 process uses umask `077`. Logs are written under

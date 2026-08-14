@@ -85,18 +85,9 @@ describe("managed service installation", () => {
       .replace(/^Standard(?:Output|Error)=.*\n/gmu, "")
       .replace(`${fixture.directory}/runtime/current/`, "/old-runtime/current/");
     await mkdir(join(fixture.directory, "systemd"), { recursive: true });
-    await writeFile(
-      fixture.definition.definitionPath,
-      stale.replace(`# ${fixture.definition.ownershipMarker}\n`, ""),
-      { mode: 0o600 },
-    );
+    await writeFile(fixture.definition.definitionPath, stale, { mode: 0o600 });
     let running = true;
     const commands: string[][] = [];
-
-    await expect(installManagedService({ ...fixture.input, run: vi.fn() }))
-      .rejects.toThrow("not recognized as Borg-owned");
-
-    await writeFile(fixture.definition.definitionPath, stale, { mode: 0o600 });
 
     await expect(installManagedService({
       ...fixture.input,
@@ -114,6 +105,32 @@ describe("managed service installation", () => {
     expect(commands[0]).toEqual(["systemctl", "--user", "stop", "ai.borgmcp.server"]);
     expect(await readFile(fixture.definition.definitionPath, "utf8"))
       .toBe(fixture.definition.content);
+  });
+
+  it("replaces exact published v0.18.1 definitions and refuses unmarked near misses", async () => {
+    for (const platform of ["launchd", "systemd"] as const) {
+      const fixture = await installationFixture(platform);
+      const legacy = legacyDefinition(fixture.directory, platform);
+      await mkdir(join(fixture.directory, platform), { recursive: true });
+      await writeFile(fixture.definition.definitionPath, legacy, { mode: 0o600 });
+
+      await expect(installManagedService(fixture.input)).resolves.toMatchObject({
+        outcome: "installed",
+        adapter: platform,
+      });
+
+      const nearMiss = legacy.replace(
+        platform === "launchd"
+          ? "<key>BORG_SERVER_PROCESS_MODE</key><string>managed</string>"
+          : 'Environment="BORG_SERVER_PROCESS_MODE=managed"',
+        platform === "launchd"
+          ? "<key>BORG_SERVER_PROCESS_MODE</key><string>foreground</string>"
+          : 'Environment="BORG_SERVER_PROCESS_MODE=foreground"',
+      );
+      await writeFile(fixture.definition.definitionPath, nearMiss, { mode: 0o600 });
+      await expect(installManagedService(fixture.input))
+        .rejects.toThrow("not recognized as Borg-owned");
+    }
   });
 
   it("enables an existing inactive systemd user definition instead of only restarting it", async () => {
@@ -243,17 +260,54 @@ describe("managed service installation", () => {
   });
 });
 
-async function installationFixture() {
+function legacyDefinition(
+  directory: string,
+  platform: "launchd" | "systemd",
+): string {
+  if (platform === "launchd") {
+    return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>ai.borgmcp.server</string>
+  <key>ProgramArguments</key><array><string>/usr/bin/node</string><string>/old-runtime/current/package/dist/main.js</string><string>start</string></array>
+  <key>EnvironmentVariables</key><dict><key>BORG_SERVER_DATA_DIR</key><string>${directory}/data</string><key>BORG_SERVER_PROCESS_MODE</key><string>managed</string></dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+  <key>ProcessType</key><string>Background</string>
+</dict></plist>
+`;
+  }
+  return `[Unit]
+Description=Borg MCP server (ai.borgmcp.server)
+
+[Service]
+Type=simple
+ExecStart="/usr/bin/node" "/old-runtime/current/package/dist/main.js" start
+Environment="BORG_SERVER_DATA_DIR=${directory}/data"
+Environment="BORG_SERVER_PROCESS_MODE=managed"
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=15
+
+[Install]
+WantedBy=default.target
+`;
+}
+
+async function installationFixture(platform: "launchd" | "systemd" = "systemd") {
   const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-service-install-")));
   directories.push(directory);
   const dataDirectory = join(directory, "data");
   await mkdir(dataDirectory, { recursive: true, mode: 0o700 });
   const definition = createManagedServiceDefinition({
-    platform: "systemd",
+    platform,
     nodeExecutable: "/usr/bin/node",
+    nodeVersion: "24.19.0",
     runtimeRoot: join(directory, "runtime"),
     dataDirectory,
-    definitionPath: join(directory, "systemd", "ai.borgmcp.server.service"),
+    definitionPath: join(directory, platform,
+      platform === "launchd" ? "ai.borgmcp.server.plist" : "ai.borgmcp.server.service"),
+    ...(platform === "launchd" ? { launchdDomain: "gui/501" } : {}),
   });
   const input = {
     definition,

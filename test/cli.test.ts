@@ -1,7 +1,13 @@
 import { Server } from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { runCli, type CliIo, type ServerService } from "../src/index.js";
+import {
+  createManagedServiceDefinition,
+  inspectManagedServiceState,
+  runCli,
+  type CliIo,
+  type ServerService,
+} from "../src/index.js";
 import { RuntimeUpdateFailure } from "../src/runtime-operator.js";
 import { ManagedServiceInstallError } from "../src/managed-service-install.js";
 import { ManagedServiceUninstallError } from "../src/managed-service-uninstall.js";
@@ -368,6 +374,58 @@ describe("runCli", () => {
     expect(tty.stdout).toHaveBeenCalledWith(expect.stringContaining(
       "Service recovery: launchctl bootstrap gui/501 '/Users/Test Operator/Library/LaunchAgents/ai.borgmcp.server.plist'",
     ));
+  });
+
+  it("omits impossible recovery for loaded inactive registrations with no definition", async () => {
+    for (const platform of ["launchd", "systemd"] as const) {
+      const definition = createManagedServiceDefinition({
+        platform,
+        nodeExecutable: "/usr/bin/node",
+        nodeVersion: "24.19.0",
+        runtimeRoot: "/missing/borg-runtime",
+        dataDirectory: "/missing/borg-data",
+        definitionPath: `/missing/${platform}/ai.borgmcp.server.${platform === "launchd" ? "plist" : "service"}`,
+        ...(platform === "launchd" ? { launchdDomain: "gui/501" } : {}),
+      });
+      const status = async () => {
+        const managedService = await inspectManagedServiceState(definition, async () => ({
+          stdout: platform === "launchd"
+            ? "state = exited\n"
+            : "LoadState=loaded\nActiveState=inactive\nSubState=dead\nMainPID=0\n",
+          stderr: "",
+        }));
+        return {
+          status: "stopped" as const,
+          controllerVersion: "0.19.0",
+          preparedArtifact: null,
+          runningArtifact: null,
+          buildIdentity: null,
+          endpoint: null,
+          mode: "stopped" as const,
+          serviceAdapter: managedService.adapter,
+          serviceState: managedService.state,
+          serviceRecoveryCommand: managedService.recoveryCommand,
+          runtimeLock: { state: "clear" as const },
+          dataIdentity: "available" as const,
+          nextAction: null,
+        };
+      };
+      const service: ServerService = { start: vi.fn(), status };
+      const tty = { ...createIo(), isTTY: true };
+      const machine = { ...createIo(), isTTY: false };
+
+      expect(await runCli(["status"], service, tty)).toBe(0);
+      expect(tty.stdout).toHaveBeenCalledWith(expect.stringContaining(
+        `Managed service: inactive (${platform})`,
+      ));
+      expect(tty.stdout.mock.calls[0]![0]).not.toContain("Service recovery:");
+      expect(await runCli(["status", "--json"], service, machine)).toBe(0);
+      expect(JSON.parse(machine.stdout.mock.calls[0]![0])).toMatchObject({
+        service_adapter: platform,
+        service_state: "inactive",
+        service_recovery: null,
+      });
+    }
   });
 
   it("preserves a stale lock only through the explicit recovery command", async () => {

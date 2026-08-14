@@ -175,7 +175,7 @@ export type ManagedServiceStatus =
   | {
       readonly state: "inactive";
       readonly adapter: ManagedServicePlatform;
-      readonly recoveryCommand: readonly [string, ...string[]];
+      readonly recoveryCommand: readonly [string, ...string[]] | null;
     }
   | {
       readonly state: "absent";
@@ -1008,7 +1008,7 @@ export async function inspectManagedServiceState(
         return Object.freeze({
           state: "inactive",
           adapter: definition.platform,
-          recoveryCommand: definition.recoverLoaded,
+          recoveryCommand: null,
         });
       }
       return Object.freeze({

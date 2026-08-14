@@ -186,7 +186,7 @@ describe("managed service uninstallation", () => {
       await expect(inspectService()).resolves.toEqual({
         state: "inactive",
         adapter: platform,
-        recoveryCommand: fixture.definition.recoverLoaded,
+        recoveryCommand: null,
       });
       const run = vi.fn();
       let failure: unknown;

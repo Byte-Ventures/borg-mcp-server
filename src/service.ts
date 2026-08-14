@@ -1004,6 +1004,13 @@ export async function inspectManagedServiceState(
     metadata = await lstat(definition.definitionPath);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      if (loaded) {
+        return Object.freeze({
+          state: "inactive",
+          adapter: definition.platform,
+          recoveryCommand: definition.recoverLoaded,
+        });
+      }
       return Object.freeze({
         state: "absent",
         adapter: null,

@@ -9,7 +9,8 @@ import {
   uninstallManagedService,
   type ManagedServiceUninstallInput,
 } from "../src/managed-service-uninstall.js";
-import { operatorErrors } from "../src/operator-error.js";
+import { operatorErrors, operatorPublicDetails } from "../src/operator-error.js";
+import { inspectManagedServiceState } from "../src/service.js";
 
 const directories: string[] = [];
 const identity = Object.freeze({
@@ -162,6 +163,45 @@ describe("managed service uninstallation", () => {
       outcome: "already-absent",
       adapter: "systemd",
     });
+  });
+
+  it("preserves production loaded-inactive evidence when the definition is missing", async () => {
+    const message =
+      "No Borg service definition is present, but the service manager still reports ai.borgmcp.server. " +
+      "Remove the leftover registration, then retry:\n" +
+      "  macOS: launchctl bootout gui/$(id -u)/ai.borgmcp.server\n" +
+      "  Linux: systemctl --user disable --now ai.borgmcp.server";
+    for (const platform of ["launchd", "systemd"] as const) {
+      const fixture = await uninstallFixture(platform);
+      await unlink(fixture.definition.definitionPath);
+      const inspectService = () => inspectManagedServiceState(
+        fixture.definition,
+        async () => ({
+          stdout: platform === "launchd"
+            ? "state = exited\n"
+            : "LoadState=loaded\nActiveState=inactive\nSubState=dead\nMainPID=0\n",
+          stderr: "",
+        }),
+      );
+      await expect(inspectService()).resolves.toEqual({
+        state: "inactive",
+        adapter: platform,
+        recoveryCommand: fixture.definition.recoverLoaded,
+      });
+      const run = vi.fn();
+      let failure: unknown;
+      try {
+        await uninstallManagedService({ ...fixture.input, inspectService, run });
+      } catch (error) {
+        failure = error;
+      }
+      expect(failure).toBe(operatorErrors.MANAGED_SERVICE_REGISTRATION_LEFTOVER);
+      expect(operatorPublicDetails(failure)).toEqual({
+        code: "MANAGED_SERVICE_REGISTRATION_LEFTOVER",
+        message,
+      });
+      expect(run).not.toHaveBeenCalled();
+    }
   });
 
   it("removes marker-owned stale definitions but refuses foreign and hardlinked files before mutation", async () => {

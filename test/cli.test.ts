@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { runCli, type CliIo, type ServerService } from "../src/index.js";
 import { RuntimeUpdateFailure } from "../src/runtime-operator.js";
 import { ManagedServiceInstallError } from "../src/managed-service-install.js";
+import { operatorErrors } from "../src/operator-error.js";
 
 function createIo() {
   const stdout = vi.fn((_message: string): void => undefined);
@@ -35,7 +36,19 @@ describe("runCli", () => {
     expect(service.setup).toHaveBeenCalledWith({ reinitialize: false });
     expect(listen).not.toHaveBeenCalled();
     expect(io.stdout).toHaveBeenCalledWith(
-      "Local server setup completed.\nYour server data and identity are ready.\nPrepared bind address: 192.168.1.20\nThis address is written into the server certificate.\nNext, run:\n  borg-mcp-server start\nLeave that terminal open while the server is running.\nOr install and start a loopback-only background service:\n  borg-mcp-server service install\nAfter installing the borg client, open a second terminal in your Git repository and run:\n  borg assimilate",
+      "Local server setup completed.\nYour server data and identity are ready.\nPrepared bind address: 192.168.1.20\nThis address is written into the server certificate.\nNext, run:\n  borg-mcp-server start\nLeave that terminal open while the server is running.\nAfter installing the borg client, open a second terminal in your Git repository and run:\n  borg assimilate",
+    );
+  });
+
+  it("offers managed service installation after fresh loopback setup", async () => {
+    const io = createIo();
+    expect(await runCli(["setup"], {
+      start: vi.fn(),
+      setup: vi.fn().mockResolvedValue({ bindHost: "127.0.0.2" }),
+    }, io)).toBe(0);
+    expect(io.stdout.mock.calls[0]![0]).toContain(
+      "Or install and start a loopback-only background service:\n" +
+      "  borg-mcp-server service install",
     );
   });
 
@@ -60,6 +73,16 @@ describe("runCli", () => {
       "Your local server is already prepared.\nYour server data and identity are unchanged.\nPrepared bind address: ::1\nThis address is written into the server certificate.\nSetup did not start the server.\nNext, run:\n  borg-mcp-server start\nLeave that terminal open while the server is running.\nOr install and start a loopback-only background service:\n  borg-mcp-server service install",
     );
     expect(output).not.toMatch(/credential|invitation/iu);
+
+    const lanIo = createIo();
+    expect(await runCli(["setup"], {
+      start: vi.fn(),
+      setup: vi.fn().mockResolvedValue({ existing: true, bindHost: "192.168.1.20" }),
+    }, lanIo)).toBe(0);
+    expect(lanIo.stdout.mock.calls[0]![0]).toContain(
+      "Next, run:\n  borg-mcp-server start\nLeave that terminal open while the server is running.",
+    );
+    expect(lanIo.stdout.mock.calls[0]![0]).not.toContain("service install");
   });
 
   it("suppresses standalone next steps for client-owned onboarding", async () => {
@@ -519,6 +542,41 @@ describe("runCli", () => {
       data_identity: "preserved",
     });
     expect(serviceFailure.stderr).not.toHaveBeenCalled();
+  });
+
+  it("renders expected managed-service refusals in machine mode and preserves TTY prose", async () => {
+    const explicitJson = { ...createIo(), isTTY: true };
+    const installService = vi.fn()
+      .mockRejectedValueOnce(operatorErrors.MANAGED_SERVICE_DATA_UNINITIALIZED)
+      .mockRejectedValueOnce(operatorErrors.MANAGED_SERVICE_LAN_UNSUPPORTED)
+      .mockRejectedValueOnce(operatorErrors.MANAGED_SERVICE_FOREGROUND_ACTIVE);
+    const service: ServerService = { start: vi.fn(), installService };
+
+    expect(await runCli(["service", "install", "--json"], service, explicitJson)).toBe(1);
+    expect(JSON.parse(explicitJson.stdout.mock.calls[0]![0])).toEqual({
+      status: "failed",
+      error_code: "MANAGED_SERVICE_DATA_UNINITIALIZED",
+      message: "Run borg-mcp-server setup before installing the managed service.",
+      recovery: "not-started",
+      data_identity: "preserved",
+    });
+    expect(explicitJson.stderr).not.toHaveBeenCalled();
+
+    const implicitMachine = { ...createIo(), isTTY: false };
+    expect(await runCli(["service", "install"], service, implicitMachine)).toBe(1);
+    expect(JSON.parse(implicitMachine.stdout.mock.calls[0]![0])).toMatchObject({
+      status: "failed",
+      error_code: "MANAGED_SERVICE_LAN_UNSUPPORTED",
+      recovery: "not-started",
+    });
+    expect(implicitMachine.stderr).not.toHaveBeenCalled();
+
+    const tty = { ...createIo(), isTTY: true };
+    expect(await runCli(["service", "install"], service, tty)).toBe(1);
+    expect(tty.stdout).not.toHaveBeenCalled();
+    expect(tty.stderr).toHaveBeenCalledWith(
+      "Server command failed: Stop the foreground server with Ctrl-C before installing the managed service.",
+    );
   });
 
   it("renders approved verified update evidence without exposing raw artifact locations", async () => {

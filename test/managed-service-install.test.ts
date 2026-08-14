@@ -78,17 +78,25 @@ describe("managed service installation", () => {
     expect(commands).toEqual([]);
   });
 
-  it("replaces only a private Borg-owned stale definition", async () => {
+  it("replaces only a private marker-bearing Borg-owned stale definition", async () => {
     const fixture = await installationFixture();
     const stale = fixture.definition.content
-      .replace(`# ${fixture.definition.ownershipMarker}\n`, "")
       .replace("UMask=0077\n", "")
       .replace(/^Standard(?:Output|Error)=.*\n/gmu, "")
       .replace(`${fixture.directory}/runtime/current/`, "/old-runtime/current/");
     await mkdir(join(fixture.directory, "systemd"), { recursive: true });
-    await writeFile(fixture.definition.definitionPath, stale, { mode: 0o600 });
+    await writeFile(
+      fixture.definition.definitionPath,
+      stale.replace(`# ${fixture.definition.ownershipMarker}\n`, ""),
+      { mode: 0o600 },
+    );
     let running = true;
     const commands: string[][] = [];
+
+    await expect(installManagedService({ ...fixture.input, run: vi.fn() }))
+      .rejects.toThrow("not recognized as Borg-owned");
+
+    await writeFile(fixture.definition.definitionPath, stale, { mode: 0o600 });
 
     await expect(installManagedService({
       ...fixture.input,

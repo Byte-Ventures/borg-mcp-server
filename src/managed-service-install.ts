@@ -177,41 +177,12 @@ async function inspectDefinition(
     }
     const content = await readFile(definition.definitionPath, "utf8");
     if (content === definition.content) return { kind: "current", content };
-    if (content.includes(definition.ownershipMarker) ||
-        isRecognizedLegacyDefinition(definition, content)) return { kind: "stale", content };
+    if (content.includes(definition.ownershipMarker)) return { kind: "stale", content };
     throw operatorErrors.MANAGED_SERVICE_DEFINITION_FOREIGN;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return { kind: "absent" };
     throw error;
   }
-}
-
-function isRecognizedLegacyDefinition(
-  definition: ManagedServiceDefinition,
-  content: string,
-): boolean {
-  if (!content.includes("/current/package/dist/main.js") ||
-      !content.includes(definition.label) ||
-      content.includes(definition.ownershipMarker)) return false;
-  if (definition.platform === "launchd") {
-    const expectedEnvironment = /<key>EnvironmentVariables<\/key><dict>.*?<\/dict>/u
-      .exec(definition.content)?.[0];
-    return expectedEnvironment !== undefined && content.startsWith("<?xml version=\"1.0\"") &&
-      content.includes(expectedEnvironment) &&
-      content.includes("<key>ProgramArguments</key><array>") &&
-      content.includes("<string>start</string>") &&
-      content.includes("<key>RunAtLoad</key><true/>") &&
-      content.endsWith("</dict></plist>\n");
-  }
-  const expectedEnvironment = definition.content.split("\n")
-    .filter((line) => line.startsWith("Environment="));
-  return content.startsWith(`[Unit]\nDescription=Borg MCP server (${definition.label})\n`) &&
-    expectedEnvironment.every((line) =>
-      content.includes(`${line}\n`) || content.includes(`${line.replaceAll("%%", "%")}\n`)) &&
-    content.includes("\n[Service]\nType=simple\nExecStart=") &&
-    content.includes(" start\n") &&
-    content.includes("\nRestart=on-failure\nRestartSec=2\nTimeoutStopSec=15\n") &&
-    content.endsWith("\n[Install]\nWantedBy=default.target\n");
 }
 
 async function ensurePrivateSink(path: string, uid = process.getuid?.()): Promise<void> {

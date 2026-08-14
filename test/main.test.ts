@@ -92,6 +92,11 @@ describe("main operator errors", () => {
       "Client name is ambiguous. Use one of these selectors: " +
       "aaaaaaaa2, id:aaaaaaaa-1000-4000-8000-000000000001.",
     );
+    expect(operatorErrorModule.operatorPublicDetails(error)).toEqual({
+      code: "CLIENT_SELECTOR_AMBIGUOUS",
+      message: "Client name is ambiguous. Use one of these selectors: " +
+        "aaaaaaaa2, id:aaaaaaaa-1000-4000-8000-000000000001.",
+    });
     expect(() => operatorErrorModule.ambiguousClientSelector("handle", [
       "aaaaaaaa1",
       "attacker\u001b[31m",
@@ -392,6 +397,7 @@ describe("main operator errors", () => {
       let result: unknown;
       try { result = invoke(); } catch (error) { result = error; }
       expect(built.operatorPublicMessage(result)).toBeNull();
+      expect(built.operatorPublicDetails(result)).toBeNull();
       const previousExitCode = process.exitCode;
       const stderr = vi.fn();
       try {

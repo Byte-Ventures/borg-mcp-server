@@ -3,6 +3,8 @@ import { sanitizeTerminalText } from "./dashboard.js";
 import { RuntimeUpdateFailure } from "./runtime-operator.js";
 import { SERVER_PACKAGE_VERSION } from "./runtime-identity.js";
 import { ManagedServiceInstallError } from "./managed-service-install.js";
+import { resolveBindOptions } from "./network-policy.js";
+import { operatorPublicDetails } from "./operator-error.js";
 
 export interface CliIo {
   readonly stdout: (message: string) => void;
@@ -123,9 +125,13 @@ export async function runCli(
             "Next, run:",
             "  borg-mcp-server start",
             "Leave that terminal open while the server is running.",
-            "Or install and start a loopback-only background service:",
-            "  borg-mcp-server service install",
           );
+          if (resolveBindOptions({ host: result.bindHost, lanConsent: true }).mode === "loopback") {
+            lines.push(
+              "Or install and start a loopback-only background service:",
+              "  borg-mcp-server service install",
+            );
+          }
         }
         io.stdout(lines.join("\n"));
         return 0;
@@ -141,8 +147,14 @@ export async function runCli(
           "Next, run:",
           "  borg-mcp-server start",
           "Leave that terminal open while the server is running.",
-          "Or install and start a loopback-only background service:",
-          "  borg-mcp-server service install",
+        );
+        if (resolveBindOptions({ host: result.bindHost, lanConsent: true }).mode === "loopback") {
+          lines.push(
+            "Or install and start a loopback-only background service:",
+            "  borg-mcp-server service install",
+          );
+        }
+        lines.push(
           "After installing the borg client, open a second terminal in your Git repository and run:",
           "  borg assimilate",
         );
@@ -222,8 +234,13 @@ export async function runCli(
       try {
         result = await service.installService();
       } catch (error) {
-        if (!(error instanceof ManagedServiceInstallError)) throw error;
-        renderServiceInstallFailure(error, io, machine);
+        if (error instanceof ManagedServiceInstallError) {
+          renderServiceInstallFailure(error, io, machine);
+          return 1;
+        }
+        const operatorFailure = operatorPublicDetails(error);
+        if (operatorFailure === null) throw error;
+        renderServiceInstallRefusal(operatorFailure, io, machine);
         return 1;
       }
       if (machine) {
@@ -421,6 +438,24 @@ function renderServiceInstallFailure(
     "Data and identity: preserved",
     "Next: borg-mcp-server status",
   ].join("\n"));
+}
+
+function renderServiceInstallRefusal(
+  failure: Readonly<{ code: string; message: string }>,
+  io: CliIo,
+  machine: boolean,
+): void {
+  if (machine) {
+    io.stdout(JSON.stringify({
+      status: "failed",
+      error_code: failure.code,
+      message: failure.message,
+      recovery: "not-started",
+      data_identity: "preserved",
+    }));
+    return;
+  }
+  io.stderr(`Server command failed: ${failure.message}`);
 }
 
 function renderUpdateFailure(failure: RuntimeUpdateFailure, io: CliIo, machine: boolean): void {

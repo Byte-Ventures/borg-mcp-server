@@ -195,9 +195,18 @@ function isSafeClientDisambiguator(selector: string): boolean {
 }
 
 export function operatorPublicMessage(error: unknown): string | null {
+  return operatorPublicDetails(error)?.message ?? null;
+}
+
+export function operatorPublicDetails(
+  error: unknown,
+): Readonly<{ code: OperatorErrorCode; message: string }> | null {
   if (typeof error !== "object" || error === null) return null;
   const code = operatorErrorCodes.get(error);
   if (code === undefined) return null;
   if (Object.getPrototypeOf(error) !== OperatorError.prototype || !Object.isFrozen(error)) return null;
-  return operatorErrorMessages.get(error) ?? publicMessages[code];
+  return Object.freeze({
+    code,
+    message: operatorErrorMessages.get(error) ?? publicMessages[code],
+  });
 }

@@ -1,0 +1,262 @@
+import { chmod, lstat, mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+import {
+  installManagedService,
+  ManagedServiceInstallError,
+  type ManagedServiceInstallInput,
+} from "../src/managed-service-install.js";
+import { createManagedServiceDefinition } from "../src/managed-service.js";
+
+const directories: string[] = [];
+const integrity = `sha512-${"A".repeat(86)}==`;
+const sourceSha = "a".repeat(40);
+const artifact = Object.freeze({
+  artifactDirectory: "/runtime/artifacts/verified",
+  packageDirectory: "/runtime/artifacts/verified/package",
+  version: "0.18.1",
+  integrity,
+  sourceSha,
+  treeSha256: "b".repeat(64),
+});
+const identity = Object.freeze({
+  package_version: artifact.version,
+  artifact_integrity: artifact.integrity,
+  source_sha: sourceSha,
+  protocol_version: "9",
+  started_at: "2026-08-14T12:00:00.000Z",
+});
+
+afterEach(async () => {
+  await Promise.all(directories.splice(0).map((directory) => rm(directory, {
+    recursive: true,
+    force: true,
+  })));
+});
+
+describe("managed service installation", () => {
+  it("atomically installs private definitions and log sinks, then resolves an exact retry", async () => {
+    const fixture = await installationFixture();
+    const commands: string[][] = [];
+    const input = {
+      ...fixture.input,
+      run: vi.fn(async (command: readonly [string, ...string[]]) => {
+        commands.push([...command]);
+        return { stdout: "", stderr: "" };
+      }),
+    } satisfies ManagedServiceInstallInput;
+
+    await expect(installManagedService(input)).resolves.toMatchObject({
+      outcome: "installed",
+      adapter: "systemd",
+      artifact,
+      runningIdentity: identity,
+    });
+    expect(commands).toEqual([
+      ["systemctl", "--user", "daemon-reload"],
+      ["systemctl", "--user", "enable", "--now", "ai.borgmcp.server"],
+    ]);
+    expect(await readFile(fixture.definition.definitionPath, "utf8"))
+      .toBe(fixture.definition.content);
+    for (const path of [
+      fixture.definition.definitionPath,
+      fixture.definition.stdoutPath,
+      fixture.definition.stderrPath,
+    ]) {
+      expect((await lstat(path)).mode & 0o777).toBe(0o600);
+    }
+    expect((await lstat(join(fixture.directory, "data", "logs"))).mode & 0o777).toBe(0o700);
+
+    commands.length = 0;
+    await expect(installManagedService({
+      ...input,
+      inspectRuntime: async () => ({ running: true, mode: "managed", identity }),
+      inspectService: async () => ({ state: "active", recoveryCommand: null }),
+    })).resolves.toMatchObject({ outcome: "already-installed" });
+    expect(commands).toEqual([]);
+  });
+
+  it("replaces only a private Borg-owned stale definition", async () => {
+    const fixture = await installationFixture();
+    const stale = fixture.definition.content
+      .replace(`# ${fixture.definition.ownershipMarker}\n`, "")
+      .replace("UMask=0077\n", "")
+      .replace(/^Standard(?:Output|Error)=.*\n/gmu, "")
+      .replace(`${fixture.directory}/runtime/current/`, "/old-runtime/current/");
+    await mkdir(join(fixture.directory, "systemd"), { recursive: true });
+    await writeFile(fixture.definition.definitionPath, stale, { mode: 0o600 });
+    let running = true;
+    const commands: string[][] = [];
+
+    await expect(installManagedService({
+      ...fixture.input,
+      inspectRuntime: async () => running
+        ? { running: true, mode: "managed", identity: { ...identity, package_version: "0.17.0" } }
+        : { running: false },
+      inspectService: async () => ({ state: "active", recoveryCommand: null }),
+      run: async (command) => {
+        commands.push([...command]);
+        if (command === fixture.definition.unload) running = false;
+        return { stdout: "", stderr: "" };
+      },
+    })).resolves.toMatchObject({ outcome: "installed" });
+
+    expect(commands[0]).toEqual(["systemctl", "--user", "stop", "ai.borgmcp.server"]);
+    expect(await readFile(fixture.definition.definitionPath, "utf8"))
+      .toBe(fixture.definition.content);
+  });
+
+  it("enables an existing inactive systemd user definition instead of only restarting it", async () => {
+    const fixture = await installationFixture();
+    await mkdir(join(fixture.directory, "systemd"), { recursive: true });
+    await writeFile(fixture.definition.definitionPath, fixture.definition.content, { mode: 0o600 });
+    const commands: string[][] = [];
+    await installManagedService({
+      ...fixture.input,
+      inspectService: async () => ({
+        state: "inactive",
+        recoveryCommand: fixture.definition.recoverLoaded,
+      }),
+      run: async (command) => {
+        commands.push([...command]);
+        return { stdout: "", stderr: "" };
+      },
+    });
+    expect(commands).toContainEqual([
+      "systemctl", "--user", "enable", "--now", "ai.borgmcp.server",
+    ]);
+    expect(commands).not.toContainEqual([
+      "systemctl", "--user", "restart", "ai.borgmcp.server",
+    ]);
+  });
+
+  it("refuses foreground ownership and foreign or unsafe definitions before controller mutation", async () => {
+    const fixture = await installationFixture();
+    await mkdir(join(fixture.directory, "systemd"), { recursive: true });
+    await writeFile(fixture.definition.definitionPath, "foreign service\n", { mode: 0o600 });
+    const run = vi.fn();
+
+    await expect(installManagedService({ ...fixture.input, run }))
+      .rejects.toThrow("not recognized as Borg-owned");
+    expect(run).not.toHaveBeenCalled();
+
+    await writeFile(fixture.definition.definitionPath, fixture.definition.content);
+    await chmod(fixture.definition.definitionPath, 0o644);
+    await expect(installManagedService({ ...fixture.input, run }))
+      .rejects.toThrow("owner-private regular file");
+    expect(run).not.toHaveBeenCalled();
+
+    await chmod(fixture.definition.definitionPath, 0o600);
+    await expect(installManagedService({
+      ...fixture.input,
+      inspectRuntime: async () => ({ running: true, mode: "foreground", identity }),
+      run,
+    })).rejects.toThrow("Ctrl-C");
+    expect(run).not.toHaveBeenCalled();
+
+    const outside = join(fixture.directory, "outside");
+    const linked = join(fixture.directory, "linked-systemd");
+    await mkdir(outside);
+    await writeFile(join(outside, "ai.borgmcp.server.service"), fixture.definition.content, {
+      mode: 0o600,
+    });
+    await symlink(outside, linked, "dir");
+    await expect(installManagedService({
+      ...fixture.input,
+      definition: { ...fixture.definition, definitionPath: join(linked, "ai.borgmcp.server.service") },
+      run,
+    })).rejects.toThrow("owner-private regular file");
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it("serializes concurrent installers without reclaiming an existing lock", async () => {
+    const fixture = await installationFixture();
+    await writeFile(join(fixture.directory, "data", "service-install.lock"), "123\n", { mode: 0o600 });
+    const run = vi.fn();
+    await expect(installManagedService({ ...fixture.input, run })).rejects.toThrow(
+      "Another managed service installation is running.",
+    );
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it("removes a new definition and reports a safe stop when startup fails", async () => {
+    const fixture = await installationFixture();
+    await expect(installManagedService({
+      ...fixture.input,
+      run: async (command) => {
+        if (command === fixture.definition.install) throw new Error("private controller error");
+        return { stdout: "", stderr: "" };
+      },
+    })).rejects.toMatchObject({
+      name: "ManagedServiceInstallError",
+      recovery: "stopped",
+      message: "Managed service installation did not complete.",
+    });
+    await expect(lstat(fixture.definition.definitionPath)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("restores and restarts a replaced Borg-owned definition after startup failure", async () => {
+    const fixture = await installationFixture();
+    const stale = `# ${fixture.definition.ownershipMarker}\nold definition\n`;
+    await mkdir(join(fixture.directory, "systemd"), { recursive: true });
+    await writeFile(fixture.definition.definitionPath, stale, { mode: 0o600 });
+    let running = true;
+    let installAttempts = 0;
+
+    let error: unknown;
+    try {
+      await installManagedService({
+        ...fixture.input,
+        inspectRuntime: async () => running
+          ? { running: true, mode: "managed", identity: { ...identity, package_version: "0.17.0" } }
+          : { running: false },
+        inspectService: async () => ({ state: "active", recoveryCommand: null }),
+        run: async (command) => {
+          if (command === fixture.definition.unload || command === fixture.definition.rollbackRemove) {
+            running = false;
+          }
+          if (command === fixture.definition.install) {
+            installAttempts += 1;
+            if (installAttempts === 1) throw new Error("private controller error");
+            running = true;
+          }
+          return { stdout: "", stderr: "" };
+        },
+      });
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toBeInstanceOf(ManagedServiceInstallError);
+    expect(error).toMatchObject({ recovery: "restored" });
+    expect(await readFile(fixture.definition.definitionPath, "utf8")).toBe(stale);
+    expect(installAttempts).toBe(2);
+  });
+});
+
+async function installationFixture() {
+  const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-service-install-")));
+  directories.push(directory);
+  const dataDirectory = join(directory, "data");
+  await mkdir(dataDirectory, { recursive: true, mode: 0o700 });
+  const definition = createManagedServiceDefinition({
+    platform: "systemd",
+    nodeExecutable: "/usr/bin/node",
+    runtimeRoot: join(directory, "runtime"),
+    dataDirectory,
+    definitionPath: join(directory, "systemd", "ai.borgmcp.server.service"),
+  });
+  const input = {
+    definition,
+    artifact,
+    dataDirectory,
+    assertInstallation: async () => undefined,
+    inspectRuntime: async () => ({ running: false }),
+    inspectService: async () => ({ state: "absent" as const, recoveryCommand: null }),
+    run: async () => ({ stdout: "", stderr: "" }),
+    probe: async () => identity,
+    timeoutMs: 1_000,
+  } satisfies ManagedServiceInstallInput;
+  return { directory, definition, input };
+}

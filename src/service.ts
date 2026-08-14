@@ -65,6 +65,10 @@ import {
   type ManagedServicePlatform,
 } from "./managed-service.js";
 import {
+  installManagedService,
+  type ManagedServiceInstallResult,
+} from "./managed-service-install.js";
+import {
   createDashboardRenderer,
   dashboardColorEnabled,
   EMBEDDED_DASHBOARD_FOOTER,
@@ -88,7 +92,7 @@ export interface ServerService {
   readonly dashboard?: (options: DashboardCommandOptions) => Promise<void>;
   readonly setup?: (options: SetupOptions) => Promise<ServerSetupResult>;
   readonly status?: () => Promise<ServerRuntimeStatus>;
-  readonly stop?: () => Promise<ServerStopResult>;
+  readonly installService?: () => Promise<ManagedServiceInstallResult>;
   readonly update?: () => Promise<ServerUpdateResult>;
   readonly recoverStaleLock?: () => Promise<StaleRuntimeLockRecovery>;
   readonly rotateClient?: (clientId: string) => Promise<string>;
@@ -198,7 +202,7 @@ export interface StaleRuntimeLockRecovery {
   readonly stale: StaleRuntimeLockEvidence;
 }
 
-export interface ServerStopResult {
+interface ServerStopResult {
   readonly outcome: "stopped" | "already-stopped" | "foreground-action-required";
 }
 
@@ -764,7 +768,7 @@ export const nodeServerService: ServerService = {
     SERVER_PACKAGE_VERSION,
     await nodeRuntimeController.inspectManagedService(),
   ),
-  stop: () => nodeRuntimeController.stopRuntime(20_000),
+  installService: () => nodeRuntimeController.installService(20_000),
   recoverStaleLock: () => recoverStaleRuntimeLock(dataDirectory),
   reissueCertificate: (additionalHost) => reissueNodeServerCertificate(dataDirectory, additionalHost),
   ...createOfflineCredentialService(dataDirectory, credentialFile),
@@ -870,7 +874,7 @@ function createNodeRuntimeOperator(managedRuntimeDirectory: string, runtimeDataD
   const lifecycle = createRuntimeLifecycle({
     unpack: createUnixNpmArtifactUnpacker(),
     restart: async (signal) => { await run(definition.restart, signal); },
-    stop: async (signal) => { await run(definition.stop, signal); },
+    stop: async (signal) => { await run(definition.unload, signal); },
     probe: (signal) => waitForRuntimeIdentity(runtimeDataDirectory, signal),
   });
   const inspectManagedService = (): Promise<ManagedServiceStatus> =>
@@ -900,8 +904,37 @@ function createNodeRuntimeOperator(managedRuntimeDirectory: string, runtimeDataD
       runtimeDataDirectory,
       timeoutMs,
       isManagedServiceActive,
-      stopManaged: async (signal) => { await run(definition.stop, signal); },
+      stopManaged: async (signal) => { await run(definition.unload, signal); },
     }),
+    installService: async (timeoutMs: number) => {
+      if (process.platform !== "darwin" && process.platform !== "linux") {
+        throw operatorErrors.MANAGED_SERVICE_PLATFORM_UNSUPPORTED;
+      }
+      await assertManagedServiceInstallation(runtimeDataDirectory);
+      let artifact;
+      try {
+        artifact = await inspectActiveRuntimeArtifact(managedRuntimeDirectory);
+      } catch {
+        throw operatorErrors.MANAGED_SERVICE_RUNTIME_UNPREPARED;
+      }
+      if (artifact === null) throw operatorErrors.MANAGED_SERVICE_RUNTIME_UNPREPARED;
+      return installManagedService({
+        definition,
+        artifact,
+        dataDirectory: runtimeDataDirectory,
+        assertInstallation: () => assertManagedServiceInstallation(runtimeDataDirectory),
+        inspectRuntime: async () => {
+          const status = await inspectRuntimeLock(runtimeDataDirectory);
+          return status.running
+            ? { running: true, mode: status.mode, identity: status.identity }
+            : { running: false, stale: status.stale !== undefined };
+        },
+        inspectService: () => inspectManagedService(),
+        run,
+        probe: (signal) => waitForRuntimeIdentity(runtimeDataDirectory, signal),
+        timeoutMs,
+      });
+    },
   });
 }
 
@@ -1150,6 +1183,14 @@ const managedInstallationFiles = Object.freeze([
   "server.crt",
   "server.json",
 ]);
+const requiredManagedInstallationFiles = Object.freeze([
+  "borg.db",
+  "credential-digest.key",
+  "ca.crt",
+  "server.key",
+  "server.crt",
+  "server.json",
+]);
 
 export async function setupNodeServerInstallation(
   setupDataDirectory: string,
@@ -1165,14 +1206,7 @@ export async function setupNodeServerInstallation(
     const existing = await inspectManagedInstallation(directory);
     if (existing.length !== 0 && !options.reinitialize) {
       const names = new Set(existing.map((path) => basename(path)));
-      const complete = [
-        "borg.db",
-        "credential-digest.key",
-        "ca.crt",
-        "server.key",
-        "server.crt",
-        "server.json",
-      ].every((name) => names.has(name));
+      const complete = requiredManagedInstallationFiles.every((name) => names.has(name));
       if (!complete) throw operatorErrors.INSTALLATION_EXISTS;
       if (credentialRoot !== undefined) {
         await readPortableOwnerCredentialForInstallation(directory, credentialRoot, 7_091);
@@ -1352,6 +1386,29 @@ async function inspectManagedInstallation(directory: string): Promise<string[]> 
     }
   }
   return existing;
+}
+
+export async function assertManagedServiceInstallation(directory: string): Promise<void> {
+  const existing = await inspectManagedInstallation(directory).catch((error) => {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  });
+  const names = new Set(existing.map((path) => basename(path)));
+  if (!requiredManagedInstallationFiles.every((name) => names.has(name))) {
+    throw operatorErrors.MANAGED_SERVICE_DATA_UNINITIALIZED;
+  }
+  let config: { readonly bind_host?: unknown };
+  try {
+    config = JSON.parse((await readFile(join(directory, "server.json"))).toString("utf8")) as {
+      readonly bind_host?: unknown;
+    };
+  } catch {
+    throw operatorErrors.MANAGED_SERVICE_DATA_UNINITIALIZED;
+  }
+  if (typeof config.bind_host !== "string") throw operatorErrors.MANAGED_SERVICE_DATA_UNINITIALIZED;
+  if (resolveBindOptions({ host: config.bind_host, lanConsent: true }).mode !== "loopback") {
+    throw operatorErrors.MANAGED_SERVICE_LAN_UNSUPPORTED;
+  }
 }
 
 function resolveSetupBindHost(environment: ServerEnvironment): string {

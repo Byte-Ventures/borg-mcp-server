@@ -8,7 +8,6 @@ import {
   mkdtemp,
   realpath,
   rm,
-  writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -17,6 +16,7 @@ import { describe, expect, it } from "vitest";
 
 import { bootstrapServer } from "../src/bootstrap.js";
 import { createManagedServiceDefinition } from "../src/managed-service.js";
+import { installManagedService } from "../src/managed-service-install.js";
 import { operatorErrors } from "../src/operator-error.js";
 import {
   createRuntimeLifecycle,
@@ -88,7 +88,7 @@ describe("macOS launchd managed update journey", () => {
         const lifecycle = createRuntimeLifecycle({
           unpack: createUnixNpmArtifactUnpacker(),
           restart: async (signal) => { await run(definition.restart, signal); },
-          stop: async (signal) => { await run(definition.stop, signal); },
+          stop: async (signal) => { await run(definition.unload, signal); },
           probe: (signal) => waitForManagedIdentity(dataDirectory, signal),
         });
         const operator = createRuntimeOperator({
@@ -112,11 +112,36 @@ describe("macOS launchd managed update journey", () => {
           },
         });
 
-        await operator.prepareLatest(30_000);
-        await writeFile(definitionPath, definition.content, { mode: 0o600 });
-        await run(definition.install, new AbortController().signal);
+        const prepared = await operator.prepareLatest(30_000);
+        const installInput = {
+          definition,
+          artifact: prepared,
+          dataDirectory,
+          assertInstallation: async () => undefined,
+          inspectRuntime: async () => {
+            const status = await inspectRuntimeLock(dataDirectory);
+            return status.running
+              ? { running: true as const, mode: status.mode, identity: status.identity }
+              : { running: false as const, stale: status.stale !== undefined };
+          },
+          inspectService: () => inspectManagedServiceState(definition, run),
+          run,
+          probe: (signal: AbortSignal) => waitForManagedIdentity(dataDirectory, signal),
+          timeoutMs: 20_000,
+        };
+        await expect(installManagedService(installInput)).resolves.toMatchObject({
+          outcome: "installed",
+          adapter: "launchd",
+          artifact: { version: SERVER_PACKAGE_VERSION, integrity },
+        });
         loaded = true;
         const first = await waitForManagedRuntime(dataDirectory);
+        await expect(installManagedService(installInput)).resolves.toMatchObject({
+          outcome: "already-installed",
+        });
+        expect((await lstat(definitionPath)).mode & 0o777).toBe(0o600);
+        expect((await lstat(definition.stdoutPath)).mode & 0o777).toBe(0o600);
+        expect((await lstat(definition.stderrPath)).mode & 0o777).toBe(0o600);
 
         const before = await inspectNodeRuntime(
           dataDirectory,
@@ -189,7 +214,7 @@ describe("macOS launchd managed update journey", () => {
 
         await run(definition.recoverLoaded, new AbortController().signal);
         await waitForManagedRuntime(dataDirectory);
-        await run(definition.stop, new AbortController().signal);
+        await run(definition.unload, new AbortController().signal);
         loaded = false;
         await waitForStopped(dataDirectory);
         const unloadedDefined = await inspectManagedServiceState(definition, run);
@@ -228,7 +253,7 @@ describe("macOS launchd managed update journey", () => {
         });
       } finally {
         if (loaded) {
-          await execute(definition.stop[0], definition.stop.slice(1), {
+          await execute(definition.unload[0], definition.unload.slice(1), {
             encoding: "utf8",
             timeout: 20_000,
           }).catch(() => undefined);

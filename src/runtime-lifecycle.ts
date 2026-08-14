@@ -108,7 +108,10 @@ export async function inspectActiveRuntimeArtifact(
     throw error;
   }
   const target = await readCurrentTarget(join(root, "current"), root);
-  return target === null ? null : readArtifactDescriptor(target);
+  if (target === null) return null;
+  const artifact = await readArtifactDescriptor(target);
+  await validateUnpackedPackage(target, artifact.version);
+  return artifact;
 }
 
 async function stageRuntimeArtifact(

@@ -46,6 +46,8 @@ has been coordinated.
   source checkout. Activation verifies npm integrity and the staged artifact
   tree, switches the `current` target atomically, and accepts a restarted process
   only when its authenticated runtime identity matches the selected artifact.
-- Review generated launchd or systemd definitions before enabling them. They
-  must retain the intended data directory and execute the immutable `current`
-  artifact target.
+- Install the loopback-only launchd or systemd user service through
+  `borg-mcp-server service install`. The installer requires initialized data and
+  a verified prepared runtime, writes owner-private definitions and log sinks,
+  and executes the immutable `current` artifact target. It refuses unrecognized
+  existing definitions instead of overwriting them.

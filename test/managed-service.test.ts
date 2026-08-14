@@ -20,7 +20,18 @@ describe("managed service adapters", () => {
     );
     expect(service.content).toContain('Environment="BORG_SERVER_DATA_DIR=/home/operator/.borg/server"');
     expect(service.content).toContain('Environment="BORG_SERVER_PROCESS_MODE=managed"');
+    expect(service.content).toContain("UMask=0077");
+    expect(service.content).toContain(
+      'StandardOutput="append:/home/operator/.borg/server/logs/managed.stdout.log"',
+    );
+    expect(service.content).toContain(
+      'StandardError="append:/home/operator/.borg/server/logs/managed.stderr.log"',
+    );
     expect(service.install).toEqual(["systemctl", "--user", "enable", "--now", "ai.borgmcp.server"]);
+    expect(service.rollbackRemove).toEqual([
+      "systemctl", "--user", "disable", "--now", "ai.borgmcp.server",
+    ]);
+    expect(service.reload).toEqual(["systemctl", "--user", "daemon-reload"]);
     expect(service.status).toEqual([
       "systemctl",
       "--user",
@@ -72,10 +83,15 @@ describe("managed service adapters", () => {
     );
     expect(service.content).toContain("/Users/operator/.borg/server &amp; identity");
     expect(service.content).toContain("BORG_SERVER_PROCESS_MODE");
+    expect(service.content).toContain("<key>Umask</key><integer>63</integer>");
+    expect(service.content).toContain(
+      "<key>StandardOutPath</key><string>/Users/operator/.borg/server &amp; identity/logs/managed.stdout.log</string>",
+    );
+    expect(service.content).toContain("borgmcp-server-owned:ai.borgmcp.server");
     expect(service.restart).toEqual([
       "launchctl", "kickstart", "-k", "gui/501/ai.borgmcp.server",
     ]);
-    expect(service.stop).toEqual([
+    expect(service.unload).toEqual([
       "launchctl", "bootout", "gui/501/ai.borgmcp.server",
     ]);
     expect(service.content).not.toContain("Development");
@@ -115,6 +131,20 @@ describe("managed service adapters", () => {
       launchdDomain: "gui/501",
       port: 70_000,
     })).toThrow("Managed service port is invalid.");
+  });
+
+  it("quotes systemd paths and escapes percent specifiers", () => {
+    const definition = createManagedServiceDefinition({
+      platform: "systemd",
+      nodeExecutable: "/opt/Node Runtime/node",
+      runtimeRoot: "/home/operator/100% runtime",
+      dataDirectory: "/home/operator/100% data",
+      definitionPath: "/home/operator/.config/systemd/user/ai.borgmcp.server.service",
+    });
+    expect(definition.content).toContain('ExecStart="/opt/Node Runtime/node"');
+    expect(definition.content).toContain("/home/operator/100%% runtime/current/package/dist/main.js");
+    expect(definition.content).toContain('Environment="BORG_SERVER_DATA_DIR=/home/operator/100%% data"');
+    expect(definition.content).toContain('StandardOutput="append:/home/operator/100%% data/logs/managed.stdout.log"');
   });
 
   it("supports a bounded unique launchd label for isolated lifecycle exercises", () => {

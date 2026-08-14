@@ -27,6 +27,17 @@ npm install --global borgmcp-server
 borg-mcp-server help
 ```
 
+`borg-mcp-server start` always runs in the foreground. After setup, install and
+start the loopback-only background service explicitly with:
+
+```sh
+borg-mcp-server service install
+```
+
+The managed service uses launchd on macOS or a systemd user service on Linux.
+See the [operator reference](docs/operator-reference.md) for service state,
+private log locations, and ordinary platform controls.
+
 ## How it fits together
 
 - [`borg-mcp-client`](https://github.com/Byte-Ventures/borg-mcp-client) provides
@@ -50,8 +61,8 @@ That guide is included in the installed package.
 ## Reference and support
 
 - [Operator reference](docs/operator-reference.md):
-  setup, dashboard, networking, debugging, credential administration, and
-  capacity controls.
+  setup, managed service installation, dashboard, networking, debugging,
+  credential administration, and capacity controls.
 - [Protocol reference](docs/protocol-reference.md):
   API and runtime metadata details.
 

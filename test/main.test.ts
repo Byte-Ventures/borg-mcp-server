@@ -52,6 +52,7 @@ describe("main operator errors", () => {
     ["INSTALLATION_EXISTS", "An installation already exists in BORG_SERVER_DATA_DIR. To destroy and recreate it, stop the server and run borg-mcp-server setup --reinitialize."],
     ["OWNER_CREDENTIAL_UNAVAILABLE", "The local owner credential is unavailable. Restore the local credential store from backup, or preserve any needed server data and run borg-mcp-server setup --reinitialize to create a new database and leaf identity while preserving the CA when present."],
     ["RUNTIME_ACTIVE", "Stop the server before running setup or offline administration."],
+    ["MANAGED_SERVICE_FOREGROUND_ACTIVE", "Stop the foreground server with Ctrl-C before installing the managed service."],
     [
       "RUNTIME_ARTIFACT_INSTALL_FAILED",
       "Setup could not prepare the verified runtime.\n" +

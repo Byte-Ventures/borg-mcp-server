@@ -39,7 +39,9 @@ export type OperatorErrorCode =
   | "MANAGED_SERVICE_FOREGROUND_ACTIVE"
   | "MANAGED_SERVICE_LAN_UNSUPPORTED"
   | "MANAGED_SERVICE_INSTALL_BUSY"
+  | "MANAGED_SERVICE_UNINSTALL_BUSY"
   | "MANAGED_SERVICE_PLATFORM_UNSUPPORTED"
+  | "MANAGED_SERVICE_UNINSTALL_PLATFORM_UNSUPPORTED"
   | "RUNTIME_ARTIFACT_INSTALL_FAILED"
   | "DASHBOARD_INSTALLATION_MISSING"
   | "DASHBOARD_SERVER_STOPPED"
@@ -101,7 +103,9 @@ const publicMessages: Readonly<Record<OperatorErrorCode, string>> = Object.freez
   MANAGED_SERVICE_FOREGROUND_ACTIVE: "Stop the foreground server with Ctrl-C before installing the managed service.",
   MANAGED_SERVICE_LAN_UNSUPPORTED: "Managed service installation is loopback-only. Use foreground start for private-LAN operation.",
   MANAGED_SERVICE_INSTALL_BUSY: "Another managed service installation is running. Wait for it to finish, then retry.",
+  MANAGED_SERVICE_UNINSTALL_BUSY: "Another managed service change is running. Wait for it to finish, then retry.",
   MANAGED_SERVICE_PLATFORM_UNSUPPORTED: "Managed service installation supports macOS launchd and Linux systemd user services only.",
+  MANAGED_SERVICE_UNINSTALL_PLATFORM_UNSUPPORTED: "Managed service uninstallation supports macOS launchd and Linux systemd user services only.",
   RUNTIME_ARTIFACT_INSTALL_FAILED: "Setup could not prepare the verified runtime.\nNext: check your Node.js and npm installation, then rerun setup.",
   DASHBOARD_INSTALLATION_MISSING: "Prepare the local server in BORG_SERVER_DATA_DIR before opening the dashboard.",
   DASHBOARD_SERVER_STOPPED: "Start the local server before opening the dashboard.",

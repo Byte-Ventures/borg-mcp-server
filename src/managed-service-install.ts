@@ -54,9 +54,14 @@ export class ManagedServiceInstallError extends Error {
   }
 }
 
-type DefinitionState =
+export type ManagedServiceDefinitionState =
   | { readonly kind: "absent" }
-  | { readonly kind: "current" | "stale"; readonly content: string };
+  | {
+      readonly kind: "current" | "stale";
+      readonly content: string;
+      readonly device: number;
+      readonly inode: number;
+    };
 
 export async function installManagedService(
   input: ManagedServiceInstallInput,
@@ -65,10 +70,10 @@ export async function installManagedService(
     throw new Error("Managed service install timeout is invalid.");
   }
   await input.assertInstallation();
-  const installLock = await acquireInstallLock(input.dataDirectory);
+  const installLock = await acquireManagedServiceLock(input.dataDirectory);
   try {
     const [definitionState, runtime, service] = await Promise.all([
-      inspectDefinition(input.definition, input.uid),
+      inspectManagedServiceDefinition(input.definition, input.uid),
       input.inspectRuntime(),
       input.inspectService(),
       assertExistingPrivateSink(input.definition.stdoutPath, input.uid),
@@ -102,14 +107,14 @@ export async function installManagedService(
     try {
       if (mustUnload) {
         mutationStarted = true;
-        await runWithDeadline(input.timeoutMs, (signal) => input.run(input.definition.unload, signal));
+        await runManagedServiceWithDeadline(input.timeoutMs, (signal) => input.run(input.definition.unload, signal));
         await waitForStopped(input, input.timeoutMs);
       }
       await ensurePrivateSink(input.definition.stdoutPath, input.uid);
       await ensurePrivateSink(input.definition.stderrPath, input.uid);
       if (definitionState.kind !== "current") {
         mutationStarted = true;
-        await writePrivateFile(
+        await writeManagedServicePrivateFile(
           input.definition.definitionPath,
           input.definition.content,
           input.uid,
@@ -118,7 +123,7 @@ export async function installManagedService(
       }
       if (input.definition.reload !== null) {
         mutationStarted = true;
-        await runWithDeadline(input.timeoutMs, (signal) => input.run(input.definition.reload!, signal));
+        await runManagedServiceWithDeadline(input.timeoutMs, (signal) => input.run(input.definition.reload!, signal));
       }
       mutationStarted = true;
       const startCommand = input.definition.platform === "launchd" &&
@@ -126,8 +131,8 @@ export async function installManagedService(
           service.recoveryCommand !== null
         ? service.recoveryCommand
         : input.definition.install;
-      await runWithDeadline(input.timeoutMs, (signal) => input.run(startCommand, signal));
-      const identity = await runWithDeadline(input.timeoutMs, input.probe);
+      await runManagedServiceWithDeadline(input.timeoutMs, (signal) => input.run(startCommand, signal));
+      const identity = await runManagedServiceWithDeadline(input.timeoutMs, input.probe);
       if (!runtimeMatchesArtifact(identity, input.artifact)) {
         throw new Error("Managed service started an unexpected runtime artifact.");
       }
@@ -153,13 +158,13 @@ async function rollback(
   previousIdentity: RuntimeBuildIdentity | null,
 ): Promise<"restored" | "stopped" | "failed"> {
   try {
-    await runWithDeadline(input.timeoutMs, (signal) => input.run(input.definition.rollbackRemove, signal))
+    await runManagedServiceWithDeadline(input.timeoutMs, (signal) => input.run(input.definition.rollbackRemove, signal))
       .catch(() => undefined);
     await waitForStopped(input, input.timeoutMs);
     if (previousContent === null) {
       await removeCurrentDefinition(input.definition);
     } else {
-      await writePrivateFile(
+      await writeManagedServicePrivateFile(
         input.definition.definitionPath,
         previousContent,
         input.uid,
@@ -167,12 +172,12 @@ async function rollback(
       );
     }
     if (input.definition.reload !== null) {
-      await runWithDeadline(input.timeoutMs, (signal) => input.run(input.definition.reload!, signal));
+      await runManagedServiceWithDeadline(input.timeoutMs, (signal) => input.run(input.definition.reload!, signal));
     }
     if (!previousActive) return "stopped";
-    await runWithDeadline(input.timeoutMs, (signal) => input.run(input.definition.install, signal));
-    const restoredIdentity = await runWithDeadline(input.timeoutMs, input.probe);
-    if (previousIdentity === null || !runtimeIdentitiesMatch(restoredIdentity, previousIdentity)) {
+    await runManagedServiceWithDeadline(input.timeoutMs, (signal) => input.run(input.definition.install, signal));
+    const restoredIdentity = await runManagedServiceWithDeadline(input.timeoutMs, input.probe);
+    if (previousIdentity === null || !managedRuntimeIdentitiesMatch(restoredIdentity, previousIdentity)) {
       return "failed";
     }
     return "restored";
@@ -181,10 +186,10 @@ async function rollback(
   }
 }
 
-async function inspectDefinition(
+export async function inspectManagedServiceDefinition(
   definition: ManagedServiceDefinition,
   uid = process.getuid?.(),
-): Promise<DefinitionState> {
+): Promise<ManagedServiceDefinitionState> {
   try {
     const metadata = await lstat(definition.definitionPath);
     await assertCanonicalDirectory(dirname(definition.definitionPath), uid);
@@ -194,9 +199,10 @@ async function inspectDefinition(
       throw operatorErrors.MANAGED_SERVICE_DEFINITION_UNSAFE;
     }
     const content = await readFile(definition.definitionPath, "utf8");
-    if (content === definition.content) return { kind: "current", content };
+    const identity = { device: metadata.dev, inode: metadata.ino };
+    if (content === definition.content) return { kind: "current", content, ...identity };
     if (hasCanonicalOwnershipMarker(definition, content) ||
-        isPublishedLegacyDefinition(definition, content)) return { kind: "stale", content };
+        isPublishedLegacyDefinition(definition, content)) return { kind: "stale", content, ...identity };
     throw operatorErrors.MANAGED_SERVICE_DEFINITION_FOREIGN;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return { kind: "absent" };
@@ -334,7 +340,7 @@ function privateSinkMetadata(
     (metadata.mode & 0o077) === 0 && (uid === undefined || metadata.uid === uid);
 }
 
-async function writePrivateFile(
+export async function writeManagedServicePrivateFile(
   path: string,
   content: string,
   uid = process.getuid?.(),
@@ -370,6 +376,19 @@ async function writePrivateFile(
   }
 }
 
+export async function removeManagedServiceDefinition(
+  definition: ManagedServiceDefinition,
+  expected: Exclude<ManagedServiceDefinitionState, { readonly kind: "absent" }>,
+  uid = process.getuid?.(),
+): Promise<void> {
+  const current = await inspectManagedServiceDefinition(definition, uid);
+  if (current.kind === "absent" || current.content !== expected.content ||
+      current.device !== expected.device || current.inode !== expected.inode) {
+    throw new Error("Managed service definition changed during removal.");
+  }
+  await unlink(definition.definitionPath);
+}
+
 async function ensurePrivateDirectory(path: string, uid = process.getuid?.()): Promise<void> {
   await mkdir(path, { recursive: true, mode: 0o700 });
   await assertCanonicalDirectory(path, uid);
@@ -395,7 +414,7 @@ async function removeCurrentDefinition(definition: ManagedServiceDefinition): Pr
 }
 
 async function waitForStopped(input: ManagedServiceInstallInput, timeoutMs: number): Promise<void> {
-  await runWithDeadline(timeoutMs, async (signal) => {
+  await runManagedServiceWithDeadline(timeoutMs, async (signal) => {
     while (!signal.aborted) {
       if (!(await input.inspectRuntime()).running) return;
       await new Promise<void>((resolve) => {
@@ -410,14 +429,17 @@ async function waitForStopped(input: ManagedServiceInstallInput, timeoutMs: numb
   });
 }
 
-async function acquireInstallLock(directory: string): Promise<{ readonly release: () => Promise<void> }> {
+export async function acquireManagedServiceLock(
+  directory: string,
+  busyError: Error = operatorErrors.MANAGED_SERVICE_INSTALL_BUSY,
+): Promise<{ readonly release: () => Promise<void> }> {
   const path = join(directory, "service-install.lock");
   let handle;
   try {
     handle = await open(path, "wx", 0o600);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "EEXIST") {
-      throw operatorErrors.MANAGED_SERVICE_INSTALL_BUSY;
+      throw busyError;
     }
     throw error;
   }
@@ -439,7 +461,7 @@ async function acquireInstallLock(directory: string): Promise<{ readonly release
   };
 }
 
-async function runWithDeadline<T>(
+export async function runManagedServiceWithDeadline<T>(
   timeoutMs: number,
   operation: (signal: AbortSignal) => Promise<T>,
 ): Promise<T> {
@@ -458,7 +480,10 @@ function runtimeMatchesArtifact(identity: RuntimeBuildIdentity, artifact: Verifi
     identity.source_sha === artifact.sourceSha;
 }
 
-function runtimeIdentitiesMatch(left: RuntimeBuildIdentity, right: RuntimeBuildIdentity): boolean {
+export function managedRuntimeIdentitiesMatch(
+  left: RuntimeBuildIdentity,
+  right: RuntimeBuildIdentity,
+): boolean {
   return left.package_version === right.package_version &&
     left.artifact_integrity === right.artifact_integrity &&
     left.source_sha === right.source_sha;

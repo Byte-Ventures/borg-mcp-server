@@ -45,13 +45,29 @@ target ending in `/current/package/dist/main.js`, and platform start/restart
 controls must all match that generated shape. Other unmarked definitions are
 left untouched.
 
+Remove the managed definition, stopping the service first when it is active,
+with:
+
+```sh
+borg-mcp-server service uninstall
+```
+
+The command is idempotent for an absent definition. It removes only the same
+owner-private, single-link, Borg-owned regular-file shapes accepted by the
+installer; foreign, linked, permissively readable, or otherwise unsafe
+definitions remain untouched. Data, server identity, credentials, verified
+runtime artifacts, and managed stdout/stderr logs are preserved. If controller
+or filesystem removal fails, human and `--json` output report the independently
+observed definition state, service state, exact platform recovery command when
+one is available, and whether a previously running stable identity returned.
+
 The definition and its stdout/stderr sinks are owner-private, and the managed
 process uses umask `077`. Logs are written under
 `~/.borg/server/logs/managed.stdout.log` and
 `~/.borg/server/logs/managed.stderr.log` when the default data directory is in
 use. `borg-mcp-server status` reports whether the service is active, inactive,
-or absent and identifies its adapter. Use the platform service manager for later
-service control:
+or absent and identifies its adapter. Use the platform service manager for
+temporary stop and restart operations:
 
 ```sh
 # macOS

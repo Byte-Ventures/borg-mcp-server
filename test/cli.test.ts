@@ -188,7 +188,18 @@ describe("runCli", () => {
       "--reinitialize   Recreate the database and leaf identity; preserve the CA when present",
     ));
     expect(help.stdout).toHaveBeenCalledWith(expect.stringContaining(
-      "service install [--json]\n           Install and start the loopback-only managed service",
+      "start    Start the server process in the foreground; stop it with Ctrl-C",
+    ));
+    expect(help.stdout).toHaveBeenCalledWith(expect.stringContaining(
+      "service install [--json]  Install and start the loopback-only managed service",
+    ));
+    expect(help.stdout).toHaveBeenCalledWith(expect.stringContaining(
+      "Before setup or reinitialization, stop the server:\n" +
+      "  Foreground: press Ctrl-C in its owning terminal.\n" +
+      "  Managed service:\n" +
+      "    macOS: launchctl bootout gui/$(id -u)/ai.borgmcp.server\n" +
+      "    Linux: systemctl --user stop ai.borgmcp.server\n" +
+      "See docs/operator-reference.md#managed-service for details.",
     ));
     expect(help.stdout.mock.calls[0]![0]).not.toContain("stop [--json]");
   });
@@ -407,7 +418,7 @@ describe("runCli", () => {
   });
 
   it("installs the managed service with strict nested grammar and bounded output", async () => {
-    const installService = vi.fn().mockResolvedValue({
+    const launchdResult = {
       outcome: "installed",
       adapter: "launchd",
       artifact: {
@@ -427,12 +438,17 @@ describe("runCli", () => {
       },
       stdoutPath: "/Users/operator/\u001b]8;;https://attacker.invalid\u0007/logs/managed.stdout.log",
       stderrPath: "/Users/operator/.borg/server/logs/managed.stderr.log",
-    });
+    } as const;
+    const installService = vi.fn().mockResolvedValue(launchdResult);
     const service: ServerService = { start: vi.fn(), installService };
     const tty = { ...createIo(), isTTY: true };
     expect(await runCli(["service", "install"], service, tty)).toBe(0);
     expect(tty.stdout).toHaveBeenCalledWith(expect.stringContaining(
       "Managed local server installed and started.",
+    ));
+    expect(tty.stdout).toHaveBeenCalledWith(expect.stringContaining(
+      "Managed stop: launchctl bootout gui/$(id -u)/ai.borgmcp.server\n" +
+      "Reference: docs/operator-reference.md#managed-service",
     ));
     expect(tty.stdout.mock.calls[0]![0]).not.toContain("/private/runtime");
     expect(tty.stdout.mock.calls[0]![0]).not.toContain("\u001b");
@@ -448,11 +464,22 @@ describe("runCli", () => {
       data_identity: "preserved",
       next_action: "borg-mcp-server status",
     });
+    installService.mockResolvedValueOnce({
+      ...launchdResult,
+      outcome: "already-installed",
+      adapter: "systemd",
+    });
+    const linux = { ...createIo(), isTTY: true };
+    expect(await runCli(["service", "install"], service, linux)).toBe(0);
+    expect(linux.stdout).toHaveBeenCalledWith(expect.stringContaining(
+      "Managed stop: systemctl --user stop ai.borgmcp.server\n" +
+      "Reference: docs/operator-reference.md#managed-service",
+    ));
     expect(await runCli(["service"], service, createIo())).toBe(1);
     expect(await runCli(["service", "install", "--json", "--json"], service, createIo())).toBe(1);
     expect(await runCli(["service", "uninstall"], service, createIo())).toBe(1);
     expect(await runCli(["stop"], service, createIo())).toBe(1);
-    expect(installService).toHaveBeenCalledTimes(2);
+    expect(installService).toHaveBeenCalledTimes(3);
   });
 
   it("renders bounded verification and rollback failures without raw errors", async () => {
@@ -722,7 +749,9 @@ describe("runCli", () => {
     expect(help).toContain("client-grant <client-name-or-handle> <cube-id> <read|write|manage>  Set one cube grant while the server is live");
     expect(help).toContain("client-ungrant <client-name-or-handle> <cube-id>  Remove one cube grant while the server is live");
     expect(help).toContain("Client listing, rotation, revocation, and grant changes are operator-only\nlive-safe operations; the running server observes committed changes on the next\nrequest.");
-    expect(help).toContain("Stop the server before setup or reinitialization.");
+    expect(help).toContain("Before setup or reinitialization, stop the server:\n" +
+      "  Foreground: press Ctrl-C in its owning terminal.");
+    expect(help).toContain("Linux: systemctl --user stop ai.borgmcp.server");
     expect(help).not.toContain("Rotate one client credential offline");
     expect(help).not.toContain("Stop the server before\nsetup, rotation, revocation, grant changes, or reinitialization.");
   });

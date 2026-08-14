@@ -15,13 +15,12 @@ const usage = `Usage: borg-mcp-server <command> [options]
 Commands:
   setup [--reinitialize]  Prepare an offline server installation
   cert-reissue --host <ip>  Add a private-LAN address to the server certificate
-  start    Start the server process
+  start    Start the server process in the foreground; stop it with Ctrl-C
   dashboard [--ascii]  View the running local server without stopping it
   status [--json]  Report exact local runtime evidence
   version [--json]  Report the installed controller version
   update [--json]  Verify the latest runtime and report any controller step
-  service install [--json]
-           Install and start the loopback-only managed service
+  service install [--json]  Install and start the loopback-only managed service
   recover-stale-lock [--json]  Preserve a safely identified stale runtime lock
   invite [<client-name>]  Create a named client enrollment invitation interactively.
            An enrolled client has no cube access until it is granted.
@@ -54,7 +53,12 @@ live. Client listing, rotation, revocation, and grant changes are operator-only
 live-safe operations; the running server observes committed changes on the next
 request.
 
-Stop the server before setup or reinitialization.
+Before setup or reinitialization, stop the server:
+  Foreground: press Ctrl-C in its owning terminal.
+  Managed service:
+    macOS: launchctl bootout gui/$(id -u)/ai.borgmcp.server
+    Linux: systemctl --user stop ai.borgmcp.server
+See docs/operator-reference.md#managed-service for details.
 
 Invitation access:
   read    observe: discover, attach as observer, and read
@@ -243,6 +247,10 @@ export async function runCli(
           `Artifact: borgmcp-server@${result.artifact.version} (${result.artifact.integrity})`,
           `Build identity: ${result.runningIdentity.source_sha ?? "unavailable"}`,
           `Adapter: ${result.adapter}`,
+          `Managed stop: ${result.adapter === "launchd"
+            ? "launchctl bootout gui/$(id -u)/ai.borgmcp.server"
+            : "systemctl --user stop ai.borgmcp.server"}`,
+          "Reference: docs/operator-reference.md#managed-service",
           `Standard output: ${sanitizeTerminalText(result.stdoutPath)}`,
           `Standard error: ${sanitizeTerminalText(result.stderrPath)}`,
           "Data and identity: preserved",

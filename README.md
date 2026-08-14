@@ -35,8 +35,11 @@ borg-mcp-server service install
 ```
 
 The managed service uses launchd on macOS or a systemd user service on Linux.
-See the [operator reference](docs/operator-reference.md) for service state,
-private log locations, and ordinary platform controls.
+Remove its definition and stop it when active with
+`borg-mcp-server service uninstall`. Uninstall preserves server data, identity,
+credentials, verified runtime artifacts, and managed logs. See the
+[operator reference](docs/operator-reference.md) for service state, private log
+locations, validation boundaries, and ordinary platform controls.
 
 ## How it fits together
 
@@ -61,7 +64,7 @@ That guide is included in the installed package.
 ## Reference and support
 
 - [Operator reference](docs/operator-reference.md):
-  setup, managed service installation, dashboard, networking, debugging,
+  setup, managed service installation and removal, dashboard, networking, debugging,
   credential administration, and capacity controls.
 - [Protocol reference](docs/protocol-reference.md):
   API and runtime metadata details.

@@ -33,13 +33,16 @@ export type OperatorErrorCode =
   | "RUNTIME_LOCK_RECOVERY_CONCURRENT"
   | "MANAGED_SERVICE_DEFINITION_UNSAFE"
   | "MANAGED_SERVICE_DEFINITION_FOREIGN"
+  | "MANAGED_SERVICE_REGISTRATION_LEFTOVER"
   | "MANAGED_SERVICE_LOG_UNSAFE"
   | "MANAGED_SERVICE_DATA_UNINITIALIZED"
   | "MANAGED_SERVICE_RUNTIME_UNPREPARED"
   | "MANAGED_SERVICE_FOREGROUND_ACTIVE"
   | "MANAGED_SERVICE_LAN_UNSUPPORTED"
   | "MANAGED_SERVICE_INSTALL_BUSY"
+  | "MANAGED_SERVICE_UNINSTALL_BUSY"
   | "MANAGED_SERVICE_PLATFORM_UNSUPPORTED"
+  | "MANAGED_SERVICE_UNINSTALL_PLATFORM_UNSUPPORTED"
   | "RUNTIME_ARTIFACT_INSTALL_FAILED"
   | "DASHBOARD_INSTALLATION_MISSING"
   | "DASHBOARD_SERVER_STOPPED"
@@ -95,13 +98,16 @@ const publicMessages: Readonly<Record<OperatorErrorCode, string>> = Object.freez
   RUNTIME_LOCK_RECOVERY_CONCURRENT: "Another recovery already preserved runtime.lock. Rerun status.",
   MANAGED_SERVICE_DEFINITION_UNSAFE: "Ensure the managed service definition is an owner-private regular file, then retry.",
   MANAGED_SERVICE_DEFINITION_FOREIGN: "The existing service definition is not recognized as Borg-owned. Preserve or remove it manually before retrying.",
+  MANAGED_SERVICE_REGISTRATION_LEFTOVER: "No Borg service definition is present, but the service manager still reports ai.borgmcp.server. Remove the leftover registration, then retry:\n  macOS: launchctl bootout gui/$(id -u)/ai.borgmcp.server\n  Linux: systemctl --user disable --now ai.borgmcp.server",
   MANAGED_SERVICE_LOG_UNSAFE: "Ensure managed service log sinks are owner-owned regular files, then retry.",
   MANAGED_SERVICE_DATA_UNINITIALIZED: "Run borg-mcp-server setup before installing the managed service.",
   MANAGED_SERVICE_RUNTIME_UNPREPARED: "Run borg-mcp-server setup or update before installing the managed service.",
   MANAGED_SERVICE_FOREGROUND_ACTIVE: "Stop the foreground server with Ctrl-C before installing the managed service.",
   MANAGED_SERVICE_LAN_UNSUPPORTED: "Managed service installation is loopback-only. Use foreground start for private-LAN operation.",
   MANAGED_SERVICE_INSTALL_BUSY: "Another managed service installation is running. Wait for it to finish, then retry.",
+  MANAGED_SERVICE_UNINSTALL_BUSY: "Another managed service change is running. Wait for it to finish, then retry.",
   MANAGED_SERVICE_PLATFORM_UNSUPPORTED: "Managed service installation supports macOS launchd and Linux systemd user services only.",
+  MANAGED_SERVICE_UNINSTALL_PLATFORM_UNSUPPORTED: "Managed service uninstallation supports macOS launchd and Linux systemd user services only.",
   RUNTIME_ARTIFACT_INSTALL_FAILED: "Setup could not prepare the verified runtime.\nNext: check your Node.js and npm installation, then rerun setup.",
   DASHBOARD_INSTALLATION_MISSING: "Prepare the local server in BORG_SERVER_DATA_DIR before opening the dashboard.",
   DASHBOARD_SERVER_STOPPED: "Start the local server before opening the dashboard.",

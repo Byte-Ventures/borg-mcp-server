@@ -3,6 +3,7 @@ import { sanitizeTerminalText } from "./dashboard.js";
 import { RuntimeUpdateFailure } from "./runtime-operator.js";
 import { SERVER_PACKAGE_VERSION } from "./runtime-identity.js";
 import { ManagedServiceInstallError } from "./managed-service-install.js";
+import { ManagedServiceUninstallError } from "./managed-service-uninstall.js";
 import { resolveBindOptions } from "./network-policy.js";
 import { operatorPublicDetails } from "./operator-error.js";
 
@@ -23,6 +24,7 @@ Commands:
   version [--json]  Report the installed controller version
   update [--json]  Verify the latest runtime and report any controller step
   service install [--json]  Install and start the loopback-only managed service
+  service uninstall [--json]  Remove the managed service and preserve local state
   recover-stale-lock [--json]  Preserve a safely identified stale runtime lock
   invite [<client-name>]  Create a named client enrollment invitation interactively.
            An enrolled client has no cube access until it is granted.
@@ -223,13 +225,58 @@ export async function runCli(
     }
     case "service": {
       const [subcommand, ...serviceArgs] = extraArgs;
-      if (subcommand !== "install" || serviceArgs.length > 1 ||
+      if ((subcommand !== "install" && subcommand !== "uninstall") || serviceArgs.length > 1 ||
           (serviceArgs.length === 1 && serviceArgs[0] !== "--json")) return invalidArguments(io);
+      const machine = serviceArgs[0] === "--json" || io.isTTY === false;
+      if (subcommand === "uninstall") {
+        if (service.uninstallService === undefined) {
+          io.stderr("Managed service uninstallation is unavailable.");
+          return 1;
+        }
+        let result: Awaited<ReturnType<NonNullable<ServerService["uninstallService"]>>>;
+        try {
+          result = await service.uninstallService();
+        } catch (error) {
+          if (error instanceof ManagedServiceUninstallError) {
+            renderServiceUninstallFailure(error, io, machine);
+            return 1;
+          }
+          const operatorFailure = operatorPublicDetails(error);
+          if (operatorFailure === null) throw error;
+          renderServiceUninstallRefusal(operatorFailure, io, machine);
+          return 1;
+        }
+        if (machine) {
+          io.stdout(JSON.stringify({
+            status: result.outcome,
+            service_adapter: result.adapter,
+            service_state: "absent",
+            definition_state: "absent",
+            data_identity: "preserved",
+            credentials: "preserved",
+            runtime_artifacts: "preserved",
+            managed_logs: "preserved",
+            next_action: "borg-mcp-server status",
+          }));
+        } else {
+          io.stdout([
+            result.outcome === "already-absent"
+              ? "Managed local server is already absent."
+              : result.outcome === "removed-active"
+                ? "Active managed local server stopped and removed."
+                : "Inactive managed local server removed.",
+            `Adapter: ${result.adapter}`,
+            "Service definition: absent",
+            "Data, identity, credentials, verified runtime artifacts, and managed logs: preserved",
+            "Next: borg-mcp-server status",
+          ].join("\n"));
+        }
+        return 0;
+      }
       if (service.installService === undefined) {
         io.stderr("Managed service installation is unavailable.");
         return 1;
       }
-      const machine = serviceArgs[0] === "--json" || io.isTTY === false;
       let result: Awaited<ReturnType<NonNullable<ServerService["installService"]>>>;
       try {
         result = await service.installService();
@@ -440,6 +487,42 @@ function renderServiceInstallFailure(
   ].join("\n"));
 }
 
+function renderServiceUninstallFailure(
+  failure: ManagedServiceUninstallError,
+  io: CliIo,
+  machine: boolean,
+): void {
+  if (machine) {
+    io.stdout(JSON.stringify({
+      status: "failed",
+      error_code: "SERVICE_UNINSTALL_FAILED",
+      definition_state: failure.definitionState,
+      service_state: failure.serviceState,
+      service_recovery: renderServiceRecovery(failure.serviceRecoveryCommand, false),
+      running_identity_restored: failure.runningIdentityRestored,
+      data_identity: "preserved",
+      credentials: "preserved",
+      runtime_artifacts: "preserved",
+      managed_logs: "preserved",
+    }));
+    return;
+  }
+  const recovery = failure.serviceRecoveryCommand === null
+    ? "none"
+    : renderShellCommand(failure.serviceRecoveryCommand);
+  io.stderr([
+    "Managed service uninstallation did not complete.",
+    `Service definition: ${failure.definitionState}`,
+    `Service state: ${failure.serviceState}`,
+    `Service recovery: ${recovery}`,
+    `Previous running identity restored: ${failure.runningIdentityRestored === null
+      ? "unconfirmed"
+      : failure.runningIdentityRestored ? "yes" : "no"}`,
+    "Data, identity, credentials, verified runtime artifacts, and managed logs: preserved",
+    "Next: borg-mcp-server status",
+  ].join("\n"));
+}
+
 function renderServiceInstallRefusal(
   failure: Readonly<{ code: string; message: string }>,
   io: CliIo,
@@ -452,6 +535,27 @@ function renderServiceInstallRefusal(
       message: failure.message,
       recovery: "not-started",
       data_identity: "preserved",
+    }));
+    return;
+  }
+  io.stderr(`Server command failed: ${failure.message}`);
+}
+
+function renderServiceUninstallRefusal(
+  failure: Readonly<{ code: string; message: string }>,
+  io: CliIo,
+  machine: boolean,
+): void {
+  if (machine) {
+    io.stdout(JSON.stringify({
+      status: "failed",
+      error_code: failure.code,
+      message: failure.message,
+      recovery: "not-started",
+      data_identity: "preserved",
+      credentials: "preserved",
+      runtime_artifacts: "preserved",
+      managed_logs: "preserved",
     }));
     return;
   }

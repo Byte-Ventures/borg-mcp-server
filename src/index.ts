@@ -38,6 +38,7 @@ export type {
   ManagedServicePlatform,
 } from "./managed-service.js";
 export type { ManagedServiceInstallResult } from "./managed-service-install.js";
+export type { ManagedServiceUninstallResult } from "./managed-service-uninstall.js";
 export {
   createRuntimeLifecycle,
   RuntimeActivationError,

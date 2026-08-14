@@ -51,3 +51,7 @@ has been coordinated.
   a verified prepared runtime, writes owner-private definitions and log sinks,
   and executes the immutable `current` artifact target. It refuses unrecognized
   existing definitions instead of overwriting them.
+- Remove a managed definition through `borg-mcp-server service uninstall`. It
+  applies the same owner, regular-file, single-link, private-mode, and Borg-shape
+  checks before deletion, and preserves data, identity, credentials, verified
+  runtime artifacts, and managed logs.

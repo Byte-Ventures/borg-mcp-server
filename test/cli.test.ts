@@ -1,9 +1,16 @@
 import { Server } from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { runCli, type CliIo, type ServerService } from "../src/index.js";
+import {
+  createManagedServiceDefinition,
+  inspectManagedServiceState,
+  runCli,
+  type CliIo,
+  type ServerService,
+} from "../src/index.js";
 import { RuntimeUpdateFailure } from "../src/runtime-operator.js";
 import { ManagedServiceInstallError } from "../src/managed-service-install.js";
+import { ManagedServiceUninstallError } from "../src/managed-service-uninstall.js";
 import { operatorErrors } from "../src/operator-error.js";
 
 function createIo() {
@@ -217,6 +224,9 @@ describe("runCli", () => {
       "service install [--json]  Install and start the loopback-only managed service",
     ));
     expect(help.stdout).toHaveBeenCalledWith(expect.stringContaining(
+      "service uninstall [--json]  Remove the managed service and preserve local state",
+    ));
+    expect(help.stdout).toHaveBeenCalledWith(expect.stringContaining(
       "Before setup or reinitialization, stop the server:\n" +
       "  Foreground: press Ctrl-C in its owning terminal.\n" +
       "  Managed service:\n" +
@@ -366,6 +376,58 @@ describe("runCli", () => {
     ));
   });
 
+  it("omits impossible recovery for loaded inactive registrations with no definition", async () => {
+    for (const platform of ["launchd", "systemd"] as const) {
+      const definition = createManagedServiceDefinition({
+        platform,
+        nodeExecutable: "/usr/bin/node",
+        nodeVersion: "24.19.0",
+        runtimeRoot: "/missing/borg-runtime",
+        dataDirectory: "/missing/borg-data",
+        definitionPath: `/missing/${platform}/ai.borgmcp.server.${platform === "launchd" ? "plist" : "service"}`,
+        ...(platform === "launchd" ? { launchdDomain: "gui/501" } : {}),
+      });
+      const status = async () => {
+        const managedService = await inspectManagedServiceState(definition, async () => ({
+          stdout: platform === "launchd"
+            ? "state = exited\n"
+            : "LoadState=loaded\nActiveState=inactive\nSubState=dead\nMainPID=0\n",
+          stderr: "",
+        }));
+        return {
+          status: "stopped" as const,
+          controllerVersion: "0.19.0",
+          preparedArtifact: null,
+          runningArtifact: null,
+          buildIdentity: null,
+          endpoint: null,
+          mode: "stopped" as const,
+          serviceAdapter: managedService.adapter,
+          serviceState: managedService.state,
+          serviceRecoveryCommand: managedService.recoveryCommand,
+          runtimeLock: { state: "clear" as const },
+          dataIdentity: "available" as const,
+          nextAction: null,
+        };
+      };
+      const service: ServerService = { start: vi.fn(), status };
+      const tty = { ...createIo(), isTTY: true };
+      const machine = { ...createIo(), isTTY: false };
+
+      expect(await runCli(["status"], service, tty)).toBe(0);
+      expect(tty.stdout).toHaveBeenCalledWith(expect.stringContaining(
+        `Managed service: inactive (${platform})`,
+      ));
+      expect(tty.stdout.mock.calls[0]![0]).not.toContain("Service recovery:");
+      expect(await runCli(["status", "--json"], service, machine)).toBe(0);
+      expect(JSON.parse(machine.stdout.mock.calls[0]![0])).toMatchObject({
+        service_adapter: platform,
+        service_state: "inactive",
+        service_recovery: null,
+      });
+    }
+  });
+
   it("preserves a stale lock only through the explicit recovery command", async () => {
     const recoverStaleLock = vi.fn().mockResolvedValue({
       backupPath: "/Users/operator/.borg/server/runtime.lock.stale-preserved",
@@ -500,9 +562,111 @@ describe("runCli", () => {
     ));
     expect(await runCli(["service"], service, createIo())).toBe(1);
     expect(await runCli(["service", "install", "--json", "--json"], service, createIo())).toBe(1);
-    expect(await runCli(["service", "uninstall"], service, createIo())).toBe(1);
     expect(await runCli(["stop"], service, createIo())).toBe(1);
     expect(installService).toHaveBeenCalledTimes(3);
+  });
+
+  it("uninstalls the managed service with strict grammar and exact retained-state diagnostics", async () => {
+    const uninstallService = vi.fn()
+      .mockResolvedValueOnce({ outcome: "removed-active", adapter: "launchd" })
+      .mockResolvedValueOnce({ outcome: "removed-inactive", adapter: "systemd" })
+      .mockResolvedValueOnce({ outcome: "already-absent", adapter: "systemd" });
+    const service: ServerService = { start: vi.fn(), uninstallService };
+    const tty = { ...createIo(), isTTY: true };
+    expect(await runCli(["service", "uninstall"], service, tty)).toBe(0);
+    expect(tty.stdout).toHaveBeenCalledWith(
+      "Active managed local server stopped and removed.\n" +
+      "Adapter: launchd\n" +
+      "Service definition: absent\n" +
+      "Data, identity, credentials, verified runtime artifacts, and managed logs: preserved\n" +
+      "Next: borg-mcp-server status",
+    );
+
+    const explicitJson = { ...createIo(), isTTY: true };
+    expect(await runCli(["service", "uninstall", "--json"], service, explicitJson)).toBe(0);
+    expect(JSON.parse(explicitJson.stdout.mock.calls[0]![0])).toEqual({
+      status: "removed-inactive",
+      service_adapter: "systemd",
+      service_state: "absent",
+      definition_state: "absent",
+      data_identity: "preserved",
+      credentials: "preserved",
+      runtime_artifacts: "preserved",
+      managed_logs: "preserved",
+      next_action: "borg-mcp-server status",
+    });
+
+    const implicitJson = { ...createIo(), isTTY: false };
+    expect(await runCli(["service", "uninstall"], service, implicitJson)).toBe(0);
+    expect(JSON.parse(implicitJson.stdout.mock.calls[0]![0])).toMatchObject({
+      status: "already-absent",
+      service_state: "absent",
+      definition_state: "absent",
+    });
+    expect(await runCli(["service", "uninstall", "--json", "--json"], service, createIo())).toBe(1);
+    expect(await runCli(["service", "uninstall", "--force"], service, createIo())).toBe(1);
+    expect(uninstallService).toHaveBeenCalledTimes(3);
+
+    uninstallService.mockRejectedValueOnce(new ManagedServiceUninstallError({
+      definitionState: "retained",
+      serviceState: "inactive",
+      serviceRecoveryCommand: ["systemctl", "--user", "enable", "--now", "ai.borgmcp.server"],
+      runningIdentityRestored: false,
+    }));
+    const failure = { ...createIo(), isTTY: false };
+    expect(await runCli(["service", "uninstall"], service, failure)).toBe(1);
+    expect(JSON.parse(failure.stdout.mock.calls[0]![0])).toEqual({
+      status: "failed",
+      error_code: "SERVICE_UNINSTALL_FAILED",
+      definition_state: "retained",
+      service_state: "inactive",
+      service_recovery: {
+        kind: "run-platform-command",
+        command: ["systemctl", "--user", "enable", "--now", "ai.borgmcp.server"],
+      },
+      running_identity_restored: false,
+      data_identity: "preserved",
+      credentials: "preserved",
+      runtime_artifacts: "preserved",
+      managed_logs: "preserved",
+    });
+
+    uninstallService.mockRejectedValueOnce(operatorErrors.MANAGED_SERVICE_DEFINITION_FOREIGN);
+    const refusal = { ...createIo(), isTTY: false };
+    expect(await runCli(["service", "uninstall"], service, refusal)).toBe(1);
+    expect(JSON.parse(refusal.stdout.mock.calls[0]![0])).toEqual({
+      status: "failed",
+      error_code: "MANAGED_SERVICE_DEFINITION_FOREIGN",
+      message: "The existing service definition is not recognized as Borg-owned. Preserve or remove it manually before retrying.",
+      recovery: "not-started",
+      data_identity: "preserved",
+      credentials: "preserved",
+      runtime_artifacts: "preserved",
+      managed_logs: "preserved",
+    });
+
+    const leftoverMessage =
+      "No Borg service definition is present, but the service manager still reports ai.borgmcp.server. " +
+      "Remove the leftover registration, then retry:\n" +
+      "  macOS: launchctl bootout gui/$(id -u)/ai.borgmcp.server\n" +
+      "  Linux: systemctl --user disable --now ai.borgmcp.server";
+    uninstallService.mockRejectedValueOnce(operatorErrors.MANAGED_SERVICE_REGISTRATION_LEFTOVER);
+    const leftoverTty = { ...createIo(), isTTY: true };
+    expect(await runCli(["service", "uninstall"], service, leftoverTty)).toBe(1);
+    expect(leftoverTty.stderr).toHaveBeenCalledWith(`Server command failed: ${leftoverMessage}`);
+    uninstallService.mockRejectedValueOnce(operatorErrors.MANAGED_SERVICE_REGISTRATION_LEFTOVER);
+    const leftoverJson = { ...createIo(), isTTY: false };
+    expect(await runCli(["service", "uninstall"], service, leftoverJson)).toBe(1);
+    expect(JSON.parse(leftoverJson.stdout.mock.calls[0]![0])).toEqual({
+      status: "failed",
+      error_code: "MANAGED_SERVICE_REGISTRATION_LEFTOVER",
+      message: leftoverMessage,
+      recovery: "not-started",
+      data_identity: "preserved",
+      credentials: "preserved",
+      runtime_artifacts: "preserved",
+      managed_logs: "preserved",
+    });
   });
 
   it("renders bounded verification and rollback failures without raw errors", async () => {

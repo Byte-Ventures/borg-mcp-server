@@ -69,6 +69,10 @@ import {
   type ManagedServiceInstallResult,
 } from "./managed-service-install.js";
 import {
+  uninstallManagedService,
+  type ManagedServiceUninstallResult,
+} from "./managed-service-uninstall.js";
+import {
   createDashboardRenderer,
   dashboardColorEnabled,
   EMBEDDED_DASHBOARD_FOOTER,
@@ -93,6 +97,7 @@ export interface ServerService {
   readonly setup?: (options: SetupOptions) => Promise<ServerSetupResult>;
   readonly status?: () => Promise<ServerRuntimeStatus>;
   readonly installService?: () => Promise<ManagedServiceInstallResult>;
+  readonly uninstallService?: () => Promise<ManagedServiceUninstallResult>;
   readonly update?: () => Promise<ServerUpdateResult>;
   readonly recoverStaleLock?: () => Promise<StaleRuntimeLockRecovery>;
   readonly rotateClient?: (clientId: string) => Promise<string>;
@@ -170,7 +175,7 @@ export type ManagedServiceStatus =
   | {
       readonly state: "inactive";
       readonly adapter: ManagedServicePlatform;
-      readonly recoveryCommand: readonly [string, ...string[]];
+      readonly recoveryCommand: readonly [string, ...string[]] | null;
     }
   | {
       readonly state: "absent";
@@ -769,6 +774,7 @@ export const nodeServerService: ServerService = {
     await nodeRuntimeController.inspectManagedService(),
   ),
   installService: () => nodeRuntimeController.installService(20_000),
+  uninstallService: () => nodeRuntimeController.uninstallService(20_000),
   recoverStaleLock: () => recoverStaleRuntimeLock(dataDirectory),
   reissueCertificate: (additionalHost) => reissueNodeServerCertificate(dataDirectory, additionalHost),
   ...createOfflineCredentialService(dataDirectory, credentialFile),
@@ -935,6 +941,25 @@ function createNodeRuntimeOperator(managedRuntimeDirectory: string, runtimeDataD
         timeoutMs,
       });
     },
+    uninstallService: async (timeoutMs: number) => {
+      if (process.platform !== "darwin" && process.platform !== "linux") {
+        throw operatorErrors.MANAGED_SERVICE_UNINSTALL_PLATFORM_UNSUPPORTED;
+      }
+      return uninstallManagedService({
+        definition,
+        dataDirectory: runtimeDataDirectory,
+        inspectRuntime: async () => {
+          const status = await inspectRuntimeLock(runtimeDataDirectory);
+          return status.running
+            ? { running: true, mode: status.mode, identity: status.identity }
+            : { running: false, stale: status.stale !== undefined };
+        },
+        inspectService: () => inspectManagedService(),
+        run,
+        probe: (signal) => waitForRuntimeIdentity(runtimeDataDirectory, signal),
+        timeoutMs,
+      });
+    },
   });
 }
 
@@ -979,6 +1004,13 @@ export async function inspectManagedServiceState(
     metadata = await lstat(definition.definitionPath);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      if (loaded) {
+        return Object.freeze({
+          state: "inactive",
+          adapter: definition.platform,
+          recoveryCommand: null,
+        });
+      }
       return Object.freeze({
         state: "absent",
         adapter: null,

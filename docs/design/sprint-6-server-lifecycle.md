@@ -44,9 +44,7 @@ Runtime activation and global controller installation are separate operations. U
 
 ### Managed Service Handoff
 
-Managed persistence is explicit and distinct from foreground start. The server may offer a platform adapter for `launchd` on macOS and `systemd` on Linux. Before enabling it, output must identify the adapter and instruct the operator to review the generated service definition. Status reports the definition independently as active, inactive, or absent. Update restarts an active managed runtime, leaves an inactive definition stopped after preparing the verified artifact, and leaves an absent service in the foreground-only state.
-
-The server does not own a command that loads platform service state. For an existing inactive definition it names the exact structured platform argv: restart/kickstart when the service remains loaded, or bootstrap/enable when it is unloaded but defined. Creating, rewriting, or loading service definitions remains outside this lifecycle slice.
+Managed persistence is explicit and distinct from foreground start. `service install` installs and starts a loopback-only platform service through `launchd` on macOS or a systemd user service on Linux. It requires initialized data, a verified prepared runtime, and no foreground process. It is idempotent, safely replaces only recognized Borg-owned stale definitions, and rolls back to the prior service or a confirmed stopped state when controller activation fails. Status reports the definition independently as active, inactive, or absent. Update restarts an active managed runtime, leaves an inactive definition stopped after preparing the verified artifact, and leaves an absent service in the foreground-only state.
 
 ### Non-TTY
 
@@ -88,11 +86,11 @@ running evidence or stage and activate a verified update with:
 borg-mcp-server status
 borg-mcp-server version
 borg-mcp-server update
-borg-mcp-server stop
+borg-mcp-server service install
 borg-mcp-server recover-stale-lock
 ```
 
-When stdout is not a terminal, `status`, `version`, `update`, `stop`, and
+When stdout is not a terminal, `status`, `version`, `update`, `service install`, and
 `recover-stale-lock` emit one bounded JSON record. The installed controller and the prepared/running runtime
 are separate layers: installing a newer CLI does not activate its server
 artifact, and activating a newer runtime does not rewrite the globally installed
@@ -122,11 +120,12 @@ starts a process, or acts on an unsafe, malformed, possibly-live, or
 identity-unverifiable lock. Run status again afterward; if a managed definition
 is inactive, follow the separately reported platform command.
 
-`stop` unloads the existing managed launchd/systemd service and waits for its
-runtime lock to disappear. It is idempotent and preserves server data, TLS
-identity, credentials, cubes, artifacts, and service definition. A foreground
-server is owned by its terminal instead, so `stop` directs the operator to use
-Ctrl-C there rather than signaling a PID inferred from an untrusted lock.
+`service install` atomically writes an owner-private definition and log sinks,
+starts the verified current runtime, and accepts success only after its runtime
+identity matches the prepared artifact. Repeated installation is idempotent.
+Controller failure restores a recognized previous definition when possible or
+reports a confirmed stopped state. A foreground server is owned by its terminal
+and must be stopped there with Ctrl-C.
 
 The server library provides matching launchd and systemd adapter definitions
 that point at the atomically selected `current` artifact and preserve

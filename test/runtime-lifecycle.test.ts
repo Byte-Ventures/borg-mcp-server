@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createRuntimeLifecycle,
   createUnixNpmArtifactUnpacker,
+  inspectActiveRuntimeArtifact,
   RuntimeArtifactInstallError,
 } from "../src/runtime-lifecycle.js";
 import type { RuntimeBuildIdentity } from "../src/runtime-identity.js";
@@ -175,6 +176,7 @@ describe("immutable runtime lifecycle", () => {
       artifact,
     })).resolves.toEqual(artifact);
     expect(await realpath(join(fixture.runtimeRoot, "current"))).toBe(artifact.artifactDirectory);
+    await expect(inspectActiveRuntimeArtifact(fixture.runtimeRoot)).resolves.toEqual(artifact);
     await expect(lifecycle.stage({
       runtimeRoot: fixture.runtimeRoot,
       tarballPath: archive.path,
@@ -191,6 +193,8 @@ describe("immutable runtime lifecycle", () => {
       runtimeRoot: fixture.runtimeRoot,
       artifact,
     })).rejects.toThrow("Runtime artifact content changed.");
+    await expect(inspectActiveRuntimeArtifact(fixture.runtimeRoot))
+      .rejects.toThrow("Runtime artifact content changed.");
   });
 
   it("binds the unpack consumer to verified bytes despite source-path replacement", async () => {

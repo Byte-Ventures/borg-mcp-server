@@ -19,10 +19,15 @@ export interface ManagedServiceDefinition {
   readonly label: string;
   readonly definitionPath: string;
   readonly content: string;
+  readonly ownershipMarker: string;
+  readonly stdoutPath: string;
+  readonly stderrPath: string;
   readonly install: readonly [string, ...string[]];
   readonly restart: readonly [string, ...string[]];
   readonly recoverLoaded: readonly [string, ...string[]];
-  readonly stop: readonly [string, ...string[]];
+  readonly unload: readonly [string, ...string[]];
+  readonly rollbackRemove: readonly [string, ...string[]];
+  readonly reload: readonly [string, ...string[]] | null;
   readonly status: readonly [string, ...string[]];
 }
 
@@ -35,7 +40,7 @@ export function createManagedServiceDefinition(input: ManagedServiceInput): Mana
     input.dataDirectory,
     input.definitionPath,
   ]) {
-    if (!isAbsolute(path) || /[\r\n\0]/u.test(path)) {
+    if (!isAbsolute(path) || /[\u0000-\u001f\u007f]/u.test(path)) {
       throw new Error("Managed service paths must be absolute and single-line.");
     }
   }
@@ -48,6 +53,9 @@ export function createManagedServiceDefinition(input: ManagedServiceInput): Mana
     throw new Error("Managed service port is invalid.");
   }
   const entrypoint = join(input.runtimeRoot, "current", "package", "dist", "main.js");
+  const stdoutPath = join(input.dataDirectory, "logs", "managed.stdout.log");
+  const stderrPath = join(input.dataDirectory, "logs", "managed.stderr.log");
+  const ownershipMarker = `borgmcp-server-owned:${label}`;
   const nodeWarningArgs = node22WarningArgs(input.nodeVersion);
   if (input.platform === "launchd") {
     const domain = input.launchdDomain;
@@ -64,13 +72,21 @@ export function createManagedServiceDefinition(input: ManagedServiceInput): Mana
         input.nodeExecutable,
         entrypoint,
         input.dataDirectory,
+        stdoutPath,
+        stderrPath,
         input.port,
         nodeWarningArgs,
+        ownershipMarker,
       ),
+      ownershipMarker,
+      stdoutPath,
+      stderrPath,
       install: ["launchctl", "bootstrap", domain, input.definitionPath] as const,
       restart: ["launchctl", "kickstart", "-k", service] as const,
       recoverLoaded: ["launchctl", "kickstart", service] as const,
-      stop: ["launchctl", "bootout", service] as const,
+      unload: ["launchctl", "bootout", service] as const,
+      rollbackRemove: ["launchctl", "bootout", service] as const,
+      reload: null,
       status: ["launchctl", "print", service] as const,
     });
   }
@@ -83,13 +99,21 @@ export function createManagedServiceDefinition(input: ManagedServiceInput): Mana
       input.nodeExecutable,
       entrypoint,
       input.dataDirectory,
+      stdoutPath,
+      stderrPath,
       input.port,
       nodeWarningArgs,
+      ownershipMarker,
     ),
+    ownershipMarker,
+    stdoutPath,
+    stderrPath,
     install: ["systemctl", "--user", "enable", "--now", label] as const,
     restart: ["systemctl", "--user", "restart", label] as const,
     recoverLoaded: ["systemctl", "--user", "restart", label] as const,
-    stop: ["systemctl", "--user", "stop", label] as const,
+    unload: ["systemctl", "--user", "stop", label] as const,
+    rollbackRemove: ["systemctl", "--user", "disable", "--now", label] as const,
+    reload: ["systemctl", "--user", "daemon-reload"] as const,
     status: [
       "systemctl",
       "--user",
@@ -105,15 +129,22 @@ function launchdDefinition(
   nodeExecutable: string,
   entrypoint: string,
   dataDirectory: string,
+  stdoutPath: string,
+  stderrPath: string,
   port: number | undefined,
   nodeWarningArgs: readonly string[],
+  ownershipMarker: string,
 ): string {
   return `<?xml version="1.0" encoding="UTF-8"?>
+<!-- ${ownershipMarker} -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>Label</key><string>${xml(label)}</string>
   <key>ProgramArguments</key><array><string>${xml(nodeExecutable)}</string>${nodeWarningArgs.map((arg) => `<string>${xml(arg)}</string>`).join("")}<string>${xml(entrypoint)}</string><string>start</string>${port === undefined ? "" : `<string>--port</string><string>${port}</string>`}</array>
   <key>EnvironmentVariables</key><dict><key>BORG_SERVER_DATA_DIR</key><string>${xml(dataDirectory)}</string><key>BORG_SERVER_PROCESS_MODE</key><string>managed</string></dict>
+  <key>StandardOutPath</key><string>${xml(stdoutPath)}</string>
+  <key>StandardErrorPath</key><string>${xml(stderrPath)}</string>
+  <key>Umask</key><integer>63</integer>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
   <key>ProcessType</key><string>Background</string>
@@ -126,10 +157,14 @@ function systemdDefinition(
   nodeExecutable: string,
   entrypoint: string,
   dataDirectory: string,
+  stdoutPath: string,
+  stderrPath: string,
   port: number | undefined,
   nodeWarningArgs: readonly string[],
+  ownershipMarker: string,
 ): string {
-  return `[Unit]
+  return `# ${ownershipMarker}
+[Unit]
 Description=Borg MCP server (${label})
 
 [Service]
@@ -137,6 +172,9 @@ Type=simple
 ExecStart=${systemdQuote(nodeExecutable)}${nodeWarningArgs.map((arg) => ` ${systemdQuote(arg)}`).join("")} ${systemdQuote(entrypoint)} start${port === undefined ? "" : ` --port ${port}`}
 Environment=${systemdQuote(`BORG_SERVER_DATA_DIR=${dataDirectory}`)}
 Environment="BORG_SERVER_PROCESS_MODE=managed"
+UMask=0077
+StandardOutput=${systemdQuote(`append:${stdoutPath}`)}
+StandardError=${systemdQuote(`append:${stderrPath}`)}
 Restart=on-failure
 RestartSec=2
 TimeoutStopSec=15
@@ -157,5 +195,5 @@ function xml(value: string): string {
 }
 
 function systemdQuote(value: string): string {
-  return `"${value.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
+  return `"${value.replaceAll("%", "%%").replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
 }

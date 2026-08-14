@@ -25,6 +25,47 @@ or `ca.crt` is absent or invalid, before deleting any server state. Use the
 separate documented CA-loss recovery procedure only when the CA material is
 genuinely unavailable.
 
+## Managed service
+
+`borg-mcp-server start` is always foreground-only. To install and start a
+loopback-only background service after setup, run:
+
+```sh
+borg-mcp-server service install
+```
+
+The command requires a complete initialized data directory, a verified prepared
+runtime, and no foreground server process. It installs a launchd agent on macOS
+or a systemd user service on Linux. Repeating the command is idempotent. A stale
+definition is replaced only when it is an owner-private regular file carrying
+Borg's ownership marker, or when it exactly matches the markerless launchd or
+systemd definition family published by `borgmcp-server@0.18.1`: the expected
+label, data directory, managed process mode, absolute Node executable, runtime
+target ending in `/current/package/dist/main.js`, and platform start/restart
+controls must all match that generated shape. Other unmarked definitions are
+left untouched.
+
+The definition and its stdout/stderr sinks are owner-private, and the managed
+process uses umask `077`. Logs are written under
+`~/.borg/server/logs/managed.stdout.log` and
+`~/.borg/server/logs/managed.stderr.log` when the default data directory is in
+use. `borg-mcp-server status` reports whether the service is active, inactive,
+or absent and identifies its adapter. Use the platform service manager for later
+service control:
+
+```sh
+# macOS
+launchctl kickstart -k gui/$(id -u)/ai.borgmcp.server
+launchctl bootout gui/$(id -u)/ai.borgmcp.server
+
+# Linux
+systemctl --user restart ai.borgmcp.server
+systemctl --user stop ai.borgmcp.server
+```
+
+The server has no public `stop` command; a foreground process remains owned by
+its terminal and stops with Ctrl-C.
+
 ## Dashboard
 
 `borg-mcp-server start` remains a foreground command. In an interactive

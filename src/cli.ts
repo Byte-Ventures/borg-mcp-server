@@ -2,6 +2,9 @@ import type { ServerService } from "./service.js";
 import { sanitizeTerminalText } from "./dashboard.js";
 import { RuntimeUpdateFailure } from "./runtime-operator.js";
 import { SERVER_PACKAGE_VERSION } from "./runtime-identity.js";
+import { ManagedServiceInstallError } from "./managed-service-install.js";
+import { resolveBindOptions } from "./network-policy.js";
+import { operatorPublicDetails } from "./operator-error.js";
 
 export interface CliIo {
   readonly stdout: (message: string) => void;
@@ -14,12 +17,12 @@ const usage = `Usage: borg-mcp-server <command> [options]
 Commands:
   setup [--reinitialize]  Prepare an offline server installation
   cert-reissue --host <ip>  Add a private-LAN address to the server certificate
-  start    Start the server process
+  start    Start the server process in the foreground; stop it with Ctrl-C
   dashboard [--ascii]  View the running local server without stopping it
   status [--json]  Report exact local runtime evidence
   version [--json]  Report the installed controller version
   update [--json]  Verify the latest runtime and report any controller step
-  stop [--json]  Stop the managed local server
+  service install [--json]  Install and start the loopback-only managed service
   recover-stale-lock [--json]  Preserve a safely identified stale runtime lock
   invite [<client-name>]  Create a named client enrollment invitation interactively.
            An enrolled client has no cube access until it is granted.
@@ -52,7 +55,12 @@ live. Client listing, rotation, revocation, and grant changes are operator-only
 live-safe operations; the running server observes committed changes on the next
 request.
 
-Stop the server before setup or reinitialization.
+Before setup or reinitialization, stop the server:
+  Foreground: press Ctrl-C in its owning terminal.
+  Managed service:
+    macOS: launchctl bootout gui/$(id -u)/ai.borgmcp.server
+    Linux: systemctl --user stop ai.borgmcp.server
+See docs/operator-reference.md#managed-service for details.
 
 Invitation access:
   read    observe: discover, attach as observer, and read
@@ -118,6 +126,12 @@ export async function runCli(
             "  borg-mcp-server start",
             "Leave that terminal open while the server is running.",
           );
+          if (resolveBindOptions({ host: result.bindHost, lanConsent: true }).mode === "loopback") {
+            lines.push(
+              "Or install and start a loopback-only background service:",
+              "  borg-mcp-server service install",
+            );
+          }
         }
         io.stdout(lines.join("\n"));
         return 0;
@@ -133,6 +147,14 @@ export async function runCli(
           "Next, run:",
           "  borg-mcp-server start",
           "Leave that terminal open while the server is running.",
+        );
+        if (resolveBindOptions({ host: result.bindHost, lanConsent: true }).mode === "loopback") {
+          lines.push(
+            "Or install and start a loopback-only background service:",
+            "  borg-mcp-server service install",
+          );
+        }
+        lines.push(
           "After installing the borg client, open a second terminal in your Git repository and run:",
           "  borg assimilate",
         );
@@ -199,21 +221,60 @@ export async function runCli(
       }
       return runtimeLock.state === "stale" ? 1 : 0;
     }
-    case "stop": {
-      if (extraArgs.length > 1 || (extraArgs.length === 1 && extraArgs[0] !== "--json") ||
-          service.stop === undefined) return invalidArguments(io);
-      const result = await service.stop();
-      const machine = extraArgs[0] === "--json" || io.isTTY === false;
-      if (machine) {
-        io.stdout(JSON.stringify({ status: result.outcome, data_identity: "preserved" }));
-      } else if (result.outcome === "stopped") {
-        io.stdout("Managed local server stopped.\nData and identity: preserved\nNext: borg-mcp-server start");
-      } else if (result.outcome === "already-stopped") {
-        io.stdout("Local server is already stopped.\nData and identity: preserved\nNext: borg-mcp-server start");
-      } else {
-        io.stdout("The local server is running in the foreground.\nStop it with Ctrl-C in its owning terminal.");
+    case "service": {
+      const [subcommand, ...serviceArgs] = extraArgs;
+      if (subcommand !== "install" || serviceArgs.length > 1 ||
+          (serviceArgs.length === 1 && serviceArgs[0] !== "--json")) return invalidArguments(io);
+      if (service.installService === undefined) {
+        io.stderr("Managed service installation is unavailable.");
+        return 1;
       }
-      return result.outcome === "foreground-action-required" ? 1 : 0;
+      const machine = serviceArgs[0] === "--json" || io.isTTY === false;
+      let result: Awaited<ReturnType<NonNullable<ServerService["installService"]>>>;
+      try {
+        result = await service.installService();
+      } catch (error) {
+        if (error instanceof ManagedServiceInstallError) {
+          renderServiceInstallFailure(error, io, machine);
+          return 1;
+        }
+        const operatorFailure = operatorPublicDetails(error);
+        if (operatorFailure === null) throw error;
+        renderServiceInstallRefusal(operatorFailure, io, machine);
+        return 1;
+      }
+      if (machine) {
+        io.stdout(JSON.stringify({
+          status: result.outcome,
+          artifact: `borgmcp-server@${result.artifact.version}`,
+          artifact_integrity: result.artifact.integrity,
+          build_identity: result.runningIdentity.source_sha,
+          mode: "managed",
+          service_adapter: result.adapter,
+          service_state: "active",
+          logs: { stdout: result.stdoutPath, stderr: result.stderrPath },
+          data_identity: "preserved",
+          next_action: "borg-mcp-server status",
+        }));
+      } else {
+        io.stdout([
+          result.outcome === "already-installed"
+            ? "Managed local server is already installed and running."
+            : "Managed local server installed and started.",
+          `Artifact: borgmcp-server@${result.artifact.version} (${result.artifact.integrity})`,
+          `Build identity: ${result.runningIdentity.source_sha ?? "unavailable"}`,
+          `Adapter: ${result.adapter}`,
+          `Managed stop: ${result.adapter === "launchd"
+            ? "launchctl bootout gui/$(id -u)/ai.borgmcp.server"
+            : "systemctl --user stop ai.borgmcp.server"}`,
+          "Reference: docs/operator-reference.md#managed-service",
+          `Standard output: ${sanitizeTerminalText(result.stdoutPath)}`,
+          `Standard error: ${sanitizeTerminalText(result.stderrPath)}`,
+          "Data and identity: preserved",
+          "Next: borg-mcp-server status",
+        ].join("\n"));
+      }
+      return 0;
     }
     case "update": {
       if (extraArgs.length > 1 || (extraArgs.length === 1 && extraArgs[0] !== "--json") ||
@@ -351,6 +412,50 @@ export async function runCli(
       io.stderr("Unknown command.");
       return 1;
   }
+}
+
+function renderServiceInstallFailure(
+  failure: ManagedServiceInstallError,
+  io: CliIo,
+  machine: boolean,
+): void {
+  if (machine) {
+    io.stdout(JSON.stringify({
+      status: "failed",
+      error_code: "SERVICE_INSTALL_FAILED",
+      recovery: failure.recovery,
+      data_identity: "preserved",
+    }));
+    return;
+  }
+  io.stderr([
+    "Managed service installation did not complete.",
+    failure.recovery === "restored"
+      ? "The previous managed service was restored."
+      : failure.recovery === "stopped"
+        ? "The server stopped safely."
+        : "Recovery could not be confirmed; inspect server status.",
+    "Data and identity: preserved",
+    "Next: borg-mcp-server status",
+  ].join("\n"));
+}
+
+function renderServiceInstallRefusal(
+  failure: Readonly<{ code: string; message: string }>,
+  io: CliIo,
+  machine: boolean,
+): void {
+  if (machine) {
+    io.stdout(JSON.stringify({
+      status: "failed",
+      error_code: failure.code,
+      message: failure.message,
+      recovery: "not-started",
+      data_identity: "preserved",
+    }));
+    return;
+  }
+  io.stderr(`Server command failed: ${failure.message}`);
 }
 
 function renderUpdateFailure(failure: RuntimeUpdateFailure, io: CliIo, machine: boolean): void {

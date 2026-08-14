@@ -13,6 +13,7 @@ import type { HttpsServerOptions, RunningServer } from "../src/https-server.js";
 import { openStore, type LivenessStore } from "../src/store.js";
 import {
   assertLanCaKeyOffline,
+  assertManagedServiceInstallation,
   acquireRuntimeLock,
   acquireInvitationMintLock,
   bindPortableOwnerCredentialPort,
@@ -1076,10 +1077,31 @@ describe("node server service", () => {
       const unsafeDefinition = { ...definition, definitionPath: directory };
       run.mockRejectedValueOnce(serviceProbeError(113));
       await expect(inspectManagedServiceState(unsafeDefinition, run)).rejects.toThrow(
-        "Ensure the managed service definition is a regular file, then retry.",
+        "Ensure the managed service definition is an owner-private regular file, then retry.",
       );
     } finally {
       await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("requires a complete loopback installation before managed service installation", async () => {
+    const loopback = await realpath(await mkdtemp(join(tmpdir(), "borg-managed-data-loopback-")));
+    const lan = await realpath(await mkdtemp(join(tmpdir(), "borg-managed-data-lan-")));
+    try {
+      await bootstrapServer(loopback, "127.0.0.1");
+      await expect(assertManagedServiceInstallation(loopback)).resolves.toBeUndefined();
+      await unlink(join(loopback, "server.crt"));
+      await expect(assertManagedServiceInstallation(loopback)).rejects.toThrow(
+        "Run borg-mcp-server setup before installing the managed service.",
+      );
+
+      await bootstrapServer(lan, "192.168.1.20");
+      await expect(assertManagedServiceInstallation(lan)).rejects.toThrow(
+        "Managed service installation is loopback-only.",
+      );
+    } finally {
+      await rm(loopback, { recursive: true, force: true });
+      await rm(lan, { recursive: true, force: true });
     }
   });
 
@@ -1456,7 +1478,7 @@ describe("node server service", () => {
     }
   });
 
-  it("stops only managed runtimes and waits for lock disappearance", async () => {
+  it("retains bounded managed unload mechanics for update and install rollback", async () => {
     const managed = {
       running: true as const,
       pid: 123,

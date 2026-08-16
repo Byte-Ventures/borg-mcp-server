@@ -9,6 +9,7 @@ import {
   ErrorCode,
   HEALTH_PATH,
   PROTOCOL_INFO_PATH,
+  PROTOCOL_LIMIT_CEILINGS,
   PROTOCOL_VERSION,
   REPOSITORY_CUBE_ASSOCIATION_PATH,
   REPOSITORY_CUBE_RESOLVE_PATH,
@@ -50,7 +51,7 @@ export const DEFAULT_SERVICE_LIMITS: ServiceLimits = {
   maxRateLimitEntries: 1_024,
   maxStreamsPerCredential: 8,
   maxHeaderBytes: 16_384,
-  maxRequestBodyBytes: 65_536,
+  maxRequestBodyBytes: PROTOCOL_LIMIT_CEILINGS.max_request_bytes,
   maxRequestsPerSocket: 0,
   requestTimeoutMs: 15_000,
   tlsHandshakeTimeoutMs: 10_000,
@@ -309,11 +310,44 @@ async function handleRequest(
   }
 
   const path = parseRequestPath(request.url);
+  if (path === null) {
+    request.resume();
+    sendEmpty(response, 404, true);
+    return;
+  }
+  const authorization = request.headers.authorization;
+  let authentication: Principal | undefined;
+  if (isAuthenticatedPath(path) && context.authorizeCoordination !== undefined) {
+    const result = await context.authorizeCoordination(authorization, signal);
+    trace.authentication = typeof result === "string" ? result : "accepted";
+    if (signal.aborted) return;
+    if (typeof result === "string") {
+      request.resume();
+      if (result === "cube-deleted") {
+        sendJson(response, 410, protocolError(ErrorCode.CUBE_DELETED, "The cube was deleted."));
+        return;
+      }
+      if (result === "evicted") {
+        sendJson(response, 410, protocolError(ErrorCode.DRONE_EVICTED, "Authentication failed."));
+        return;
+      }
+      const code = result === "revoked" ? ErrorCode.SESSION_REVOKED
+        : result === "rejected" ? ErrorCode.SESSION_REJECTED
+        : result === "missing" || authorization === undefined ? "AUTH_MISSING" : "AUTH_INVALID";
+      sendJson(response, 401, protocolError(code, "Authentication failed."));
+      return;
+    }
+    authentication = result;
+    trace.principal = result;
+  }
 
-  const requestBody = await readRequestBody(request, limits.maxRequestBodyBytes);
+  const requestBody = await readRequestBody(
+    request,
+    authentication === undefined ? Math.min(limits.maxRequestBodyBytes, 65_536) : limits.maxRequestBodyBytes,
+  );
   if (requestBody === "oversized") {
     if (isCoordinationPath(path)) {
-      sendJson(response, 413, protocolError("CONTENT_TOO_LARGE", "Request body is too large."), true);
+      sendJson(response, 413, protocolError("CONTENT_TOO_LARGE", "Request body is too large."));
     } else {
       sendEmpty(response, 413, true);
     }
@@ -362,7 +396,7 @@ async function handleRequest(
     return;
   }
 
-  if (isAuthenticatedPath(path) && context.authorizeCoordination !== undefined) {
+  if (authentication !== undefined) {
     let decoded: unknown;
     if (requestBody.length === 0) {
       decoded = undefined;
@@ -373,26 +407,6 @@ async function handleRequest(
         decoded = undefined;
       }
     }
-    const authorization = request.headers.authorization;
-    const authentication = await context.authorizeCoordination(authorization, signal);
-    trace.authentication = typeof authentication === "string" ? authentication : "accepted";
-    if (signal.aborted) return;
-    if (typeof authentication === "string") {
-      if (authentication === "cube-deleted") {
-        sendJson(response, 410, protocolError(ErrorCode.CUBE_DELETED, "The cube was deleted."));
-        return;
-      }
-      if (authentication === "evicted") {
-        sendJson(response, 410, protocolError(ErrorCode.DRONE_EVICTED, "Authentication failed."));
-        return;
-      }
-      const code = authentication === "revoked" ? ErrorCode.SESSION_REVOKED
-        : authentication === "rejected" ? ErrorCode.SESSION_REJECTED
-        : authentication === "missing" || authorization === undefined ? "AUTH_MISSING" : "AUTH_INVALID";
-      sendJson(response, 401, protocolError(code, "Authentication failed."));
-      return;
-    }
-    trace.principal = authentication;
     if (path === RUNTIME_INFO_PATH) {
       if (request.method !== "GET" || requestBody.length !== 0) {
         sendEmpty(response, request.method === "GET" ? 400 : 405, true);
@@ -483,6 +497,7 @@ function debugRoute(rawUrl: string | undefined): DebugRoute {
   if (/^\/api\/cubes\/[0-9a-f-]{36}\/logs$/iu.test(path)) return "cube_logs";
   if (/^\/api\/cubes\/[0-9a-f-]{36}\/acks$/iu.test(path)) return "cube_acks";
   if (/^\/api\/cubes\/[0-9a-f-]{36}\/decisions$/iu.test(path)) return "cube_decisions";
+  if (/^\/api\/cubes\/[0-9a-f-]{36}\/documents(?:\/[^/]+)?$/iu.test(path)) return "cube_documents";
   if (/^\/api\/cubes\/[0-9a-f-]{36}\/stream$/iu.test(path)) return "cube_stream";
   return "unknown";
 }
@@ -503,26 +518,25 @@ async function readRequestBody(
   const declaredLength = request.headers["content-length"];
   if (declaredLength !== undefined) {
     if (!/^\d+$/u.test(declaredLength)) {
-      request.resume();
+      for await (const _chunk of request) { /* Drain without retaining an invalid body. */ }
       return "oversized";
     }
     if (Number(declaredLength) > maxBytes) {
-      request.resume();
+      for await (const _chunk of request) { /* Drain without retaining an oversized body. */ }
       return "oversized";
     }
   }
 
   let bytes = 0;
+  let oversized = false;
   const chunks: Buffer[] = [];
   for await (const chunk of request) {
     const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
     bytes += buffer.length;
-    if (bytes > maxBytes) {
-      request.resume();
-      return "oversized";
-    }
-    chunks.push(buffer);
+    if (bytes > maxBytes) oversized = true;
+    if (!oversized) chunks.push(buffer);
   }
+  if (oversized) return "oversized";
   return Buffer.concat(chunks, bytes);
 }
 

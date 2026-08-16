@@ -739,6 +739,65 @@ export const STORE_MIGRATIONS: readonly Migration[] = Object.freeze([
       ALTER TABLE drone_sessions ADD COLUMN initial_log_cursor_created_at TEXT;
     `,
   },
+  {
+    version: 24,
+    name: "cube_documents",
+    sql: `
+      CREATE TABLE documents (
+        id TEXT PRIMARY KEY,
+        cube_id TEXT NOT NULL REFERENCES cubes(id) ON DELETE CASCADE,
+        title TEXT NOT NULL,
+        content_type TEXT NOT NULL CHECK (content_type IN ('text/markdown', 'text/plain')),
+        content TEXT NOT NULL,
+        size_bytes INTEGER NOT NULL CHECK (size_bytes >= 0),
+        state TEXT NOT NULL CHECK (state IN ('active', 'superseded', 'removed')),
+        supersedes TEXT,
+        superseded_by TEXT,
+        author_kind TEXT NOT NULL CHECK (author_kind IN ('operator', 'client', 'drone-session')),
+        author_id TEXT NOT NULL,
+        author_drone_id TEXT,
+        author_label TEXT,
+        author_role TEXT,
+        created_at TEXT NOT NULL,
+        removed_by_kind TEXT CHECK (
+          removed_by_kind IS NULL OR removed_by_kind IN ('operator', 'client', 'drone-session')
+        ),
+        removed_by_id TEXT,
+        removed_by_drone_id TEXT,
+        removed_by_label TEXT,
+        removed_by_role TEXT,
+        removed_at TEXT,
+        CHECK (state = 'removed' OR ((state = 'active') = (superseded_by IS NULL))),
+        CHECK ((state = 'removed') = (removed_at IS NOT NULL)),
+        CHECK ((removed_at IS NULL) = (removed_by_kind IS NULL AND removed_by_id IS NULL)),
+        CHECK ((removed_by_kind IS NULL) = (removed_by_id IS NULL)),
+        UNIQUE (id, cube_id),
+        FOREIGN KEY (supersedes, cube_id) REFERENCES documents(id, cube_id),
+        FOREIGN KEY (superseded_by, cube_id) REFERENCES documents(id, cube_id)
+      ) STRICT;
+
+      CREATE UNIQUE INDEX documents_supersedes_idx
+        ON documents (supersedes) WHERE supersedes IS NOT NULL;
+      CREATE INDEX documents_cube_state_idx
+        ON documents (cube_id, state, created_at, id);
+      CREATE UNIQUE INDEX activity_log_id_cube_idx
+        ON activity_log (id, cube_id);
+
+      CREATE TABLE activity_log_documents (
+        entry_id TEXT NOT NULL REFERENCES activity_log(id) ON DELETE CASCADE,
+        document_id TEXT NOT NULL REFERENCES documents(id),
+        cube_id TEXT NOT NULL,
+        ordinal INTEGER NOT NULL CHECK (ordinal BETWEEN 0 AND 99),
+        PRIMARY KEY (entry_id, ordinal),
+        UNIQUE (entry_id, document_id),
+        FOREIGN KEY (entry_id, cube_id) REFERENCES activity_log(id, cube_id) ON DELETE CASCADE,
+        FOREIGN KEY (document_id, cube_id) REFERENCES documents(id, cube_id)
+      ) STRICT, WITHOUT ROWID;
+
+      CREATE INDEX activity_log_documents_document_idx
+        ON activity_log_documents (document_id, entry_id);
+    `,
+  },
 ]);
 
 interface AppliedMigrationRow {

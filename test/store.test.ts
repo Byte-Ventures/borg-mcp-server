@@ -297,7 +297,15 @@ describe("Principal to ScopedStore isolation", () => {
       .toThrow(ScopedStoreError);
     expect(() => runtime.forPrincipal(clientPrincipal(outsiderId)).deleteCube(ids.cubeA))
       .toThrow(ScopedStoreError);
-    const entry = manager.appendLog(ids.cubeA, { message: "deleted activity" });
+    const document = manager.putDocument(ids.cubeA, {
+      title: "Deleted evidence",
+      contentType: "text/plain",
+      content: "retained only while the cube exists",
+    });
+    const entry = manager.appendLog(ids.cubeA, {
+      message: "deleted activity",
+      documents: [document.id],
+    });
     manager.acknowledge(ids.cubeA, entry.id, "ack");
     manager.recordDecision(ids.cubeA, { topic: "deleted-topic", decision: "deleted decision" });
     let deletionSignals = 0;
@@ -326,7 +334,7 @@ describe("Principal to ScopedStore isolation", () => {
     const database = new DatabaseSync(join(directory, "borg.db"), { readOnly: true });
     for (const table of [
       "client_cube_grants", "roles", "drones", "drone_sessions",
-      "activity_log", "activity_acks", "decisions", "expired_activity_cursors",
+      "activity_log", "activity_acks", "activity_log_documents", "documents", "decisions", "expired_activity_cursors",
       "cube_create_bindings", "repository_associations",
     ]) {
       expect(database.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get())

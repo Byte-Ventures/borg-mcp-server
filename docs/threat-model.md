@@ -176,7 +176,7 @@ v1 scope.
 - Activity storage retains at most 10,000 entries and 10,000 cursor tombstones per cube by default;
   pruning is transactional and cascades recipients and acknowledgements before publishing the new
   entry. Every network-reachable growth mutation, including enrollment, attach/reissue, acknowledgement,
-  decision history, directives, and activity, fails closed with a secret-free `CAPACITY_EXCEEDED`
+  decision history, documents, directives, and activity, fails closed with a secret-free `CAPACITY_EXCEEDED`
   response before mutation when the database plus WAL/SHM reaches 1 GiB or available filesystem space
   would fall below 64 MiB. The preflight reserves at least 64 SQLite pages for indexes and metadata,
   rounds the bounded payload to whole pages, and conservatively reserves rewriting the entire current
@@ -184,6 +184,8 @@ v1 scope.
   trades usable capacity for a no-write-before-rejection guarantee, including prune/cascade paths. Operators
   may lower or raise these positive-integer bounds with
   `BORG_SERVER_MAX_ACTIVITY_ENTRIES_PER_CUBE`, `BORG_SERVER_MAX_ACTIVE_DECISION_BYTES_PER_CUBE`,
+  `BORG_SERVER_MAX_DOCUMENT_BYTES`, `BORG_SERVER_MAX_ACTIVE_DOCUMENT_BYTES_PER_CUBE`,
+  `BORG_SERVER_LOG_ENTRY_ADVISORY_BYTES`, `BORG_SERVER_MAX_LOG_ENTRY_BYTES`,
   `BORG_SERVER_MAX_DATABASE_BYTES`, and
   `BORG_SERVER_MIN_FREE_DISK_BYTES`; changes require restart and must fit the host backup policy.
 
@@ -197,6 +199,7 @@ v1 scope.
 | Cube directive update | Directive replacement and SQLite index/page growth |
 | Role create/update/section patch/delete; role rationale read | Role insertion, sparse field replacement, default transition, targeted playbook fragment replacement, guarded deletion with evicted-drone retarget, or one named section read without mutation, bounded to 51,200 bytes |
 | Activity append | Log/recipient insertion, cursor tombstone insertion, and pruning cascades |
+| Document create/remove and log citation | Immutable text insertion, linear same-cube supersession, audit-retained removal, and ordered citation binding |
 | Activity acknowledgement/claim | Acknowledgement insertion |
 | Decision ratification | Active-decision supersession and immutable history insertion |
 
@@ -204,6 +207,11 @@ v1 scope.
   dynamic code, remote tools, outbound-cloud requests, or arbitrary SQL. Subprocess use is confined to
   local runtime and managed-service lifecycle operations. Offline bootstrap is also exercised with TCP,
   UDP, and `fetch` egress actively intercepted.
+- Document titles and content are cube-confidential data. Cross-cube exact-id
+  operations collapse to secret-free not-found responses. Debug diagnostics and
+  the local dashboard never include document bodies or titles. Removal is
+  logical retention for audit resolution, not secure erasure; backups retain the
+  same data according to the operator's backup policy.
 
 ## Acceptance matrix
 

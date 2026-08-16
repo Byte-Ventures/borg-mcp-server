@@ -823,6 +823,10 @@ describe("node server service", () => {
       BORG_SERVER_TLS_CA_FILE: "/private/ca.crt",
       BORG_SERVER_MAX_DATABASE_BYTES: "2000000000",
       BORG_SERVER_MAX_ACTIVE_DECISION_BYTES_PER_CUBE: "32768",
+      BORG_SERVER_MAX_DOCUMENT_BYTES: "65536",
+      BORG_SERVER_MAX_ACTIVE_DOCUMENT_BYTES_PER_CUBE: "524288",
+      BORG_SERVER_LOG_ENTRY_ADVISORY_BYTES: "1024",
+      BORG_SERVER_MAX_LOG_ENTRY_BYTES: "4096",
       BORG_SERVER_CONTEXT_GUIDELINE_BYTES: "8192",
       BORG_TOKEN: "must-not-cross-boundary",
       UNRELATED_REFRESH_TOKEN: "must-not-cross-boundary",
@@ -832,6 +836,10 @@ describe("node server service", () => {
       BORG_SERVER_TLS_CA_FILE: "/private/ca.crt",
       BORG_SERVER_MAX_DATABASE_BYTES: "2000000000",
       BORG_SERVER_MAX_ACTIVE_DECISION_BYTES_PER_CUBE: "32768",
+      BORG_SERVER_MAX_DOCUMENT_BYTES: "65536",
+      BORG_SERVER_MAX_ACTIVE_DOCUMENT_BYTES_PER_CUBE: "524288",
+      BORG_SERVER_LOG_ENTRY_ADVISORY_BYTES: "1024",
+      BORG_SERVER_MAX_LOG_ENTRY_BYTES: "4096",
       BORG_SERVER_CONTEXT_GUIDELINE_BYTES: "8192",
     });
   });
@@ -848,6 +856,10 @@ describe("node server service", () => {
     })).toEqual({
       maxActivityEntriesPerCube: 2_500,
       maxActiveDecisionBytesPerCube: 32_768,
+      maxDocumentBytes: 65_536,
+      maxActiveDocumentBytesPerCube: 524_288,
+      logEntryAdvisoryBytes: 1_024,
+      maxLogEntryBytes: 4_096,
       contextGuidelineBytes: 8_192,
       maxDatabaseBytes: 500_000_000,
       minFreeDiskBytes: 50_000_000,
@@ -858,6 +870,14 @@ describe("node server service", () => {
       .toThrow("Set BORG_SERVER_MAX_ACTIVE_DECISION_BYTES_PER_CUBE to a positive integer.");
     expect(() => resolveStorageLimits({ BORG_SERVER_CONTEXT_GUIDELINE_BYTES: "0" }))
       .toThrow("Set BORG_SERVER_CONTEXT_GUIDELINE_BYTES to a positive integer.");
+    expect(() => resolveStorageLimits({ BORG_SERVER_MAX_DOCUMENT_BYTES: "524289" }))
+      .toThrow("Set document byte budgets to positive integers");
+    expect(() => resolveStorageLimits({
+      BORG_SERVER_MAX_DOCUMENT_BYTES: "10485760",
+      BORG_SERVER_MAX_ACTIVE_DOCUMENT_BYTES_PER_CUBE: "10485760",
+    })).toThrow("Set document byte budgets to positive integers");
+    expect(() => resolveStorageLimits({ BORG_SERVER_LOG_ENTRY_ADVISORY_BYTES: "4097" }))
+      .toThrow("Set log entry byte limits to positive integers");
   });
 
   it("requires the CA signing key to leave the runtime directory before LAN startup", async () => {

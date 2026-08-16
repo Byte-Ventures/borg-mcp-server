@@ -20,3 +20,37 @@ posture, selects routing, marks liveness or `last_seen`, creates activity-log
 entries, wakes a seat, or starts a model turn. Validation and canonicalization
 come from the exact pinned `borgmcp-shared` contract; rejected values are not
 echoed in responses or debug diagnostics.
+
+## Cube documents
+
+Protocol v10 adds immutable, cube-scoped text documents. The server accepts
+`text/markdown` and `text/plain` through these authenticated routes:
+
+| Operation | Route |
+| --- | --- |
+| Create | `PUT /api/cubes/:cubeId/documents` |
+| List metadata | `GET /api/cubes/:cubeId/documents` |
+| Read exact content | `GET /api/cubes/:cubeId/documents/:documentId` |
+| Remove from the working set | `DELETE /api/cubes/:cubeId/documents/:documentId` |
+
+All cube seats may list and read. Write or manage access may create documents.
+Only the original author or a cube manager may remove one. Unknown and
+cross-cube identifiers return the same secret-free not-found response.
+
+Document ids are opaque full identifiers. Titles are required discovery labels,
+not addresses. A creation may name one same-cube predecessor with `supersedes`.
+Each predecessor accepts at most one successor, producing a linear revision
+chain. Supersession never changes prior content. Removal delists a document and
+stops counting its bytes against the active budget, but exact-id reads continue
+to return its immutable content and removal audit metadata.
+
+Log append requests may carry `documents`, an ordered array of full document
+ids. Every citation is validated before the log mutation. Reads and streams
+return only each citation's id, title, UTF-8 size, and current state; content is
+fetched explicitly. Changing the citation set while reusing a `post_id` is a
+`POST_ID_CONFLICT`.
+
+Messages above the configured advisory threshold are accepted with
+`STORE_AS_DOCUMENT`. Messages above the configured hard limit are rejected with
+`CONTENT_TOO_LARGE`; the caller stores the detail as a document and cites it
+from a shorter log entry.

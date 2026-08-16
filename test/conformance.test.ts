@@ -52,7 +52,7 @@ describe("borgmcp-shared server adapter", () => {
           observations: {},
         },
       ]);
-      expect(report.results).toHaveLength(31);
+      expect(report.results).toHaveLength(32);
     } finally {
       await fixture.server.close();
       fixture.digester.destroy();
@@ -82,6 +82,7 @@ async function conformanceEnvironment(): Promise<{
   const createdByPrincipal = new Map<string, CreateCubeResponse>();
   const pendingCreateCapability = new Set<string>();
   const managedSessions = new Map<string, { sessionId: string; credential: string }>();
+  const sessionCredentialPrincipals = new Map<string, string>();
   const material = await generate([{ name: "commonName", value: "localhost" }], {
     algorithm: "sha256",
     keyType: "ec",
@@ -102,7 +103,6 @@ async function conformanceEnvironment(): Promise<{
   const transport = new HttpsConformanceTransport(
     server.origin,
     material.cert,
-    server.limits.maxRequestBodyBytes,
   );
 
   const environment: ConformanceEnvironment = {
@@ -116,6 +116,7 @@ async function conformanceEnvironment(): Promise<{
         createdByPrincipal.clear();
         pendingCreateCapability.clear();
         managedSessions.clear();
+        sessionCredentialPrincipals.clear();
       },
       restartAuthority: async () => {
         runtime.close();
@@ -245,9 +246,9 @@ async function conformanceEnvironment(): Promise<{
         const roleId = randomUUID();
         if (grantedCubeId === undefined) {
           runtime.maintenance.createCube({ id: cubeId, ownerId: resolvedClientId, name: "Session fixture", directive: "" });
+          runtime.maintenance.grantClientCube({ clientId: resolvedClientId, cubeId, access: "manage" });
         }
         runtime.maintenance.createRole({ id: roleId, cubeId, name: `Session ${roleId.slice(-8)}` });
-        runtime.maintenance.grantClientCube({ clientId: resolvedClientId, cubeId, access: "manage" });
         const sessionCredential = generateSecret();
         authority.attachSeat(runtime.forPrincipal(authority.authenticate(
           `Bearer ${principalCredentials.get(principal.id) ?? ""}`,
@@ -256,6 +257,7 @@ async function conformanceEnvironment(): Promise<{
           roleId,
           sessionCredential,
         });
+        sessionCredentialPrincipals.set(sessionCredential, principal.id);
         return sessionCredential;
       },
       issueSingleUseInvitation: async (principal, purpose) => {
@@ -389,6 +391,22 @@ async function conformanceEnvironment(): Promise<{
         transport.request("POST", `/api/cubes/${cube.id}/logs`, JSON.stringify(request), credential),
       appendRaw: async (credential, cube, body) =>
         transport.request("POST", `/api/cubes/${cube.id}/logs`, body, credential),
+      putDocument: async (credential, cube, request) =>
+        transport.request("PUT", `/api/cubes/${cube.id}/documents`, JSON.stringify(request),
+          documentCredential(credential, sessionCredentialPrincipals, principalCredentials)),
+      listDocuments: async (credential, cube, request) =>
+        transport.request("GET", `/api/cubes/${cube.id}/documents`, JSON.stringify(request),
+          documentCredential(credential, sessionCredentialPrincipals, principalCredentials)),
+      getDocument: async (credential, cube, request) => {
+        const id = (request as { payload: { id: string } }).payload.id;
+        return transport.request("GET", `/api/cubes/${cube.id}/documents/${encodeURIComponent(id)}`, JSON.stringify(request),
+          documentCredential(credential, sessionCredentialPrincipals, principalCredentials));
+      },
+      removeDocument: async (credential, cube, request) => {
+        const id = (request as { payload: { id: string } }).payload.id;
+        return transport.request("DELETE", `/api/cubes/${cube.id}/documents/${encodeURIComponent(id)}`, JSON.stringify(request),
+          documentCredential(credential, sessionCredentialPrincipals, principalCredentials));
+      },
       read: async (credential, cube, request) =>
         transport.request("PUT", `/api/cubes/${cube.id}/logs`, JSON.stringify(request), credential),
       ack: async (credential, cube, request) =>
@@ -510,12 +528,10 @@ function opaqueCursor(cursor: LogCursor): string {
 class HttpsConformanceTransport {
   readonly #origin: string;
   readonly #ca: string;
-  readonly #maxRequestBodyBytes: number;
 
-  constructor(origin: string, ca: string, maxRequestBodyBytes: number) {
+  constructor(origin: string, ca: string) {
     this.#origin = origin;
     this.#ca = ca;
-    this.#maxRequestBodyBytes = maxRequestBodyBytes;
   }
 
   request(
@@ -550,9 +566,7 @@ class HttpsConformanceTransport {
         }));
       });
       outgoing.on("error", reject);
-      outgoing.end(body !== undefined && Buffer.byteLength(body) <= this.#maxRequestBodyBytes
-        ? body
-        : undefined);
+      outgoing.end(body);
     });
   }
 
@@ -590,6 +604,15 @@ class HttpsConformanceTransport {
       outgoing.end();
     });
   }
+}
+
+function documentCredential(
+  credential: string,
+  sessionCredentialPrincipals: ReadonlyMap<string, string>,
+  principalCredentials: ReadonlyMap<string, string>,
+): string {
+  const principalId = sessionCredentialPrincipals.get(credential);
+  return principalId === undefined ? credential : principalCredentials.get(principalId) ?? credential;
 }
 
 async function* stringStream(stream: AsyncIterable<unknown>): AsyncIterable<string> {

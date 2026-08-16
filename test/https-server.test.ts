@@ -262,6 +262,53 @@ describe("HTTPS service", () => {
     ]));
   });
 
+  it("rejects valid and malformed bodies on authenticated log-entry GET requests", async () => {
+    const coordinationRequests: unknown[] = [];
+    const bodylessServer = await startHttpsServer({
+      bind: { port: 0 },
+      tls: { key, cert: certificate },
+      authorizeCoordination: async () => clientPrincipal(
+        "00000000-0000-4000-8000-000000000403",
+      ),
+      handleCoordination: async (coordinationRequest) => {
+        coordinationRequests.push(coordinationRequest);
+        return {
+          status: 200,
+          body: {
+            protocol_version: "12",
+            request_id: "00000000-0000-4000-8000-000000000404",
+            payload: { entry: { id: "00000000-0000-4000-8000-000000000402" } },
+          },
+        };
+      },
+    });
+    const path = "/api/cubes/00000000-0000-4000-8000-000000000401/logs/00000000-0000-4000-8000-000000000402";
+    const headers = { authorization: "Bearer bodyless-entry-credential" };
+    try {
+      const empty = await request(bodylessServer.origin, certificate, path, headers);
+      const validBody = await request(bodylessServer.origin, certificate, path, headers, "{}");
+      const malformedBody = await request(
+        bodylessServer.origin,
+        certificate,
+        path,
+        headers,
+        "{not-json",
+      );
+
+      expect(empty.status).toBe(200);
+      for (const refused of [validBody, malformedBody]) {
+        expect(refused.status).toBe(400);
+        expect(JSON.parse(refused.body)).toEqual({
+          protocol_version: "12",
+          error: { code: "INVALID_INPUT", message: "Invalid protocol request." },
+        });
+      }
+      expect(coordinationRequests).toHaveLength(1);
+    } finally {
+      await bodylessServer.close();
+    }
+  });
+
   it("returns only the protocol tag without authorization", async () => {
     const response = await request(server.origin, certificate, "/api/protocol");
 

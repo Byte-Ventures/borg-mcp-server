@@ -397,6 +397,10 @@ async function handleRequest(
   }
 
   if (authentication !== undefined) {
+    if (request.method === "GET" && isLogEntryPath(path) && requestBody.length !== 0) {
+      sendJson(response, 400, protocolError("INVALID_INPUT", "Invalid protocol request."), true);
+      return;
+    }
     let decoded: unknown;
     if (requestBody.length === 0) {
       decoded = undefined;
@@ -495,7 +499,7 @@ function debugRoute(rawUrl: string | undefined): DebugRoute {
     return "cube_drone_self_metadata";
   }
   if (/^\/api\/cubes\/[0-9a-f-]{36}\/logs$/iu.test(path)) return "cube_logs";
-  if (/^\/api\/cubes\/[0-9a-f-]{36}\/logs\/(?:[0-9a-f]{8}|[0-9a-f-]{36})$/iu.test(path)) {
+  if (isLogEntryPath(path)) {
     return "cube_log_entry";
   }
   if (/^\/api\/cubes\/[0-9a-f-]{36}\/logs\/[0-9a-f-]{36}\/ack-status$/iu.test(path)) {
@@ -506,6 +510,10 @@ function debugRoute(rawUrl: string | undefined): DebugRoute {
   if (/^\/api\/cubes\/[0-9a-f-]{36}\/documents(?:\/[^/]+)?$/iu.test(path)) return "cube_documents";
   if (/^\/api\/cubes\/[0-9a-f-]{36}\/stream$/iu.test(path)) return "cube_stream";
   return "unknown";
+}
+
+function isLogEntryPath(path: string): boolean {
+  return /^\/api\/cubes\/[0-9a-f-]{36}\/logs\/(?:[0-9a-f]{8}|[0-9a-f-]{36})$/iu.test(path);
 }
 
 async function closeRejectedStream(stream: AsyncIterable<string>): Promise<void> {

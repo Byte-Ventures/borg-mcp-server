@@ -38,7 +38,7 @@ function stripAnsi(value: string): string {
 
 const server: DashboardServerIdentity = Object.freeze({
   name: "borgmcp-server",
-  version: "0.22.0",
+  version: "1.0.0",
   endpoint: "https://127.0.0.1:7091",
   bind_mode: "loopback",
   state: "online",
@@ -91,11 +91,11 @@ describe("dashboard snapshot source", () => {
       cubeId: ids.cubeB,
       droneId: ids.droneB,
     }));
-    droneA.appendLog(ids.cubeA, { message: "outside-window-secret-body" });
+    droneA.appendLog(ids.cubeA, { visibility: "broadcast", message: "outside-window-secret-body" });
     now = new Date("2026-07-25T11:51:00.000Z");
-    droneA.appendLog(ids.cubeA, { message: "inside-window-secret-body-a" });
+    droneA.appendLog(ids.cubeA, { visibility: "broadcast", message: "inside-window-secret-body-a" });
     now = new Date("2026-07-25T11:56:00.000Z");
-    droneB.appendLog(ids.cubeB, { message: "inside-window-secret-body-b" });
+    droneB.appendLog(ids.cubeB, { visibility: "broadcast", message: "inside-window-secret-body-b" });
     now = new Date("2026-07-25T12:00:00.000Z");
 
     expect(runtime.dashboard.read()).toEqual({
@@ -140,7 +140,7 @@ describe("dashboard snapshot source", () => {
       clientId: ids.client,
       cubeId: ids.cubeA,
       droneId: ids.droneA,
-    })).appendLog(ids.cubeA, { message: "committed" });
+    })).appendLog(ids.cubeA, { visibility: "broadcast", message: "committed" });
     expect(listener).toHaveBeenCalledOnce();
     unsubscribe();
     runtime.forPrincipal(droneSessionPrincipal({
@@ -148,7 +148,7 @@ describe("dashboard snapshot source", () => {
       clientId: ids.client,
       cubeId: ids.cubeA,
       droneId: ids.droneA,
-    })).appendLog(ids.cubeA, { message: "after unsubscribe" });
+    })).appendLog(ids.cubeA, { visibility: "broadcast", message: "after unsubscribe" });
     expect(listener).toHaveBeenCalledOnce();
   });
 });
@@ -550,7 +550,7 @@ describe("dashboard renderer", () => {
     const maliciousServer: DashboardServerIdentity = {
       ...server,
       name: "borg\u001b]52;c;clipboard\u0007\nserver",
-      version: "0.22.0\u001b[2J",
+      version: "1.0.0\u001b[2J",
       endpoint: "https://safe.invalid/\u202Eevil",
     };
     const data = snapshotData(1);

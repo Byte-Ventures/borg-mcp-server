@@ -67,3 +67,21 @@ The query requires cube read access and applies the same directed-entry scope as
 log reads. Unknown, pruned, unauthorized, and cross-cube entries return the same
 `NOT_FOUND` response. Reading status does not acknowledge or claim the entry,
 append activity, or advance an unread cursor.
+
+## Explicit addressing and entry lookup
+
+Protocol v12 makes delivery intent mandatory on every activity append. The
+`to` field must be exactly `"broadcast"` or a non-empty array of recipient
+selectors. Public `visibility` and resolved recipient-id inputs are rejected.
+Message classes, prefixes, and lifecycle values classify entries only; they do
+not select recipients or supply a default audience. Responses continue to
+expose stored visibility and resolved recipient ids as authoritative delivery
+evidence. Reusing a `post_id` is idempotent when content and explicit delivery
+resolve identically, even if advisory classification differs.
+
+`GET /api/cubes/:cubeId/logs/:entryId` reads one visible entry without a request
+body and without changing acknowledgements, claims, cursors, or activity
+history. `entryId` is either a canonical UUID or exactly eight hexadecimal
+prefix characters. Unknown, inaccessible, and cross-cube entries return the
+same `NOT_FOUND` response; an ambiguous prefix returns
+`409 LOG_ENTRY_PREFIX_AMBIGUOUS`.

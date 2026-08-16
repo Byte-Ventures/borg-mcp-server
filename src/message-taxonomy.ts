@@ -19,8 +19,6 @@ export interface MessageRouting {
   readonly routing: {
     readonly class: string | null;
     readonly recipients: string[];
-    readonly fellOpen: boolean;
-    readonly message: string | null;
   };
 }
 
@@ -46,19 +44,11 @@ export function validateMessageTaxonomy(value: unknown): MessageTaxonomy | null 
     const classKey = normalize(className);
     if (classes.has(classKey)) throw new TypeError("Message taxonomy class names must be unique.");
     classes.add(classKey);
-    const routing = record["routing"];
-    if (routing !== "broadcast" && routing !== "directed") {
-      throw new TypeError("Message taxonomy routing must be broadcast or directed.");
-    }
     const classPrefixes = taxonomyStringArray(record["prefixes"], "Taxonomy prefixes", 64);
     for (const prefix of classPrefixes) {
       const key = normalize(prefix);
       if (prefixes.has(key)) throw new TypeError("Message taxonomy prefixes must be unique.");
       prefixes.add(key);
-    }
-    const defaultTo = taxonomyStringArray(record["default_to"], "Taxonomy default recipients");
-    if (routing === "directed" && defaultTo.length === 0) {
-      throw new TypeError("Directed taxonomy classes require default recipients.");
     }
     const lifecycle = record["lifecycle"];
     if (lifecycle !== undefined && lifecycle !== "dispatch" && lifecycle !== "completion") {
@@ -67,8 +57,6 @@ export function validateMessageTaxonomy(value: unknown): MessageTaxonomy | null 
     return {
       class: className,
       prefixes: classPrefixes,
-      routing,
-      ...(defaultTo.length === 0 ? {} : { default_to: defaultTo }),
       ...(lifecycle === undefined ? {} : { lifecycle }),
     };
   });
@@ -99,88 +87,30 @@ export function patchMessageTaxonomy(
   ]);
 }
 
-export function messageTaxonomyReferencesRole(
-  taxonomy: MessageTaxonomy | null,
-  roleName: string,
-): boolean {
-  const target = roleSlug(roleName);
-  return taxonomy?.some((entry) =>
-    (entry.default_to ?? []).some((selector) => roleSlug(selector) === target)
-  ) ?? false;
-}
-
 export function resolveMessageRouting(
   input: {
     readonly message: string;
-    readonly visibility?: "broadcast" | "direct";
-    readonly recipientDroneIds?: readonly string[];
     readonly className?: string;
-    readonly to?: readonly string[];
+    readonly to: "broadcast" | readonly string[];
   },
   taxonomy: MessageTaxonomy | null,
   roles: readonly RoutingRole[],
   drones: readonly RoutingDrone[],
 ): MessageRouting {
-  if (input.visibility === "broadcast" &&
-      ((input.recipientDroneIds?.length ?? 0) > 0 || input.to !== undefined)) {
-    throw new TypeError("Broadcast activity cannot name direct recipients.");
-  }
-  if (input.visibility !== undefined || input.recipientDroneIds !== undefined) {
-    const visibility = input.visibility ?? "direct";
-    const recipients = visibility === "direct"
-      ? input.recipientDroneIds?.length
-        ? [...new Set(input.recipientDroneIds)]
-        : resolveSelectors(input.to ?? [], roles, drones, true)
-      : [];
-    if (visibility === "direct" && recipients.length === 0) {
-      throw new TypeError("Direct activity requires a recipient.");
-    }
-    return routingResult(visibility, recipients, null, false, null);
-  }
-
-  const explicitClass = input.className === undefined
-    ? null
-    : taxonomyClass(taxonomy, input.className);
-  if (input.className !== undefined && explicitClass === null) {
-    throw new TypeError("Message taxonomy class is not declared by this cube.");
-  }
-  if (input.to !== undefined) {
-    const recipients = resolveSelectors(input.to, roles, drones, true);
-    return routingResult("direct", recipients, explicitClass?.class ?? null, false, null);
-  }
-  if (taxonomy === null) return routingResult("broadcast", [], null, false, null);
-
-  const matched = explicitClass ?? classifyMessage(taxonomy, input.message);
-  if (matched === null || matched.routing === "broadcast") {
-    return routingResult("broadcast", [], matched?.class ?? null, false, null);
-  }
-  const recipients = resolveSelectors(matched.default_to ?? [], roles, drones, false);
-  if (recipients.length === 0) {
-    return routingResult(
-      "broadcast",
-      [],
-      matched.class,
-      true,
-      "No active default recipient resolved; delivered as broadcast.",
-    );
-  }
-  return routingResult("direct", recipients, matched.class, false, null);
+  const className = input.className ?? classifyMessage(taxonomy, input.message)?.class ?? null;
+  if (input.to === "broadcast") return routingResult("broadcast", [], className);
+  return routingResult("direct", resolveSelectors(input.to, roles, drones), className);
 }
 
 function resolveSelectors(
   selectors: readonly string[],
   roles: readonly RoutingRole[],
   drones: readonly RoutingDrone[],
-  strict: boolean,
 ): string[] {
-  if (strict && selectors.length === 0) throw new TypeError("Direct recipients cannot be empty.");
+  if (selectors.length === 0) throw new TypeError("Direct recipients cannot be empty.");
   const recipients = new Set<string>();
   for (const selector of selectors) {
-    try {
-      for (const drone of resolveSelector(selector, roles, drones)) recipients.add(drone.id);
-    } catch (error) {
-      if (strict) throw error;
-    }
+    for (const drone of resolveSelector(selector, roles, drones)) recipients.add(drone.id);
   }
   return [...recipients];
 }
@@ -218,32 +148,22 @@ function resolveSelector(
   throw new TypeError("Recipient does not exist.");
 }
 
-function classifyMessage(taxonomy: MessageTaxonomy, message: string): MessageTaxonomyClass | null {
+function classifyMessage(taxonomy: MessageTaxonomy | null, message: string): MessageTaxonomyClass | null {
+  if (taxonomy === null) return null;
   const token = message.split(/[:\s]/u, 1)[0] ?? "";
   const key = normalize(token);
   return taxonomy.find((entry) => (entry.prefixes ?? []).some((prefix) => normalize(prefix) === key)) ?? null;
-}
-
-function taxonomyClass(
-  taxonomy: MessageTaxonomy | null,
-  className: string,
-): MessageTaxonomyClass | null {
-  if (taxonomy === null) return null;
-  const key = normalize(className);
-  return taxonomy.find((entry) => normalize(entry.class) === key) ?? null;
 }
 
 function routingResult(
   visibility: "broadcast" | "direct",
   recipientDroneIds: string[],
   className: string | null,
-  fellOpen: boolean,
-  message: string | null,
 ): MessageRouting {
   return {
     visibility,
     recipientDroneIds,
-    routing: { class: className, recipients: recipientDroneIds, fellOpen, message },
+    routing: { class: className, recipients: recipientDroneIds },
   };
 }
 
@@ -255,7 +175,7 @@ function taxonomyObject(value: unknown): Record<string, unknown> {
 }
 
 function exactTaxonomyKeys(record: Record<string, unknown>): void {
-  const allowed = new Set(["class", "prefixes", "routing", "default_to", "lifecycle"]);
+  const allowed = new Set(["class", "prefixes", "lifecycle"]);
   if (Object.keys(record).some((key) => !allowed.has(key))) {
     throw new TypeError("Message taxonomy class contains an unknown field.");
   }

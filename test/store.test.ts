@@ -971,6 +971,70 @@ describe("Principal to ScopedStore isolation", () => {
     expect(client.readLog(ids.cubeA, null, 10).entries).toEqual([retained]);
   });
 
+  it("capacity-gates document removal without changing audit state", async () => {
+    const path = join(directory, "borg.db");
+    runtime.close();
+    let capacity = { databaseBytes: 0, freeDiskBytes: 2_000_000 };
+    runtime = await openStore({
+      path,
+      storageLimits: {
+        maxActivityEntriesPerCube: 10,
+        maxDatabaseBytes: 1_000_000,
+        minFreeDiskBytes: 10_000,
+      },
+      capacityProbe: () => capacity,
+    });
+    const client = runtime.forPrincipal(clientPrincipal(ids.clientA));
+    const document = client.putDocument(ids.cubeA, {
+      title: "Removal capacity evidence",
+      contentType: "text/plain",
+      content: "immutable",
+    });
+    const inspectAudit = () => {
+      const database = new DatabaseSync(path, { readOnly: true });
+      try {
+        return database.prepare(`
+          SELECT state, removed_by_kind, removed_by_id, removed_by_drone_id,
+                 removed_by_label, removed_by_role, removed_at
+          FROM documents WHERE id = ?
+        `).get(document.id);
+      } finally {
+        database.close();
+      }
+    };
+    const unchanged = {
+      state: "active",
+      removed_by_kind: null,
+      removed_by_id: null,
+      removed_by_drone_id: null,
+      removed_by_label: null,
+      removed_by_role: null,
+      removed_at: null,
+    };
+
+    for (const pressure of [
+      { databaseBytes: 1_000_000, freeDiskBytes: 2_000_000 },
+      { databaseBytes: 0, freeDiskBytes: 0 },
+    ]) {
+      capacity = pressure;
+      expect(() => client.removeDocument(ids.cubeA, document.id)).toThrowError(
+        expect.objectContaining({ name: "StorageCapacityError", code: "CAPACITY_EXCEEDED" }),
+      );
+      expect(client.getDocument(ids.cubeA, document.id)).toMatchObject({
+        state: "active",
+        removed_by: null,
+        removed_at: null,
+      });
+      expect(inspectAudit()).toEqual(unchanged);
+    }
+
+    capacity = { databaseBytes: 0, freeDiskBytes: 2_000_000 };
+    const removed = client.removeDocument(ids.cubeA, document.id);
+    capacity = { databaseBytes: 1_000_000, freeDiskBytes: 0 };
+    expect(client.removeDocument(ids.cubeA, document.id)).toEqual(removed);
+    expect(inspectAudit()).toMatchObject({ state: "removed" });
+  });
+
   it("guards every remotely reachable database-growth mutation before state change", async () => {
     const path = join(directory, "borg.db");
     runtime.close();

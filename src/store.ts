@@ -2104,13 +2104,23 @@ class SqliteScopedStore implements ScopedStore {
       if (!isAuthor && !this.#canManageDocuments(cubeId)) throw new DocumentRemoveDeniedError();
       if (requiredText(row, "state") !== "removed") {
         const actor = this.#documentActor(cubeId);
+        const removedAt = this.#now();
+        this.#capacityGuard.assertCanGrow(
+          512 +
+          Buffer.byteLength(this.#principal.kind) +
+          Buffer.byteLength(this.#principal.id) +
+          (actor.drone_id === null ? 0 : Buffer.byteLength(actor.drone_id)) +
+          (actor.label === null ? 0 : Buffer.byteLength(actor.label)) +
+          (actor.role === null ? 0 : Buffer.byteLength(actor.role)) +
+          Buffer.byteLength(removedAt),
+        );
         this.#database.prepare(`
           UPDATE documents SET state = 'removed', removed_by_kind = ?, removed_by_id = ?,
             removed_by_drone_id = ?, removed_by_label = ?, removed_by_role = ?, removed_at = ?
           WHERE id = ? AND cube_id = ?
         `).run(
           this.#principal.kind, this.#principal.id, actor.drone_id, actor.label, actor.role,
-          this.#now(), documentId, cubeId,
+          removedAt, documentId, cubeId,
         );
       }
       const document = this.#documentMetadata(cubeId, documentId);

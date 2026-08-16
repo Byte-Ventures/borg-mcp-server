@@ -1,6 +1,6 @@
 {
   "name": "borgmcp-server",
-  "version": "0.22.0",
+  "version": "1.0.0",
   "private": false,
   "description": "Self-hosted Borg coordination server",
   "license": "SEE LICENSE IN LICENSE",

@@ -297,7 +297,15 @@ describe("Principal to ScopedStore isolation", () => {
       .toThrow(ScopedStoreError);
     expect(() => runtime.forPrincipal(clientPrincipal(outsiderId)).deleteCube(ids.cubeA))
       .toThrow(ScopedStoreError);
-    const entry = manager.appendLog(ids.cubeA, { message: "deleted activity" });
+    const document = manager.putDocument(ids.cubeA, {
+      title: "Deleted evidence",
+      contentType: "text/plain",
+      content: "retained only while the cube exists",
+    });
+    const entry = manager.appendLog(ids.cubeA, {
+      message: "deleted activity",
+      documents: [document.id],
+    });
     manager.acknowledge(ids.cubeA, entry.id, "ack");
     manager.recordDecision(ids.cubeA, { topic: "deleted-topic", decision: "deleted decision" });
     let deletionSignals = 0;
@@ -326,7 +334,7 @@ describe("Principal to ScopedStore isolation", () => {
     const database = new DatabaseSync(join(directory, "borg.db"), { readOnly: true });
     for (const table of [
       "client_cube_grants", "roles", "drones", "drone_sessions",
-      "activity_log", "activity_acks", "decisions", "expired_activity_cursors",
+      "activity_log", "activity_acks", "activity_log_documents", "documents", "decisions", "expired_activity_cursors",
       "cube_create_bindings", "repository_associations",
     ]) {
       expect(database.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get())
@@ -961,6 +969,70 @@ describe("Principal to ScopedStore isolation", () => {
     expect(() => client.appendLog(ids.cubeA, { message: "database-pressure-secret" }))
       .toThrow(StorageCapacityError);
     expect(client.readLog(ids.cubeA, null, 10).entries).toEqual([retained]);
+  });
+
+  it("capacity-gates document removal without changing audit state", async () => {
+    const path = join(directory, "borg.db");
+    runtime.close();
+    let capacity = { databaseBytes: 0, freeDiskBytes: 2_000_000 };
+    runtime = await openStore({
+      path,
+      storageLimits: {
+        maxActivityEntriesPerCube: 10,
+        maxDatabaseBytes: 1_000_000,
+        minFreeDiskBytes: 10_000,
+      },
+      capacityProbe: () => capacity,
+    });
+    const client = runtime.forPrincipal(clientPrincipal(ids.clientA));
+    const document = client.putDocument(ids.cubeA, {
+      title: "Removal capacity evidence",
+      contentType: "text/plain",
+      content: "immutable",
+    });
+    const inspectAudit = () => {
+      const database = new DatabaseSync(path, { readOnly: true });
+      try {
+        return database.prepare(`
+          SELECT state, removed_by_kind, removed_by_id, removed_by_drone_id,
+                 removed_by_label, removed_by_role, removed_at
+          FROM documents WHERE id = ?
+        `).get(document.id);
+      } finally {
+        database.close();
+      }
+    };
+    const unchanged = {
+      state: "active",
+      removed_by_kind: null,
+      removed_by_id: null,
+      removed_by_drone_id: null,
+      removed_by_label: null,
+      removed_by_role: null,
+      removed_at: null,
+    };
+
+    for (const pressure of [
+      { databaseBytes: 1_000_000, freeDiskBytes: 2_000_000 },
+      { databaseBytes: 0, freeDiskBytes: 0 },
+    ]) {
+      capacity = pressure;
+      expect(() => client.removeDocument(ids.cubeA, document.id)).toThrowError(
+        expect.objectContaining({ name: "StorageCapacityError", code: "CAPACITY_EXCEEDED" }),
+      );
+      expect(client.getDocument(ids.cubeA, document.id)).toMatchObject({
+        state: "active",
+        removed_by: null,
+        removed_at: null,
+      });
+      expect(inspectAudit()).toEqual(unchanged);
+    }
+
+    capacity = { databaseBytes: 0, freeDiskBytes: 2_000_000 };
+    const removed = client.removeDocument(ids.cubeA, document.id);
+    capacity = { databaseBytes: 1_000_000, freeDiskBytes: 0 };
+    expect(client.removeDocument(ids.cubeA, document.id)).toEqual(removed);
+    expect(inspectAudit()).toMatchObject({ state: "removed" });
   });
 
   it("guards every remotely reachable database-growth mutation before state change", async () => {

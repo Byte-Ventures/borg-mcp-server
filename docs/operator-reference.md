@@ -270,6 +270,21 @@ server also accepts `BORG_SERVER_CONTEXT_GUIDELINE_BYTES` (default: 16384 bytes)
 for directive and playbook review advisories.
 
 Invalid values fail closed before the server starts.
+Document storage uses two UTF-8 byte budgets:
+`BORG_SERVER_MAX_DOCUMENT_BYTES` defaults to 65536 bytes per document, and
+`BORG_SERVER_MAX_ACTIVE_DOCUMENT_BYTES_PER_CUBE` defaults to 524288 bytes per
+cube. Active and superseded revisions count; removed documents remain
+audit-readable but do not count. The per-document value must not exceed the
+per-cube value. When the active budget fills, remove superseded revisions with
+the client's `borg_remove-document` tool before retrying.
+
+Activity messages use `BORG_SERVER_LOG_ENTRY_ADVISORY_BYTES` (default 1024) and
+`BORG_SERVER_MAX_LOG_ENTRY_BYTES` (default 4096). Messages above the advisory
+and at or below the hard limit are accepted with document-storage guidance.
+Messages above the hard limit are rejected before mutation. The advisory must
+not exceed the hard limit, and the hard limit cannot exceed the durable
+10240-byte storage ceiling.
+
 The active decision text budget sums UTF-8 bytes from each active decision's topic,
 decision, and rationale. A new topic cannot exceed the budget. Replacing an
 existing topic is allowed when the resulting total stays at or below the larger

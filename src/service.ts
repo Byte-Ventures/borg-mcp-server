@@ -4,6 +4,13 @@ import { lstat, open, readFile, rename, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import { promisify } from "node:util";
+import {
+  DOCUMENT_MAX_ACTIVE_BYTES_PER_CUBE_ENV,
+  DOCUMENT_MAX_BYTES_ENV,
+  LOG_ENTRY_ADVISORY_ENV,
+  MAX_LOG_ENTRY_ENV,
+  PROTOCOL_LIMIT_CEILINGS,
+} from "borgmcp-shared/protocol";
 
 import {
   bootstrapServer,
@@ -219,6 +226,10 @@ export interface ServerEnvironment {
   readonly BORG_SERVER_BIND_HOST?: string;
   readonly BORG_SERVER_MAX_ACTIVITY_ENTRIES_PER_CUBE?: string;
   readonly BORG_SERVER_MAX_ACTIVE_DECISION_BYTES_PER_CUBE?: string;
+  readonly BORG_SERVER_MAX_DOCUMENT_BYTES?: string;
+  readonly BORG_SERVER_MAX_ACTIVE_DOCUMENT_BYTES_PER_CUBE?: string;
+  readonly BORG_SERVER_LOG_ENTRY_ADVISORY_BYTES?: string;
+  readonly BORG_SERVER_MAX_LOG_ENTRY_BYTES?: string;
   readonly BORG_SERVER_CONTEXT_GUIDELINE_BYTES?: string;
   readonly BORG_SERVER_MAX_DATABASE_BYTES?: string;
   readonly BORG_SERVER_MIN_FREE_DISK_BYTES?: string;
@@ -447,6 +458,7 @@ export function createNodeServerService(dependencies: ServiceDependencies): Serv
             debugLogger,
             undefined,
             storageLimits.contextGuidelineBytes,
+            storageLimits.logEntryAdvisoryBytes,
           );
         }
         await dependencies.onStartupPhase?.("pre-listen");
@@ -588,6 +600,10 @@ export function selectServerEnvironment(environment: NodeJS.ProcessEnv): ServerE
   const bindHost = environment["BORG_SERVER_BIND_HOST"];
   const maxActivityEntries = environment["BORG_SERVER_MAX_ACTIVITY_ENTRIES_PER_CUBE"];
   const maxActiveDecisionBytes = environment["BORG_SERVER_MAX_ACTIVE_DECISION_BYTES_PER_CUBE"];
+  const maxDocumentBytes = environment[DOCUMENT_MAX_BYTES_ENV];
+  const maxActiveDocumentBytes = environment[DOCUMENT_MAX_ACTIVE_BYTES_PER_CUBE_ENV];
+  const logEntryAdvisoryBytes = environment[LOG_ENTRY_ADVISORY_ENV];
+  const maxLogEntryBytes = environment[MAX_LOG_ENTRY_ENV];
   const contextGuidelineBytes = environment["BORG_SERVER_CONTEXT_GUIDELINE_BYTES"];
   const maxDatabaseBytes = environment["BORG_SERVER_MAX_DATABASE_BYTES"];
   const minFreeDiskBytes = environment["BORG_SERVER_MIN_FREE_DISK_BYTES"];
@@ -612,6 +628,18 @@ export function selectServerEnvironment(environment: NodeJS.ProcessEnv): ServerE
     ...(maxActiveDecisionBytes === undefined
       ? {}
       : { BORG_SERVER_MAX_ACTIVE_DECISION_BYTES_PER_CUBE: maxActiveDecisionBytes }),
+    ...(maxDocumentBytes === undefined
+      ? {}
+      : { BORG_SERVER_MAX_DOCUMENT_BYTES: maxDocumentBytes }),
+    ...(maxActiveDocumentBytes === undefined
+      ? {}
+      : { BORG_SERVER_MAX_ACTIVE_DOCUMENT_BYTES_PER_CUBE: maxActiveDocumentBytes }),
+    ...(logEntryAdvisoryBytes === undefined
+      ? {}
+      : { BORG_SERVER_LOG_ENTRY_ADVISORY_BYTES: logEntryAdvisoryBytes }),
+    ...(maxLogEntryBytes === undefined
+      ? {}
+      : { BORG_SERVER_MAX_LOG_ENTRY_BYTES: maxLogEntryBytes }),
     ...(contextGuidelineBytes === undefined
       ? {}
       : { BORG_SERVER_CONTEXT_GUIDELINE_BYTES: contextGuidelineBytes }),
@@ -625,7 +653,7 @@ export function selectServerEnvironment(environment: NodeJS.ProcessEnv): ServerE
 }
 
 export function resolveStorageLimits(environment: ServerEnvironment): StorageLimits {
-  return {
+  const limits: StorageLimits = {
     maxActivityEntriesPerCube: positiveEnvironmentInteger(
       environment.BORG_SERVER_MAX_ACTIVITY_ENTRIES_PER_CUBE,
       DEFAULT_STORAGE_LIMITS.maxActivityEntriesPerCube,
@@ -635,6 +663,26 @@ export function resolveStorageLimits(environment: ServerEnvironment): StorageLim
       environment.BORG_SERVER_MAX_ACTIVE_DECISION_BYTES_PER_CUBE,
       DEFAULT_STORAGE_LIMITS.maxActiveDecisionBytesPerCube!,
       "BORG_SERVER_MAX_ACTIVE_DECISION_BYTES_PER_CUBE",
+    ),
+    maxDocumentBytes: positiveEnvironmentInteger(
+      environment.BORG_SERVER_MAX_DOCUMENT_BYTES,
+      DEFAULT_STORAGE_LIMITS.maxDocumentBytes!,
+      DOCUMENT_MAX_BYTES_ENV,
+    ),
+    maxActiveDocumentBytesPerCube: positiveEnvironmentInteger(
+      environment.BORG_SERVER_MAX_ACTIVE_DOCUMENT_BYTES_PER_CUBE,
+      DEFAULT_STORAGE_LIMITS.maxActiveDocumentBytesPerCube!,
+      DOCUMENT_MAX_ACTIVE_BYTES_PER_CUBE_ENV,
+    ),
+    logEntryAdvisoryBytes: positiveEnvironmentInteger(
+      environment.BORG_SERVER_LOG_ENTRY_ADVISORY_BYTES,
+      DEFAULT_STORAGE_LIMITS.logEntryAdvisoryBytes!,
+      LOG_ENTRY_ADVISORY_ENV,
+    ),
+    maxLogEntryBytes: positiveEnvironmentInteger(
+      environment.BORG_SERVER_MAX_LOG_ENTRY_BYTES,
+      DEFAULT_STORAGE_LIMITS.maxLogEntryBytes!,
+      MAX_LOG_ENTRY_ENV,
     ),
     contextGuidelineBytes: positiveEnvironmentInteger(
       environment.BORG_SERVER_CONTEXT_GUIDELINE_BYTES,
@@ -652,6 +700,14 @@ export function resolveStorageLimits(environment: ServerEnvironment): StorageLim
       "BORG_SERVER_MIN_FREE_DISK_BYTES",
     ),
   };
+  if (limits.maxDocumentBytes! > limits.maxActiveDocumentBytesPerCube! ||
+      limits.maxDocumentBytes! > PROTOCOL_LIMIT_CEILINGS.max_request_bytes - 1_024) {
+    throw operatorErrors.DOCUMENT_BUDGET_INVALID;
+  }
+  if (limits.logEntryAdvisoryBytes! > limits.maxLogEntryBytes! || limits.maxLogEntryBytes! > 10_240) {
+    throw operatorErrors.LOG_ENTRY_LIMIT_INVALID;
+  }
+  return limits;
 }
 
 function positiveEnvironmentInteger(value: string | undefined, fallback: number, name: string): number {
@@ -666,6 +722,12 @@ function positiveEnvironmentInteger(value: string | undefined, fallback: number,
 function storageOperatorErrorCode(name: string): OperatorErrorCode {
   if (name === "BORG_SERVER_MAX_ACTIVITY_ENTRIES_PER_CUBE") return "ACTIVITY_LIMIT_INVALID";
   if (name === "BORG_SERVER_MAX_ACTIVE_DECISION_BYTES_PER_CUBE") return "DECISION_BUDGET_INVALID";
+  if (name === DOCUMENT_MAX_BYTES_ENV || name === DOCUMENT_MAX_ACTIVE_BYTES_PER_CUBE_ENV) {
+    return "DOCUMENT_BUDGET_INVALID";
+  }
+  if (name === LOG_ENTRY_ADVISORY_ENV || name === MAX_LOG_ENTRY_ENV) {
+    return "LOG_ENTRY_LIMIT_INVALID";
+  }
   if (name === "BORG_SERVER_CONTEXT_GUIDELINE_BYTES") return "CONTEXT_GUIDELINE_INVALID";
   if (name === "BORG_SERVER_MAX_DATABASE_BYTES") return "DATABASE_LIMIT_INVALID";
   if (name === "BORG_SERVER_MIN_FREE_DISK_BYTES") return "DISK_RESERVE_INVALID";

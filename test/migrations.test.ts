@@ -124,7 +124,7 @@ describe("SQLite migrations", () => {
     expect(first.diagnostics()).toEqual({
       journalMode: "wal",
       foreignKeys: true,
-      schemaVersions: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23],
+      schemaVersions: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24],
     });
     expect((await stat(join(directory, "data"))).mode & 0o777).toBe(0o700);
     expect((await stat(databasePath)).mode & 0o777).toBe(0o600);
@@ -134,7 +134,7 @@ describe("SQLite migrations", () => {
 
     const second = await openStore({ path: databasePath });
     expect(second.diagnostics().schemaVersions)
-      .toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]);
+      .toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24]);
     second.close();
     await expect(access(databasePath)).resolves.toBeUndefined();
   });
@@ -760,7 +760,44 @@ describe("SQLite migrations", () => {
     ).get()).toBeUndefined();
     expect(database.prepare(
       "SELECT version, name FROM schema_migrations ORDER BY version DESC LIMIT 1",
-    ).get()).toEqual({ version: 23, name: "reliable_coordination_replay" });
+    ).get()).toEqual({ version: 24, name: "cube_documents" });
+    database.close();
+  });
+
+  it("structurally rejects cross-cube document revisions and citations", () => {
+    const database = new DatabaseSync(":memory:", { enableForeignKeyConstraints: true });
+    applyMigrations(database);
+    const cubeA = "00000000-0000-4000-8000-000000000081";
+    const cubeB = "00000000-0000-4000-8000-000000000082";
+    const documentA = "00000000-0000-4000-8000-000000000083";
+    const documentB = "00000000-0000-4000-8000-000000000084";
+    const entryA = "00000000-0000-4000-8000-000000000085";
+    const now = "2026-08-16T00:00:00.000Z";
+    const insertCube = database.prepare(`
+      INSERT INTO cubes (id, name, directive, created_at, updated_at) VALUES (?, ?, '', ?, ?)
+    `);
+    insertCube.run(cubeA, "Cube A", now, now);
+    insertCube.run(cubeB, "Cube B", now, now);
+    const insertDocument = database.prepare(`
+      INSERT INTO documents (
+        id, cube_id, title, content_type, content, size_bytes, state,
+        supersedes, author_kind, author_id, created_at
+      ) VALUES (?, ?, ?, 'text/plain', 'x', 1, 'active', ?, 'operator', ?, ?)
+    `);
+    insertDocument.run(documentA, cubeA, "A", null, cubeA, now);
+    expect(() => insertDocument.run(documentB, cubeB, "B", documentA, cubeB, now)).toThrow();
+    insertDocument.run(documentB, cubeB, "B", null, cubeB, now);
+    database.prepare(`
+      INSERT INTO activity_log (
+        id, cube_id, actor_kind, actor_id, message, created_at
+      ) VALUES (?, ?, 'operator', ?, 'entry', ?)
+    `).run(entryA, cubeA, cubeA, now);
+    expect(() => database.prepare(`
+      INSERT INTO activity_log_documents (entry_id, document_id, cube_id, ordinal)
+      VALUES (?, ?, ?, 0)
+    `).run(entryA, documentB, cubeA)).toThrow();
+    expect(database.prepare("SELECT COUNT(*) AS count FROM activity_log_documents").get())
+      .toEqual({ count: 0 });
     database.close();
   });
 

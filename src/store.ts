@@ -6,13 +6,23 @@ import { DatabaseSync } from "node:sqlite";
 import type { MessageTaxonomy } from "borgmcp-shared/domain";
 import type {
   CreateCubeRepository,
+  CubeDocument,
+  CubeDocumentMetadata,
   CubeTemplate,
+  DocumentActor,
+  DocumentCitation,
+  DocumentContentType,
   DroneRuntimeMetadata,
   DroneRuntimeMetadataPatch,
 } from "borgmcp-shared/protocol";
 import {
+  DOCUMENT_DEFAULT_MAX_ACTIVE_BYTES_PER_CUBE,
+  DOCUMENT_DEFAULT_MAX_BYTES,
+  DEFAULT_LOG_ENTRY_ADVISORY_BYTES,
+  DEFAULT_MAX_LOG_ENTRY_BYTES,
   decodeAssociateRepositoryCubeRequest,
   decodeCreateCubeRequest,
+  decodePutDocumentRequest,
   decodeResolveRepositoryCubeRequest,
   ROLE_TEXT_MAX_BYTES,
 } from "borgmcp-shared/protocol";
@@ -88,6 +98,7 @@ export interface EnrichedActivityRecord {
   readonly drone_label: string | null;
   readonly role_name: string | null;
   readonly recipient_drone_ids: string[];
+  readonly documents?: DocumentCitation[];
   readonly wake_nonce?: string;
 }
 
@@ -207,6 +218,10 @@ export const DEFAULT_CUBE_LIMITS: CubeLimits = Object.freeze({
 export interface StorageLimits {
   readonly maxActivityEntriesPerCube: number;
   readonly maxActiveDecisionBytesPerCube?: number;
+  readonly maxDocumentBytes?: number;
+  readonly maxActiveDocumentBytesPerCube?: number;
+  readonly logEntryAdvisoryBytes?: number;
+  readonly maxLogEntryBytes?: number;
   readonly contextGuidelineBytes?: number;
   readonly maxDatabaseBytes: number;
   readonly minFreeDiskBytes: number;
@@ -220,6 +235,10 @@ export interface StorageCapacity {
 export const DEFAULT_STORAGE_LIMITS: StorageLimits = Object.freeze({
   maxActivityEntriesPerCube: 10_000,
   maxActiveDecisionBytesPerCube: 16_384,
+  maxDocumentBytes: DOCUMENT_DEFAULT_MAX_BYTES,
+  maxActiveDocumentBytesPerCube: DOCUMENT_DEFAULT_MAX_ACTIVE_BYTES_PER_CUBE,
+  logEntryAdvisoryBytes: DEFAULT_LOG_ENTRY_ADVISORY_BYTES,
+  maxLogEntryBytes: DEFAULT_MAX_LOG_ENTRY_BYTES,
   contextGuidelineBytes: 16_384,
   maxDatabaseBytes: 1_073_741_824,
   minFreeDiskBytes: 67_108_864,
@@ -352,10 +371,20 @@ export interface ScopedStore {
     readonly visibility?: "broadcast" | "direct";
     readonly recipientDroneIds?: readonly string[];
     readonly routingKey?: string | null;
+    readonly documents?: readonly string[];
   }) => AppendLogRecord;
   readonly hasLogPost: (cubeId: string, postId: string) => boolean;
   readonly readLog: (cubeId: string, cursor: LogCursor | null, limit: number) => ActivityPage;
   readonly readLogEntry: (cubeId: string, selector: string) => EnrichedActivityRecord;
+  readonly putDocument: (cubeId: string, input: {
+    readonly title: string;
+    readonly contentType: DocumentContentType;
+    readonly content: string;
+    readonly supersedes?: string;
+  }) => CubeDocument;
+  readonly getDocument: (cubeId: string, documentId: string) => CubeDocument;
+  readonly listDocuments: (cubeId: string) => CubeDocumentMetadata[];
+  readonly removeDocument: (cubeId: string, documentId: string) => CubeDocumentMetadata;
   readonly acknowledge: (cubeId: string, entryId: string, kind: "ack" | "claim") => void;
   readonly recordDecision: (cubeId: string, input: {
     readonly topic: string;
@@ -756,6 +785,51 @@ export class PostIdConflictError extends Error {
   constructor() {
     super("The post id was already used with different content or routing.");
     this.name = "PostIdConflictError";
+  }
+}
+
+export class DocumentNotFoundError extends Error {
+  readonly code = "DOCUMENT_NOT_FOUND";
+
+  constructor() {
+    super("The requested document was not found.");
+    this.name = "DocumentNotFoundError";
+  }
+}
+
+export class DocumentBudgetExceededError extends Error {
+  readonly code = "DOCUMENT_BUDGET_EXCEEDED";
+
+  constructor(message: string) {
+    super(message);
+    this.name = "DocumentBudgetExceededError";
+  }
+}
+
+export class DocumentSupersessionInvalidError extends Error {
+  readonly code = "DOCUMENT_SUPERSESSION_INVALID";
+
+  constructor() {
+    super("The document supersession is invalid.");
+    this.name = "DocumentSupersessionInvalidError";
+  }
+}
+
+export class DocumentRemoveDeniedError extends Error {
+  readonly code = "DOCUMENT_REMOVE_DENIED";
+
+  constructor() {
+    super("Only the document author or a cube manager may remove this document.");
+    this.name = "DocumentRemoveDeniedError";
+  }
+}
+
+export class LogEntryTooLargeError extends Error {
+  readonly code = "CONTENT_TOO_LARGE";
+
+  constructor(readonly maximumBytes: number) {
+    super(`Activity messages may contain at most ${maximumBytes} bytes. Store the detail as a document and cite it from a shorter entry.`);
+    this.name = "LogEntryTooLargeError";
   }
 }
 
@@ -1915,23 +1989,172 @@ class SqliteScopedStore implements ScopedStore {
     }
   }
 
+  putDocument(cubeId: string, input: {
+    readonly title: string;
+    readonly contentType: DocumentContentType;
+    readonly content: string;
+    readonly supersedes?: string;
+  }): CubeDocument {
+    assertCanonicalUuid(cubeId, "Cube id");
+    const request = decodePutDocumentRequest({
+      title: input.title,
+      content_type: input.contentType,
+      content: input.content,
+      ...(input.supersedes === undefined ? {} : { supersedes: input.supersedes }),
+    });
+    this.#requireDocumentWrite(cubeId);
+    const sizeBytes = Buffer.byteLength(request.content);
+    const maxDocumentBytes = this.#storageLimits.maxDocumentBytes!;
+    if (sizeBytes > maxDocumentBytes) {
+      throw new DocumentBudgetExceededError(
+        `The document is ${sizeBytes} bytes; the per-document budget is ${maxDocumentBytes} bytes. Store a smaller document.`,
+      );
+    }
+    this.#capacityGuard.assertCanGrow(
+      Buffer.byteLength(request.title) + sizeBytes + 1_024,
+    );
+    const id = randomUUID();
+    const createdAt = this.#now();
+    this.#database.exec("BEGIN IMMEDIATE");
+    try {
+      this.#requireDocumentWrite(cubeId);
+      const active = this.#database.prepare(`
+        SELECT COALESCE(SUM(size_bytes), 0) AS total, COUNT(*) AS count
+        FROM documents WHERE cube_id = ? AND state <> 'removed'
+      `).get(cubeId)!;
+      const total = requiredInteger(active, "total");
+      const maxActiveBytes = this.#storageLimits.maxActiveDocumentBytesPerCube!;
+      if (requiredInteger(active, "count") >= 500) {
+        throw new DocumentBudgetExceededError(
+          "The cube already has 500 active documents. Remove superseded revisions with borg_remove-document before retrying.",
+        );
+      }
+      if (total + sizeBytes > maxActiveBytes) {
+        throw new DocumentBudgetExceededError(
+          `The cube has ${total} active document bytes; adding ${sizeBytes} bytes exceeds the ${maxActiveBytes}-byte budget. Remove superseded revisions with borg_remove-document before retrying.`,
+        );
+      }
+      if (request.supersedes !== undefined) {
+        const predecessor = this.#database.prepare(`
+          SELECT state, superseded_by FROM documents WHERE id = ? AND cube_id = ?
+        `).get(request.supersedes, cubeId);
+        if (predecessor === undefined || nullableText(predecessor, "superseded_by") !== null ||
+            requiredText(predecessor, "state") === "superseded") {
+          throw new DocumentSupersessionInvalidError();
+        }
+      }
+      const actor = this.#documentActor(cubeId);
+      this.#database.prepare(`
+        INSERT INTO documents (
+          id, cube_id, title, content_type, content, size_bytes, state, supersedes,
+          superseded_by, author_kind, author_id, author_drone_id, author_label,
+          author_role, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 'active', ?, NULL, ?, ?, ?, ?, ?, ?)
+      `).run(
+        id, cubeId, request.title, request.content_type, request.content, sizeBytes,
+        request.supersedes ?? null, this.#principal.kind, this.#principal.id,
+        actor.drone_id, actor.label, actor.role, createdAt,
+      );
+      if (request.supersedes !== undefined) {
+        this.#database.prepare(`
+          UPDATE documents
+          SET superseded_by = ?, state = CASE WHEN state = 'active' THEN 'superseded' ELSE state END
+          WHERE id = ? AND cube_id = ?
+        `).run(id, request.supersedes, cubeId);
+      }
+      const document = this.#document(cubeId, id);
+      this.#database.exec("COMMIT");
+      return document;
+    } catch (error) {
+      try { this.#database.exec("ROLLBACK"); } catch { /* Preserve the original failure. */ }
+      throw error;
+    }
+  }
+
+  getDocument(cubeId: string, documentId: string): CubeDocument {
+    this.#requireCube(cubeId, "read");
+    validateDocumentId(documentId);
+    return this.#document(cubeId, documentId);
+  }
+
+  listDocuments(cubeId: string): CubeDocumentMetadata[] {
+    this.#requireCube(cubeId, "read");
+    return this.#database.prepare(`
+      SELECT * FROM documents
+      WHERE cube_id = ? AND state <> 'removed'
+      ORDER BY created_at, id LIMIT 500
+    `).all(cubeId).map(documentMetadataRecord);
+  }
+
+  removeDocument(cubeId: string, documentId: string): CubeDocumentMetadata {
+    this.#requireCube(cubeId, "read");
+    validateDocumentId(documentId);
+    this.#database.exec("BEGIN IMMEDIATE");
+    try {
+      this.#requireCube(cubeId, "read");
+      const row = this.#database.prepare(
+        "SELECT * FROM documents WHERE id = ? AND cube_id = ?",
+      ).get(documentId, cubeId);
+      if (row === undefined) throw new DocumentNotFoundError();
+      const authorDroneId = nullableText(row, "author_drone_id");
+      const isAuthor = authorDroneId === null
+        ? requiredText(row, "author_kind") === this.#principal.kind &&
+          requiredText(row, "author_id") === this.#principal.id
+        : this.#principal.kind === "drone-session" && this.#principal.droneId === authorDroneId;
+      if (!isAuthor && !this.#canManageDocuments(cubeId)) throw new DocumentRemoveDeniedError();
+      if (requiredText(row, "state") !== "removed") {
+        const actor = this.#documentActor(cubeId);
+        const removedAt = this.#now();
+        this.#capacityGuard.assertCanGrow(
+          512 +
+          Buffer.byteLength(this.#principal.kind) +
+          Buffer.byteLength(this.#principal.id) +
+          (actor.drone_id === null ? 0 : Buffer.byteLength(actor.drone_id)) +
+          (actor.label === null ? 0 : Buffer.byteLength(actor.label)) +
+          (actor.role === null ? 0 : Buffer.byteLength(actor.role)) +
+          Buffer.byteLength(removedAt),
+        );
+        this.#database.prepare(`
+          UPDATE documents SET state = 'removed', removed_by_kind = ?, removed_by_id = ?,
+            removed_by_drone_id = ?, removed_by_label = ?, removed_by_role = ?, removed_at = ?
+          WHERE id = ? AND cube_id = ?
+        `).run(
+          this.#principal.kind, this.#principal.id, actor.drone_id, actor.label, actor.role,
+          removedAt, documentId, cubeId,
+        );
+      }
+      const document = this.#documentMetadata(cubeId, documentId);
+      this.#database.exec("COMMIT");
+      return document;
+    } catch (error) {
+      try { this.#database.exec("ROLLBACK"); } catch { /* Preserve the original failure. */ }
+      throw error;
+    }
+  }
+
   appendLog(cubeId: string, input: {
     readonly postId?: string;
     readonly message: string;
     readonly visibility?: "broadcast" | "direct";
     readonly recipientDroneIds?: readonly string[];
     readonly routingKey?: string | null;
+    readonly documents?: readonly string[];
   }): AppendLogRecord {
     assertCanonicalUuid(cubeId, "Cube id");
     if (input.postId !== undefined) assertCanonicalUuid(input.postId, "Post id");
-    if (input.message.length === 0 || Buffer.byteLength(input.message) > 10_240) {
-      throw new Error("Activity message must contain 1 to 10240 bytes.");
+    if (input.message.length === 0 || Buffer.byteLength(input.message) > this.#storageLimits.maxLogEntryBytes!) {
+      throw new LogEntryTooLargeError(this.#storageLimits.maxLogEntryBytes!);
     }
     const visibility = input.visibility ?? "broadcast";
     if (visibility !== "broadcast" && visibility !== "direct") {
       throw new Error("Unknown activity visibility.");
     }
     const recipients = [...new Set(input.recipientDroneIds ?? [])];
+    const documents = [...(input.documents ?? [])];
+    if (documents.length > 100 || new Set(documents).size !== documents.length) {
+      throw new Error("Activity documents must contain at most 100 unique document ids.");
+    }
+    documents.forEach(validateDocumentId);
     if (recipients.length > 100 || recipients.some((id) => {
       try { assertCanonicalUuid(id, "Recipient drone id"); return false; } catch { return true; }
     })) {
@@ -1953,6 +2176,7 @@ class SqliteScopedStore implements ScopedStore {
       visibility,
       recipients: [...recipients].sort(),
       routing: input.routingKey ?? null,
+      documents,
     });
     this.#database.exec("BEGIN IMMEDIATE");
     try {
@@ -1965,12 +2189,26 @@ class SqliteScopedStore implements ScopedStore {
           if (requiredText(prior, "tuple_json") !== tupleJson) {
             throw new PostIdConflictError();
           }
-          const entry = JSON.parse(requiredText(prior, "entry_json")) as EnrichedActivityRecord;
+          const stored = JSON.parse(requiredText(prior, "entry_json")) as EnrichedActivityRecord;
+          let entry = stored;
+          try {
+            entry = this.#enrichedEntry(cubeId, stored.id);
+          } catch (error) {
+            if (!(error instanceof ScopedStoreError)) throw error;
+          }
           this.#database.exec("COMMIT");
           return appendLogRecord(entry, true);
         }
       }
-      this.#capacityGuard.assertCanGrow(Buffer.byteLength(input.message) + (recipients.length * 128));
+      if (documents.length > 0) {
+        const documentRows = this.#database.prepare(`
+          SELECT id FROM documents WHERE cube_id = ? AND id IN (${documents.map(() => "?").join(", ")})
+        `).all(cubeId, ...documents);
+        if (documentRows.length !== documents.length) throw new DocumentNotFoundError();
+      }
+      this.#capacityGuard.assertCanGrow(
+        Buffer.byteLength(input.message) + (recipients.length * 128) + (documents.length * 128),
+      );
       const id = randomUUID();
       const createdAt = this.#nextActivityTimestamp(cubeId);
       const inserted = this.#database.prepare(`
@@ -2012,6 +2250,12 @@ class SqliteScopedStore implements ScopedStore {
           "INSERT INTO activity_log_recipients (entry_id, drone_id) VALUES (?, ?)",
         );
         for (const recipient of recipients) addRecipient.run(id, recipient);
+      }
+      if (documents.length > 0) {
+        const addDocument = this.#database.prepare(`
+          INSERT INTO activity_log_documents (entry_id, document_id, cube_id, ordinal) VALUES (?, ?, ?, ?)
+        `);
+        documents.forEach((documentId, ordinal) => addDocument.run(id, documentId, cubeId, ordinal));
       }
       const entry = this.#enrichedEntry(cubeId, id);
       if (input.postId !== undefined) {
@@ -2748,7 +2992,12 @@ class SqliteScopedStore implements ScopedStore {
     const recipientRows = this.#database.prepare(`
       SELECT drone_id FROM activity_log_recipients WHERE entry_id = ? ORDER BY drone_id
     `).all(entryId);
-    return enrichedActivityRecord(row, recipientRows.map((recipient) => requiredText(recipient, "drone_id")));
+    return enrichedActivityRecord(
+      row,
+      recipientRows.map((recipient) => requiredText(recipient, "drone_id")),
+      undefined,
+      documentCitations(this.#database, entryId),
+    );
   }
 
   #claims(cubeId: string, broadcastOnly: boolean): ClaimRecord[] {
@@ -2778,6 +3027,86 @@ class SqliteScopedStore implements ScopedStore {
     `).get(id);
     if (row === undefined) throw new ScopedStoreError();
     return decisionRecord(row);
+  }
+
+  #document(cubeId: string, documentId: string): CubeDocument {
+    const row = this.#database.prepare(
+      "SELECT * FROM documents WHERE id = ? AND cube_id = ?",
+    ).get(documentId, cubeId);
+    if (row === undefined) throw new DocumentNotFoundError();
+    return documentRecord(row);
+  }
+
+  #documentMetadata(cubeId: string, documentId: string): CubeDocumentMetadata {
+    const row = this.#database.prepare(
+      "SELECT * FROM documents WHERE id = ? AND cube_id = ?",
+    ).get(documentId, cubeId);
+    if (row === undefined) throw new DocumentNotFoundError();
+    return documentMetadataRecord(row);
+  }
+
+  #documentActor(cubeId: string): DocumentActor {
+    if (this.#principal.kind !== "drone-session") {
+      return { drone_id: null, label: null, role: null };
+    }
+    const row = this.#database.prepare(`
+      SELECT drone.id AS drone_id, drone.label, role.name AS role
+      FROM drones AS drone
+      JOIN roles AS role ON role.id = drone.role_id AND role.cube_id = drone.cube_id
+      WHERE drone.id = ? AND drone.cube_id = ? AND drone.evicted_at IS NULL
+    `).get(this.#principal.droneId, cubeId);
+    if (row === undefined) throw new ScopedStoreError();
+    return {
+      drone_id: requiredText(row, "drone_id"),
+      label: requiredText(row, "label"),
+      role: requiredText(row, "role"),
+    };
+  }
+
+  #canManageDocuments(cubeId: string): boolean {
+    if (this.#principal.kind === "operator") return true;
+    const clientId = this.#principal.kind === "client"
+      ? this.#principal.id
+      : this.#principal.clientId;
+    if (this.#principal.kind === "client") {
+      return this.#database.prepare(`
+        SELECT 1 FROM clients AS client
+        JOIN client_cube_grants AS grant_row ON grant_row.client_id = client.id
+        WHERE client.id = ? AND client.revoked_at IS NULL
+          AND grant_row.cube_id = ? AND grant_row.access = 'manage'
+      `).get(clientId, cubeId) !== undefined;
+    }
+    return this.#database.prepare(`
+      SELECT 1 FROM drone_sessions AS session
+      JOIN clients AS client ON client.id = session.client_id
+      JOIN drones AS drone ON drone.id = session.drone_id
+        AND drone.client_id = session.client_id AND drone.cube_id = session.cube_id
+      JOIN client_cube_grants AS grant_row ON grant_row.client_id = session.client_id
+        AND grant_row.cube_id = session.cube_id
+      WHERE session.id = ? AND session.client_id = ? AND session.cube_id = ?
+        AND session.drone_id = ? AND session.revoked_at IS NULL
+        AND client.revoked_at IS NULL AND drone.evicted_at IS NULL
+        AND grant_row.access = 'manage'
+    `).get(
+      this.#principal.id,
+      this.#principal.clientId,
+      cubeId,
+      this.#principal.droneId,
+    ) !== undefined;
+  }
+
+  #requireDocumentWrite(cubeId: string): void {
+    try {
+      this.#requireCube(cubeId, "write");
+    } catch (error) {
+      if (!(error instanceof ScopedStoreError)) throw error;
+      try {
+        this.#requireCube(cubeId, "read");
+      } catch {
+        throw error;
+      }
+      throw new AccessDeniedError();
+    }
   }
 
   #scope(access: CubeAccess): ScopePredicate {
@@ -3534,7 +3863,12 @@ class SqliteLivenessStore implements LivenessStore {
     const recipients = this.#database.prepare(
       "SELECT drone_id FROM activity_log_recipients WHERE entry_id = ? ORDER BY drone_id",
     ).all(entryId).map((recipient) => requiredText(recipient, "drone_id"));
-    return enrichedActivityRecord(row, recipients, wakeNonce);
+    return enrichedActivityRecord(
+      row,
+      recipients,
+      wakeNonce,
+      documentCitations(this.#database, entryId),
+    );
   }
 }
 
@@ -4126,6 +4460,7 @@ function enrichedActivityRecord(
   row: Record<string, unknown>,
   recipientDroneIds: string[],
   wakeNonce?: string,
+  documents: DocumentCitation[] = [],
 ): EnrichedActivityRecord {
   const visibility = requiredText(row, "visibility");
   if (visibility !== "broadcast" && visibility !== "direct") {
@@ -4141,6 +4476,7 @@ function enrichedActivityRecord(
     drone_label: nullableText(row, "drone_label"),
     role_name: nullableText(row, "role_name"),
     recipient_drone_ids: recipientDroneIds,
+    ...(documents.length === 0 ? {} : { documents }),
     ...(wakeNonce === undefined ? {} : { wake_nonce: wakeNonce }),
   };
 }
@@ -4160,6 +4496,69 @@ function claimRecord(row: Record<string, unknown>): ClaimRecord {
     claimed_at: requiredText(row, "claimed_at"),
     stale: false,
   };
+}
+
+function documentCitations(database: DatabaseSync, entryId: string): DocumentCitation[] {
+  return database.prepare(`
+    SELECT document.id, document.title, document.size_bytes, document.state
+    FROM activity_log_documents AS citation
+    JOIN documents AS document ON document.id = citation.document_id
+      AND document.cube_id = citation.cube_id
+    WHERE citation.entry_id = ? ORDER BY citation.ordinal
+  `).all(entryId).map(documentCitationRecord);
+}
+
+function documentCitationRecord(row: Record<string, unknown>): DocumentCitation {
+  return {
+    id: requiredText(row, "id"),
+    title: requiredText(row, "title"),
+    size_bytes: requiredInteger(row, "size_bytes"),
+    state: documentState(row),
+  };
+}
+
+function documentMetadataRecord(row: Record<string, unknown>): CubeDocumentMetadata {
+  const removedAt = nullableText(row, "removed_at");
+  return {
+    ...documentCitationRecord(row),
+    content_type: documentContentType(row),
+    supersedes: nullableText(row, "supersedes"),
+    superseded_by: nullableText(row, "superseded_by"),
+    author: {
+      drone_id: nullableText(row, "author_drone_id"),
+      label: nullableText(row, "author_label"),
+      role: nullableText(row, "author_role"),
+    },
+    created_at: requiredText(row, "created_at"),
+    removed_by: removedAt === null
+      ? null
+      : {
+          drone_id: nullableText(row, "removed_by_drone_id"),
+          label: nullableText(row, "removed_by_label"),
+          role: nullableText(row, "removed_by_role"),
+        },
+    removed_at: removedAt,
+  };
+}
+
+function documentRecord(row: Record<string, unknown>): CubeDocument {
+  return { ...documentMetadataRecord(row), content: requiredText(row, "content") };
+}
+
+function documentState(row: Record<string, unknown>): CubeDocumentMetadata["state"] {
+  const state = requiredText(row, "state");
+  if (state !== "active" && state !== "superseded" && state !== "removed") {
+    throw new Error("Database contains invalid document state.");
+  }
+  return state;
+}
+
+function documentContentType(row: Record<string, unknown>): DocumentContentType {
+  const contentType = requiredText(row, "content_type");
+  if (contentType !== "text/markdown" && contentType !== "text/plain") {
+    throw new Error("Database contains invalid document content type.");
+  }
+  return contentType;
 }
 
 function decisionRecord(row: Record<string, unknown>): DecisionRecord {
@@ -4823,10 +5222,25 @@ function validateTimestamp(value: string): void {
   }
 }
 
+function validateDocumentId(value: string): void {
+  if (Buffer.byteLength(value) < 1 || Buffer.byteLength(value) > 128 ||
+      !/^[A-Za-z0-9][A-Za-z0-9._:-]*$/u.test(value)) {
+    throw new Error("Document id is invalid.");
+  }
+}
+
 function validateStorageLimits(limits: StorageLimits | CubeLimits): void {
   for (const [name, value] of Object.entries(limits)) {
     if (!Number.isSafeInteger(value) || value <= 0) {
       throw new Error(`${name} must be a positive safe integer.`);
+    }
+  }
+  if ("maxDocumentBytes" in limits) {
+    if (limits.maxDocumentBytes! > limits.maxActiveDocumentBytesPerCube!) {
+      throw new Error("maxDocumentBytes must not exceed maxActiveDocumentBytesPerCube.");
+    }
+    if (limits.logEntryAdvisoryBytes! > limits.maxLogEntryBytes! || limits.maxLogEntryBytes! > 10_240) {
+      throw new Error("Log entry limits are invalid.");
     }
   }
 }

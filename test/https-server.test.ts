@@ -65,7 +65,7 @@ describe("HTTPS service", () => {
           return {
             status: 400,
             body: {
-              protocol_version: "9",
+              protocol_version: "10",
               error: { code: "INVALID_INPUT", message: "Invalid enrollment request." },
             },
           };
@@ -74,7 +74,7 @@ describe("HTTPS service", () => {
           return {
             status: 401,
             body: {
-              protocol_version: "9",
+              protocol_version: "10",
               request_id: "request-1234",
               error: { code: "AUTH_INVALID", message: "Enrollment authentication failed." },
             },
@@ -82,7 +82,7 @@ describe("HTTPS service", () => {
         }
         return {
           status: 201,
-          body: { protocol_version: "9", request_id: "request-1234", payload: { ok: true } },
+          body: { protocol_version: "10", request_id: "request-1234", payload: { ok: true } },
         };
       },
       handleCoordination: async (coordinationRequest) => {
@@ -91,7 +91,7 @@ describe("HTTPS service", () => {
           ...(coordinationRequest.cursor === undefined ? {} : { cursor: coordinationRequest.cursor }),
           ...(coordinationRequest.since === undefined ? {} : { since: coordinationRequest.since }),
         };
-        return { status: 200, body: { protocol_version: "9", request_id: "unexpected" } };
+        return { status: 200, body: { protocol_version: "10", request_id: "unexpected" } };
       },
       runtimeIdentity: createRuntimeBuildIdentity({
         sourceSha: "a".repeat(40),
@@ -138,8 +138,8 @@ describe("HTTPS service", () => {
       authorization: "Bearer invalid-test-token",
     });
 
-    expect(missing).toMatchObject({ status: 200, body: '{"protocol_version":"9"}' });
-    expect(invalid).toMatchObject({ status: 200, body: '{"protocol_version":"9"}' });
+    expect(missing).toMatchObject({ status: 200, body: '{"protocol_version":"10"}' });
+    expect(invalid).toMatchObject({ status: 200, body: '{"protocol_version":"10"}' });
   });
 
   it("serves build identity only to an authenticated principal without coordination mutation", async () => {
@@ -156,10 +156,10 @@ describe("HTTPS service", () => {
     expect(invalid.status).toBe(401);
     expect(accepted.status).toBe(200);
     expect(JSON.parse(accepted.body)).toEqual({
-      package_version: "0.20.0",
+      package_version: "0.21.0",
       source_sha: "a".repeat(40),
       artifact_integrity: `sha512-${"A".repeat(86)}==`,
-      protocol_version: "9",
+      protocol_version: "10",
       started_at: "2026-07-21T12:00:00.000Z",
     });
     expect(coordinationCalls).toBe(before);
@@ -234,7 +234,7 @@ describe("HTTPS service", () => {
     const response = await request(server.origin, certificate, "/api/protocol");
 
     expect(response.status).toBe(200);
-    expect(JSON.parse(response.body)).toEqual({ protocol_version: "9" });
+    expect(JSON.parse(response.body)).toEqual({ protocol_version: "10" });
     expect(response.headers["cache-control"]).toBe("no-store");
   });
 
@@ -262,7 +262,7 @@ describe("HTTPS service", () => {
       );
       expect(response.status).toBe(401);
       expect(JSON.parse(response.body)).toEqual({
-        protocol_version: "9",
+        protocol_version: "10",
         error: { code: "SESSION_REVOKED", message: "Authentication failed." },
       });
     }
@@ -283,7 +283,7 @@ describe("HTTPS service", () => {
       );
       expect(response.status).toBe(401);
       expect(JSON.parse(response.body)).toEqual({
-        protocol_version: "9",
+        protocol_version: "10",
         error: { code: "SESSION_REJECTED", message: "Authentication failed." },
       });
     }
@@ -304,7 +304,7 @@ describe("HTTPS service", () => {
       );
       expect(response.status).toBe(410);
       expect(JSON.parse(response.body)).toEqual({
-        protocol_version: "9",
+        protocol_version: "10",
         error: { code: "CUBE_DELETED", message: "The cube was deleted." },
       });
     }
@@ -344,12 +344,12 @@ describe("HTTPS service", () => {
     const assertEvictedResponses = async (): Promise<void> => {
       for (const [method, path, body] of [
         ["PUT", `/api/cubes/${cubeId}/logs`, JSON.stringify({
-          protocol_version: "9",
+          protocol_version: "10",
           request_id: "evicted-read-after-delete",
           payload: { cursor: null },
         })],
         ["DELETE", `/api/cubes/${cubeId}`, JSON.stringify({
-          protocol_version: "9",
+          protocol_version: "10",
           request_id: "evicted-delete-after-delete",
           payload: {},
         })],
@@ -359,7 +359,7 @@ describe("HTTPS service", () => {
         }, body, method);
         expect(response.status).toBe(410);
         expect(JSON.parse(response.body)).toEqual({
-          protocol_version: "9",
+          protocol_version: "10",
           error: { code: "DRONE_EVICTED", message: "Authentication failed." },
         });
       }
@@ -422,13 +422,13 @@ describe("HTTPS service", () => {
       certificate,
       "/api/enrollment/exchange",
       { "content-type": "application/json" },
-      JSON.stringify({ protocol_version: "9", request_id: "request-1234", payload: {} }),
+      JSON.stringify({ protocol_version: "10", request_id: "request-1234", payload: {} }),
       "POST",
     );
 
     expect(response.status).toBe(201);
     expect(JSON.parse(response.body)).toEqual({
-      protocol_version: "9",
+      protocol_version: "10",
       request_id: "request-1234",
       payload: { ok: true },
     });
@@ -446,7 +446,7 @@ describe("HTTPS service", () => {
 
     expect(response.status).toBe(400);
     expect(JSON.parse(response.body)).toEqual({
-      protocol_version: "9",
+      protocol_version: "10",
       error: { code: "INVALID_INPUT", message: "Invalid enrollment request." },
     });
   });
@@ -463,7 +463,7 @@ describe("HTTPS service", () => {
 
     expect(response.status).toBe(401);
     expect(JSON.parse(response.body)).toEqual({
-      protocol_version: "9",
+      protocol_version: "10",
       request_id: "request-1234",
       error: { code: "AUTH_INVALID", message: "Enrollment authentication failed." },
     });
@@ -515,6 +515,54 @@ describe("HTTPS service", () => {
     });
 
     expect(response.status).toBe(400);
+  });
+
+  it("authenticates concurrent large coordination requests before body admission", async () => {
+    let acceptedBodies = 0;
+    const bounded = await startHttpsServer({
+      bind: { port: 0 },
+      tls: { key, cert: certificate },
+      limits: {
+        ...DEFAULT_SERVICE_LIMITS,
+        maxConnections: 8,
+        maxConnectionsPerAddress: 8,
+        maxRequestBodyBytes: 70_000,
+      },
+      authorizeCoordination: async (authorization) => authorization === "Bearer accepted-large-token"
+        ? clientPrincipal("00000000-0000-4000-8000-000000000201")
+        : "invalid",
+      handleCoordination: async (coordinationRequest) => {
+        acceptedBodies += 1;
+        expect(JSON.stringify(coordinationRequest.body).length).toBeGreaterThan(65_536);
+        return { status: 200, body: { accepted: true } };
+      },
+    });
+    const path = "/api/cubes/00000000-0000-4000-8000-000000000001/documents";
+    try {
+      const hostile = await Promise.all(Array.from({ length: 4 }, () => incompleteRequest(
+        bounded.origin,
+        certificate,
+        path,
+        { authorization: "Bearer invalid-large-token", "content-length": "1000000" },
+        "PUT",
+      )));
+      expect(hostile.map(({ status }) => status)).toEqual([401, 401, 401, 401]);
+      expect(acceptedBodies).toBe(0);
+
+      const body = JSON.stringify({ content: "x".repeat(65_536) });
+      const accepted = await request(
+        bounded.origin,
+        certificate,
+        path,
+        { authorization: "Bearer accepted-large-token", "content-type": "application/json" },
+        body,
+        "PUT",
+      );
+      expect(accepted.status).toBe(200);
+      expect(acceptedBodies).toBe(1);
+    } finally {
+      await bounded.close();
+    }
   });
 
   it("requires the configured TLS trust anchor", async () => {
@@ -1176,7 +1224,7 @@ describe("HTTPS service", () => {
         return {
           status: 200,
           body: {
-            protocol_version: "9",
+            protocol_version: "10",
             request_id: `read-${expectedCursor}`,
             payload: {
               entries: [{ sequence: expectedCursor }],
@@ -1237,13 +1285,13 @@ describe("HTTPS service", () => {
           messages.push(message);
           if (messages.length === 30) releaseAppends();
           await allAppendsAdmitted;
-          return { status: 201, body: { protocol_version: "9", payload: { accepted: true } } };
+          return { status: 201, body: { protocol_version: "10", payload: { accepted: true } } };
         }
         if (coordinationRequest.path === path && coordinationRequest.method === "PUT") {
           return {
             status: 200,
             body: {
-              protocol_version: "9",
+              protocol_version: "10",
               payload: { entries: messages.map((message) => ({ message })) },
             },
           };
@@ -1258,7 +1306,7 @@ describe("HTTPS service", () => {
         certificate,
         path,
         { authorization: "Bearer burst-client" },
-        JSON.stringify({ protocol_version: "9", request_id: `append-${index}`, payload: { message } }),
+        JSON.stringify({ protocol_version: "10", request_id: `append-${index}`, payload: { message } }),
         "POST",
       )));
       expect(responses.map((response) => response.status)).toEqual(Array.from({ length: 30 }, () => 201));
@@ -1268,7 +1316,7 @@ describe("HTTPS service", () => {
         certificate,
         path,
         { authorization: "Bearer burst-client" },
-        JSON.stringify({ protocol_version: "9", request_id: "drain", payload: {} }),
+        JSON.stringify({ protocol_version: "10", request_id: "drain", payload: {} }),
         "PUT",
       );
       expect(drained.status).toBe(200);
@@ -1304,7 +1352,7 @@ describe("HTTPS service", () => {
         messages.push(message);
         if (messages.length === 30) markAppendsAdmitted();
         await releaseHeldAppends;
-        return { status: 201, body: { protocol_version: "9", payload: { accepted: true } } };
+        return { status: 201, body: { protocol_version: "10", payload: { accepted: true } } };
       },
     });
     const submitted = Array.from({ length: 31 }, (_, index) => `append-${index}`);
@@ -1314,7 +1362,7 @@ describe("HTTPS service", () => {
         certificate,
         path,
         { authorization: "Bearer burst-client" },
-        JSON.stringify({ protocol_version: "9", request_id: `over-cap-${index}`, payload: { message } }),
+        JSON.stringify({ protocol_version: "10", request_id: `over-cap-${index}`, payload: { message } }),
         "POST",
       ));
       await allAppendsAdmitted;
@@ -1323,7 +1371,7 @@ describe("HTTPS service", () => {
         certificate,
         path,
         { authorization: "Bearer burst-client" },
-        JSON.stringify({ protocol_version: "9", request_id: "over-cap-30", payload: { message: submitted[30] } }),
+        JSON.stringify({ protocol_version: "10", request_id: "over-cap-30", payload: { message: submitted[30] } }),
         "POST",
       );
       expect(rejected.status).toBe(429);
@@ -1769,6 +1817,38 @@ function request(
     );
     outgoing.on("error", reject);
     outgoing.end(body);
+  });
+}
+
+function incompleteRequest(
+  origin: string,
+  ca: string,
+  path: string,
+  headers: Readonly<Record<string, string>>,
+  method: string,
+): Promise<TestResponse> {
+  const url = new URL(path, origin);
+  return new Promise((resolve, reject) => {
+    const outgoing = httpsRequest({
+      hostname: url.hostname,
+      port: url.port,
+      path: url.pathname,
+      method,
+      headers,
+      ca,
+      rejectUnauthorized: true,
+      agent: false,
+    }, (response) => {
+      response.setEncoding("utf8");
+      let body = "";
+      response.on("data", (chunk: string) => { body += chunk; });
+      response.on("end", () => {
+        outgoing.destroy();
+        resolve({ status: response.statusCode ?? 0, headers: response.headers, body });
+      });
+    });
+    outgoing.on("error", reject);
+    outgoing.flushHeaders();
   });
 }
 

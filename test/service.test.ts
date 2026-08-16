@@ -544,7 +544,7 @@ describe("node server service", () => {
         }),
         server: expect.objectContaining({
           name: "borgmcp-server",
-          version: "0.20.0",
+          version: "0.21.0",
           endpoint: "https://127.0.0.1:7091",
           state: "online",
         }),
@@ -681,7 +681,7 @@ describe("node server service", () => {
     expect(options?.tls.ca).toEqual(Buffer.from("test-certificate"));
     expect(onStarted).toHaveBeenCalledWith(
       "https://127.0.0.1:7091",
-      expect.objectContaining({ package_version: "0.20.0" }),
+      expect.objectContaining({ package_version: "0.21.0" }),
       { bindHost: null, bindMode: "loopback", remedy: null },
     );
     expect(waitForShutdown).toHaveBeenCalledOnce();
@@ -714,7 +714,7 @@ describe("node server service", () => {
       expect(startServer.mock.calls[0]![0].bind).toEqual({});
       expect(onStarted).toHaveBeenCalledWith(
         "https://127.0.0.1:7091",
-        expect.objectContaining({ package_version: "0.20.0" }),
+        expect.objectContaining({ package_version: "0.21.0" }),
         {
           bindHost: "192.168.1.20",
           bindMode: "loopback",
@@ -823,6 +823,10 @@ describe("node server service", () => {
       BORG_SERVER_TLS_CA_FILE: "/private/ca.crt",
       BORG_SERVER_MAX_DATABASE_BYTES: "2000000000",
       BORG_SERVER_MAX_ACTIVE_DECISION_BYTES_PER_CUBE: "32768",
+      BORG_SERVER_MAX_DOCUMENT_BYTES: "65536",
+      BORG_SERVER_MAX_ACTIVE_DOCUMENT_BYTES_PER_CUBE: "524288",
+      BORG_SERVER_LOG_ENTRY_ADVISORY_BYTES: "1024",
+      BORG_SERVER_MAX_LOG_ENTRY_BYTES: "4096",
       BORG_SERVER_CONTEXT_GUIDELINE_BYTES: "8192",
       BORG_TOKEN: "must-not-cross-boundary",
       UNRELATED_REFRESH_TOKEN: "must-not-cross-boundary",
@@ -832,6 +836,10 @@ describe("node server service", () => {
       BORG_SERVER_TLS_CA_FILE: "/private/ca.crt",
       BORG_SERVER_MAX_DATABASE_BYTES: "2000000000",
       BORG_SERVER_MAX_ACTIVE_DECISION_BYTES_PER_CUBE: "32768",
+      BORG_SERVER_MAX_DOCUMENT_BYTES: "65536",
+      BORG_SERVER_MAX_ACTIVE_DOCUMENT_BYTES_PER_CUBE: "524288",
+      BORG_SERVER_LOG_ENTRY_ADVISORY_BYTES: "1024",
+      BORG_SERVER_MAX_LOG_ENTRY_BYTES: "4096",
       BORG_SERVER_CONTEXT_GUIDELINE_BYTES: "8192",
     });
   });
@@ -848,6 +856,10 @@ describe("node server service", () => {
     })).toEqual({
       maxActivityEntriesPerCube: 2_500,
       maxActiveDecisionBytesPerCube: 32_768,
+      maxDocumentBytes: 65_536,
+      maxActiveDocumentBytesPerCube: 524_288,
+      logEntryAdvisoryBytes: 1_024,
+      maxLogEntryBytes: 4_096,
       contextGuidelineBytes: 8_192,
       maxDatabaseBytes: 500_000_000,
       minFreeDiskBytes: 50_000_000,
@@ -858,6 +870,14 @@ describe("node server service", () => {
       .toThrow("Set BORG_SERVER_MAX_ACTIVE_DECISION_BYTES_PER_CUBE to a positive integer.");
     expect(() => resolveStorageLimits({ BORG_SERVER_CONTEXT_GUIDELINE_BYTES: "0" }))
       .toThrow("Set BORG_SERVER_CONTEXT_GUIDELINE_BYTES to a positive integer.");
+    expect(() => resolveStorageLimits({ BORG_SERVER_MAX_DOCUMENT_BYTES: "524289" }))
+      .toThrow("Set document byte budgets to positive integers");
+    expect(() => resolveStorageLimits({
+      BORG_SERVER_MAX_DOCUMENT_BYTES: "10485760",
+      BORG_SERVER_MAX_ACTIVE_DOCUMENT_BYTES_PER_CUBE: "10485760",
+    })).toThrow("Set document byte budgets to positive integers");
+    expect(() => resolveStorageLimits({ BORG_SERVER_LOG_ENTRY_ADVISORY_BYTES: "4097" }))
+      .toThrow("Set log entry byte limits to positive integers");
   });
 
   it("requires the CA signing key to leave the runtime directory before LAN startup", async () => {
@@ -1168,7 +1188,7 @@ describe("node server service", () => {
     const artifact = {
       artifactDirectory: "/runtime/artifacts/candidate",
       packageDirectory: "/runtime/artifacts/candidate/package",
-      version: "0.20.0",
+      version: "0.21.0",
       integrity: `sha512-${"A".repeat(86)}==`,
       sourceSha: "a".repeat(40),
       treeSha256: "b".repeat(64),
@@ -1186,7 +1206,7 @@ describe("node server service", () => {
       "/Users/operator/Library/LaunchAgents/ai.borgmcp.server.plist",
     ] as const;
 
-    expect(completeRuntimeUpdate(prepared, "0.20.0", {
+    expect(completeRuntimeUpdate(prepared, "0.21.0", {
       state: "inactive",
       adapter: "launchd",
       recoveryCommand: command,
@@ -1195,7 +1215,7 @@ describe("node server service", () => {
       serviceAdapter: "launchd",
       serviceRecoveryCommand: command,
     });
-    expect(completeRuntimeUpdate(prepared, "0.20.0", {
+    expect(completeRuntimeUpdate(prepared, "0.21.0", {
       state: "absent",
       adapter: null,
       recoveryCommand: null,
@@ -1211,7 +1231,7 @@ describe("node server service", () => {
         artifactIntegrity: artifact.integrity,
         startedAt: new Date("2026-07-26T12:00:00.000Z"),
       }),
-    }, "0.20.0", {
+    }, "0.21.0", {
       state: "active",
       adapter: "launchd",
       recoveryCommand: null,
@@ -1219,7 +1239,7 @@ describe("node server service", () => {
       serviceState: "active",
       serviceAdapter: "launchd",
       serviceRecoveryCommand: null,
-      runningIdentity: { package_version: "0.20.0" },
+      runningIdentity: { package_version: "0.21.0" },
     });
   });
 

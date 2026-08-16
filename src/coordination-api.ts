@@ -12,6 +12,10 @@ import {
   decodeCreateCubeRequestEnvelope,
   decodeDeleteCubeRequestEnvelope,
   decodeDeleteRoleRequestEnvelope,
+  decodeGetDocumentRequestEnvelope,
+  decodeListDocumentsRequestEnvelope,
+  decodePutDocumentRequestEnvelope,
+  decodeRemoveDocumentRequestEnvelope,
   decodeDroneRuntimeMetadataPatch,
   decodeAppendLogRequest,
   decodeEvictDroneRequestEnvelope,
@@ -48,6 +52,11 @@ import {
   RoleSectionNotFoundError,
   ActivityEntryPrefixConflictError,
   PostIdConflictError,
+  DocumentBudgetExceededError,
+  DocumentNotFoundError,
+  DocumentRemoveDeniedError,
+  DocumentSupersessionInvalidError,
+  LogEntryTooLargeError,
   ScopedStoreError,
   StorageCapacityError,
   type DroneRecord,
@@ -93,6 +102,7 @@ export class CoordinationApi {
   readonly #debugLogger: DebugLogger;
   readonly #streamHeartbeatMs: number;
   readonly #contextGuidelineBytes: number;
+  readonly #logEntryAdvisoryBytes: number;
   #replayBarrier: ReplayBarrier | undefined;
 
   constructor(
@@ -101,12 +111,14 @@ export class CoordinationApi {
     debugLogger: DebugLogger = disabledDebugLogger,
     streamHeartbeatMs = 5_000,
     contextGuidelineBytes = DEFAULT_STORAGE_LIMITS.contextGuidelineBytes!,
+    logEntryAdvisoryBytes = DEFAULT_STORAGE_LIMITS.logEntryAdvisoryBytes!,
   ) {
     this.#runtime = runtime;
     this.#authority = authority;
     this.#debugLogger = debugLogger;
     this.#streamHeartbeatMs = streamHeartbeatMs;
     this.#contextGuidelineBytes = contextGuidelineBytes;
+    this.#logEntryAdvisoryBytes = logEntryAdvisoryBytes;
   }
 
   armReplayTransition(): { readonly reached: Promise<void>; readonly release: () => void } {
@@ -280,18 +292,21 @@ export class CoordinationApi {
       .exec(request.path);
     const logEntryMatch = /^\/api\/cubes\/([0-9a-f-]{36})\/logs\/([0-9a-f]{8}|[0-9a-f-]{36})$/iu
       .exec(request.path);
+    const documentMatch = /^\/api\/cubes\/([0-9a-f-]{36})\/documents\/([^/]+)$/u
+      .exec(request.path);
     const droneMatch = /^\/api\/cubes\/([0-9a-f-]{36})\/drones\/([0-9a-f-]{36})$/u
       .exec(request.path);
     const selfMetadataMatch =
       /^\/api\/cubes\/([0-9a-f-]{36})\/drones\/self\/metadata$/u.exec(request.path);
-    const match = /^\/api\/cubes\/([0-9a-f-]{36})(?:\/(roles|drones|logs|acks|decisions|stream|taxonomy-patch|role-rationale))?$/u
+    const match = /^\/api\/cubes\/([0-9a-f-]{36})(?:\/(roles|drones|logs|acks|decisions|documents|stream|taxonomy-patch|role-rationale))?$/u
       .exec(request.path);
-    if (match === null && roleMatch === null && logEntryMatch === null && droneMatch === null && selfMetadataMatch === null) {
+    if (match === null && roleMatch === null && logEntryMatch === null && documentMatch === null && droneMatch === null && selfMetadataMatch === null) {
       return failure(404, "NOT_FOUND", "The requested resource was not found.");
     }
-    const cubeId = (roleMatch?.[1] ?? logEntryMatch?.[1] ?? droneMatch?.[1] ?? selfMetadataMatch?.[1] ?? match?.[1])!;
+    const cubeId = (roleMatch?.[1] ?? logEntryMatch?.[1] ?? documentMatch?.[1] ?? droneMatch?.[1] ?? selfMetadataMatch?.[1] ?? match?.[1])!;
     const roleId = roleMatch?.[2];
     const droneId = droneMatch?.[2];
+    const documentId = documentMatch?.[2];
     if (!uuidPattern.test(cubeId) || (roleId !== undefined && !uuidPattern.test(roleId)) ||
         (droneId !== undefined && !uuidPattern.test(droneId))) {
       return failure(404, "NOT_FOUND", "The requested resource was not found.");
@@ -300,6 +315,8 @@ export class CoordinationApi {
       ? "role"
       : logEntryMatch !== null
         ? "log-entry"
+      : documentMatch !== null
+        ? "document"
       : droneMatch !== null
         ? "drone"
         : selfMetadataMatch !== null
@@ -537,7 +554,7 @@ export class CoordinationApi {
       }
       if (resource === "logs" && request.method === "POST") {
         const envelope = decodeProtocolEnvelope(request.body, decodeAppendLogRequest);
-        const { post_id: postId, message, visibility, recipientDroneIds, class: className, to } = envelope.payload as typeof envelope.payload & { post_id: string };
+        const { post_id: postId, message, visibility, recipientDroneIds, class: className, to, documents } = envelope.payload as typeof envelope.payload & { post_id: string };
         const cube = store.getCube(cubeId);
         if (cube === null) throw new ScopedStoreError();
         let resolved;
@@ -561,6 +578,7 @@ export class CoordinationApi {
             ? { recipientDroneIds: resolved.recipientDroneIds }
             : {}),
           routingKey: resolved.routing.class,
+          ...(documents === undefined ? {} : { documents }),
         });
         if (!appended.deduplicated) {
           this.#debugLogger.emit({
@@ -577,6 +595,9 @@ export class CoordinationApi {
           entry: (({ deduplicated: _, ...entry }) => entry)(appended),
           deduplicated: appended.deduplicated,
           routing: resolved.routing,
+          ...(Buffer.byteLength(message) <= this.#logEntryAdvisoryBytes
+            ? {}
+            : { advisory: { code: "STORE_AS_DOCUMENT", threshold_bytes: this.#logEntryAdvisoryBytes } }),
         });
       }
       if (resource === "logs" && request.method === "PUT") {
@@ -599,6 +620,32 @@ export class CoordinationApi {
       if (resource === "log-entry" && request.method === "GET") {
         const entry = store.readLogEntry(cubeId, requiredLogEntrySelector(logEntryMatch![2]!));
         return success(200, "log-entry-read", { entry });
+      }
+      if (resource === "documents" && request.method === "PUT") {
+        const envelope = decodePutDocumentRequestEnvelope(request.body);
+        const document = store.putDocument(cubeId, {
+          title: envelope.payload.title,
+          contentType: envelope.payload.content_type,
+          content: envelope.payload.content,
+          ...(envelope.payload.supersedes === undefined
+            ? {}
+            : { supersedes: envelope.payload.supersedes }),
+        });
+        return success(201, envelope.request_id, { document });
+      }
+      if (resource === "documents" && request.method === "GET") {
+        const envelope = decodeListDocumentsRequestEnvelope(request.body);
+        return success(200, envelope.request_id, { documents: store.listDocuments(cubeId) });
+      }
+      if (resource === "document" && request.method === "GET") {
+        const envelope = decodeGetDocumentRequestEnvelope(request.body);
+        if (envelope.payload.id !== documentId) throw new InputError();
+        return success(200, envelope.request_id, { document: store.getDocument(cubeId, documentId!) });
+      }
+      if (resource === "document" && request.method === "DELETE") {
+        const envelope = decodeRemoveDocumentRequestEnvelope(request.body);
+        if (envelope.payload.id !== documentId) throw new InputError();
+        return success(200, envelope.request_id, { document: store.removeDocument(cubeId, documentId!) });
       }
       if (resource === "acks" && request.method === "POST") {
         const envelope = decodeEnvelope(request.body);
@@ -657,6 +704,21 @@ export class CoordinationApi {
         if (error instanceof PostIdConflictError) {
           return failure(409, error.code, error.message, safeRequestId(request.body));
         }
+      if (error instanceof DocumentNotFoundError) {
+        return failure(404, error.code, error.message, safeRequestId(request.body));
+      }
+      if (error instanceof DocumentRemoveDeniedError) {
+        return failure(403, error.code, error.message, safeRequestId(request.body));
+      }
+      if (error instanceof DocumentBudgetExceededError) {
+        return failure(413, error.code, error.message, safeRequestId(request.body));
+      }
+      if (error instanceof DocumentSupersessionInvalidError) {
+        return failure(409, error.code, error.message, safeRequestId(request.body));
+      }
+      if (error instanceof LogEntryTooLargeError) {
+        return failure(413, error.code, error.message, safeRequestId(request.body));
+      }
       if (error instanceof CubeDeletedError) {
         return failure(410, ErrorCode.CUBE_DELETED, error.message, safeRequestId(request.body));
       }
@@ -694,9 +756,13 @@ export class CoordinationApi {
         return failure(507, "CAPACITY_EXCEEDED", error.message, safeRequestId(request.body));
       }
       if (error instanceof ProtocolContractError) {
-        return error.code === ErrorCode.UNSUPPORTED_PROTOCOL_VERSION
-          ? failure(426, error.code, "Unsupported protocol version.", safeRequestId(request.body))
-          : failure(400, "INVALID_INPUT", "Invalid protocol request.", safeRequestId(request.body));
+        if (error.code === ErrorCode.UNSUPPORTED_PROTOCOL_VERSION) {
+          return failure(426, error.code, "Unsupported protocol version.", safeRequestId(request.body));
+        }
+        if (error.code === ErrorCode.DOCUMENT_CONTENT_TYPE_UNSUPPORTED) {
+          return failure(400, error.code, "Unsupported document content type.", safeRequestId(request.body));
+        }
+        return failure(400, "INVALID_INPUT", "Invalid protocol request.", safeRequestId(request.body));
       }
       if (error instanceof InputError || error instanceof TypeError || error instanceof RangeError) {
         return failure(

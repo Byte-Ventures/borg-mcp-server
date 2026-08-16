@@ -5,6 +5,7 @@ import { dirname, join, parse, relative, resolve, sep } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { MessageTaxonomy } from "borgmcp-shared/domain";
 import type {
+  AckStatusResult,
   CreateCubeRepository,
   CubeDocument,
   CubeDocumentMetadata,
@@ -376,6 +377,7 @@ export interface ScopedStore {
   readonly hasLogPost: (cubeId: string, postId: string) => boolean;
   readonly readLog: (cubeId: string, cursor: LogCursor | null, limit: number) => ActivityPage;
   readonly readLogEntry: (cubeId: string, selector: string) => EnrichedActivityRecord;
+  readonly readAckStatus: (cubeId: string, entryId: string) => AckStatusResult;
   readonly putDocument: (cubeId: string, input: {
     readonly title: string;
     readonly contentType: DocumentContentType;
@@ -548,6 +550,8 @@ export interface MaintenanceStore {
   readonly observeAuthorityState: () => {
     readonly enrolled_clients: number;
     readonly enrollment_claims: number;
+    readonly activity_acknowledgements: number;
+    readonly activity_claims: number;
     readonly cubes: number;
     readonly roles: number;
     readonly grants: number;
@@ -2343,6 +2347,60 @@ class SqliteScopedStore implements ScopedStore {
     return this.#enrichedEntry(cubeId, requiredText(rows[0]!, "id"));
   }
 
+  readAckStatus(cubeId: string, entryId: string): AckStatusResult {
+    assertCanonicalUuid(entryId, "Activity entry id");
+    const entry = this.readLogEntry(cubeId, entryId);
+    const recipients = this.#database.prepare(`
+      SELECT recipient.drone_id,
+             drone.label AS drone_label,
+             role.name AS drone_role,
+             MIN(acknowledgement.created_at) AS acknowledged_at
+      FROM activity_log_recipients AS recipient
+      LEFT JOIN drones AS drone ON drone.id = recipient.drone_id AND drone.cube_id = ?
+      LEFT JOIN roles AS role ON role.id = drone.role_id AND role.cube_id = drone.cube_id
+      LEFT JOIN activity_acks AS acknowledgement
+        ON acknowledgement.entry_id = recipient.entry_id
+        AND acknowledgement.claimant_drone_id = recipient.drone_id
+        AND acknowledgement.principal_kind = 'drone-session'
+        AND acknowledgement.kind = 'ack'
+      WHERE recipient.entry_id = ?
+      GROUP BY recipient.drone_id, drone.label, role.name
+      ORDER BY recipient.drone_id
+    `).all(cubeId, entryId).map((row) => ({
+      drone_id: requiredText(row, "drone_id"),
+      drone_label: nullableText(row, "drone_label"),
+      drone_role: nullableText(row, "drone_role"),
+      acknowledged_at: nullableText(row, "acknowledged_at"),
+    }));
+    const claims = this.#database.prepare(`
+      SELECT acknowledgement.claimant_drone_id AS drone_id,
+             drone.label AS drone_label,
+             role.name AS drone_role,
+             MIN(acknowledgement.created_at) AS claimed_at
+      FROM activity_acks AS acknowledgement
+      LEFT JOIN drones AS drone ON drone.id = acknowledgement.claimant_drone_id
+        AND drone.cube_id = ?
+      LEFT JOIN roles AS role ON role.id = drone.role_id AND role.cube_id = drone.cube_id
+      WHERE acknowledgement.entry_id = ?
+        AND acknowledgement.principal_kind = 'drone-session'
+        AND acknowledgement.kind = 'claim'
+        AND acknowledgement.claimant_drone_id IS NOT NULL
+      GROUP BY acknowledgement.claimant_drone_id, drone.label, role.name
+      ORDER BY claimed_at, acknowledgement.claimant_drone_id
+    `).all(cubeId, entryId).map((row) => ({
+      drone_id: requiredText(row, "drone_id"),
+      drone_label: nullableText(row, "drone_label"),
+      drone_role: nullableText(row, "drone_role"),
+      claimed_at: requiredText(row, "claimed_at"),
+    }));
+    return {
+      entry_id: entry.id,
+      visibility: entry.visibility,
+      recipients,
+      claims,
+    };
+  }
+
   acknowledge(cubeId: string, entryId: string, kind: "ack" | "claim"): void {
     this.#requireCube(cubeId, "write");
     assertCanonicalUuid(entryId, "Activity entry id");
@@ -3321,6 +3379,12 @@ class SqliteMaintenanceStore implements MaintenanceStore {
     return {
       enrolled_clients: count("clients"),
       enrollment_claims: count("enrollment_claims"),
+      activity_acknowledgements: requiredInteger(this.#database.prepare(
+        "SELECT COUNT(*) AS count FROM activity_acks WHERE kind = 'ack'",
+      ).get()!, "count"),
+      activity_claims: requiredInteger(this.#database.prepare(
+        "SELECT COUNT(*) AS count FROM activity_acks WHERE kind = 'claim'",
+      ).get()!, "count"),
       cubes: count("cubes"),
       roles: count("roles"),
       grants: count("client_cube_grants"),

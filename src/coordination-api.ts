@@ -9,6 +9,8 @@ import {
   createProtocolEnvelope,
   decodeAssociateRepositoryCubeRequestEnvelope,
   decodeAttachRequestEnvelope,
+  decodeAckStatusRequestEnvelope,
+  decodeAckStatusResult,
   decodeCreateCubeRequestEnvelope,
   decodeDeleteCubeRequestEnvelope,
   decodeDeleteRoleRequestEnvelope,
@@ -292,6 +294,8 @@ export class CoordinationApi {
       .exec(request.path);
     const logEntryMatch = /^\/api\/cubes\/([0-9a-f-]{36})\/logs\/([0-9a-f]{8}|[0-9a-f-]{36})$/iu
       .exec(request.path);
+    const ackStatusMatch = /^\/api\/cubes\/([0-9a-f-]{36})\/logs\/([0-9a-f-]{36})\/ack-status$/iu
+      .exec(request.path);
     const documentMatch = /^\/api\/cubes\/([0-9a-f-]{36})\/documents\/([^/]+)$/u
       .exec(request.path);
     const droneMatch = /^\/api\/cubes\/([0-9a-f-]{36})\/drones\/([0-9a-f-]{36})$/u
@@ -300,10 +304,10 @@ export class CoordinationApi {
       /^\/api\/cubes\/([0-9a-f-]{36})\/drones\/self\/metadata$/u.exec(request.path);
     const match = /^\/api\/cubes\/([0-9a-f-]{36})(?:\/(roles|drones|logs|acks|decisions|documents|stream|taxonomy-patch|role-rationale))?$/u
       .exec(request.path);
-    if (match === null && roleMatch === null && logEntryMatch === null && documentMatch === null && droneMatch === null && selfMetadataMatch === null) {
+    if (match === null && roleMatch === null && logEntryMatch === null && ackStatusMatch === null && documentMatch === null && droneMatch === null && selfMetadataMatch === null) {
       return failure(404, "NOT_FOUND", "The requested resource was not found.");
     }
-    const cubeId = (roleMatch?.[1] ?? logEntryMatch?.[1] ?? documentMatch?.[1] ?? droneMatch?.[1] ?? selfMetadataMatch?.[1] ?? match?.[1])!;
+    const cubeId = (roleMatch?.[1] ?? logEntryMatch?.[1] ?? ackStatusMatch?.[1] ?? documentMatch?.[1] ?? droneMatch?.[1] ?? selfMetadataMatch?.[1] ?? match?.[1])!;
     const roleId = roleMatch?.[2];
     const droneId = droneMatch?.[2];
     const documentId = documentMatch?.[2];
@@ -313,15 +317,17 @@ export class CoordinationApi {
     }
     const resource = roleMatch !== null
       ? "role"
-      : logEntryMatch !== null
-        ? "log-entry"
-      : documentMatch !== null
-        ? "document"
-      : droneMatch !== null
-        ? "drone"
-        : selfMetadataMatch !== null
-          ? "self-metadata"
-          : match?.[2];
+      : ackStatusMatch !== null
+        ? "ack-status"
+        : logEntryMatch !== null
+          ? "log-entry"
+          : documentMatch !== null
+            ? "document"
+            : droneMatch !== null
+              ? "drone"
+              : selfMetadataMatch !== null
+                ? "self-metadata"
+                : match?.[2];
     const sectionPatch = roleMatch?.[3] !== undefined;
     const store = this.#runtime.forPrincipal(authentication);
 
@@ -620,6 +626,13 @@ export class CoordinationApi {
       if (resource === "log-entry" && request.method === "GET") {
         const entry = store.readLogEntry(cubeId, requiredLogEntrySelector(logEntryMatch![2]!));
         return success(200, "log-entry-read", { entry });
+      }
+      if (resource === "ack-status" && request.method === "GET") {
+        const envelope = decodeAckStatusRequestEnvelope(request.body);
+        if (envelope.payload.entry_id !== ackStatusMatch![2]) throw new InputError();
+        return success(200, envelope.request_id, decodeAckStatusResult(
+          store.readAckStatus(cubeId, envelope.payload.entry_id),
+        ));
       }
       if (resource === "documents" && request.method === "PUT") {
         const envelope = decodePutDocumentRequestEnvelope(request.body);

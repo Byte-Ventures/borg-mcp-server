@@ -54,3 +54,16 @@ Messages above the configured advisory threshold are accepted with
 `STORE_AS_DOCUMENT`. Messages above the configured hard limit are rejected with
 `CONTENT_TOO_LARGE`; the caller stores the detail as a document and cites it
 from a shorter log entry.
+
+## Acknowledgement status
+
+Protocol v11 adds `GET /api/cubes/:cubeId/logs/:entryId/ack-status`. The strict
+request envelope repeats the full activity `entry_id`. The response reports the
+entry visibility, each intended direct recipient's current nullable label and
+role plus nullable acknowledgement timestamp, and advisory claims as a separate
+collection. Broadcast entries have no explicit recipient list.
+
+The query requires cube read access and applies the same directed-entry scope as
+log reads. Unknown, pruned, unauthorized, and cross-cube entries return the same
+`NOT_FOUND` response. Reading status does not acknowledge or claim the entry,
+append activity, or advance an unread cursor.

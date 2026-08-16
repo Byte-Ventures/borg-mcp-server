@@ -165,7 +165,7 @@ describe("Principal to ScopedStore isolation", () => {
       access: "manage",
     })).toThrow(operatorErrors.CUBE_ID_INVALID);
   });
-  it("gives the delegated Queen the complete activation timing contract", () => {
+  it("keeps delegated Queen follow-up milestone-based and operator-controlled", () => {
     expect(PLATFORM_QUEEN_DETAILED_DESCRIPTION).toContain(
       "Use START NOW, RESUME NOW, REVIEW NOW, or HOLD",
     );
@@ -173,22 +173,28 @@ describe("Principal to ScopedStore isolation", () => {
       "ACK and claim are receipt only",
     );
     expect(PLATFORM_QUEEN_DETAILED_DESCRIPTION).toContain(
-      "within 2 minutes",
+      "Follow work through substantive milestones, not elapsed-time deadlines",
     );
     expect(PLATFORM_QUEEN_DETAILED_DESCRIPTION).toContain(
-      "send the named drone a direct activation reminder (a kick)",
+      "send at most one direct status request",
     );
     expect(PLATFORM_QUEEN_DETAILED_DESCRIPTION).toContain(
-      "after a further 5 minutes",
+      "report silence or liveness evidence to the human",
     );
     expect(PLATFORM_QUEEN_DETAILED_DESCRIPTION).toContain(
-      "eligible and authorized",
+      "never authorizes an ownership change",
     );
     expect(PLATFORM_QUEEN_DETAILED_DESCRIPTION).toContain(
-      "substantive PROGRESS at least every 10 minutes",
+      "explicit human operator approval for the exact work item and recipient",
+    );
+    expect(PLATFORM_QUEEN_DETAILED_DESCRIPTION).toContain(
+      "Do not interrupt slow local work merely to satisfy a cadence",
     );
     expect(PLATFORM_QUEEN_DETAILED_DESCRIPTION).toContain(
       "BLOCKED immediately",
+    );
+    expect(PLATFORM_QUEEN_DETAILED_DESCRIPTION).not.toMatch(
+      /(?:within|further|every) (?:2|5|10) minutes|activation reminder|probe liveness|eligible and authorized reassignment/i,
     );
   });
 

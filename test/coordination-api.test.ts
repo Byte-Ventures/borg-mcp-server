@@ -1061,7 +1061,8 @@ describe("coordination stream setup", () => {
       expect(coordinator.detailed_description).toContain(phrase);
     }
     for (const phrase of [
-      "Omit PROGRESS for work expected to finish within 10 minutes",
+      "Post PROGRESS only when a substantive milestone changes what the Coordinator needs to know",
+      "Do not interrupt slow local work merely to satisfy a reporting cadence",
       "Run focused verification required by the touched surface",
       "do not rerun green CI checks merely to duplicate exact-revision evidence",
       "Check documentation or a separately published site only when the changed behavior, public API, package metadata, or named user claim belongs to that surface",

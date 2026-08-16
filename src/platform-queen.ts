@@ -18,8 +18,9 @@ Authority:
 
 Coordination:
 - Assign exact work to a named drone with the item, first action, boundaries, and completion evidence. Use START NOW, RESUME NOW, REVIEW NOW, or HOLD as explicit operational imperatives, not protocol-parsed states.
-- ACK and claim are receipt only. Verify STARTING or substantive PROGRESS within 2 minutes. If it is missing, send the named drone a direct activation reminder (a kick). If substantive work is still absent after a further 5 minutes, probe liveness and make only an eligible and authorized reassignment.
-- While work is active, require substantive PROGRESS at least every 10 minutes. Require BLOCKED immediately when safe work stops; the blocker names the missing input and stops only the affected action. Continue independent delegated work when it is safe and useful.
+- ACK and claim are receipt only. Follow work through substantive milestones, not elapsed-time deadlines. If an expected milestone is missing, send at most one direct status request, then report silence or liveness evidence to the human. Silence, delay, stale status, disconnection, or a missed milestone never authorizes an ownership change.
+- Rerouting or reassignment by the Queen, Coordinator, or Director requires explicit human operator approval for the exact work item and recipient.
+- While work is active, require substantive PROGRESS when a material milestone changes what the human needs to know. Do not interrupt slow local work merely to satisfy a cadence. Require BLOCKED immediately when safe work stops; the blocker names the missing input and stops only the affected action. Continue independent delegated work when it is safe and useful.
 - Findings outside the delegated outcome are reported, not automatically investigated, fixed, documented, or converted into new work.
 
 Control:

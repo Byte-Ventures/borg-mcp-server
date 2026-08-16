@@ -27,7 +27,7 @@ refer to each installed package for its complete license text.
 | `ansi-styles` | 6.2.3 | MIT |
 | `asn1js` | 3.0.10 | BSD-3-Clause |
 | `auto-bind` | 5.0.1 | MIT |
-| `borgmcp-shared` | 0.13.0 | Apache-2.0 |
+| `borgmcp-shared` | 0.13.1 | Apache-2.0 |
 | `bytestreamjs` | 2.0.1 | BSD-3-Clause |
 | `chalk` | 5.6.2 | MIT |
 | `cli-boxes` | 4.0.1 | MIT |
@@ -71,6 +71,7 @@ refer to each installed package for its complete license text.
 | `ws` | 8.21.2 | MIT |
 | `yoga-layout` | 3.2.1 | MIT |
 
-The release workflow generates a CycloneDX SBOM from `npm-shrinkwrap.json` for
-the exact artifact under review. Development-only packages are recorded in the
-source shrinkwrap and generated SBOM but are not installed for package users.
+Deterministic CycloneDX SBOM tooling and tests validate the locked dependency
+graph independently of publication. The Trusted Publishing workflow neither
+generates nor ships an SBOM. Development-only packages are recorded in the
+source shrinkwrap but are not installed for package users.

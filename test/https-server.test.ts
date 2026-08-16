@@ -203,6 +203,10 @@ describe("HTTPS service", () => {
       bind: { port: 0 },
       tls: { key, cert: certificate },
       debugLogger: createDebugLogger((line) => lines.push(line)),
+      authorizeCoordination: async () => clientPrincipal(
+        "00000000-0000-4000-8000-000000000403",
+      ),
+      handleCoordination: async () => ({ status: 200, body: {} }),
     });
     const urlSecret = "secret-url-component";
     const bearerSecret = "secret-bearer-component";
@@ -210,6 +214,12 @@ describe("HTTPS service", () => {
       await request(debugServer.origin, certificate, `/api/${urlSecret}`, {
         authorization: `Bearer ${bearerSecret}`,
       });
+      await request(
+        debugServer.origin,
+        certificate,
+        "/api/cubes/00000000-0000-4000-8000-000000000401/logs/00000000-0000-4000-8000-000000000402/ack-status",
+        { authorization: "Bearer diagnostic-credential" },
+      );
       await request(debugServer.origin, certificate, "/api/protocol");
     } finally {
       await debugServer.close();
@@ -220,6 +230,14 @@ describe("HTTPS service", () => {
     expect(output).not.toContain(bearerSecret);
     expect(lines.map((line) => JSON.parse(line))).toEqual(expect.arrayContaining([
       expect.objectContaining({ event: "request", route: "unknown", method: "GET", status: 404 }),
+      expect.objectContaining({
+        event: "request",
+        route: "cube_ack_status",
+        method: "GET",
+        authentication: "accepted",
+        authorization: "accepted",
+        status: 200,
+      }),
       expect.objectContaining({
         event: "request",
         route: "protocol",

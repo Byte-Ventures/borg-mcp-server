@@ -52,7 +52,7 @@ describe("borgmcp-shared server adapter", () => {
           observations: {},
         },
       ]);
-      expect(report.results).toHaveLength(33);
+      expect(report.results).toHaveLength(35);
     } finally {
       await fixture.server.close();
       fixture.digester.destroy();
@@ -160,30 +160,8 @@ async function conformanceEnvironment(): Promise<{
         });
         return { id: role.id };
       },
-      referenceRoleFromTaxonomy: async (cube, role) => {
-        const store = runtime.forPrincipal(operatorPrincipal(
-          "00000000-0000-4000-8000-000000000399",
-        ));
-        const roleName = store.listRoles(cube.id).find((candidate) => candidate.id === role.id)?.name;
-        if (roleName === undefined) throw new Error("Conformance role is unavailable.");
-        store.updateCube(cube.id, { messageTaxonomy: [{
-          class: "role-reference",
-          prefixes: ["ROLE-REFERENCE"],
-          routing: "directed",
-          default_to: [roleName],
-        }] });
-      },
-      configureMessageClassRouting: async (cube, className, recipientDroneIds) => {
-        const store = runtime.forPrincipal(operatorPrincipal(
-          "00000000-0000-4000-8000-000000000399",
-        ));
-        const current = store.getCube(cube.id)?.messageTaxonomy ?? [];
-        store.updateCube(cube.id, { messageTaxonomy: [...current, {
-          class: className,
-          prefixes: [`${className.toUpperCase()}:`],
-          routing: "directed",
-          default_to: [...recipientDroneIds],
-        }] });
+      replaceLogEntryId: async (cube, currentId, replacementId) => {
+        runtime.maintenance.replaceLogEntryId(cube.id, currentId, replacementId);
       },
       createDrone: async (principal, cube, role) => {
         const credential = principalCredentials.get(principal.id);
@@ -409,6 +387,15 @@ async function conformanceEnvironment(): Promise<{
       },
       read: async (credential, cube, request) =>
         transport.request("PUT", `/api/cubes/${cube.id}/logs`, JSON.stringify(request), credential),
+      entryQuery: async (credential, cube, request) => {
+        const entryId = (request as { payload: { entry_id: string } }).payload.entry_id;
+        return transport.request(
+          "GET",
+          `/api/cubes/${cube.id}/logs/${encodeURIComponent(entryId)}`,
+          undefined,
+          credential,
+        );
+      },
       ack: async (credential, cube, request) =>
         transport.request("POST", `/api/cubes/${cube.id}/acks`, JSON.stringify(request), credential),
       ackStatus: async (credential, cube, request) => {
@@ -443,7 +430,6 @@ async function conformanceEnvironment(): Promise<{
               class_def: {
                 class: envelope.payload.marker,
                 prefixes: [`${envelope.payload.marker}:`],
-                routing: "broadcast",
               },
             },
           }),

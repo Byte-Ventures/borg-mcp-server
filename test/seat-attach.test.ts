@@ -113,11 +113,11 @@ describe("client seat attach", () => {
 
   it("reuses the matching active digest without mutating session identity", async () => {
     const sessionCredential = generateSecret();
-    const initial = runtime.forPrincipal(authenticatedPrincipal(clientA.credential)).appendLog(ids.cubeA, {
+    const initial = runtime.forPrincipal(authenticatedPrincipal(clientA.credential)).appendLog(ids.cubeA, { visibility: "broadcast",
       message: "before attach",
     });
     const created = await attach(clientA.credential, ids.cubeA, ids.roleA, sessionCredential, "attach-reuse-1");
-    runtime.forPrincipal(authenticatedPrincipal(clientA.credential)).appendLog(ids.cubeA, {
+    runtime.forPrincipal(authenticatedPrincipal(clientA.credential)).appendLog(ids.cubeA, { visibility: "broadcast",
       message: "after attach",
     });
     now = new Date("2126-07-14T13:00:00.000Z");
@@ -443,7 +443,7 @@ describe("client seat attach", () => {
     expect(response).toMatchObject({
       status: 426,
       body: {
-        protocol_version: "11",
+        protocol_version: "12",
         request_id: "attach-version-old",
         error: {
           code: "UNSUPPORTED_PROTOCOL_VERSION",
@@ -531,7 +531,7 @@ function authenticatedPrincipal(credential: string) {
 }
 
 function envelope(requestId: string, payload: Record<string, unknown>) {
-  return { protocol_version: "11", request_id: requestId, payload };
+  return { protocol_version: "12", request_id: requestId, payload };
 }
 
 function count(table: "drones" | "drone_sessions" | "drone_session_credentials"): number {

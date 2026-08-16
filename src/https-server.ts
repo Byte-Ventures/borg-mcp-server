@@ -495,6 +495,9 @@ function debugRoute(rawUrl: string | undefined): DebugRoute {
     return "cube_drone_self_metadata";
   }
   if (/^\/api\/cubes\/[0-9a-f-]{36}\/logs$/iu.test(path)) return "cube_logs";
+  if (/^\/api\/cubes\/[0-9a-f-]{36}\/logs\/(?:[0-9a-f]{8}|[0-9a-f-]{36})$/iu.test(path)) {
+    return "cube_log_entry";
+  }
   if (/^\/api\/cubes\/[0-9a-f-]{36}\/logs\/[0-9a-f-]{36}\/ack-status$/iu.test(path)) {
     return "cube_ack_status";
   }

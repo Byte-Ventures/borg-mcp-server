@@ -54,7 +54,7 @@ describe("SQLite migrations", () => {
     expect(migrationChecksum(STORE_MIGRATIONS[16]!)).toBe(publishedV070.rows[16]![2]);
   });
 
-  it("replays a published 0.7.0 migration ledger and upgrades it to v23", async () => {
+  it("replays a published 0.7.0 migration ledger and upgrades it to the current schema", async () => {
     const fixtures = await publishedMigrationFixtures;
     const database = new DatabaseSync(":memory:");
     applyMigrations(database, STORE_MIGRATIONS.slice(0, 17));
@@ -124,7 +124,7 @@ describe("SQLite migrations", () => {
     expect(first.diagnostics()).toEqual({
       journalMode: "wal",
       foreignKeys: true,
-      schemaVersions: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24],
+      schemaVersions: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25],
     });
     expect((await stat(join(directory, "data"))).mode & 0o777).toBe(0o700);
     expect((await stat(databasePath)).mode & 0o777).toBe(0o600);
@@ -134,7 +134,7 @@ describe("SQLite migrations", () => {
 
     const second = await openStore({ path: databasePath });
     expect(second.diagnostics().schemaVersions)
-      .toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24]);
+      .toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25]);
     second.close();
     await expect(access(databasePath)).resolves.toBeUndefined();
   });
@@ -760,7 +760,202 @@ describe("SQLite migrations", () => {
     ).get()).toBeUndefined();
     expect(database.prepare(
       "SELECT version, name FROM schema_migrations ORDER BY version DESC LIMIT 1",
-    ).get()).toEqual({ version: 24, name: "cube_documents" });
+    ).get()).toEqual({ version: 25, name: "explicit_log_addressing" });
+    database.close();
+  });
+
+  it("removes taxonomy routing policy while preserving classification metadata", async () => {
+    const database = new DatabaseSync(":memory:");
+    applyMigrations(database, STORE_MIGRATIONS.slice(0, 24));
+    const now = "2026-08-16T00:00:00.000Z";
+    const insertCube = database.prepare(`
+      INSERT INTO cubes (id, name, directive, message_taxonomy, created_at, updated_at)
+      VALUES (?, ?, '', ?, ?, ?)
+    `);
+    const taxonomy = [{
+      class: "dispatch",
+      prefixes: ["START"],
+      routing: "directed",
+      default_to: ["Builder"],
+      lifecycle: "dispatch",
+    }, {
+      class: "status",
+      prefixes: ["DONE"],
+      routing: "broadcast",
+      lifecycle: "completion",
+    }];
+    insertCube.run(
+      "00000000-0000-4000-8000-000000000091",
+      "Migrated taxonomy",
+      JSON.stringify(taxonomy),
+      now,
+      now,
+    );
+    const legacyDiscipline = `
+
+Structured message routing:
+- Pass the intended recipient through borg_log's structured \`to:\` parameter for every directed message.
+- Naming a recipient inside the message text does not route it.
+- The default is broadcast. Without \`to:\`, a matching directed class, or explicit direct visibility, the unrouted message broadcasts to every seat.`;
+    const mandatoryDiscipline = `
+
+Structured message routing:
+- Every borg_log call must set structured \`to:\` to either \`"broadcast"\` or a non-empty recipient selector array.
+- Use \`to: "broadcast"\` only when every cube member is the intended audience; otherwise name every intended recipient explicitly.
+- Naming a recipient inside the message text does not route it.
+- Message classes and prefixes classify lifecycle signals only; they never choose recipients or provide a default audience.`;
+    const legacyBroadcast = "- Send PING with `to:` only for a directed liveness check. Use DECISION or HALT only for an intentional cube-wide human-seat message.";
+    const mandatoryBroadcast = "- Send PING with `to:` only for a directed liveness check. Use DECISION or HALT with `to: \"broadcast\"` only for an intentional cube-wide human-seat message.";
+    const insertRole = database.prepare(`
+      INSERT INTO roles (id, cube_id, name, detailed_description, created_at)
+      VALUES (?, ?, ?, ?, ?)
+    `);
+    insertRole.run(
+      "00000000-0000-4000-8000-000000000093",
+      "00000000-0000-4000-8000-000000000091",
+      "Stock role",
+      `${legacyDiscipline}\n${legacyBroadcast}`,
+      now,
+    );
+    const clientId = "00000000-0000-4000-8000-000000000096";
+    const droneId = "00000000-0000-4000-8000-000000000097";
+    const sessionId = "00000000-0000-4000-8000-000000000099";
+    const entryId = "00000000-0000-4000-8000-000000000098";
+    database.prepare(
+      "INSERT INTO clients (id, name, created_at) VALUES (?, 'History client', ?)",
+    ).run(clientId, now);
+    database.prepare(`
+      INSERT INTO drones (id, cube_id, role_id, client_id, label, created_at)
+      VALUES (?, ?, ?, ?, 'history-drone', ?)
+    `).run(
+      droneId,
+      "00000000-0000-4000-8000-000000000091",
+      "00000000-0000-4000-8000-000000000093",
+      clientId,
+      now,
+    );
+    database.prepare(`
+      INSERT INTO activity_log (
+        id, cube_id, drone_id, actor_kind, actor_id, message, created_at, visibility
+      ) VALUES (?, ?, ?, 'drone-session', ?, 'historical direct entry', ?, 'direct')
+    `).run(
+      entryId,
+      "00000000-0000-4000-8000-000000000091",
+      droneId,
+      droneId,
+      now,
+    );
+    database.prepare(
+      "INSERT INTO activity_log_recipients (entry_id, drone_id) VALUES (?, ?)",
+    ).run(entryId, droneId);
+    database.prepare(`
+      INSERT INTO drone_sessions (
+        id, client_id, cube_id, drone_id, created_at,
+        initial_log_cursor_id, initial_log_cursor_created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(sessionId, clientId, "00000000-0000-4000-8000-000000000091", droneId, now, entryId, now);
+    database.prepare(`
+      INSERT INTO expired_activity_cursors (cube_id, entry_id, created_at)
+      VALUES (?, ?, ?)
+    `).run("00000000-0000-4000-8000-000000000091", entryId, now);
+    const insertAck = database.prepare(`
+      INSERT INTO activity_acks (
+        entry_id, principal_kind, principal_id, kind, created_at, claimant_drone_id
+      ) VALUES (?, 'drone-session', ?, ?, ?, ?)
+    `);
+    insertAck.run(entryId, droneId, "ack", now, droneId);
+    insertAck.run(entryId, droneId, "claim", now, droneId);
+    const historyBefore = {
+      entry: database.prepare(
+        "SELECT id, visibility, created_at FROM activity_log WHERE id = ?",
+      ).get(entryId),
+      recipients: database.prepare(
+        "SELECT entry_id, drone_id FROM activity_log_recipients WHERE entry_id = ?",
+      ).all(entryId),
+      acknowledgements: database.prepare(`
+        SELECT entry_id, principal_id, kind, created_at, claimant_drone_id
+        FROM activity_acks WHERE entry_id = ? ORDER BY kind
+      `).all(entryId),
+      sessionCursor: database.prepare(`
+        SELECT initial_log_cursor_id, initial_log_cursor_created_at
+        FROM drone_sessions WHERE id = ?
+      `).get(sessionId),
+      expiredCursor: database.prepare(`
+        SELECT cube_id, entry_id, created_at
+        FROM expired_activity_cursors WHERE entry_id = ?
+      `).get(entryId),
+    };
+    insertRole.run(
+      "00000000-0000-4000-8000-000000000094",
+      "00000000-0000-4000-8000-000000000091",
+      "Customized role",
+      `Custom preamble.${legacyDiscipline}\nCustom suffix.`,
+      now,
+    );
+    insertRole.run(
+      "00000000-0000-4000-8000-000000000095",
+      "00000000-0000-4000-8000-000000000091",
+      "Unrelated role",
+      "Custom routing prose must remain byte-identical.",
+      now,
+    );
+    insertCube.run(
+      "00000000-0000-4000-8000-000000000092",
+      "Null taxonomy",
+      null,
+      now,
+      now,
+    );
+
+    applyMigrations(database);
+
+    const rows = database.prepare(
+      "SELECT id, message_taxonomy FROM cubes ORDER BY id",
+    ).all() as Array<{ id: string; message_taxonomy: string | null }>;
+    expect(JSON.parse(rows[0]!.message_taxonomy!)).toEqual([{
+      class: "dispatch",
+      prefixes: ["START"],
+      lifecycle: "dispatch",
+    }, {
+      class: "status",
+      prefixes: ["DONE"],
+      lifecycle: "completion",
+    }]);
+    expect(rows[1]!.message_taxonomy).toBeNull();
+    expect(database.prepare(
+      "SELECT detailed_description FROM roles WHERE name = 'Stock role'",
+    ).get()).toEqual({ detailed_description: `${mandatoryDiscipline}\n${mandatoryBroadcast}` });
+    expect(database.prepare(
+      "SELECT detailed_description FROM roles WHERE name = 'Customized role'",
+    ).get()).toEqual({
+      detailed_description: `Custom preamble.${mandatoryDiscipline}\nCustom suffix.`,
+    });
+    expect(database.prepare(
+      "SELECT detailed_description FROM roles WHERE name = 'Unrelated role'",
+    ).get()).toEqual({ detailed_description: "Custom routing prose must remain byte-identical." });
+    expect({
+      entry: database.prepare(
+        "SELECT id, visibility, created_at FROM activity_log WHERE id = ?",
+      ).get(entryId),
+      recipients: database.prepare(
+        "SELECT entry_id, drone_id FROM activity_log_recipients WHERE entry_id = ?",
+      ).all(entryId),
+      acknowledgements: database.prepare(`
+        SELECT entry_id, principal_id, kind, created_at, claimant_drone_id
+        FROM activity_acks WHERE entry_id = ? ORDER BY kind
+      `).all(entryId),
+      sessionCursor: database.prepare(`
+        SELECT initial_log_cursor_id, initial_log_cursor_created_at
+        FROM drone_sessions WHERE id = ?
+      `).get(sessionId),
+      expiredCursor: database.prepare(`
+        SELECT cube_id, entry_id, created_at
+        FROM expired_activity_cursors WHERE entry_id = ?
+      `).get(entryId),
+    }).toEqual(historyBefore);
+    expect(database.prepare(
+      "SELECT version, name FROM schema_migrations ORDER BY version DESC LIMIT 1",
+    ).get()).toEqual({ version: 25, name: "explicit_log_addressing" });
     database.close();
   });
 

@@ -91,11 +91,11 @@ describe("dashboard snapshot source", () => {
       cubeId: ids.cubeB,
       droneId: ids.droneB,
     }));
-    droneA.appendLog(ids.cubeA, { message: "outside-window-secret-body" });
+    droneA.appendLog(ids.cubeA, { visibility: "broadcast", message: "outside-window-secret-body" });
     now = new Date("2026-07-25T11:51:00.000Z");
-    droneA.appendLog(ids.cubeA, { message: "inside-window-secret-body-a" });
+    droneA.appendLog(ids.cubeA, { visibility: "broadcast", message: "inside-window-secret-body-a" });
     now = new Date("2026-07-25T11:56:00.000Z");
-    droneB.appendLog(ids.cubeB, { message: "inside-window-secret-body-b" });
+    droneB.appendLog(ids.cubeB, { visibility: "broadcast", message: "inside-window-secret-body-b" });
     now = new Date("2026-07-25T12:00:00.000Z");
 
     expect(runtime.dashboard.read()).toEqual({
@@ -140,7 +140,7 @@ describe("dashboard snapshot source", () => {
       clientId: ids.client,
       cubeId: ids.cubeA,
       droneId: ids.droneA,
-    })).appendLog(ids.cubeA, { message: "committed" });
+    })).appendLog(ids.cubeA, { visibility: "broadcast", message: "committed" });
     expect(listener).toHaveBeenCalledOnce();
     unsubscribe();
     runtime.forPrincipal(droneSessionPrincipal({
@@ -148,7 +148,7 @@ describe("dashboard snapshot source", () => {
       clientId: ids.client,
       cubeId: ids.cubeA,
       droneId: ids.droneA,
-    })).appendLog(ids.cubeA, { message: "after unsubscribe" });
+    })).appendLog(ids.cubeA, { visibility: "broadcast", message: "after unsubscribe" });
     expect(listener).toHaveBeenCalledOnce();
   });
 });

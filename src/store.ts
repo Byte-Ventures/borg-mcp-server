@@ -43,7 +43,7 @@ import {
   type RoleSectionPatchConflictReason,
   type RoleSectionPatchOp,
 } from "./role-section.js";
-import { messageTaxonomyReferencesRole, validateMessageTaxonomy } from "./message-taxonomy.js";
+import { validateMessageTaxonomy } from "./message-taxonomy.js";
 import {
   PLATFORM_QUEEN_DETAILED_DESCRIPTION,
   PLATFORM_QUEEN_SHORT_DESCRIPTION,
@@ -369,7 +369,7 @@ export interface ScopedStore {
   readonly appendLog: (cubeId: string, input: {
     readonly postId?: string;
     readonly message: string;
-    readonly visibility?: "broadcast" | "direct";
+    readonly visibility: "broadcast" | "direct";
     readonly recipientDroneIds?: readonly string[];
     readonly routingKey?: string | null;
     readonly documents?: readonly string[];
@@ -550,6 +550,7 @@ export interface MaintenanceStore {
   readonly observeAuthorityState: () => {
     readonly enrolled_clients: number;
     readonly enrollment_claims: number;
+    readonly activity_log_entries: number;
     readonly activity_acknowledgements: number;
     readonly activity_claims: number;
     readonly cubes: number;
@@ -661,6 +662,7 @@ export interface MaintenanceStore {
       readonly session_revoked: boolean;
     }>;
   };
+  readonly replaceLogEntryId: (cubeId: string, currentId: string, replacementId: string) => void;
   readonly expireActivityCursor: (cubeId: string, cursor: LogCursor) => void;
 }
 
@@ -735,15 +737,6 @@ export class RoleRequiredError extends Error {
   constructor() {
     super("A required cube role cannot be deleted.");
     this.name = "RoleRequiredError";
-  }
-}
-
-export class RoleReferencedError extends Error {
-  readonly code = "ROLE_REFERENCED";
-
-  constructor() {
-    super("A message taxonomy default recipient still references this role.");
-    this.name = "RoleReferencedError";
   }
 }
 
@@ -1497,7 +1490,7 @@ class SqliteScopedStore implements ScopedStore {
   }
 
   appendActivity(cubeId: string, message: string): ActivityRecord {
-    const entry = this.appendLog(cubeId, { message });
+    const entry = this.appendLog(cubeId, { message, visibility: "broadcast" });
     const droneId = this.#principal.kind === "drone-session" ? this.#principal.droneId : null;
     return {
       id: entry.id,
@@ -1762,16 +1755,6 @@ class SqliteScopedStore implements ScopedStore {
       if (requiredInteger(roleRow, "is_mandatory") === 1 ||
           requiredInteger(roleRow, "is_human_seat") === 1) {
         throw new RoleRequiredError();
-      }
-      const cubeRow = this.#database.prepare(
-        "SELECT message_taxonomy FROM cubes WHERE id = ?",
-      ).get(cubeId);
-      if (cubeRow === undefined) throw new ScopedStoreError();
-      if (messageTaxonomyReferencesRole(
-        parseTaxonomy(nullableText(cubeRow, "message_taxonomy")),
-        requiredText(roleRow, "name"),
-      )) {
-        throw new RoleReferencedError();
       }
       const activeDrone = this.#database.prepare(`
         SELECT 1 AS present FROM drones
@@ -2139,7 +2122,7 @@ class SqliteScopedStore implements ScopedStore {
   appendLog(cubeId: string, input: {
     readonly postId?: string;
     readonly message: string;
-    readonly visibility?: "broadcast" | "direct";
+    readonly visibility: "broadcast" | "direct";
     readonly recipientDroneIds?: readonly string[];
     readonly routingKey?: string | null;
     readonly documents?: readonly string[];
@@ -2149,7 +2132,7 @@ class SqliteScopedStore implements ScopedStore {
     if (input.message.length === 0 || Buffer.byteLength(input.message) > this.#storageLimits.maxLogEntryBytes!) {
       throw new LogEntryTooLargeError(this.#storageLimits.maxLogEntryBytes!);
     }
-    const visibility = input.visibility ?? "broadcast";
+    const visibility = input.visibility;
     if (visibility !== "broadcast" && visibility !== "direct") {
       throw new Error("Unknown activity visibility.");
     }
@@ -2179,7 +2162,6 @@ class SqliteScopedStore implements ScopedStore {
       message: input.message,
       visibility,
       recipients: [...recipients].sort(),
-      routing: input.routingKey ?? null,
       documents,
     });
     this.#database.exec("BEGIN IMMEDIATE");
@@ -3379,6 +3361,7 @@ class SqliteMaintenanceStore implements MaintenanceStore {
     return {
       enrolled_clients: count("clients"),
       enrollment_claims: count("enrollment_claims"),
+      activity_log_entries: count("activity_log"),
       activity_acknowledgements: requiredInteger(this.#database.prepare(
         "SELECT COUNT(*) AS count FROM activity_acks WHERE kind = 'ack'",
       ).get()!, "count"),
@@ -3759,6 +3742,50 @@ class SqliteMaintenanceStore implements MaintenanceStore {
         session_revoked: requiredInteger(row, "session_revoked") === 1,
       })),
     };
+  }
+
+  replaceLogEntryId(cubeId: string, currentId: string, replacementId: string): void {
+    assertCanonicalUuid(cubeId, "Cube id");
+    assertCanonicalUuid(currentId, "Current activity entry id");
+    assertCanonicalUuid(replacementId, "Replacement activity entry id");
+    if (this.#database.prepare(
+      "SELECT 1 FROM activity_log WHERE cube_id = ? AND id = ?",
+    ).get(cubeId, currentId) === undefined || this.#database.prepare(
+      "SELECT 1 FROM activity_log WHERE id = ?",
+    ).get(replacementId) !== undefined) {
+      throw new ScopedStoreError();
+    }
+    this.#database.exec("BEGIN IMMEDIATE");
+    try {
+      this.#database.exec("PRAGMA defer_foreign_keys = ON");
+      this.#database.prepare(
+        "UPDATE activity_log SET id = ? WHERE cube_id = ? AND id = ?",
+      ).run(replacementId, cubeId, currentId);
+      for (const table of [
+        "activity_acks",
+        "activity_log_recipients",
+        "activity_log_documents",
+        "activity_wake_attempts",
+      ]) {
+        this.#database.prepare(`UPDATE ${table} SET entry_id = ? WHERE entry_id = ?`)
+          .run(replacementId, currentId);
+      }
+      this.#database.prepare(`
+        UPDATE expired_activity_cursors SET entry_id = ? WHERE cube_id = ? AND entry_id = ?
+      `).run(replacementId, cubeId, currentId);
+      this.#database.prepare(`
+        UPDATE drone_sessions SET initial_log_cursor_id = ?
+        WHERE cube_id = ? AND initial_log_cursor_id = ?
+      `).run(replacementId, cubeId, currentId);
+      this.#database.prepare(`
+        UPDATE activity_post_bindings SET entry_json = json_set(entry_json, '$.id', ?)
+        WHERE cube_id = ? AND json_extract(entry_json, '$.id') = ?
+      `).run(replacementId, cubeId, currentId);
+      this.#database.exec("COMMIT");
+    } catch (error) {
+      try { this.#database.exec("ROLLBACK"); } catch { /* Preserve the original failure. */ }
+      throw error;
+    }
   }
 
   expireActivityCursor(cubeId: string, cursor: LogCursor): void {

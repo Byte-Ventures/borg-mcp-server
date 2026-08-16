@@ -14,6 +14,7 @@ import {
   decodeCreateCubeRequestEnvelope,
   decodeDeleteCubeRequestEnvelope,
   decodeDeleteRoleRequestEnvelope,
+  decodeEntryQueryResult,
   decodeGetDocumentRequestEnvelope,
   decodeListDocumentsRequestEnvelope,
   decodePutDocumentRequestEnvelope,
@@ -48,7 +49,6 @@ import {
   RoleConflictError,
   RoleInUseError,
   RoleNotFoundError,
-  RoleReferencedError,
   RoleRequiredError,
   RoleSectionConflictError,
   RoleSectionNotFoundError,
@@ -560,20 +560,19 @@ export class CoordinationApi {
       }
       if (resource === "logs" && request.method === "POST") {
         const envelope = decodeProtocolEnvelope(request.body, decodeAppendLogRequest);
-        const { post_id: postId, message, visibility, recipientDroneIds, class: className, to, documents } = envelope.payload as typeof envelope.payload & { post_id: string };
+        const { post_id: postId, message, class: className, to, documents } = envelope.payload;
         const cube = store.getCube(cubeId);
         if (cube === null) throw new ScopedStoreError();
         let resolved;
         try {
           resolved = resolveMessageRouting({
             message,
-            ...(visibility === undefined ? {} : { visibility }),
-            ...(recipientDroneIds === undefined ? {} : { recipientDroneIds }),
             ...(className === undefined ? {} : { className }),
-            ...(to === undefined ? {} : { to }),
+            to,
           }, cube.messageTaxonomy, store.listRoles(cubeId), store.listDrones(cubeId));
         } catch (error) {
           if (store.hasLogPost(cubeId, postId)) throw new PostIdConflictError();
+          if (error instanceof TypeError) throw new ScopedStoreError();
           throw error;
         }
         const appended = store.appendLog(cubeId, {
@@ -624,8 +623,11 @@ export class CoordinationApi {
         return success(200, envelope.requestId, page);
       }
       if (resource === "log-entry" && request.method === "GET") {
-        const entry = store.readLogEntry(cubeId, requiredLogEntrySelector(logEntryMatch![2]!));
-        return success(200, "log-entry-read", { entry });
+        if (request.body !== undefined) throw new InputError();
+        const selector = requiredLogEntrySelector(logEntryMatch![2]!);
+        return success(200, randomUUID(), decodeEntryQueryResult({
+          entry: store.readLogEntry(cubeId, selector),
+        }));
       }
       if (resource === "ack-status" && request.method === "GET") {
         const envelope = decodeAckStatusRequestEnvelope(request.body);
@@ -759,7 +761,7 @@ export class CoordinationApi {
       if (error instanceof RoleInUseError) {
         return failure(409, error.code, error.message, safeRequestId(request.body));
       }
-      if (error instanceof RoleRequiredError || error instanceof RoleReferencedError) {
+      if (error instanceof RoleRequiredError) {
         return failure(409, error.code, error.message, safeRequestId(request.body));
       }
       if (error instanceof RoleNotFoundError || error instanceof RoleSectionNotFoundError) {

@@ -158,7 +158,7 @@ describe("read-only dashboard snapshot source", () => {
       cubeId: ids.cube,
       droneId: ids.drone,
     }));
-    drone.appendLog(ids.cube, { message: "broadcast" });
+    drone.appendLog(ids.cube, { visibility: "broadcast", message: "broadcast" });
     drone.appendLog(ids.cube, {
       message: "directed",
       visibility: "direct",

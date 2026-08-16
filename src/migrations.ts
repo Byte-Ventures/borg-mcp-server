@@ -798,6 +798,48 @@ export const STORE_MIGRATIONS: readonly Migration[] = Object.freeze([
         ON activity_log_documents (document_id, entry_id);
     `,
   },
+  {
+    version: 25,
+    name: "explicit_log_addressing",
+    sql: `
+      UPDATE cubes
+      SET message_taxonomy = (
+        SELECT json_group_array(json(json_remove(value, '$.routing', '$.default_to')))
+        FROM json_each(cubes.message_taxonomy)
+      )
+      WHERE message_taxonomy IS NOT NULL;
+
+      UPDATE roles
+      SET detailed_description = replace(replace(replace(replace(replace(
+        detailed_description,
+        '
+
+Structured message routing:
+- Pass the intended recipient through borg_log''s structured \`to:\` parameter for every directed message.
+- Naming a recipient inside the message text does not route it.
+- The default is broadcast. Without \`to:\`, a matching directed class, or explicit direct visibility, the unrouted message broadcasts to every seat.',
+        '
+
+Structured message routing:
+- Every borg_log call must set structured \`to:\` to either \`"broadcast"\` or a non-empty recipient selector array.
+- Use \`to: "broadcast"\` only when every cube member is the intended audience; otherwise name every intended recipient explicitly.
+- Naming a recipient inside the message text does not route it.
+- Message classes and prefixes classify lifecycle signals only; they never choose recipients or provide a default audience.'
+      ),
+        '- After every merge to the protected or main branch, broadcast the merge SHA.',
+        '- After every merge to the protected or main branch, post the merge SHA with \`to: "broadcast"\`.'
+      ),
+        '- Send PING with \`to:\` only for a directed liveness check. Use DECISION or HALT only for an intentional cube-wide human-seat message. After an authorized merge, broadcast MERGED with the exact merge SHA.',
+        '- Send PING with \`to:\` only for a directed liveness check. Use DECISION or HALT with \`to: "broadcast"\` only for an intentional cube-wide human-seat message. After an authorized merge, post MERGED with the exact merge SHA and \`to: "broadcast"\`.'
+      ),
+        '- Send PING with \`to:\` only for a directed liveness check. Use DECISION or HALT only for an intentional cube-wide human-seat message.',
+        '- Send PING with \`to:\` only for a directed liveness check. Use DECISION or HALT with \`to: "broadcast"\` only for an intentional cube-wide human-seat message.'
+      ),
+        '- Send DISPATCH, HOLD, APPROVED, QUESTION, ANSWER, and HEADS-UP with \`to:\` to the Shaper. Use DECISION only when the message is intentionally cube-wide.',
+        '- Send DISPATCH, HOLD, APPROVED, QUESTION, ANSWER, and HEADS-UP with \`to:\` to the Shaper. Use DECISION with \`to: "broadcast"\` only when the message is intentionally cube-wide.'
+      );
+    `,
+  },
 ]);
 
 interface AppliedMigrationRow {

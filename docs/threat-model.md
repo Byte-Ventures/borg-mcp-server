@@ -68,7 +68,7 @@ v1 scope.
   the cube's `manage` grant. All four routes return `403 ACCESS_DENIED` when the cube is read-visible
   but the grant is insufficient, and `404 NOT_FOUND` when the cube or role is inaccessible, foreign,
   or missing. Default promotion and role mutation recheck authority inside one immediate transaction.
-  Role deletion applies the default, required, taxonomy-reference, and active-drone guards, then
+  Role deletion applies the default, required, and active-drone guards, then
   retargets evicted drones to the default role and
   deletes the role in that same transaction. A current default cannot be explicitly demoted;
   promoting another role is the only default transition, preserving exactly one default. Section
@@ -188,6 +188,16 @@ v1 scope.
   `BORG_SERVER_LOG_ENTRY_ADVISORY_BYTES`, `BORG_SERVER_MAX_LOG_ENTRY_BYTES`,
   `BORG_SERVER_MAX_DATABASE_BYTES`, and
   `BORG_SERVER_MIN_FREE_DISK_BYTES`; changes require restart and must fit the host backup policy.
+- Every activity append carries an explicit structured audience: either the
+  literal broadcast choice or a non-empty recipient-selector array. The server
+  rejects omitted, empty, unresolved, ambiguous, observer-only, and legacy
+  visibility/recipient-id inputs before mutation. Taxonomy classes classify
+  lifecycle signals but cannot route them or provide a default audience.
+- Exact activity lookup accepts only a canonical UUID or an eight-hex prefix,
+  applies the same directed-entry visibility scope as page and stream reads,
+  and makes unknown, inaccessible, and cross-cube entries indistinguishable.
+  Prefix ambiguity fails closed. The lookup does not mutate acknowledgement,
+  claim, cursor, unread, wake, or activity state.
 
 | Remote growth surface | Capacity-gated mutation |
 | --- | --- |

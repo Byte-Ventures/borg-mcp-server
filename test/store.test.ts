@@ -107,16 +107,16 @@ describe("reliable log append", () => {
     const events: ActivityStreamRecord[] = [];
     const unsubscribe = author.subscribeActivity(ids.cubeA, (entry) => events.push(entry));
 
-    const created = author.appendLog(ids.cubeA, { postId, message: "stable", routingKey: "work" });
-    const retried = author.appendLog(ids.cubeA, { postId, message: "stable", routingKey: "work" });
+    const created = author.appendLog(ids.cubeA, { visibility: "broadcast", postId, message: "stable", routingKey: "work" });
+    const retried = author.appendLog(ids.cubeA, { visibility: "broadcast", postId, message: "stable", routingKey: "work" });
     expect(retried).toMatchObject({ id: created.id, deduplicated: true });
     expect(events).toHaveLength(1);
-    expect(() => author.appendLog(ids.cubeA, { postId, message: "changed", routingKey: "work" }))
+    expect(() => author.appendLog(ids.cubeA, { visibility: "broadcast", postId, message: "changed", routingKey: "work" }))
       .toThrow(PostIdConflictError);
     expect(events).toHaveLength(1);
 
     runtime.maintenance.grantClientCube({ clientId: ids.clientB, cubeId: ids.cubeA, access: "write" });
-    const independent = runtime.forPrincipal(clientPrincipal(ids.clientB)).appendLog(ids.cubeA, {
+    const independent = runtime.forPrincipal(clientPrincipal(ids.clientB)).appendLog(ids.cubeA, { visibility: "broadcast",
       postId,
       message: "stable",
       routingKey: "work",
@@ -143,16 +143,16 @@ describe("reliable log append", () => {
     runtime.maintenance.grantClientCube({ clientId: ids.clientA, cubeId: ids.cubeA, access: "manage" });
     const author = runtime.forPrincipal(clientPrincipal(ids.clientA));
     const postId = "00000000-0000-4000-8000-000000000099";
-    const created = author.appendLog(ids.cubeA, { postId, message: "stable" });
+    const created = author.appendLog(ids.cubeA, { visibility: "broadcast", postId, message: "stable" });
     for (let index = 0; index < 10; index += 1) {
-      author.appendLog(ids.cubeA, { message: `filler-${index}` });
+      author.appendLog(ids.cubeA, { visibility: "broadcast", message: `filler-${index}` });
     }
     expect(author.readLog(ids.cubeA, null, 20).entries.some((entry) => entry.id === created.id)).toBe(false);
 
     capacity = { databaseBytes: 1_000_000, freeDiskBytes: 2_000_000 };
-    expect(author.appendLog(ids.cubeA, { postId, message: "stable" }))
+    expect(author.appendLog(ids.cubeA, { visibility: "broadcast", postId, message: "stable" }))
       .toMatchObject({ id: created.id, deduplicated: true });
-    expect(() => author.appendLog(ids.cubeA, { postId, message: "changed" }))
+    expect(() => author.appendLog(ids.cubeA, { visibility: "broadcast", postId, message: "changed" }))
       .toThrow(PostIdConflictError);
   });
 });
@@ -308,7 +308,7 @@ describe("Principal to ScopedStore isolation", () => {
       contentType: "text/plain",
       content: "retained only while the cube exists",
     });
-    const entry = manager.appendLog(ids.cubeA, {
+    const entry = manager.appendLog(ids.cubeA, { visibility: "broadcast",
       message: "deleted activity",
       documents: [document.id],
     });
@@ -460,12 +460,11 @@ describe("Principal to ScopedStore isolation", () => {
       messageTaxonomy: [{
         class: "status",
         prefixes: ["DONE"],
-        routing: "directed",
-        default_to: ["queen"],
+        lifecycle: "completion",
       }],
     })).toMatchObject({
       directive: "migrated directive",
-      messageTaxonomy: [{ class: "status", prefixes: ["DONE"], routing: "directed" }],
+      messageTaxonomy: [{ class: "status", prefixes: ["DONE"], lifecycle: "completion" }],
     });
 
     const entry = client.appendActivity(ids.cubeA, "client append");
@@ -475,7 +474,7 @@ describe("Principal to ScopedStore isolation", () => {
     runtime = await openStore({ path, clock: () => new Date("2026-07-14T12:30:00.000Z") });
     expect(runtime.forPrincipal(clientPrincipal(ids.clientA)).getCube(ids.cubeA)).toMatchObject({
       directive: "migrated directive",
-      messageTaxonomy: [{ class: "status", prefixes: ["DONE"], routing: "directed" }],
+      messageTaxonomy: [{ class: "status", prefixes: ["DONE"], lifecycle: "completion" }],
     });
   });
 
@@ -710,6 +709,34 @@ describe("Principal to ScopedStore isolation", () => {
     expect(reopened.readActivity(ids.cubeA, 10)).toContainEqual(entry);
   });
 
+  it("replaces one fixture log id without changing entry data or authority counts", () => {
+    const manager = runtime.forPrincipal(clientPrincipal(ids.clientA));
+    const entry = manager.appendLog(ids.cubeA, { visibility: "broadcast", message: "replace fixture id" });
+    const collision = manager.appendLog(ids.cubeA, { visibility: "broadcast", message: "existing fixture id" });
+    const replacementId = "00000000-0000-4000-8000-000000000099";
+    const before = runtime.maintenance.observeAuthorityState();
+
+    runtime.maintenance.replaceLogEntryId(ids.cubeA, entry.id, replacementId);
+
+    expect(runtime.maintenance.observeAuthorityState()).toEqual(before);
+    expect(() => manager.readLogEntry(ids.cubeA, entry.id)).toThrow(ScopedStoreError);
+    expect(manager.readLogEntry(ids.cubeA, replacementId)).toMatchObject({
+      id: replacementId,
+      message: "replace fixture id",
+      created_at: entry.created_at,
+    });
+    expect(() => runtime.maintenance.replaceLogEntryId(
+      ids.cubeA,
+      replacementId,
+      collision.id,
+    )).toThrow(ScopedStoreError);
+    expect(() => runtime.maintenance.replaceLogEntryId(
+      ids.cubeA,
+      randomUUID(),
+      randomUUID(),
+    )).toThrow(ScopedStoreError);
+  });
+
   it("publishes idempotent ack and claim notifications to their intended audience", () => {
     const peerDroneId = "00000000-0000-4000-8000-000000000021";
     const peerSessionId = "00000000-0000-4000-8000-000000000022";
@@ -742,7 +769,7 @@ describe("Principal to ScopedStore isolation", () => {
     const peerEvents: ActivityStreamRecord[] = [];
     const stopAuthor = author.subscribeActivity(ids.cubeA, (entry) => authorEvents.push(entry));
     const stopPeer = peer.subscribeActivity(ids.cubeA, (entry) => peerEvents.push(entry));
-    const entry = author.appendLog(ids.cubeA, { message: "dispatch work" });
+    const entry = author.appendLog(ids.cubeA, { visibility: "broadcast", message: "dispatch work" });
     authorEvents.length = 0;
     peerEvents.length = 0;
 
@@ -852,7 +879,7 @@ describe("Principal to ScopedStore isolation", () => {
     expect(runtime.maintenance.observeAuthorityState()).toEqual(beforeDistinct);
     expect(manager.readLog(ids.cubeA, null, 10)).toEqual(unreadBefore);
 
-    const broadcast = manager.appendLog(ids.cubeA, { message: "broadcast status" });
+    const broadcast = manager.appendLog(ids.cubeA, { visibility: "broadcast", message: "broadcast status" });
     expect(manager.readAckStatus(ids.cubeA, broadcast.id)).toEqual({
       entry_id: broadcast.id,
       visibility: "broadcast",
@@ -875,11 +902,11 @@ describe("Principal to ScopedStore isolation", () => {
       cubeId: ids.cubeA,
       droneId: ids.droneA,
     }));
-    const anchor = drone.appendLog(ids.cubeA, { message: "dispatch received" });
+    const anchor = drone.appendLog(ids.cubeA, { visibility: "broadcast", message: "dispatch received" });
     expect(drone.listDronesSince(ids.cubeA, anchor.id).drones).toContainEqual(
       expect.objectContaining({ id: ids.droneA, seen_since: false }),
     );
-    const response = drone.appendLog(ids.cubeA, { message: "response posted" });
+    const response = drone.appendLog(ids.cubeA, { visibility: "broadcast", message: "response posted" });
     expect(drone.listDronesSince(ids.cubeA, anchor.id)).toMatchObject({
       since: anchor.created_at,
       drones: [expect.objectContaining({
@@ -978,9 +1005,9 @@ describe("Principal to ScopedStore isolation", () => {
 
   it("paginates monotonic tuple cursors and keeps claims outside the log cursor", () => {
     const client = runtime.forPrincipal(clientPrincipal(ids.clientA));
-    const alpha = client.appendLog(ids.cubeA, { message: "alpha" });
-    const beta = client.appendLog(ids.cubeA, { message: "beta" });
-    const gamma = client.appendLog(ids.cubeA, { message: "gamma" });
+    const alpha = client.appendLog(ids.cubeA, { visibility: "broadcast", message: "alpha" });
+    const beta = client.appendLog(ids.cubeA, { visibility: "broadcast", message: "beta" });
+    const gamma = client.appendLog(ids.cubeA, { visibility: "broadcast", message: "gamma" });
 
     expect([alpha.created_at, beta.created_at, gamma.created_at]).toEqual([
       "2026-07-14T12:00:00.000Z",
@@ -1025,7 +1052,7 @@ describe("Principal to ScopedStore isolation", () => {
     client.acknowledge(ids.cubeA, first.id, "claim");
     const appended = [first];
     for (let index = 1; index < 50; index += 1) {
-      appended.push(client.appendLog(ids.cubeA, { message: `entry-${index.toString().padStart(2, "0")}` }));
+      appended.push(client.appendLog(ids.cubeA, { visibility: "broadcast", message: `entry-${index.toString().padStart(2, "0")}` }));
     }
 
     const retained = client.readLog(ids.cubeA, null, 50);
@@ -1061,10 +1088,10 @@ describe("Principal to ScopedStore isolation", () => {
       capacityProbe: () => capacity,
     });
     const client = runtime.forPrincipal(clientPrincipal(ids.clientA));
-    const retained = client.appendLog(ids.cubeA, { message: "retained" });
+    const retained = client.appendLog(ids.cubeA, { visibility: "broadcast", message: "retained" });
 
     capacity = { databaseBytes: 0, freeDiskBytes: 0 };
-    expect(() => client.appendLog(ids.cubeA, { message: "disk-pressure-secret" })).toThrowError(
+    expect(() => client.appendLog(ids.cubeA, { visibility: "broadcast", message: "disk-pressure-secret" })).toThrowError(
       expect.objectContaining({
         name: "StorageCapacityError",
         code: "CAPACITY_EXCEEDED",
@@ -1072,7 +1099,7 @@ describe("Principal to ScopedStore isolation", () => {
       }),
     );
     capacity = { databaseBytes: 1_000_000, freeDiskBytes: 2_000_000 };
-    expect(() => client.appendLog(ids.cubeA, { message: "database-pressure-secret" }))
+    expect(() => client.appendLog(ids.cubeA, { visibility: "broadcast", message: "database-pressure-secret" }))
       .toThrow(StorageCapacityError);
     expect(client.readLog(ids.cubeA, null, 10).entries).toEqual([retained]);
   });
@@ -1155,7 +1182,7 @@ describe("Principal to ScopedStore isolation", () => {
       capacityProbe: () => capacity,
     });
     const client = runtime.forPrincipal(clientPrincipal(ids.clientA));
-    const baseline = client.appendLog(ids.cubeA, { message: "baseline" });
+    const baseline = client.appendLog(ids.cubeA, { visibility: "broadcast", message: "baseline" });
     const beforeDrones = client.listDrones(ids.cubeA);
     const drone = runtime.forPrincipal(droneSessionPrincipal({
       id: ids.sessionA,
@@ -1174,7 +1201,7 @@ describe("Principal to ScopedStore isolation", () => {
 
     const denied: Array<() => unknown> = [
       () => client.updateDirective(ids.cubeA, "blocked directive"),
-      () => client.appendLog(ids.cubeA, { message: "blocked log" }),
+      () => client.appendLog(ids.cubeA, { visibility: "broadcast", message: "blocked log" }),
       () => client.acknowledge(ids.cubeA, baseline.id, "claim"),
       () => client.recordDecision(ids.cubeA, { topic: "blocked", decision: "blocked" }),
       () => client.createRole(ids.cubeA, { name: "Blocked role" }),
@@ -1291,12 +1318,12 @@ describe("Principal to ScopedStore isolation", () => {
     });
     const client = runtime.forPrincipal(clientPrincipal(ids.clientA));
     for (result of [null, {}, { databaseBytes: Number.NaN, freeDiskBytes: 2_000_000 }]) {
-      expect(() => client.appendLog(ids.cubeA, { message: "blocked" })).toThrowError(
+      expect(() => client.appendLog(ids.cubeA, { visibility: "broadcast", message: "blocked" })).toThrowError(
         expect.objectContaining({ code: "CAPACITY_EXCEEDED", message: "Storage capacity is unavailable." }),
       );
     }
     shouldThrow = true;
-    expect(() => client.appendLog(ids.cubeA, { message: "blocked" })).toThrowError(
+    expect(() => client.appendLog(ids.cubeA, { visibility: "broadcast", message: "blocked" })).toThrowError(
       expect.objectContaining({ code: "CAPACITY_EXCEEDED", message: "Storage capacity is unavailable." }),
     );
     expect(client.readLog(ids.cubeA, null, 10).entries).toEqual([]);
@@ -1315,7 +1342,7 @@ describe("Principal to ScopedStore isolation", () => {
       capacityProbe: () => ({ databaseBytes: 0, freeDiskBytes: 22_359 }),
     });
     const client = runtime.forPrincipal(clientPrincipal(ids.clientA));
-    expect(() => client.appendLog(ids.cubeA, { message: "x" })).toThrow(StorageCapacityError);
+    expect(() => client.appendLog(ids.cubeA, { visibility: "broadcast", message: "x" })).toThrow(StorageCapacityError);
     expect(client.readLog(ids.cubeA, null, 10).entries).toEqual([]);
   });
 
@@ -1332,7 +1359,7 @@ describe("Principal to ScopedStore isolation", () => {
 
   it("classifies explicitly expired cursors without weakening cube scope", () => {
     const client = runtime.forPrincipal(clientPrincipal(ids.clientA));
-    const entry = client.appendLog(ids.cubeA, { message: "retained" });
+    const entry = client.appendLog(ids.cubeA, { visibility: "broadcast", message: "retained" });
     const cursor = { id: entry.id, created_at: entry.created_at };
     runtime.maintenance.expireActivityCursor(ids.cubeA, cursor);
 

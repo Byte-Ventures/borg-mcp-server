@@ -1,5 +1,9 @@
 # Release history
 
+Version `1.0.0` moves the server to protocol v12 and exact
+`borgmcp-shared@1.0.0`. It requires explicit log audiences, makes taxonomy
+classification-only, and adds scoped exact or eight-hex-prefix activity lookup.
+
 Versions `0.1.2`, `0.1.3`, `0.1.13`, and `0.1.19` were not published; their immutable tags are
 preserved failed-release evidence and are not installation or dogfood targets.
 Version `0.1.5` includes the reviewed owner-enrollment, idempotent multi-cube

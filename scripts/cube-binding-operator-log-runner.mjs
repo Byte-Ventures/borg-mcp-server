@@ -15,6 +15,7 @@ if (active === null) throw new Error("real client active cube missing after atta
 
 const message = `server-242-real-client-${randomUUID()}`;
 const posted = await appendLog(active.sessionToken, active.apiUrl, message, {
+  to: "broadcast",
   serverTrustIdentity: active.serverTrustIdentity,
 });
 if (posted?.entry?.message !== message || typeof posted.entry.id !== "string") {

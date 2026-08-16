@@ -52,7 +52,7 @@ describe("borgmcp-shared server adapter", () => {
           observations: {},
         },
       ]);
-      expect(report.results).toHaveLength(32);
+      expect(report.results).toHaveLength(33);
     } finally {
       await fixture.server.close();
       fixture.digester.destroy();
@@ -411,6 +411,15 @@ async function conformanceEnvironment(): Promise<{
         transport.request("PUT", `/api/cubes/${cube.id}/logs`, JSON.stringify(request), credential),
       ack: async (credential, cube, request) =>
         transport.request("POST", `/api/cubes/${cube.id}/acks`, JSON.stringify(request), credential),
+      ackStatus: async (credential, cube, request) => {
+        const entryId = (request as { payload: { entry_id: string } }).payload.entry_id;
+        return transport.request(
+          "GET",
+          `/api/cubes/${cube.id}/logs/${encodeURIComponent(entryId)}/ack-status`,
+          JSON.stringify(request),
+          credential,
+        );
+      },
       updateCube: async (credential, cube, request) =>
         transport.request("PATCH", `/api/cubes/${cube.id}`, JSON.stringify(request), credential),
       deleteCube: async (credential, cube, request) =>

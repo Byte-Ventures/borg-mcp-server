@@ -769,6 +769,105 @@ describe("Principal to ScopedStore isolation", () => {
     stopPeer();
   });
 
+  it("reads acknowledgement status without changing acknowledgements, claims, or log cursors", () => {
+    const peerDroneId = "00000000-0000-4000-8000-000000000021";
+    const peerSessionId = "00000000-0000-4000-8000-000000000022";
+    runtime.maintenance.createDrone({
+      id: peerDroneId,
+      cubeId: ids.cubeA,
+      roleId: ids.roleA,
+      clientId: ids.clientA,
+      label: "two-of-two-queen",
+    });
+    runtime.maintenance.createDroneSession({
+      id: peerSessionId,
+      clientId: ids.clientA,
+      cubeId: ids.cubeA,
+      droneId: peerDroneId,
+    });
+    const manager = runtime.forPrincipal(clientPrincipal(ids.clientA));
+    const recipient = runtime.forPrincipal(droneSessionPrincipal({
+      id: ids.sessionA,
+      clientId: ids.clientA,
+      cubeId: ids.cubeA,
+      droneId: ids.droneA,
+    }));
+    const claimant = runtime.forPrincipal(droneSessionPrincipal({
+      id: peerSessionId,
+      clientId: ids.clientA,
+      cubeId: ids.cubeA,
+      droneId: peerDroneId,
+    }));
+    const direct = manager.appendLog(ids.cubeA, {
+      message: "direct status",
+      visibility: "direct",
+      recipientDroneIds: [ids.droneA, peerDroneId],
+    });
+    const beforeMissing = runtime.maintenance.observeAuthorityState();
+
+    expect(manager.readAckStatus(ids.cubeA, direct.id)).toEqual({
+      entry_id: direct.id,
+      visibility: "direct",
+      recipients: [
+        {
+          drone_id: ids.droneA,
+          drone_label: "one-of-one-queen",
+          drone_role: "Queen",
+          acknowledged_at: null,
+        },
+        {
+          drone_id: peerDroneId,
+          drone_label: "two-of-two-queen",
+          drone_role: "Queen",
+          acknowledged_at: null,
+        },
+      ],
+      claims: [],
+    });
+    expect(runtime.maintenance.observeAuthorityState()).toEqual(beforeMissing);
+
+    storeNow = new Date("2026-07-14T12:00:01.000Z");
+    recipient.acknowledge(ids.cubeA, direct.id, "ack");
+    storeNow = new Date("2026-07-14T12:00:02.000Z");
+    claimant.acknowledge(ids.cubeA, direct.id, "claim");
+    const beforeDistinct = runtime.maintenance.observeAuthorityState();
+    const unreadBefore = manager.readLog(ids.cubeA, null, 10);
+    expect(manager.readAckStatus(ids.cubeA, direct.id)).toEqual({
+      entry_id: direct.id,
+      visibility: "direct",
+      recipients: [
+        expect.objectContaining({
+          drone_id: ids.droneA,
+          acknowledged_at: "2026-07-14T12:00:01.000Z",
+        }),
+        expect.objectContaining({ drone_id: peerDroneId, acknowledged_at: null }),
+      ],
+      claims: [{
+        drone_id: peerDroneId,
+        drone_label: "two-of-two-queen",
+        drone_role: "Queen",
+        claimed_at: "2026-07-14T12:00:02.000Z",
+      }],
+    });
+    expect(runtime.maintenance.observeAuthorityState()).toEqual(beforeDistinct);
+    expect(manager.readLog(ids.cubeA, null, 10)).toEqual(unreadBefore);
+
+    const broadcast = manager.appendLog(ids.cubeA, { message: "broadcast status" });
+    expect(manager.readAckStatus(ids.cubeA, broadcast.id)).toEqual({
+      entry_id: broadcast.id,
+      visibility: "broadcast",
+      recipients: [],
+      claims: [],
+    });
+
+    runtime.maintenance.grantClientCube({ clientId: ids.clientB, cubeId: ids.cubeA, access: "read" });
+    const observer = runtime.forPrincipal(clientPrincipal(ids.clientB));
+    expect(observer.readAckStatus(ids.cubeA, broadcast.id).visibility).toBe("broadcast");
+    expect(() => observer.readAckStatus(ids.cubeA, direct.id)).toThrow(ScopedStoreError);
+    expect(() => manager.readAckStatus(ids.cubeA, randomUUID())).toThrow(ScopedStoreError);
+    expect(() => manager.readAckStatus(ids.cubeB, direct.id)).toThrow(ScopedStoreError);
+  });
+
   it("tracks sender posts separately from roster anchor liveness", () => {
     const drone = runtime.forPrincipal(droneSessionPrincipal({
       id: ids.sessionA,
@@ -944,6 +1043,7 @@ describe("Principal to ScopedStore isolation", () => {
       10,
     )).toThrow(CursorExpiredError);
     expect(() => client.acknowledge(ids.cubeA, first.id, "ack")).toThrow(ScopedStoreError);
+    expect(() => client.readAckStatus(ids.cubeA, first.id)).toThrow(ScopedStoreError);
     expect(retained.entries.at(-1)?.id).toBe(appended.at(-1)?.id);
   });
 

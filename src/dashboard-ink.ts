@@ -81,10 +81,11 @@ function InkDashboard(input: {
   const footerRows = lifecycleRows + 1;
   const chromeRows = 5 + footerRows;
   const bodyRows = Math.max(0, height - chromeRows);
-  const feedRows = snapshot.recent_activity.length === 0 ? 0 : Math.min(
+  const desiredFeedRows = snapshot.recent_activity.length === 0 ? 0 : Math.min(
     snapshot.recent_activity.length,
     bodyRows < 10 ? 1 : height >= 36 ? 4 : 3,
   );
+  const feedRows = Math.min(desiredFeedRows, Math.max(0, bodyRows - 1));
   const listSpace = Math.max(1, bodyRows - feedRows);
   const minimumPanelRows = Math.min(4, Math.max(1, bodyRows - feedRows));
   const listLimit = Math.max(0, bodyRows - feedRows - minimumPanelRows);

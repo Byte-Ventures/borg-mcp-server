@@ -278,8 +278,18 @@ describe("dashboard renderer", () => {
 
   it("preserves status, drone name, and age at the exact 40x10 Sensor Grid boundary", () => {
     const data = snapshotData(2);
+    const attention = {
+      unacked_directed: 1,
+      stale_directed: 1,
+      oldest_unacked: {
+        created_at: "2026-07-25T11:55:00.000Z",
+        cube_name: "cube-01",
+        recipient_label: "builder-01",
+      },
+    } as const;
     const snapshot = rankDashboardSnapshot({
       ...data,
+      attention,
       recent_activity: [{
         id: "40000000-0000-4000-8000-000000000040",
         cube_name: "cube-01",
@@ -292,15 +302,21 @@ describe("dashboard renderer", () => {
         activity_class: null,
         message_head: "new activity",
       }],
+      cubes: data.cubes.map((cube) => ({
+        ...cube,
+        attention,
+        drones: cube.drones.map((drone) => ({ ...drone, attention })),
+      })),
     }, server);
     const frame = createDashboardRenderer({ glyphMode: "ascii", color: false, motionMode: "off" })(
       snapshot,
       40,
       10,
     );
+    expect(frame).toContain("ATTN STALE 1");
     expect(frame).toContain("RECENT builder-01");
     expect(frame).toContain("1m");
-    expect(frame).toContain("FEED");
+    expect(frame).not.toContain("FEED");
     expect(frame.split("\n").some((line) => /^[.:+*#]\s+\d/u.test(line))).toBe(false);
   });
 

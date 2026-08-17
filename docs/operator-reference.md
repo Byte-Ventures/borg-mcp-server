@@ -89,16 +89,22 @@ its terminal and stops with Ctrl-C.
 
 `borg-mcp-server start` remains a foreground command. In an interactive
 terminal it opens a read-only dashboard showing the verified server identity,
-the effective endpoint and bind mode,
-the most active cube in an auto-following per-drone activity panel, and a paged
-cube list ranked by coordination posts in the trailing 15 minutes. Distinct
-posting drones break ties. New activity produces a short, event-driven cube
-pulse. The panel shows per-drone labels, sent counts, last-active age, and an
-in-process activity history over the selected window; at full density it also
-shows role and directed-entry counts. The dashboard never displays activity message
-bodies. The panel absorbs the terminal rows left after the cube list and fixed
-chrome. It refreshes on committed activity, on terminal resize, and on a
-bounded five-second age tick.
+the effective endpoint and bind mode, and an attention-first Sensor Grid. The
+layout prioritizes the ATTN band, the focused cube's per-drone status and
+activity traces, a recent activity feed, and then a paged cube list ranked by
+coordination posts in the trailing 15 minutes. Distinct posting drones break
+ties. The status words LIVE, RECENT, QUIET, and DARK keep liveness meaningful
+without color. The feed contains at most the eight newest entries and displays
+only a sanitized, terminal-width-truncated head of each message; the database
+query bounds that head to 256 code points. It does not display full message
+bodies, actor or recipient IDs, or document contents.
+
+The Sensor Grid refreshes on committed activity, acknowledgements, terminal
+resize, and a bounded five-second age tick. New activity produces a short,
+event-driven cube pulse. By default, one scope marker advances at no more than
+two frames per second without reading the database. A frame taking longer than
+50 milliseconds disables ambient motion for that viewer session and reports
+`motion: calm (auto)` in the footer.
 
 No input is required. When stdin is also an interactive terminal, `<` and `>`
 pin the preceding or following ranked cube and `a` returns to auto-follow. The
@@ -111,9 +117,16 @@ state.
 The dashboard uses box-drawing terminal glyphs by default. `--ascii` forces a
 strict 7-bit rendering, and incompatible terminal/locale settings select that
 fallback automatically. `NO_COLOR` removes color without removing status
-labels or layout cues. Terminals smaller than roughly 40 columns by 10 rows
-receive a bounded plain-text status view. The activity panel uses a flat
-single-column box outline with no perspective cube art.
+labels or layout cues. `BORGMCP_DASHBOARD_MOTION=ambient` (the default) moves
+the scope marker every 500 milliseconds and retains event pulses. `calm`
+advances the marker once after each successful data refresh, including the
+five-second idle refresh, and retains event pulses. `off` leaves the marker
+fixed at its terminal position with no marker animation or event pulse.
+`--no-motion` selects `off` and always wins over the environment setting.
+An interactive `TERM=dumb` terminal keeps the same Sensor Grid hierarchy with
+strict ASCII and no color. Terminals below 40 columns or 10 rows receive a
+bounded plain-text status view; at constrained sizes lower-priority feed and
+cube-list rows yield before ATTN and the focused drone's status, name, and age.
 
 Ctrl-C or terminal teardown stops the server, restores the prior terminal screen and cursor, and
 does not install or enable persistence. Redirected output and managed-service
@@ -123,8 +136,9 @@ the existing single bounded machine-readable startup record. That record include
 `bind_remedy` when the prepared and effective bind intent differ.
 
 To observe an already-running local server from a second terminal, run
-`borg-mcp-server dashboard` (or add `--ascii`). This viewer opens the existing
-SQLite database read-only and shows the same dashboard.
+`borg-mcp-server dashboard` (optionally with `--ascii` or `--no-motion`). This
+viewer opens the existing SQLite database read-only and shows the same
+dashboard. `BORGMCP_DASHBOARD_MOTION` applies to this viewer as well.
 The same optional navigation keys work in this viewer. Ctrl-C closes only the
 viewer; the server keeps running. Redirected or non-TTY viewer output is one
 bounded non-ANSI snapshot and then exits.
@@ -135,7 +149,9 @@ the ownership and private filesystem permissions on `BORG_SERVER_DATA_DIR`
 user to own the private directory and database, and rejects untrusted writable
 path ancestors. It is not a per-client, per-principal, tenant-scoped, or remote
 dashboard. The command refuses missing, non-private, incompatible, or stopped
-installations and never displays activity message bodies.
+installations. Its feed has the same eight-entry, 256-code-point sanitized
+message-head boundary as the embedded dashboard and never displays a full
+message body.
 
 ## Network configuration
 

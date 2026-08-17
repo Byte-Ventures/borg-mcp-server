@@ -5,6 +5,7 @@ export interface ParsedStartOptions {
   readonly bind: BindOptionsInput;
   readonly logLevel?: "debug";
   readonly ascii: boolean;
+  readonly noMotion: boolean;
 }
 
 export function parseStartOptions(args: readonly string[]): ParsedStartOptions {
@@ -13,6 +14,7 @@ export function parseStartOptions(args: readonly string[]): ParsedStartOptions {
   let lanConsent = false;
   let logLevel: "debug" | undefined;
   let ascii = false;
+  let noMotion = false;
 
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index];
@@ -24,6 +26,11 @@ export function parseStartOptions(args: readonly string[]): ParsedStartOptions {
     if (argument === "--ascii") {
       if (ascii) throw operatorErrors.START_OPTION_UNKNOWN;
       ascii = true;
+      continue;
+    }
+    if (argument === "--no-motion") {
+      if (noMotion) throw operatorErrors.START_OPTION_UNKNOWN;
+      noMotion = true;
       continue;
     }
     if (argument === "--host") {
@@ -59,6 +66,7 @@ export function parseStartOptions(args: readonly string[]): ParsedStartOptions {
     },
     ...(logLevel === undefined ? {} : { logLevel }),
     ascii,
+    noMotion,
   };
 }
 

@@ -11,6 +11,7 @@ describe("parseStartOptions", () => {
         lanConsent: true,
       },
       ascii: false,
+      noMotion: false,
     });
   });
 
@@ -19,6 +20,7 @@ describe("parseStartOptions", () => {
       bind: {},
       logLevel: "debug",
       ascii: false,
+      noMotion: false,
     });
   });
 
@@ -26,6 +28,15 @@ describe("parseStartOptions", () => {
     expect(parseStartOptions(["--ascii"])).toEqual({
       bind: {},
       ascii: true,
+      noMotion: false,
+    });
+  });
+
+  it("disables dashboard motion explicitly", () => {
+    expect(parseStartOptions(["--no-motion", "--ascii"])).toEqual({
+      bind: {},
+      ascii: true,
+      noMotion: true,
     });
   });
 
@@ -35,6 +46,7 @@ describe("parseStartOptions", () => {
     ["--port", "secret"],
     ["--lan", "--lan"],
     ["--ascii", "--ascii"],
+    ["--no-motion", "--no-motion"],
     ["--log-level"],
     ["--log-level", "secret"],
     ["--log-level", "debug", "--log-level", "debug"],

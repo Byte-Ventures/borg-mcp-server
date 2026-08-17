@@ -19,7 +19,7 @@ Commands:
   setup [--reinitialize]  Prepare an offline server installation
   cert-reissue --host <ip>  Add a private-LAN address to the server certificate
   start    Start the server process in the foreground; stop it with Ctrl-C
-  dashboard [--ascii]  View the running local server without stopping it
+  dashboard [--ascii] [--no-motion]  View the running local server without stopping it
   status [--json]  Report exact local runtime evidence
   version [--json]  Report the installed controller version
   update [--json]  Verify the latest runtime and report any controller step
@@ -40,10 +40,12 @@ Start options:
   --port <number>  Listen port (default: 7091)
   --lan            Consent to this start on a private LAN address
   --ascii          Use strict 7-bit dashboard glyphs
+  --no-motion      Disable dashboard presentation motion
   --log-level debug  Emit centrally redacted structured diagnostics to stderr
 
 Dashboard options:
   --ascii          Use strict 7-bit dashboard glyphs
+  --no-motion      Disable dashboard presentation motion
 
 Setup options:
   --reinitialize   Recreate the database and leaf identity; preserve the CA when present
@@ -179,11 +181,12 @@ export async function runCli(
       await service.start(extraArgs);
       return 0;
     case "dashboard": {
-      if (service.dashboard === undefined || extraArgs.length > 1 ||
-          (extraArgs.length === 1 && extraArgs[0] !== "--ascii")) {
+      const options = new Set(extraArgs);
+      if (service.dashboard === undefined || options.size !== extraArgs.length ||
+          [...options].some((option) => option !== "--ascii" && option !== "--no-motion")) {
         return invalidArguments(io);
       }
-      await service.dashboard({ ascii: extraArgs[0] === "--ascii" });
+      await service.dashboard({ ascii: options.has("--ascii"), noMotion: options.has("--no-motion") });
       return 0;
     }
     case "status": {

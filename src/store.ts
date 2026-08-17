@@ -50,6 +50,11 @@ import {
 } from "./platform-queen.js";
 import type { DashboardSnapshotSource } from "./dashboard.js";
 import { createDashboardSnapshotReader } from "./dashboard-source.js";
+import {
+  WAKE_MAX_ATTEMPTS,
+  WAKE_RETRY_INTERVAL_MS,
+  WAKE_STALE_AFTER_MS,
+} from "./wake-policy.js";
 
 export type CubeAccess = "read" | "write" | "manage";
 
@@ -2413,9 +2418,12 @@ class SqliteScopedStore implements ScopedStore {
     const originalAuthor = nullableText(original, "drone_id");
     const recipients = kind === "ack"
       ? originalAuthor === null ? [] : [originalAuthor]
-      : this.#claimAudience(cubeId, entryId, requiredText(original, "visibility"))
+        : this.#claimAudience(cubeId, entryId, requiredText(original, "visibility"))
         .filter((droneId) => droneId !== claimantDroneId);
-    if (recipients.length === 0) return;
+    if (recipients.length === 0) {
+      this.#activityHub.publishDashboardChange();
+      return;
+    }
     const roleName = actor === undefined ? null : requiredText(actor, "role_name");
     const notification: ActivityNotificationRecord = {
       kind,
@@ -3886,14 +3894,14 @@ class ActivityHub {
     return () => this.#allListeners.delete(listener);
   }
 
+  publishDashboardChange(): void {
+    this.#notifyAll();
+  }
+
   hasListener(cubeId: string, droneId: string): boolean {
     return (this.#wakeListeners.get(cubeId)?.get(droneId) ?? 0) > 0;
   }
 }
-
-const WAKE_RETRY_INTERVAL_MS = 60_000;
-const WAKE_MAX_ATTEMPTS = 2;
-const WAKE_STALE_AFTER_MS = WAKE_RETRY_INTERVAL_MS * (WAKE_MAX_ATTEMPTS + 1);
 
 class SqliteLivenessStore implements LivenessStore {
   readonly #database: DatabaseSync;

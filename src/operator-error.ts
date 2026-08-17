@@ -47,6 +47,7 @@ export type OperatorErrorCode =
   | "DASHBOARD_INSTALLATION_MISSING"
   | "DASHBOARD_SERVER_STOPPED"
   | "DASHBOARD_DATA_UNAVAILABLE"
+  | "DASHBOARD_MOTION_INVALID"
   | "ACTIVITY_LIMIT_INVALID"
   | "DECISION_BUDGET_INVALID"
   | "DOCUMENT_BUDGET_INVALID"
@@ -114,6 +115,7 @@ const publicMessages: Readonly<Record<OperatorErrorCode, string>> = Object.freez
   DASHBOARD_INSTALLATION_MISSING: "Prepare the local server in BORG_SERVER_DATA_DIR before opening the dashboard.",
   DASHBOARD_SERVER_STOPPED: "Start the local server before opening the dashboard.",
   DASHBOARD_DATA_UNAVAILABLE: "Dashboard data is unavailable. Check that BORG_SERVER_DATA_DIR is private and readable, then retry.",
+  DASHBOARD_MOTION_INVALID: "Set BORGMCP_DASHBOARD_MOTION to ambient, calm, or off.",
   ACTIVITY_LIMIT_INVALID: "Set BORG_SERVER_MAX_ACTIVITY_ENTRIES_PER_CUBE to a positive integer.",
   DECISION_BUDGET_INVALID: "Set BORG_SERVER_MAX_ACTIVE_DECISION_BYTES_PER_CUBE to a positive integer.",
   DOCUMENT_BUDGET_INVALID: "Set document byte budgets to positive integers with BORG_SERVER_MAX_DOCUMENT_BYTES no greater than BORG_SERVER_MAX_ACTIVE_DOCUMENT_BYTES_PER_CUBE.",

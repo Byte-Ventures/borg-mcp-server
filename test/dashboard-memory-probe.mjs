@@ -20,6 +20,8 @@ const source = {
     const capturedAt = new Date(base + reads * 5_000).toISOString();
     return {
       captured_at: capturedAt,
+      attention: { unacked_directed: 0, stale_directed: 0, oldest_unacked: null },
+      recent_activity: [],
       cubes: [{
         id: "00000000-0000-4000-8000-000000000001",
         name: "cube",
@@ -28,6 +30,7 @@ const source = {
         drones_total: 1,
         drones_seen_15m: 1,
         last_post_at: capturedAt,
+        attention: { unacked_directed: 0, stale_directed: 0, oldest_unacked: null },
         drones: [{
           id: "10000000-0000-4000-8000-000000000001",
           label: "builder",
@@ -36,6 +39,7 @@ const source = {
           sent: reads,
           sent_5s: reads,
           received: reads,
+          attention: { unacked_directed: 0, stale_directed: 0, oldest_unacked: null },
         }],
       }],
     };

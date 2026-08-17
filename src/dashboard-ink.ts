@@ -79,15 +79,27 @@ function InkDashboard(input: {
     : 0;
   const maximumPosts = Math.max(...snapshot.cubes.map((cube) => cube.posts_15m), 0);
   const footerRows = lifecycleRows + 1;
-  const chromeRows = 4 + footerRows;
+  const chromeRows = 5 + footerRows;
   const bodyRows = Math.max(0, height - chromeRows);
-  const listCap = Math.max(1, Math.floor(bodyRows * 0.42));
+  const desiredFeedRows = snapshot.recent_activity.length === 0 ? 0 : Math.min(
+    snapshot.recent_activity.length,
+    bodyRows < 10 ? 1 : height >= 36 ? 4 : 3,
+  );
+  const feedRows = Math.min(desiredFeedRows, Math.max(0, bodyRows - 1));
+  const listSpace = Math.max(1, bodyRows - feedRows);
+  const minimumPanelRows = Math.min(4, Math.max(1, bodyRows - feedRows));
+  const listLimit = Math.max(0, bodyRows - feedRows - minimumPanelRows);
+  const desiredListCap = Math.max(
+    snapshot.cubes.length > 1 && listSpace >= 4 ? 2 : 1,
+    Math.floor(listSpace * 0.42),
+  );
+  const listCap = Math.min(listLimit, desiredListCap);
   const listRows = Math.min(snapshot.cubes.length, listCap);
-  const panelRows = Math.max(1, bodyRows - listRows);
+  const panelRows = Math.max(1, bodyRows - listRows - feedRows);
   const focus = view.autoFollow || view.focusedCubeId === null
     ? snapshot.cubes[0]
     : snapshot.cubes.find((cube) => cube.id === view.focusedCubeId) ?? snapshot.cubes[0];
-  const pageCount = Math.max(1, Math.ceil(snapshot.cubes.length / listCap));
+  const pageCount = listCap === 0 ? 1 : Math.max(1, Math.ceil(snapshot.cubes.length / listCap));
   const page = Math.max(0, view.page ?? 0) % pageCount;
   const pageStart = page * listCap;
   const glyphs = options.glyphMode === "ascii" ? ASCII_GLYPHS : BOX_GLYPHS;
@@ -95,6 +107,7 @@ function InkDashboard(input: {
   const children: ReactNode[] = [
     h(InkRail, { key: "rail", snapshot, width, glyphs, color: options.color }),
     h(InkBindStatus, { key: "bind", snapshot, width, glyphs }),
+    h(InkAttention, { key: "attention", snapshot, width, glyphs, color: options.color }),
     h(InkRule, { key: "separator-top", width, glyphs }),
     focus === undefined
       ? h(InkEmptyPanel, { key: "empty-panel", width, glyphs })
@@ -111,6 +124,17 @@ function InkDashboard(input: {
     h(InkRule, { key: "separator-bottom", width, glyphs }),
   ];
 
+  snapshot.recent_activity.slice(0, feedRows).forEach((activity, index) => {
+    children.push(h(InkFeedRow, {
+      key: `feed-${activity.id}`,
+      snapshot,
+      activity,
+      width,
+      glyphs,
+      showClass: width >= 100,
+      first: index === 0,
+    }));
+  });
   for (const [index, cube] of snapshot.cubes.slice(pageStart, pageStart + listRows).entries()) {
     children.push(h(InkSummaryRow, {
       key: `summary-${index}`,
@@ -141,9 +165,37 @@ function InkDashboard(input: {
     pageCount,
     baseFooter: options.baseFooter,
     ellipsis: glyphs.ellipsis,
+    motionMode: view.motionMode ?? options.motionMode ?? "ambient",
+    motionAutoDegraded: view.motionAutoDegraded === true,
   }));
 
   return h(Box, { width, height, flexDirection: "column", overflow: "hidden" }, children);
+}
+
+function InkAttention(input: {
+  readonly snapshot: DashboardSnapshot;
+  readonly width: number;
+  readonly glyphs: Glyphs;
+  readonly color: boolean;
+}): ReactNode {
+  const attention = input.snapshot.attention;
+  let value = "ATTN 0";
+  if (attention.unacked_directed > 0) {
+    const oldest = attention.oldest_unacked;
+    const age = oldest === null ? "unknown" : formatAge(input.snapshot.captured_at, oldest.created_at);
+    const origin = oldest === null ? "" :
+      ` ${dashboardText(oldest.cube_name, input.glyphs)}/${dashboardText(oldest.recipient_label, input.glyphs)}`;
+    value = attention.stale_directed > 0
+      ? `>> ATTN STALE ${attention.stale_directed}  unacked ${attention.unacked_directed}  oldest ${age}${origin}`
+      : `ATTN PENDING ${attention.unacked_directed}  oldest ${age}${origin}`;
+  }
+  const active = input.color && attention.unacked_directed > 0;
+  const visible = truncateCell(value, input.width, input.glyphs.ellipsis);
+  const rendered = active
+    ? `\u001b[7m${attention.stale_directed > 0 ? amber : green}${visible}${reset}`
+    : visible;
+  return h(Box, { width: input.width, height: 1, overflow: "hidden" },
+    h(Text, null, rendered));
 }
 
 function InkRail(input: {
@@ -240,23 +292,24 @@ function InkFocusPanel(input: {
   const { snapshot, cube, width, rows, glyphs, view, color } = input;
   const inner = Math.max(1, width - 2);
   if (rows < 4) {
-    return h(Text, { wrap: "truncate-end" }, truncateCell(
-      `${sanitizeTerminalText(cube.name)} ${glyphs.dash} ${cube.drones.length} ` +
-      `${plural(cube.drones.length, "drone")} ${glyphs.separator} activity panel needs a taller terminal`,
-      width,
-      glyphs.ellipsis,
-    ));
+    const drone = cube.drones[0];
+    const value = drone === undefined
+      ? `SCOPE ${sanitizeTerminalText(cube.name)} ${glyphs.separator} no drones`
+      : `${livenessStatus(snapshot.captured_at, drone.last_seen)} ${sanitizeTerminalText(drone.label)} ` +
+        `${glyphs.separator} ${formatAge(snapshot.captured_at, drone.last_seen)}`;
+    return h(Box, { width, height: rows, overflow: "hidden" },
+      h(Text, { wrap: "truncate-end" }, truncateCell(value, width, glyphs.ellipsis)));
   }
 
   const window = view.activityWindowMs ?? DASHBOARD_ACTIVITY_WINDOW_MS;
   const mode = view.autoFollow || view.focusedCubeId === null ? "(auto)" : "(pinned)";
-  const title = ` ${sanitizeTerminalText(cube.name)} ${glyphs.separator} ${mode} ` +
-    `${glyphs.separator} DRONE ACTIVITY ${glyphs.separator} ${formatWindow(window)} ago ${glyphs.axis} now `;
-  const contentRows = rows - 2;
   const coverage = activityCoverage(view.observation ?? [], snapshot.captured_at, window);
+  const title = ` SCOPE ${sanitizeTerminalText(cube.name)} ${glyphs.separator} ${mode} ` +
+    `${glyphs.separator} ${formatWindow(window)} ${glyphs.separator} cov ${Math.round(coverage * 100)}% `;
+  const contentRows = rows - 2;
   const maximumActivityRate = activityRateMaximum(cube, view.activity);
   const collecting = coverage < 1;
-  const reserveNotes = collecting ? 1 : 0;
+  const reserveNotes = (collecting ? 1 : 0) + 1;
   const bandHeight = ([3, 2, 1] as const).find((candidate) =>
     cube.drones.length <= Math.floor((contentRows - reserveNotes) / candidate)) ?? 1;
   const allFit = cube.drones.length <= Math.floor((contentRows - reserveNotes) / bandHeight);
@@ -265,6 +318,15 @@ function InkFocusPanel(input: {
     : Math.max(1, Math.floor((contentRows - reserveNotes - 1) / bandHeight));
   const drones = cube.drones.slice(0, visible);
   const body: ReactNode[] = [];
+
+  body.push(h(InkScopeSweep, {
+    key: "scope-sweep",
+    width: inner,
+    glyphs,
+    phase: view.ambientPhase ?? 0,
+    motionMode: view.motionMode ?? "ambient",
+    color,
+  }));
 
   drones.forEach((drone) => {
     body.push(h(InkDroneBand, {
@@ -356,11 +418,13 @@ function InkDroneBand(input: {
   const label = truncateCell(rawLabel, labelLimit, glyphs.ellipsis);
   const role = truncateCell(rawRole, roleLimit, glyphs.ellipsis);
   const last = formatAge(capturedAt, drone.last_seen);
+  const status = livenessStatus(capturedAt, drone.last_seen);
   const graphStyle = color ? style : {};
   if (height === 1) {
-    const prefixWidth = terminalCellWidth(label) + 1 + String(drone.sent).length + 1 + terminalCellWidth(last) + 1;
+    const prefixWidth = terminalCellWidth(status) + 1 + terminalCellWidth(label) + 1 + String(drone.sent).length + 1 + terminalCellWidth(last) + 1;
     const graphWidth = Math.max(4, width - prefixWidth);
     return h(Box, { key: drone.id, width, height: 1, flexDirection: "row", overflow: "hidden" },
+      h(Text, null, styledText(`${status} `, graphStyle)),
       h(InkNaturalText, { value: label, maxWidth: terminalCellWidth(label), ellipsis: glyphs.ellipsis, style: graphStyle }),
       h(Text, null, styledText(" ", graphStyle)),
       h(Text, null, styledText(String(drone.sent), graphStyle)),
@@ -381,9 +445,12 @@ function InkDroneBand(input: {
   }
 
   const detailWidth = Math.max(0, width - terminalCellWidth(label) - 1 - terminalCellWidth(role) - 2);
+  const attention = drone.attention.unacked_directed === 0
+    ? ""
+    : `  ATTN ${drone.attention.unacked_directed}/${drone.attention.stale_directed}`;
   const details = height >= 3
-    ? `SENT ${drone.sent}  DIRECTED ${drone.received}  LAST ${last}`
-    : `SENT ${drone.sent}  LAST ${last}`;
+    ? `${status}  SENT ${drone.sent}  DIRECTED ${drone.received}${attention}  LAST ${last}`
+    : `${status}  SENT ${drone.sent}${attention}  LAST ${last}`;
   const identityChildren: ReactNode[] = [
     h(InkFixedText, { key: "label", value: label, width: terminalCellWidth(label), ellipsis: glyphs.ellipsis, style: graphStyle }),
     h(Text, { key: "label-gap" }, styledText(" ", graphStyle)),
@@ -408,6 +475,20 @@ function InkDroneBand(input: {
     }));
   }
   return h(Box, { width, height, flexDirection: "column", overflow: "hidden" }, lines);
+}
+
+function InkScopeSweep(input: {
+  readonly width: number;
+  readonly glyphs: Glyphs;
+  readonly phase: number;
+  readonly motionMode: "ambient" | "calm" | "off";
+  readonly color: boolean;
+}): ReactNode {
+  const width = Math.max(1, input.width);
+  const position = input.motionMode === "off" ? width - 1 : Math.abs(input.phase) % width;
+  const marker = input.glyphs.cube[Math.min(2, input.glyphs.cube.length - 1)]!;
+  const value = `${" ".repeat(position)}${marker}${" ".repeat(Math.max(0, width - position - 1))}`;
+  return h(Box, { width, height: 1, overflow: "hidden" }, h(Text, { dimColor: input.color }, value));
 }
 
 function InkActivityGraph(input: {
@@ -581,6 +662,8 @@ function InkFooter(input: {
   readonly pageCount: number;
   readonly baseFooter: string;
   readonly ellipsis: string;
+  readonly motionMode: "ambient" | "calm" | "off";
+  readonly motionAutoDegraded: boolean;
 }): ReactNode {
   const pageSegment = input.pageCount > 1
     ? `${input.navigation ? "SPACE " : "page "}${input.page + 1}/${input.pageCount}`
@@ -590,10 +673,12 @@ function InkFooter(input: {
         ...(input.snapshot.cubes.length > 1 ? ["< > switch  |  a auto"] : []),
         ...(pageSegment === undefined ? [] : [pageSegment]),
         `w ${formatWindow(input.activityWindowMs)}`,
+        ...(input.motionAutoDegraded ? ["motion: calm (auto)"] : []),
         input.baseFooter,
       ]
     : [
         ...(pageSegment === undefined ? [] : [pageSegment]),
+        ...(input.motionAutoDegraded ? ["motion: calm (auto)"] : []),
         input.baseFooter,
       ];
   while (segments.length > 1 && footerSegmentsWidth(segments) > input.width) segments.shift();
@@ -617,6 +702,26 @@ function InkFooter(input: {
     }
   });
   return h(Box, { width: input.width, height: 1, flexDirection: "row", overflow: "hidden" }, children);
+}
+
+function InkFeedRow(input: {
+  readonly snapshot: DashboardSnapshot;
+  readonly activity: DashboardSnapshot["recent_activity"][number];
+  readonly width: number;
+  readonly glyphs: Glyphs;
+  readonly showClass: boolean;
+  readonly first: boolean;
+}): ReactNode {
+  const activity = input.activity;
+  const actor = dashboardText(activity.actor_label ?? activity.actor_kind, input.glyphs);
+  const classification = input.showClass && activity.activity_class !== null
+    ? ` [${dashboardText(activity.activity_class, input.glyphs)}]`
+    : "";
+  const prefix = `${input.first ? "FEED " : "     "}${formatAge(input.snapshot.captured_at, activity.created_at)} ` +
+    `${dashboardText(activity.cube_name, input.glyphs)}/${actor}${classification} `;
+  const value = `${prefix}${dashboardText(activity.message_head, input.glyphs)}`;
+  return h(Box, { width: input.width, height: 1, overflow: "hidden" },
+    h(Text, null, truncateCell(value, input.width, input.glyphs.ellipsis)));
 }
 
 function InkLifecycleFooter(input: {
@@ -659,6 +764,15 @@ function livenessStyle(capturedAt: string, lastActivity: string | null, color: b
   return {};
 }
 
+function livenessStatus(capturedAt: string, lastActivity: string | null): "LIVE" | "RECENT" | "QUIET" | "DARK" {
+  if (lastActivity === null) return "DARK";
+  const age = Date.parse(capturedAt) - Date.parse(lastActivity);
+  if (!Number.isFinite(age) || age >= 60 * 60_000) return "DARK";
+  if (age < 60_000) return "LIVE";
+  if (age < 15 * 60_000) return "RECENT";
+  return "QUIET";
+}
+
 function lifecycleFooterRows(value: string, width: number): number {
   const sentences = lifecycleSentences(value);
   return sentences.reduce((total, sentence) => {
@@ -695,6 +809,11 @@ function truncateCell(value: string, width: number, ellipsis: string, forceEllip
 
 function terminalCellWidth(value: string): number {
   return stringWidth(stripAnsi(value));
+}
+
+function dashboardText(value: string, glyphs: Glyphs): string {
+  const sanitized = sanitizeTerminalText(value);
+  return glyphs === ASCII_GLYPHS ? sanitized.replace(/[^\x20-\x7e]/gu, "?") : sanitized;
 }
 
 function finiteDimension(value: number, fallback: number): number {

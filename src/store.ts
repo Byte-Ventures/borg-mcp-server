@@ -2831,7 +2831,7 @@ class SqliteScopedStore implements ScopedStore {
   ): () => void {
     this.#requireCube(cubeId, "read");
     return this.#activityHub.subscribe(cubeId, (entry) => {
-      if ("kind" in entry) {
+      if ("kind" in entry || entry.wake_nonce !== undefined) {
         if (this.#principal.kind === "drone-session" &&
             entry.recipient_drone_ids.includes(this.#principal.droneId)) listener(entry);
         return;

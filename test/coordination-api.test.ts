@@ -470,41 +470,58 @@ describe("coordination stream setup", () => {
     await reconnectIterator.return?.();
   });
 
-  it("does not count another drone's replay-time notifications toward the bound", async () => {
+  it("keeps 201 peer-targeted wake retries isolated from a nonrecipient pre-live stream", async () => {
     const lines: string[] = [];
+    let now = new Date("2026-07-14T12:00:00.000Z");
     const fixture = await createNotificationPressureFixture(
       201,
       "recipient-isolation",
       createDebugLogger((line) => lines.push(line)),
+      true,
+      () => now,
     );
+    const intended = await fixture.api.handle({
+      method: "GET",
+      path: `/api/cubes/${fixture.cubeId}/stream`,
+      principal: fixture.authorPrincipal,
+      cursor: fixture.lastEntryCursor,
+      signal: new AbortController().signal,
+    });
+    const intendedIterator = intended.stream![Symbol.asyncIterator]();
+    expect((await intendedIterator.next()).value).toContain("event: bookmark");
+
     const barrier = fixture.api.armReplayTransition();
     const opening = fixture.api.handle({
       method: "GET",
       path: `/api/cubes/${fixture.cubeId}/stream`,
       principal: fixture.outsiderPrincipal,
-      cursor: fixture.cursor,
+      cursor: fixture.lastEntryCursor,
       signal: new AbortController().signal,
     });
     await barrier.reached;
-    for (const entry of fixture.entries) fixture.peerStore.acknowledge(fixture.cubeId, entry.id, "ack");
+    now = new Date("2026-07-14T12:01:01.000Z");
+    const firstWake = intendedIterator.next();
+    runtime!.liveness.scan();
     barrier.release();
 
     const response = await opening;
     const iterator = response.stream![Symbol.asyncIterator]();
-    const replayed: string[] = [];
-    for (;;) {
-      const next = await iterator.next();
+    expect((await iterator.next()).value).toContain("event: bookmark");
+
+    const wakeEntryIds: string[] = [];
+    for (let index = 0; index < fixture.entries.length; index += 1) {
+      const next = index === 0 ? await firstWake : await intendedIterator.next();
       expect(next.done).toBe(false);
-      if (next.value.includes("event: bookmark")) break;
-      const data = JSON.parse(next.value.match(/data: (.+)\n\n/u)![1]!);
-      expect(data.entry.kind).toBeUndefined();
-      replayed.push(data.entry.id);
+      const data = JSON.parse(next.value!.match(/data: (.+)\n\n/u)![1]!);
+      expect(data.entry.wake_nonce).toEqual(expect.any(String));
+      wakeEntryIds.push(data.entry.id);
     }
-    expect(replayed).toEqual(fixture.entries.map((entry) => entry.id));
+    expect(wakeEntryIds).toEqual(fixture.entries.map((entry) => entry.id));
     expect(lines.map((line) => JSON.parse(line))).not.toContainEqual(
       expect.objectContaining({ event: "sse_overflow" }),
     );
     await iterator.return?.();
+    await intendedIterator.return?.();
   });
 
   it("emits heartbeat events while a live stream is idle", async () => {
@@ -2509,10 +2526,12 @@ async function createNotificationPressureFixture(
   entryCount: number,
   name: string,
   debugLogger = disabledDebugLogger,
+  direct = false,
+  clock?: () => Date,
 ) {
   const directory = await realpath(await mkdtemp(join(tmpdir(), `borg-api-notification-${name}-`)));
   directories.push(directory);
-  runtime = await openStore({ path: join(directory, "borg.db") });
+  runtime = await openStore({ path: join(directory, "borg.db"), ...(clock === undefined ? {} : { clock }) });
   digester = new CredentialDigester(Buffer.alloc(32, 36));
   const authority = new CredentialAuthority(runtime.credentials, digester);
   const clientId = "00000000-0000-4000-8000-000000000401";
@@ -2546,16 +2565,27 @@ async function createNotificationPressureFixture(
   const authorStore = runtime.forPrincipal(authorPrincipal);
   const peerStore = runtime.forPrincipal(peerPrincipal);
   const cursorEntry = authorStore.appendLog(cubeId, { visibility: "broadcast", message: "cursor seed" });
-  const entries = Array.from({ length: entryCount }, (_, index) => authorStore.appendLog(cubeId, {
-    visibility: "broadcast",
-    message: `notification-${index}`,
-  }));
+  const entries = Array.from({ length: entryCount }, (_, index) => authorStore.appendLog(
+    cubeId,
+    direct
+      ? {
+          visibility: "direct",
+          recipientDroneIds: [authorDroneId],
+          message: `notification-${index}`,
+        }
+      : { visibility: "broadcast", message: `notification-${index}` },
+  ));
+  const lastEntry = entries.at(-1) ?? cursorEntry;
   return {
     api: new CoordinationApi(runtime, authority, debugLogger),
     cubeId,
     cursor: Buffer.from(JSON.stringify({
       id: cursorEntry.id,
       created_at: cursorEntry.created_at,
+    })).toString("base64url"),
+    lastEntryCursor: Buffer.from(JSON.stringify({
+      id: lastEntry.id,
+      created_at: lastEntry.created_at,
     })).toString("base64url"),
     entries,
     authorStore,

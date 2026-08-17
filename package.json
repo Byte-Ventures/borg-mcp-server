@@ -1,6 +1,6 @@
 {
   "name": "borgmcp-server",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": false,
   "description": "Self-hosted Borg coordination server",
   "license": "SEE LICENSE IN LICENSE",
@@ -58,7 +58,7 @@
     "vitest": "4.1.10"
   },
   "dependencies": {
-    "borgmcp-shared": "1.0.0",
+    "borgmcp-shared": "1.0.1",
     "ink": "7.1.1",
     "react": "19.2.8",
     "selfsigned": "5.5.0"

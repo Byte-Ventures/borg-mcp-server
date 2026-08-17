@@ -37,7 +37,7 @@ describe("release SBOM", () => {
     };
     expect(report).toMatchObject({
       name: "borgmcp-server",
-      version: "1.0.0",
+      version: "1.0.1",
       format: "CycloneDX-1.5",
     });
     expect(report.components).toBeGreaterThan(0);
@@ -47,9 +47,9 @@ describe("release SBOM", () => {
     };
     expect(normalized.metadata.component).toMatchObject({
       name: "borgmcp-server",
-      version: "1.0.0",
-      "bom-ref": "borgmcp-server@1.0.0",
-      purl: "pkg:npm/borgmcp-server@1.0.0",
+      version: "1.0.1",
+      "bom-ref": "borgmcp-server@1.0.1",
+      purl: "pkg:npm/borgmcp-server@1.0.1",
     });
   });
 
@@ -64,7 +64,7 @@ describe("release SBOM", () => {
     const distributionMismatch = structuredClone(fixture.sbom);
     distributionMismatch.components[0].externalReferences
       .find((reference: { type: string }) => reference.type === "distribution").url =
-        "https://registry.npmjs.org/attacker/-/attacker-1.0.0.tgz";
+        "https://registry.npmjs.org/attacker/-/attacker-1.0.1.tgz";
     await expectRejectedFixture(fixture.directory, distributionMismatch, "distribution reference");
 
     const graphMismatch = structuredClone(fixture.sbom);

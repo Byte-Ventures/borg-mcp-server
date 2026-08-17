@@ -1688,12 +1688,11 @@ async function teardownRuntime(resources: RuntimeResources): Promise<void> {
 
 function supportsForegroundDashboard(): boolean {
   return process.stdout.isTTY === true &&
-    serverEnvironment.BORG_SERVER_PROCESS_MODE !== "managed" &&
-    process.env["TERM"] !== "dumb";
+    serverEnvironment.BORG_SERVER_PROCESS_MODE !== "managed";
 }
 
 function supportsStandaloneDashboard(): boolean {
-  return process.stdout.isTTY === true && process.env["TERM"] !== "dumb";
+  return process.stdout.isTTY === true;
 }
 
 function supportsDashboardNavigation(): boolean {

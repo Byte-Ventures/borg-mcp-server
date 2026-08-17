@@ -86,13 +86,19 @@ function InkDashboard(input: {
     bodyRows < 10 ? 1 : height >= 36 ? 4 : 3,
   );
   const listSpace = Math.max(1, bodyRows - feedRows);
-  const listCap = Math.max(snapshot.cubes.length > 1 && listSpace >= 4 ? 2 : 1, Math.floor(listSpace * 0.42));
+  const minimumPanelRows = Math.min(4, Math.max(1, bodyRows - feedRows));
+  const listLimit = Math.max(0, bodyRows - feedRows - minimumPanelRows);
+  const desiredListCap = Math.max(
+    snapshot.cubes.length > 1 && listSpace >= 4 ? 2 : 1,
+    Math.floor(listSpace * 0.42),
+  );
+  const listCap = Math.min(listLimit, desiredListCap);
   const listRows = Math.min(snapshot.cubes.length, listCap);
   const panelRows = Math.max(1, bodyRows - listRows - feedRows);
   const focus = view.autoFollow || view.focusedCubeId === null
     ? snapshot.cubes[0]
     : snapshot.cubes.find((cube) => cube.id === view.focusedCubeId) ?? snapshot.cubes[0];
-  const pageCount = Math.max(1, Math.ceil(snapshot.cubes.length / listCap));
+  const pageCount = listCap === 0 ? 1 : Math.max(1, Math.ceil(snapshot.cubes.length / listCap));
   const page = Math.max(0, view.page ?? 0) % pageCount;
   const pageStart = page * listCap;
   const glyphs = options.glyphMode === "ascii" ? ASCII_GLYPHS : BOX_GLYPHS;
@@ -182,11 +188,13 @@ function InkAttention(input: {
       ? `>> ATTN STALE ${attention.stale_directed}  unacked ${attention.unacked_directed}  oldest ${age}${origin}`
       : `ATTN PENDING ${attention.unacked_directed}  oldest ${age}${origin}`;
   }
-  const style: InkTextStyle = !input.color || attention.unacked_directed === 0
-    ? {}
-    : attention.stale_directed > 0 ? { color: "yellow", bold: true } : { color: "green", bold: true };
+  const active = input.color && attention.unacked_directed > 0;
+  const visible = truncateCell(value, input.width, input.glyphs.ellipsis);
+  const rendered = active
+    ? `\u001b[7m${attention.stale_directed > 0 ? amber : green}${visible}${reset}`
+    : visible;
   return h(Box, { width: input.width, height: 1, overflow: "hidden" },
-    h(Text, null, styledText(truncateCell(value, input.width, input.glyphs.ellipsis), style)));
+    h(Text, null, rendered));
 }
 
 function InkRail(input: {
@@ -283,12 +291,13 @@ function InkFocusPanel(input: {
   const { snapshot, cube, width, rows, glyphs, view, color } = input;
   const inner = Math.max(1, width - 2);
   if (rows < 4) {
-    return h(Text, { wrap: "truncate-end" }, truncateCell(
-      `${sanitizeTerminalText(cube.name)} ${glyphs.dash} ${cube.drones.length} ` +
-      `${plural(cube.drones.length, "drone")} ${glyphs.separator} activity panel needs a taller terminal`,
-      width,
-      glyphs.ellipsis,
-    ));
+    const drone = cube.drones[0];
+    const value = drone === undefined
+      ? `SCOPE ${sanitizeTerminalText(cube.name)} ${glyphs.separator} no drones`
+      : `${livenessStatus(snapshot.captured_at, drone.last_seen)} ${sanitizeTerminalText(drone.label)} ` +
+        `${glyphs.separator} ${formatAge(snapshot.captured_at, drone.last_seen)}`;
+    return h(Box, { width, height: rows, overflow: "hidden" },
+      h(Text, { wrap: "truncate-end" }, truncateCell(value, width, glyphs.ellipsis)));
   }
 
   const window = view.activityWindowMs ?? DASHBOARD_ACTIVITY_WINDOW_MS;

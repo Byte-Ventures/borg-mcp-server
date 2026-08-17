@@ -2418,9 +2418,12 @@ class SqliteScopedStore implements ScopedStore {
     const originalAuthor = nullableText(original, "drone_id");
     const recipients = kind === "ack"
       ? originalAuthor === null ? [] : [originalAuthor]
-      : this.#claimAudience(cubeId, entryId, requiredText(original, "visibility"))
+        : this.#claimAudience(cubeId, entryId, requiredText(original, "visibility"))
         .filter((droneId) => droneId !== claimantDroneId);
-    if (recipients.length === 0) return;
+    if (recipients.length === 0) {
+      this.#activityHub.publishDashboardChange();
+      return;
+    }
     const roleName = actor === undefined ? null : requiredText(actor, "role_name");
     const notification: ActivityNotificationRecord = {
       kind,
@@ -3889,6 +3892,10 @@ class ActivityHub {
   subscribeAll(listener: () => void): () => void {
     this.#allListeners.add(listener);
     return () => this.#allListeners.delete(listener);
+  }
+
+  publishDashboardChange(): void {
+    this.#notifyAll();
   }
 
   hasListener(cubeId: string, droneId: string): boolean {

@@ -24,7 +24,7 @@ import {
   type DashboardSnapshotSource,
   type DashboardTerminal,
 } from "../src/dashboard.js";
-import { droneSessionPrincipal } from "../src/principal.js";
+import { clientPrincipal, droneSessionPrincipal } from "../src/principal.js";
 import { openStore, type StoreRuntime } from "../src/store.js";
 
 function createDashboardRenderer(
@@ -156,6 +156,32 @@ describe("dashboard snapshot source", () => {
     })).appendLog(ids.cubeA, { visibility: "broadcast", message: "after unsubscribe" });
     expect(listener).toHaveBeenCalledOnce();
   });
+
+  it("notifies the embedded dashboard when a drone acknowledges an operator-authored entry", async () => {
+    directory = await realpath(await mkdtemp(join(tmpdir(), "borg-dashboard-operator-ack-")));
+    runtime = await openStore({
+      path: join(directory, "borg.db"),
+      clock: () => new Date("2026-07-25T12:00:00.000Z"),
+    });
+    seedDashboard(runtime);
+    const listener = vi.fn();
+    const unsubscribe = runtime.dashboard.subscribe(listener);
+    const entry = runtime.forPrincipal(clientPrincipal(ids.client)).appendLog(ids.cubeA, {
+      visibility: "direct",
+      recipientDroneIds: [ids.droneA],
+      message: "operator-authored",
+    });
+    listener.mockClear();
+    runtime.forPrincipal(droneSessionPrincipal({
+      id: ids.sessionA,
+      clientId: ids.client,
+      cubeId: ids.cubeA,
+      droneId: ids.droneA,
+    })).acknowledge(ids.cubeA, entry.id, "ack");
+    expect(listener).toHaveBeenCalledOnce();
+    expect(runtime.dashboard.read().attention.unacked_directed).toBe(0);
+    unsubscribe();
+  });
 });
 
 describe("dashboard renderer", () => {
@@ -250,6 +276,34 @@ describe("dashboard renderer", () => {
     expect(inkFrame.split("\n")).toHaveLength(10);
   });
 
+  it("preserves status, drone name, and age at the exact 40x10 Sensor Grid boundary", () => {
+    const data = snapshotData(2);
+    const snapshot = rankDashboardSnapshot({
+      ...data,
+      recent_activity: [{
+        id: "40000000-0000-4000-8000-000000000040",
+        cube_name: "cube-01",
+        actor_kind: "operator",
+        actor_label: null,
+        actor_role: null,
+        created_at: data.captured_at,
+        visibility: "broadcast",
+        recipient_count: 0,
+        activity_class: null,
+        message_head: "new activity",
+      }],
+    }, server);
+    const frame = createDashboardRenderer({ glyphMode: "ascii", color: false, motionMode: "off" })(
+      snapshot,
+      40,
+      10,
+    );
+    expect(frame).toContain("RECENT builder-01");
+    expect(frame).toContain("1m");
+    expect(frame).toContain("FEED");
+    expect(frame.split("\n").some((line) => /^[.:+*#]\s+\d/u.test(line))).toBe(false);
+  });
+
   it("keeps the live foreground fallback outside Ink while crossing the boundary", async () => {
     const harness = terminalHarness();
     harness.setDimensions(39, 24);
@@ -316,7 +370,7 @@ describe("dashboard renderer", () => {
     const frame = createDashboardRenderer({ glyphMode: "ascii", color: false })(
       snapshot,
       80,
-      12,
+      14,
       {
         autoFollow: true,
         focusedCubeId: null,
@@ -832,6 +886,9 @@ describe("dashboard renderer", () => {
       expect(frame).not.toContain("\u001b[2J");
     }
     expect(ink).toContain("safe message");
+    const inverse = createDashboardRenderer({ glyphMode: "ascii", color: true, motionMode: "off" })(snapshot, 100, 24);
+    expect(inverse).toContain("\u001b[7m");
+    expect(ink).not.toContain("\u001b[7m");
   });
 
   it("keeps new feed and attention text strictly 7-bit in ASCII mode", () => {
@@ -1083,7 +1140,7 @@ describe("foreground dashboard lifecycle", () => {
     harness.setDimensions(80, 13);
     harness.resize();
     harness.input(" ");
-    expect(harness.output.at(-1)).toContain("SPACE 2/2");
+    expect(harness.output.at(-1)).toContain("SPACE 2/3");
     harness.input(" ");
     harness.setDimensions(80, 16);
     harness.resize();

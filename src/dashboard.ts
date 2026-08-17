@@ -733,8 +733,14 @@ function dashboardFrameKey(
     bodyRows < 10 ? 1 : height >= 36 ? 4 : 3,
   );
   const listSpace = Math.max(1, bodyRows - feedRows);
-  const listCap = Math.max(snapshot.cubes.length > 1 && listSpace >= 4 ? 2 : 1, Math.floor(listSpace * 0.42));
-  const pageCount = Math.max(1, Math.ceil(snapshot.cubes.length / listCap));
+  const minimumPanelRows = Math.min(4, Math.max(1, bodyRows - feedRows));
+  const listLimit = Math.max(0, bodyRows - feedRows - minimumPanelRows);
+  const desiredListCap = Math.max(
+    snapshot.cubes.length > 1 && listSpace >= 4 ? 2 : 1,
+    Math.floor(listSpace * 0.42),
+  );
+  const listCap = Math.min(listLimit, desiredListCap);
+  const pageCount = listCap === 0 ? 1 : Math.max(1, Math.ceil(snapshot.cubes.length / listCap));
   const page = Math.max(0, view.page ?? 0) % pageCount;
   const summaryCubes = snapshot.cubes.slice(page * listCap, page * listCap + Math.min(snapshot.cubes.length, listCap));
   const focus = view.autoFollow || view.focusedCubeId === null

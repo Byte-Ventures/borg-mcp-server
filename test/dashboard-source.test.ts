@@ -42,6 +42,52 @@ afterEach(async () => {
 });
 
 describe("read-only dashboard snapshot source", () => {
+  it("uses the canonical wake-stale boundary and clears attention on recipient acknowledgement", async () => {
+    directory = await realpath(await mkdtemp(join(tmpdir(), "borg-dashboard-attention-")));
+    await bootstrapServer(directory);
+    let now = new Date("2026-07-25T11:57:00.001Z");
+    writer = await openStore({
+      path: join(directory, "borg.db"),
+      clock: () => now,
+      migrationMode: "require-current",
+    });
+    seed(writer);
+    const drone = writer.forPrincipal(droneSessionPrincipal({
+      id: ids.session,
+      clientId: ids.client,
+      cubeId: ids.cube,
+      droneId: ids.drone,
+    }));
+    const entry = drone.appendLog(ids.cube, {
+      message: `${"x".repeat(256)}TAIL_SENTINEL`,
+      visibility: "direct",
+      recipientDroneIds: [ids.drone],
+    });
+    now = new Date("2026-07-25T12:00:00.000Z");
+    expect(writer.dashboard.read().attention).toMatchObject({
+      unacked_directed: 1,
+      stale_directed: 0,
+    });
+    now = new Date("2026-07-25T12:00:00.001Z");
+    const stale = writer.dashboard.read();
+    expect(stale.attention).toMatchObject({ unacked_directed: 1, stale_directed: 1 });
+    expect(stale.recent_activity[0]?.message_head).toHaveLength(256);
+    expect(stale.recent_activity[0]?.message_head).not.toContain("TAIL_SENTINEL");
+    drone.acknowledge(ids.cube, entry.id, "ack");
+    expect(writer.dashboard.read().attention).toMatchObject({ unacked_directed: 0, stale_directed: 0 });
+    for (let index = 0; index < 10; index += 1) {
+      drone.appendLog(ids.cube, {
+        message: `recent-${index}`,
+        visibility: "broadcast",
+        routingKey: index === 9 ? "checkpoint" : null,
+      });
+    }
+    const recent = writer.dashboard.read().recent_activity;
+    expect(recent).toHaveLength(8);
+    expect(recent[0]).toMatchObject({ message_head: "recent-9", activity_class: "checkpoint" });
+    expect(recent.at(-1)?.message_head).toBe("recent-2");
+  });
+
   it("polls a live WAL database without selecting activity bodies", async () => {
     vi.useFakeTimers();
     directory = await realpath(await mkdtemp(join(tmpdir(), "borg-dashboard-poll-")));
@@ -96,7 +142,11 @@ describe("read-only dashboard snapshot source", () => {
       last_post_at: "2026-07-25T12:01:00.000Z",
       drones: [{ sent: 1, sent_5s: 1, received: 1 }],
     });
-    expect(JSON.stringify(source.read())).not.toContain("poll-secret-body");
+    expect(source.read().recent_activity[0]).toMatchObject({
+      message_head: "poll-secret-body",
+      visibility: "direct",
+      recipient_count: 1,
+    });
     unsubscribe();
     source.close();
     expect(() => source.subscribe(vi.fn())).toThrow("closed");

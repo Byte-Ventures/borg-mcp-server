@@ -2,13 +2,42 @@ import { createInkDashboardElement, renderInkDashboardFrame } from "./dashboard-
 import { renderPlainDashboard } from "./dashboard-plain.js";
 import { render as renderInk, type Instance as InkInstance } from "ink";
 import { Writable } from "node:stream";
+import { performance } from "node:perf_hooks";
+import { operatorErrors } from "./operator-error.js";
 
 export const DASHBOARD_ACTIVITY_WINDOW_MS = 15 * 60_000;
 export const DASHBOARD_IDLE_REFRESH_MS = 5_000;
 export const DASHBOARD_EVENT_COALESCE_MS = 250;
 export const DASHBOARD_RESIZE_DEBOUNCE_MS = 125;
 export const DASHBOARD_PULSE_FRAME_MS = 125;
+export const DASHBOARD_AMBIENT_FRAME_MS = 500;
+export const DASHBOARD_FRAME_BUDGET_MS = 50;
 const DASHBOARD_PULSE_PHASES = 4;
+
+export type DashboardMotionMode = "ambient" | "calm" | "off";
+
+export interface DashboardAttentionData {
+  readonly unacked_directed: number;
+  readonly stale_directed: number;
+  readonly oldest_unacked: {
+    readonly created_at: string;
+    readonly cube_name: string;
+    readonly recipient_label: string;
+  } | null;
+}
+
+export interface DashboardRecentActivityData {
+  readonly id: string;
+  readonly cube_name: string;
+  readonly actor_kind: "operator" | "client" | "drone-session";
+  readonly actor_label: string | null;
+  readonly actor_role: string | null;
+  readonly created_at: string;
+  readonly visibility: "broadcast" | "direct";
+  readonly recipient_count: number;
+  readonly activity_class: string | null;
+  readonly message_head: string;
+}
 
 export interface DashboardDroneData {
   readonly id: string;
@@ -18,6 +47,7 @@ export interface DashboardDroneData {
   readonly sent: number;
   readonly sent_5s: number;
   readonly received: number;
+  readonly attention: DashboardAttentionData;
 }
 
 export interface DashboardCubeData {
@@ -29,11 +59,14 @@ export interface DashboardCubeData {
   readonly drones_seen_15m: number;
   readonly last_post_at: string | null;
   readonly drones: readonly DashboardDroneData[];
+  readonly attention: DashboardAttentionData;
 }
 
 export interface DashboardDataSnapshot {
   readonly captured_at: string;
   readonly cubes: readonly DashboardCubeData[];
+  readonly attention: DashboardAttentionData;
+  readonly recent_activity: readonly DashboardRecentActivityData[];
 }
 
 export interface DashboardSnapshotSource {
@@ -59,6 +92,8 @@ export interface DashboardSnapshot {
   readonly captured_at: string;
   readonly server: DashboardServerIdentity;
   readonly cubes: readonly DashboardCubeSnapshot[];
+  readonly attention: DashboardAttentionData;
+  readonly recent_activity: readonly DashboardRecentActivityData[];
 }
 
 export type DashboardGlyphMode = "box" | "ascii";
@@ -76,6 +111,7 @@ export interface DashboardRenderOptions {
   readonly color: boolean;
   readonly footer: DashboardFooter;
   readonly navigation?: boolean;
+  readonly motionMode?: DashboardMotionMode;
 }
 
 export interface DashboardViewState {
@@ -87,6 +123,9 @@ export interface DashboardViewState {
   readonly observation?: readonly DashboardActivitySample[];
   readonly activityWindowMs?: number;
   readonly page?: number;
+  readonly motionMode?: DashboardMotionMode;
+  readonly motionAutoDegraded?: boolean;
+  readonly ambientPhase?: number;
 }
 
 export interface DashboardActivitySample {
@@ -191,6 +230,8 @@ export function rankDashboardSnapshot(
     captured_at: data.captured_at,
     server: Object.freeze({ ...server }),
     cubes: Object.freeze(cubes),
+    attention: data.attention,
+    recent_activity: data.recent_activity,
   });
 }
 
@@ -204,6 +245,9 @@ export function createDashboardRenderer(options: DashboardRenderOptions): Dashbo
     activity: new Map(),
     activityWindowMs: DASHBOARD_ACTIVITY_WINDOW_MS,
     page: 0,
+    motionMode: options.motionMode ?? "ambient",
+    motionAutoDegraded: false,
+    ambientPhase: 0,
   }) => {
     if (!usesInkDashboard(columns, rows)) {
       return renderPlainDashboard(snapshot, columns, rows, options.footer);
@@ -240,6 +284,17 @@ export function dashboardColorEnabled(
   environment: Readonly<Record<string, string | undefined>>,
 ): boolean {
   return environment["NO_COLOR"] === undefined && environment["TERM"] !== "dumb";
+}
+
+export function resolveDashboardMotionMode(input: {
+  readonly noMotion: boolean;
+  readonly environment: { readonly BORGMCP_DASHBOARD_MOTION?: string };
+}): DashboardMotionMode {
+  if (input.noMotion) return "off";
+  const configured = input.environment["BORGMCP_DASHBOARD_MOTION"];
+  if (configured === undefined || configured === "ambient") return "ambient";
+  if (configured === "calm" || configured === "off") return configured;
+  throw operatorErrors.DASHBOARD_MOTION_INVALID;
 }
 
 function usesInkDashboard(columns: number, rows: number): boolean {
@@ -284,6 +339,8 @@ export function startForegroundDashboard(input: {
   readonly eventCoalesceMs?: number;
   readonly resizeDebounceMs?: number;
   readonly pulseFrameMs?: number;
+  readonly ambientFrameMs?: number;
+  readonly frameBudgetMs?: number;
 }): ForegroundDashboard {
   let closed = false;
   let restored = false;
@@ -292,6 +349,7 @@ export function startForegroundDashboard(input: {
   let eventTimer: ReturnType<typeof setTimeout> | undefined;
   let resizeTimer: ReturnType<typeof setTimeout> | undefined;
   let pulseTimer: ReturnType<typeof setTimeout> | undefined;
+  let ambientTimer: ReturnType<typeof setTimeout> | undefined;
   let inkInstance: InkInstance | undefined;
   let inkStdout: NodeJS.WriteStream | undefined;
   let autoFollow = true;
@@ -300,6 +358,9 @@ export function startForegroundDashboard(input: {
   let pulsePhase = 0;
   let activityWindowMs = DASHBOARD_ACTIVITY_WINDOW_MS;
   let page = 0;
+  let motionMode = input.renderer.inkOptions?.motionMode ?? "ambient";
+  let motionAutoDegraded = false;
+  let ambientPhase = 0;
   const activityHistory = new Map<string, DashboardActivitySample[]>();
   const observationHistory: DashboardActivitySample[] = [];
   let previousActivity = new Map<string, {
@@ -321,6 +382,7 @@ export function startForegroundDashboard(input: {
     if (eventTimer !== undefined) clearTimeout(eventTimer);
     if (resizeTimer !== undefined) clearTimeout(resizeTimer);
     if (pulseTimer !== undefined) clearTimeout(pulseTimer);
+    if (ambientTimer !== undefined) clearTimeout(ambientTimer);
   };
   let unsubscribeSource = (): void => undefined;
   let unsubscribeResize = (): void => undefined;
@@ -389,6 +451,7 @@ export function startForegroundDashboard(input: {
   const paint = (): void => {
     if (closed || lastSnapshot === undefined) return;
     try {
+      const startedAt = performance.now();
       const dimensions = input.terminal.dimensions();
       const view = {
         autoFollow,
@@ -399,6 +462,9 @@ export function startForegroundDashboard(input: {
         observation: observationHistory,
         activityWindowMs,
         page,
+        motionMode,
+        motionAutoDegraded,
+        ambientPhase,
       } satisfies DashboardViewState;
       const inkOptions = inkRenderers.has(input.renderer) ? input.renderer.inkOptions : undefined;
       if (inkOptions !== undefined && usesInkDashboard(dimensions.columns, dimensions.rows)) {
@@ -412,6 +478,7 @@ export function startForegroundDashboard(input: {
           mountInk(lastSnapshot, dimensions, view, inkOptions);
         }
         lastFrame = frameKey;
+        finishFrame(startedAt, true);
         return;
       }
       if (inkInstance !== undefined || inkStdout !== undefined) unmountInk();
@@ -419,6 +486,7 @@ export function startForegroundDashboard(input: {
       if (frame === lastFrame) return;
       input.terminal.write(`${clearScreen}${frame}`);
       lastFrame = frame;
+      finishFrame(startedAt, false);
     } catch (error) {
       fail(error);
     }
@@ -441,10 +509,16 @@ export function startForegroundDashboard(input: {
         { posts15m: cube.posts_15m, lastPostAt: cube.last_post_at },
       ]));
       if (changedCubeIds.length > 0) {
-        pulseCubeIds = new Set(changedCubeIds);
-        pulsePhase = DASHBOARD_PULSE_PHASES;
-        schedulePulse();
+        if (motionMode === "off") {
+          pulseCubeIds = new Set();
+          pulsePhase = 0;
+        } else {
+          pulseCubeIds = new Set(changedCubeIds);
+          pulsePhase = DASHBOARD_PULSE_PHASES;
+          schedulePulse();
+        }
       }
+      if (motionMode === "calm") ambientPhase += 1;
       priorRanks = new Map(snapshot.cubes.map((cube) => [cube.id, cube.rank]));
       recordDashboardActivity(snapshot, activityHistory, observationHistory, activityWindowMs);
       lastSnapshot = snapshot;
@@ -473,7 +547,13 @@ export function startForegroundDashboard(input: {
   const scheduleResize = (): void => {
     if (closed) return;
     if (inkRenderers.has(input.renderer)) {
+      const dimensions = input.terminal.dimensions();
+      if (!usesInkDashboard(dimensions.columns, dimensions.rows) && ambientTimer !== undefined) {
+        clearTimeout(ambientTimer);
+        ambientTimer = undefined;
+      }
       paint();
+      scheduleAmbient();
       return;
     }
     if (resizeTimer !== undefined) clearTimeout(resizeTimer);
@@ -484,7 +564,7 @@ export function startForegroundDashboard(input: {
     resizeTimer.unref?.();
   };
   function schedulePulse(): void {
-    if (closed || pulseTimer !== undefined) return;
+    if (closed || motionMode === "off" || pulseTimer !== undefined) return;
     pulseTimer = setTimeout(() => {
       pulseTimer = undefined;
       pulsePhase = Math.max(0, pulsePhase - 1);
@@ -493,6 +573,29 @@ export function startForegroundDashboard(input: {
       if (!closed && pulsePhase > 0) schedulePulse();
     }, input.pulseFrameMs ?? DASHBOARD_PULSE_FRAME_MS);
     pulseTimer.unref?.();
+  }
+  function scheduleAmbient(): void {
+    if (closed || motionMode !== "ambient" || ambientTimer !== undefined ||
+        !inkRenderers.has(input.renderer)) return;
+    const dimensions = input.terminal.dimensions();
+    if (!usesInkDashboard(dimensions.columns, dimensions.rows)) return;
+    ambientTimer = setTimeout(() => {
+      ambientTimer = undefined;
+      ambientPhase += 1;
+      paint();
+      scheduleAmbient();
+    }, input.ambientFrameMs ?? DASHBOARD_AMBIENT_FRAME_MS);
+    ambientTimer.unref?.();
+  }
+  function finishFrame(startedAt: number, ink: boolean): void {
+    if (!ink || motionMode !== "ambient" ||
+        performance.now() - startedAt <= (input.frameBudgetMs ?? DASHBOARD_FRAME_BUDGET_MS)) return;
+    motionMode = "calm";
+    motionAutoDegraded = true;
+    if (ambientTimer !== undefined) clearTimeout(ambientTimer);
+    ambientTimer = undefined;
+    lastFrame = undefined;
+    queueMicrotask(paint);
   }
   const navigate = (direction: -1 | 1): void => {
     const cubes = lastSnapshot?.cubes ?? [];
@@ -509,6 +612,8 @@ export function startForegroundDashboard(input: {
     if (input.terminal.requestSuspend === undefined) return;
     unsubscribeInput();
     unsubscribeInput = (): void => undefined;
+    if (ambientTimer !== undefined) clearTimeout(ambientTimer);
+    ambientTimer = undefined;
     unmountInk();
     lastFrame = undefined;
     input.terminal.write(alternateScreenRestore);
@@ -518,6 +623,7 @@ export function startForegroundDashboard(input: {
         input.terminal.write(alternateScreenEnter);
         subscribeInput();
         refresh();
+        scheduleAmbient();
       } catch (error) {
         fail(error);
       }
@@ -562,6 +668,7 @@ export function startForegroundDashboard(input: {
     subscribeInput();
     refresh();
     if (!closed) scheduleIdle();
+    scheduleAmbient();
   } catch (error) {
     stop();
     throw error;
@@ -619,7 +726,14 @@ function dashboardFrameKey(
   const lifecycleRows = options.footer === EMBEDDED_DASHBOARD_FOOTER
     ? dashboardLifecycleFooterRows(EMBEDDED_DASHBOARD_LIFECYCLE_FOOTER, width)
     : 0;
-  const listCap = Math.max(1, Math.floor(Math.max(0, height - (3 + lifecycleRows + 1)) * 0.42));
+  const footerRows = lifecycleRows + 1;
+  const bodyRows = Math.max(0, height - (5 + footerRows));
+  const feedRows = snapshot.recent_activity.length === 0 ? 0 : Math.min(
+    snapshot.recent_activity.length,
+    bodyRows < 10 ? 1 : height >= 36 ? 4 : 3,
+  );
+  const listSpace = Math.max(1, bodyRows - feedRows);
+  const listCap = Math.max(snapshot.cubes.length > 1 && listSpace >= 4 ? 2 : 1, Math.floor(listSpace * 0.42));
   const pageCount = Math.max(1, Math.ceil(snapshot.cubes.length / listCap));
   const page = Math.max(0, view.page ?? 0) % pageCount;
   const summaryCubes = snapshot.cubes.slice(page * listCap, page * listCap + Math.min(snapshot.cubes.length, listCap));
@@ -634,6 +748,7 @@ function dashboardFrameKey(
     .map((cube) => cube.id)
     .sort();
   const activityWindowMs = view.activityWindowMs ?? DASHBOARD_ACTIVITY_WINDOW_MS;
+  const panelRows = Math.max(1, bodyRows - Math.min(snapshot.cubes.length, listCap) - feedRows);
   return JSON.stringify({
     kind: "ink-dashboard",
     dimensions: { columns: width, rows: height },
@@ -646,6 +761,8 @@ function dashboardFrameKey(
       maximumPosts: Math.max(...snapshot.cubes.map((cube) => cube.posts_15m), 0),
       summaryCubes,
       focus,
+      attention: snapshot.attention,
+      recentActivity: snapshot.recent_activity.slice(0, feedRows),
     },
     view: {
       autoFollow: view.autoFollow,
@@ -656,6 +773,9 @@ function dashboardFrameKey(
       observation: view.observation ?? [],
       activityWindowMs,
       page,
+      motionMode: view.motionMode ?? options.motionMode ?? "ambient",
+      motionAutoDegraded: view.motionAutoDegraded === true,
+      ambientPhase: panelRows >= 4 ? view.ambientPhase ?? 0 : 0,
     },
   });
 }

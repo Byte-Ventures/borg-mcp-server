@@ -11,6 +11,7 @@ import {
   EMBEDDED_DASHBOARD_LIFECYCLE_FOOTER,
   rankDashboardSnapshot,
   renderPlainDashboard,
+  resolveDashboardMotionMode,
   sanitizeTerminalText,
   selectDashboardGlyphMode,
   STANDALONE_DASHBOARD_FOOTER,
@@ -98,7 +99,7 @@ describe("dashboard snapshot source", () => {
     droneB.appendLog(ids.cubeB, { visibility: "broadcast", message: "inside-window-secret-body-b" });
     now = new Date("2026-07-25T12:00:00.000Z");
 
-    expect(runtime.dashboard.read()).toEqual({
+    expect(runtime.dashboard.read()).toMatchObject({
       captured_at: "2026-07-25T12:00:00.000Z",
       cubes: [
         {
@@ -123,7 +124,11 @@ describe("dashboard snapshot source", () => {
         },
       ],
     });
-    expect(JSON.stringify(runtime.dashboard.read())).not.toContain("secret-body");
+    expect(runtime.dashboard.read().recent_activity.map((entry) => entry.message_head)).toEqual([
+      "inside-window-secret-body-b",
+      "inside-window-secret-body-a",
+      "outside-window-secret-body",
+    ]);
   });
 
   it("notifies one server-wide subscriber after a committed post", async () => {
@@ -159,7 +164,7 @@ describe("dashboard renderer", () => {
     const eight = rankDashboardSnapshot(snapshotData(8), server);
     const frame = renderer(eight, 80, 24);
     expect(frame).toContain("██ BORGMCP-SERVER ██");
-    expect(frame).toContain("DRONE ACTIVITY");
+    expect(frame).toContain("SCOPE");
     expect(frame).toContain("cube-01");
     expect(frame).toContain("collecting");
     expect(frame).toContain("up 3h");
@@ -181,7 +186,7 @@ describe("dashboard renderer", () => {
     expect(ascii).toContain("== BORGMCP-SERVER ==");
     expect(ascii).toContain("+");
     for (const line of ascii.split("\n")) expect([...line]).toHaveLength(60);
-    expect(ascii).toContain("DRONE ACTIVITY");
+    expect(ascii).toContain("SCOPE");
     expect(ascii).toContain("collecting -");
 
     for (let width = 20; width <= 100; width += 1) {
@@ -203,7 +208,7 @@ describe("dashboard renderer", () => {
     expect(tiny).toContain("Data saved. Read-only view.");
     expect(tiny).not.toContain("\u001b[");
     expect(tiny).not.toContain("┌");
-    expect(tiny.split("\n")).toHaveLength(8);
+    expect(tiny.split("\n")).toHaveLength(9);
     expect(tiny.split("\n").every((line) => [...line].length <= 39)).toBe(true);
 
     const narrow = createDashboardRenderer({ glyphMode: "box", color: true })(snapshot, 20, 9);
@@ -222,7 +227,7 @@ describe("dashboard renderer", () => {
     expect(tinyViewer).toContain("Ctrl-C closes this viewer.");
     expect(tinyViewer).toContain("Server stays up. View is read-only.");
     expect(tinyViewer).not.toContain("stops this server");
-    expect(tinyViewer.split("\n")).toHaveLength(8);
+    expect(tinyViewer.split("\n")).toHaveLength(9);
     expect(tinyViewer.split("\n").every((line) => [...line].length <= 39)).toBe(true);
 
     const oneShotViewer = renderPlainDashboard(snapshot, 39, 9);
@@ -236,7 +241,7 @@ describe("dashboard renderer", () => {
     const renderer = createDashboardRenderer({ glyphMode: "ascii", color: false });
     for (const [columns, rows] of [[39, 24], [100, 8], [20, 4]] as const) {
       const frame = renderer(snapshot, columns, rows);
-      expect(frame).not.toContain("DRONE ACTIVITY");
+      expect(frame).not.toContain("SCOPE");
     }
 
     const inkFrame = renderer(snapshot, 40, 10);
@@ -257,7 +262,7 @@ describe("dashboard renderer", () => {
     });
 
     expect(harness.output.at(-1)).toContain("borgmcp-server online");
-    expect(harness.output.join("")).not.toContain("DRONE ACTIVITY");
+    expect(harness.output.join("")).not.toContain("SCOPE");
 
     harness.setDimensions(40, 10);
     const beforeInk = harness.output.length;
@@ -272,7 +277,7 @@ describe("dashboard renderer", () => {
     harness.setDimensions(39, 24);
     harness.resize();
     expect(harness.output.at(-1)).toContain("borgmcp-server online");
-    expect(harness.output.at(-1)).not.toContain("DRONE ACTIVITY");
+    expect(harness.output.at(-1)).not.toContain("SCOPE");
     dashboard.close();
   });
 
@@ -283,7 +288,7 @@ describe("dashboard renderer", () => {
       24,
     );
     const detail = frame.split("\n").slice(3, -3);
-    expect(detail[0]).toContain("DRONE ACTIVITY");
+    expect(detail.some((line) => line.includes("SCOPE"))).toBe(true);
     expect(detail.every((line) => [...line].length === 80)).toBe(true);
     expect(frame).not.toContain("/......");
   });
@@ -300,7 +305,7 @@ describe("dashboard renderer", () => {
           pulseCubeIds,
           pulsePhase,
         });
-        expect(frame).toContain("DRONE ACTIVITY");
+        expect(frame).toContain("SCOPE");
         expect(frame).not.toContain("/......");
       }
     }
@@ -369,11 +374,11 @@ describe("dashboard renderer", () => {
     const empty = renderer(rankDashboardSnapshot(snapshotData(0), server), 80, 24);
 
     expect(auto).toContain("1 cube");
-    expect(auto).toContain("DRONE ACTIVITY");
+    expect(auto).toContain("SCOPE");
     expect(auto).toContain("1 poster");
     expect(auto).toContain("collecting");
     expect(auto).not.toContain("< > switch");
-    expect(pinned).toContain("DRONE ACTIVITY");
+    expect(pinned).toContain("SCOPE");
     expect(empty).not.toContain("< > switch");
   });
 
@@ -777,10 +782,126 @@ describe("dashboard renderer", () => {
       asciiRequested: true,
       environment: { TERM: "xterm", LANG: "en_US.UTF-8" },
     })).toBe("ascii");
+    expect(resolveDashboardMotionMode({ noMotion: false, environment: {} })).toBe("ambient");
+    expect(resolveDashboardMotionMode({ noMotion: false, environment: { BORGMCP_DASHBOARD_MOTION: "calm" } })).toBe("calm");
+    expect(resolveDashboardMotionMode({ noMotion: true, environment: { BORGMCP_DASHBOARD_MOTION: "ambient" } })).toBe("off");
+    expect(() => resolveDashboardMotionMode({
+      noMotion: false,
+      environment: { BORGMCP_DASHBOARD_MOTION: "fast" },
+    })).toThrow("Set BORGMCP_DASHBOARD_MOTION to ambient, calm, or off.");
+  });
+
+  it("renders attention and a bounded sanitized recent feed across Ink and plain fallbacks", () => {
+    const data = snapshotData(1);
+    const attention = {
+      unacked_directed: 2,
+      stale_directed: 1,
+      oldest_unacked: {
+        created_at: "2026-07-25T11:55:00.000Z",
+        cube_name: "cube-01",
+        recipient_label: "builder-01",
+      },
+    } as const;
+    const recent = [{
+      id: "40000000-0000-4000-8000-000000000001",
+      cube_name: "cube-01",
+      actor_kind: "drone-session" as const,
+      actor_label: "builder-01",
+      actor_role: "Builder",
+      created_at: "2026-07-25T11:59:00.000Z",
+      visibility: "direct" as const,
+      recipient_count: 1,
+      activity_class: "review",
+      message_head: "safe\u001b[2J\nmessage",
+    }];
+    const snapshot = rankDashboardSnapshot({
+      ...data,
+      attention,
+      recent_activity: recent,
+      cubes: data.cubes.map((cube) => ({
+        ...cube,
+        attention,
+        drones: cube.drones.map((drone) => ({ ...drone, attention })),
+      })),
+    }, server);
+    const ink = createDashboardRenderer({ glyphMode: "ascii", color: false, motionMode: "off" })(snapshot, 100, 24);
+    const plain = renderPlainDashboard(snapshot, 39, 9);
+    for (const frame of [ink, plain]) {
+      expect(frame).toContain("ATTN STALE 1");
+      expect(frame).toContain("FEED");
+      expect(frame).not.toContain("\u001b[2J");
+    }
+    expect(ink).toContain("safe message");
+  });
+
+  it("keeps new feed and attention text strictly 7-bit in ASCII mode", () => {
+    const data = snapshotData(1);
+    const snapshot = rankDashboardSnapshot({
+      ...data,
+      recent_activity: [{
+        id: "40000000-0000-4000-8000-000000000002",
+        cube_name: "東京",
+        actor_kind: "operator",
+        actor_label: null,
+        actor_role: null,
+        created_at: data.captured_at,
+        visibility: "broadcast",
+        recipient_count: 0,
+        activity_class: "通知",
+        message_head: "更新 🚀",
+      }],
+    }, server);
+    const frame = createDashboardRenderer({ glyphMode: "ascii", color: false, motionMode: "off" })(
+      snapshot,
+      100,
+      24,
+    );
+    expect(frame).toContain("FEED");
+    expect(frame).not.toMatch(/[^\x00-\x7f]/u);
   });
 });
 
 describe("foreground dashboard lifecycle", () => {
+  it("degrades ambient motion to calm after a frame budget overrun", async () => {
+    const harness = terminalHarness();
+    harness.setDimensions(120, 30);
+    const dashboard = startForegroundDashboard({
+      source: sourceHarness(snapshotData(2)),
+      server,
+      terminal: harness.terminal,
+      renderer: createDashboardRenderer({
+        glyphMode: "ascii",
+        color: false,
+        motionMode: "ambient",
+        navigation: true,
+      }),
+      frameBudgetMs: -1,
+    });
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+    expect(harness.output.join("\n")).toContain("motion: calm (auto)");
+    dashboard.close();
+  });
+
+  it("animates the ambient scope without refreshing data and stays static when motion is off", async () => {
+    vi.useFakeTimers();
+    for (const [motionMode, expectedExtraWrites] of [["ambient", true], ["off", false]] as const) {
+      const harness = terminalHarness();
+      const source = sourceHarness(snapshotData(1));
+      const dashboard = startForegroundDashboard({
+        source,
+        server,
+        terminal: harness.terminal,
+        renderer: createDashboardRenderer({ glyphMode: "ascii", color: false, motionMode }),
+        ambientFrameMs: 100,
+      });
+      const reads = source.readCount();
+      const writes = harness.output.length;
+      await vi.advanceTimersByTimeAsync(300);
+      expect(source.readCount()).toBe(reads);
+      expect(harness.output.length > writes).toBe(expectedExtraWrites);
+      dashboard.close();
+    }
+  });
   it("bounds activity history when the live drone set rotates", async () => {
     vi.useFakeTimers();
     const harness = terminalHarness();
@@ -881,7 +1002,7 @@ describe("foreground dashboard lifecycle", () => {
     await vi.advanceTimersByTimeAsync(250);
 
     expect(source.readCount()).toBe(2);
-    expect(harness.output.at(-1)).toContain("DRONE ACTIVITY");
+    expect(harness.output.at(-1)).toContain("SCOPE");
     dashboard.close();
   });
 
@@ -914,7 +1035,7 @@ describe("foreground dashboard lifecycle", () => {
 
     const pulse = harness.output.at(-1)!;
     expect(pulse).not.toBe(before);
-    expect(pulse).toContain("DRONE ACTIVITY");
+    expect(pulse).toContain("SCOPE");
     expect(pulse.split("\n").find((line) => line.includes("cube-02"))).toMatch(
       /^[.:+*#]\s+2 .*O\s*$/u,
     );
@@ -928,7 +1049,7 @@ describe("foreground dashboard lifecycle", () => {
   it("pulses on snapshot deltas and supports pinned navigation with explicit auto return", async () => {
     vi.useFakeTimers();
     const harness = terminalHarness();
-    harness.setDimensions(80, 13);
+    harness.setDimensions(80, 16);
     const source = sourceHarness(snapshotData(3));
     const renderer = vi.fn(createDashboardRenderer({
       glyphMode: "ascii",
@@ -943,25 +1064,29 @@ describe("foreground dashboard lifecycle", () => {
       pulseFrameMs: 100,
     });
 
-    expect(harness.output.at(-1)).toContain("cube-01 . (auto) . DRONE ACTIVITY");
+    expect(harness.output.at(-1)).toContain("SCOPE cube-01 . (auto)");
     harness.input(">");
-    expect(harness.output.at(-1)).toContain("cube-02 . (pinned) . DRONE ACTIVITY");
+    expect(harness.output.at(-1)).toContain("SCOPE cube-02 . (pinned)");
     harness.input("<");
-    expect(harness.output.at(-1)).toContain("cube-01 . (pinned) . DRONE ACTIVITY");
+    expect(harness.output.at(-1)).toContain("SCOPE cube-01 . (pinned)");
     harness.input("a");
-    expect(harness.output.at(-1)).toContain("cube-01 . (auto) . DRONE ACTIVITY");
+    expect(harness.output.at(-1)).toContain("SCOPE cube-01 . (auto)");
     harness.input("<");
-    expect(harness.output.at(-1)).toContain("cube-03 . (pinned) . DRONE ACTIVITY");
+    expect(harness.output.at(-1)).toContain("SCOPE cube-03 . (pinned)");
     harness.input("a");
-    expect(harness.output.at(-1)).toContain("cube-01 . (auto) . DRONE ACTIVITY");
+    expect(harness.output.at(-1)).toContain("SCOPE cube-01 . (auto)");
 
     harness.input("w");
     expect(harness.output.at(-1)).toContain("of 60m");
     harness.input("w");
     expect(harness.output.at(-1)).toContain("of 5m");
+    harness.setDimensions(80, 13);
+    harness.resize();
     harness.input(" ");
     expect(harness.output.at(-1)).toContain("SPACE 2/2");
     harness.input(" ");
+    harness.setDimensions(80, 16);
+    harness.resize();
 
     const changed = snapshotData(3);
     source.set({
@@ -975,7 +1100,7 @@ describe("foreground dashboard lifecycle", () => {
     await vi.advanceTimersByTimeAsync(250);
     expect(source.readCount()).toBe(2);
     const pulseStart = harness.output.at(-1);
-    expect(pulseStart).toContain("DRONE ACTIVITY");
+    expect(pulseStart).toContain("SCOPE");
     await vi.advanceTimersByTimeAsync(100);
     expect(harness.output.at(-1)).not.toBe(pulseStart);
     expect(source.readCount()).toBe(2);
@@ -1077,7 +1202,7 @@ describe("foreground dashboard lifecycle", () => {
     harness.input("\u001a");
     await new Promise<void>((resolve) => setImmediate(resolve));
 
-    expect(harness.output.slice(beforeResume).join("")).toContain("DRONE ACTIVITY");
+    expect(harness.output.slice(beforeResume).join("")).toContain("SCOPE");
     dashboard.close();
   });
 
@@ -1137,8 +1262,11 @@ function seedDashboard(store: StoreRuntime): void {
 }
 
 function snapshotData(count: number): DashboardDataSnapshot {
+  const attention = { unacked_directed: 0, stale_directed: 0, oldest_unacked: null } as const;
   return {
     captured_at: "2026-07-25T12:00:00.000Z",
+    attention,
+    recent_activity: [],
     cubes: Array.from({ length: count }, (_, index) => ({
       id: `00000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`,
       name: `cube-${String(index + 1).padStart(2, "0")}`,
@@ -1150,6 +1278,7 @@ function snapshotData(count: number): DashboardDataSnapshot {
         ? null
         : new Date(Date.parse("2026-07-25T12:00:00.000Z") - ((index + 1) * 60_000))
             .toISOString(),
+      attention,
       drones: [{
         id: `10000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`,
         label: `builder-${String(index + 1).padStart(2, "0")}`,
@@ -1158,6 +1287,7 @@ function snapshotData(count: number): DashboardDataSnapshot {
         sent: index + 1,
         sent_5s: index + 1,
         received: index + 1,
+        attention,
       }],
     })),
   };

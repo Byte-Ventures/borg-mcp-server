@@ -535,7 +535,7 @@ describe("node server service", () => {
         waitForShutdown: vi.fn().mockResolvedValue(undefined),
       });
 
-      await service.start(["--ascii"]);
+      await service.start(["--ascii", "--no-motion"]);
 
       expect(startForegroundDashboard).toHaveBeenCalledWith(expect.objectContaining({
         source: expect.objectContaining({
@@ -549,6 +549,7 @@ describe("node server service", () => {
           state: "online",
         }),
         asciiRequested: true,
+        noMotion: true,
       }));
       expect(closeDashboard).toHaveBeenCalledOnce();
       expect(closeServer).toHaveBeenCalledOnce();
@@ -828,6 +829,7 @@ describe("node server service", () => {
       BORG_SERVER_LOG_ENTRY_ADVISORY_BYTES: "1024",
       BORG_SERVER_MAX_LOG_ENTRY_BYTES: "4096",
       BORG_SERVER_CONTEXT_GUIDELINE_BYTES: "8192",
+      BORGMCP_DASHBOARD_MOTION: "calm",
       BORG_TOKEN: "must-not-cross-boundary",
       UNRELATED_REFRESH_TOKEN: "must-not-cross-boundary",
     })).toEqual({
@@ -841,6 +843,7 @@ describe("node server service", () => {
       BORG_SERVER_LOG_ENTRY_ADVISORY_BYTES: "1024",
       BORG_SERVER_MAX_LOG_ENTRY_BYTES: "4096",
       BORG_SERVER_CONTEXT_GUIDELINE_BYTES: "8192",
+      BORGMCP_DASHBOARD_MOTION: "calm",
     });
   });
 

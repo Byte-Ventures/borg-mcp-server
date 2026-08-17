@@ -50,6 +50,11 @@ import {
 } from "./platform-queen.js";
 import type { DashboardSnapshotSource } from "./dashboard.js";
 import { createDashboardSnapshotReader } from "./dashboard-source.js";
+import {
+  WAKE_MAX_ATTEMPTS,
+  WAKE_RETRY_INTERVAL_MS,
+  WAKE_STALE_AFTER_MS,
+} from "./wake-policy.js";
 
 export type CubeAccess = "read" | "write" | "manage";
 
@@ -3890,10 +3895,6 @@ class ActivityHub {
     return (this.#wakeListeners.get(cubeId)?.get(droneId) ?? 0) > 0;
   }
 }
-
-const WAKE_RETRY_INTERVAL_MS = 60_000;
-const WAKE_MAX_ATTEMPTS = 2;
-const WAKE_STALE_AFTER_MS = WAKE_RETRY_INTERVAL_MS * (WAKE_MAX_ATTEMPTS + 1);
 
 class SqliteLivenessStore implements LivenessStore {
   readonly #database: DatabaseSync;

@@ -52,6 +52,7 @@ export {
   dashboardColorEnabled,
   rankDashboardSnapshot,
   renderPlainDashboard,
+  resolveDashboardMotionMode,
   sanitizeTerminalText,
   selectDashboardGlyphMode,
 } from "./dashboard.js";
@@ -66,6 +67,9 @@ export type {
   DashboardSnapshot,
   DashboardSnapshotSource,
   DashboardViewState,
+  DashboardAttentionData,
+  DashboardMotionMode,
+  DashboardRecentActivityData,
 } from "./dashboard.js";
 export { createRuntimeOperator } from "./runtime-operator.js";
 export { RuntimeUpdateFailure } from "./runtime-operator.js";

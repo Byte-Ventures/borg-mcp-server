@@ -88,6 +88,26 @@ describe("dashboard command", () => {
     server = undefined;
   });
 
+  it("restores the standalone PTY dashboard when motion is explicitly disabled", async () => {
+    directory = await realpath(await mkdtemp(join(tmpdir(), "borg-dashboard-no-motion-")));
+    await bootstrapServer(directory);
+    server = spawn(process.execPath, [mainPath, "start", "--port", "0"], {
+      env: childEnvironment(directory),
+      stdio: ["ignore", "ignore", "ignore"],
+    });
+    await waitForLiveRuntime(directory);
+
+    const result = await runDashboardInPty("dashboard", directory, ["--no-motion"]);
+    expect(result).toMatchObject({ code: 0, signal: null });
+    expect(result.output).toContain("\u001b[?1049h");
+    expect(result.output).toContain("\u001b[?1049l");
+    expect(server.exitCode).toBeNull();
+
+    server.kill("SIGTERM");
+    await expect(waitForExit(server)).resolves.toMatchObject({ code: 0, signal: null });
+    server = undefined;
+  });
+
   it("reports missing and stopped installations without raw paths", async () => {
     directory = await realpath(await mkdtemp(join(tmpdir(), "borg-dashboard-state-")));
     const missingPath = join(directory, "private-missing-installation");
@@ -128,7 +148,11 @@ async function runDashboard(dataDirectory: string): Promise<{
   return { ...await waitForExit(child), stdout, stderr };
 }
 
-async function runDashboardInPty(command: "start" | "dashboard", dataDirectory: string): Promise<{
+async function runDashboardInPty(
+  command: "start" | "dashboard",
+  dataDirectory: string,
+  extraArgs: readonly string[] = [],
+): Promise<{
   readonly code: number | null;
   readonly signal: NodeJS.Signals | null;
   readonly output: string;
@@ -137,7 +161,7 @@ async function runDashboardInPty(command: "start" | "dashboard", dataDirectory: 
     dashboardPtyRunner,
     process.execPath,
     mainPath,
-    ...(command === "start" ? ["start", "--port", "0"] : ["dashboard"]),
+    ...(command === "start" ? ["start", "--port", "0", ...extraArgs] : ["dashboard", ...extraArgs]),
   ], {
     env: { ...childEnvironment(dataDirectory), BORG_PTY_READY_MARKER: "online" },
     stdio: ["ignore", "pipe", "pipe"],

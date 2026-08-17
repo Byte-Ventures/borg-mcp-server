@@ -29,11 +29,11 @@ export function renderPlainDashboard(
       width,
       ASCII_GLYPHS.ellipsis,
     ),
-    plainCell(
-      `Endpoint: ${sanitizeTerminalText(snapshot.server.endpoint)}  Bind mode: ${snapshot.server.bind_mode}`,
-      width,
-      ASCII_GLYPHS.ellipsis,
-    ),
+    plainCell(plainAttention(snapshot), width, ASCII_GLYPHS.ellipsis),
+    plainCell(`Endpoint: ${sanitizeTerminalText(snapshot.server.endpoint)}  Bind mode: ${snapshot.server.bind_mode}`, width, ASCII_GLYPHS.ellipsis),
+    ...(snapshot.recent_activity[0] === undefined
+      ? []
+      : [plainCell(plainRecentActivity(snapshot), width, ASCII_GLYPHS.ellipsis)]),
     plainCell(`${snapshot.cubes.length} cubes | ${totalPosts} posts/15m`, width, ASCII_GLYPHS.ellipsis),
     ...plainFooter(footer, width),
   ];
@@ -47,6 +47,34 @@ export function renderPlainDashboard(
     ));
   }
   return lines.join("\n");
+}
+
+function plainAttention(snapshot: DashboardSnapshot): string {
+  const attention = snapshot.attention;
+  if (attention.unacked_directed === 0) return "ATTN 0";
+  const oldest = attention.oldest_unacked;
+  const origin = oldest === null
+    ? ""
+    : ` | ${plainText(oldest.cube_name)}/${plainText(oldest.recipient_label)}`;
+  const age = oldest === null ? "unknown" : plainAge(snapshot.captured_at, oldest.created_at);
+  return attention.stale_directed > 0
+    ? `>> ATTN STALE ${attention.stale_directed} | unacked ${attention.unacked_directed} | oldest ${age}${origin}`
+    : `ATTN PENDING ${attention.unacked_directed} | oldest ${age}${origin}`;
+}
+
+function plainRecentActivity(snapshot: DashboardSnapshot): string {
+  const activity = snapshot.recent_activity[0]!;
+  const actor = activity.actor_label ?? activity.actor_kind;
+  const classification = activity.activity_class === null
+    ? ""
+    : ` [${plainText(activity.activity_class)}]`;
+  return `FEED ${plainAge(snapshot.captured_at, activity.created_at)} ` +
+    `${plainText(activity.cube_name)}/${plainText(actor)}${classification} ` +
+    plainText(activity.message_head);
+}
+
+function plainText(value: string): string {
+  return sanitizeTerminalText(value).replace(/[^\x20-\x7e]/gu, "?");
 }
 
 function plainFooter(footer: DashboardFooter | undefined, width: number): string[] {

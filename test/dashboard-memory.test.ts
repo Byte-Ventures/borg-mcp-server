@@ -34,6 +34,8 @@ const {
 
 const snapshot = {
   captured_at: "2026-07-25T12:00:00.000Z",
+  attention: { unacked_directed: 0, stale_directed: 0, oldest_unacked: null },
+  recent_activity: [],
   cubes: [{
     id: "00000000-0000-4000-8000-000000000001",
     name: "cube",
@@ -42,6 +44,7 @@ const snapshot = {
     drones_total: 1,
     drones_seen_15m: 1,
     last_post_at: null,
+    attention: { unacked_directed: 0, stale_directed: 0, oldest_unacked: null },
     drones: [{
       id: "10000000-0000-4000-8000-000000000001",
       label: "builder",
@@ -50,6 +53,7 @@ const snapshot = {
       sent: 1,
       sent_5s: 1,
       received: 1,
+      attention: { unacked_directed: 0, stale_directed: 0, oldest_unacked: null },
     }],
   }],
 } as const;
@@ -88,6 +92,7 @@ it("does not retain redundant live Ink renders for a stable roster and snapshot"
       glyphMode: "ascii",
       color: false,
       footer: "^C stop server  |  read-only",
+      motionMode: "off",
     }),
     idleRefreshMs: 100,
   });

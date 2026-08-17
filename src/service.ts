@@ -86,6 +86,7 @@ import {
   STANDALONE_DASHBOARD_FOOTER,
   rankDashboardSnapshot,
   renderPlainDashboard,
+  resolveDashboardMotionMode,
   selectDashboardGlyphMode,
   startForegroundDashboard,
   type DashboardServerIdentity,
@@ -118,6 +119,7 @@ export interface ServerService {
 
 export interface DashboardCommandOptions {
   readonly ascii: boolean;
+  readonly noMotion: boolean;
 }
 
 export interface SetupOptions {
@@ -237,6 +239,7 @@ export interface ServerEnvironment {
   readonly BORG_SERVER_ARTIFACT_INTEGRITY?: string;
   readonly BORG_SERVER_PROCESS_MODE?: "foreground" | "managed";
   readonly BORG_SERVER_RUNTIME_DIR?: string;
+  readonly BORGMCP_DASHBOARD_MOTION?: string;
 }
 
 interface ServiceDependencies {
@@ -254,6 +257,7 @@ interface ServiceDependencies {
     readonly source: DashboardSnapshotSource;
     readonly server: DashboardServerIdentity;
     readonly asciiRequested: boolean;
+    readonly noMotion: boolean;
   }) => ForegroundDashboard | undefined;
   readonly waitForShutdown: (server: RunningServer, signal?: AbortSignal) => Promise<void>;
   readonly debugOutput?: (line: string) => void;
@@ -320,6 +324,7 @@ export function createNodeServerService(dependencies: ServiceDependencies): Serv
       let dataDirectory: string | undefined;
       let storageLimits: StorageLimits;
       let asciiRequested = false;
+      let noMotion = false;
       let compatibilityLoopbackHost: "127.0.0.1" | "::1" | undefined;
       let bindMode: "loopback" | "lan";
       let preparedBindHost: string | null = null;
@@ -331,6 +336,7 @@ export function createNodeServerService(dependencies: ServiceDependencies): Serv
         const parsed = parseStartOptions(args);
         bind = parsed.bind;
         asciiRequested = parsed.ascii;
+        noMotion = parsed.noMotion;
         debugLogger = createDebugLogger(parsed.logLevel === "debug" ? dependencies.debugOutput : undefined);
         const resolvedBind = resolveBindOptions(bind);
         bindMode = resolvedBind.mode;
@@ -551,6 +557,7 @@ export function createNodeServerService(dependencies: ServiceDependencies): Serv
               started_at: new Date().toISOString(),
             }),
             asciiRequested,
+            noMotion,
           });
         }
         debugLogger.emit({ event: "lifecycle", action: "listening" });
@@ -611,6 +618,7 @@ export function selectServerEnvironment(environment: NodeJS.ProcessEnv): ServerE
   const artifactIntegrity = environment["BORG_SERVER_ARTIFACT_INTEGRITY"];
   const processMode = environment["BORG_SERVER_PROCESS_MODE"];
   const runtimeDirectory = environment["BORG_SERVER_RUNTIME_DIR"];
+  const dashboardMotion = environment["BORGMCP_DASHBOARD_MOTION"];
   if (processMode !== undefined && processMode !== "foreground" && processMode !== "managed") {
     throw new Error("BORG_SERVER_PROCESS_MODE is invalid.");
   }
@@ -649,6 +657,7 @@ export function selectServerEnvironment(environment: NodeJS.ProcessEnv): ServerE
     ...(artifactIntegrity === undefined ? {} : { BORG_SERVER_ARTIFACT_INTEGRITY: artifactIntegrity }),
     ...(processMode === undefined ? {} : { BORG_SERVER_PROCESS_MODE: processMode }),
     ...(runtimeDirectory === undefined ? {} : { BORG_SERVER_RUNTIME_DIR: runtimeDirectory }),
+    ...(dashboardMotion === undefined ? {} : { BORGMCP_DASHBOARD_MOTION: dashboardMotion }),
   };
 }
 
@@ -760,7 +769,7 @@ const startOnlyService = createNodeServerService({
     }
     nodeServerTestHooks?.onListening?.(origin);
   },
-  startForegroundDashboard: ({ source, server, asciiRequested }) => {
+  startForegroundDashboard: ({ source, server, asciiRequested, noMotion }) => {
     if (!supportsForegroundDashboard()) return undefined;
     const navigation = supportsDashboardNavigation();
     return startForegroundDashboard({
@@ -773,6 +782,7 @@ const startOnlyService = createNodeServerService({
           environment: process.env,
         }),
         color: dashboardColorEnabled(process.env),
+        motionMode: resolveDashboardMotionMode({ noMotion, environment: serverEnvironment }),
         footer: EMBEDDED_DASHBOARD_FOOTER,
         navigation,
       }),
@@ -898,6 +908,7 @@ async function runNodeDashboardViewer(
           environment: process.env,
         }),
         color: dashboardColorEnabled(process.env),
+        motionMode: resolveDashboardMotionMode({ noMotion: options.noMotion, environment: serverEnvironment }),
         footer: STANDALONE_DASHBOARD_FOOTER,
         navigation,
       }),

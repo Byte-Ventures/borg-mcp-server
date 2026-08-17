@@ -251,12 +251,14 @@ describe("runCli", () => {
     const service: ServerService = { start: vi.fn(), dashboard };
 
     expect(await runCli(["dashboard"], service, createIo())).toBe(0);
-    expect(dashboard).toHaveBeenLastCalledWith({ ascii: false });
+    expect(dashboard).toHaveBeenLastCalledWith({ ascii: false, noMotion: false });
     expect(await runCli(["dashboard", "--ascii"], service, createIo())).toBe(0);
-    expect(dashboard).toHaveBeenLastCalledWith({ ascii: true });
+    expect(dashboard).toHaveBeenLastCalledWith({ ascii: true, noMotion: false });
+    expect(await runCli(["dashboard", "--no-motion", "--ascii"], service, createIo())).toBe(0);
+    expect(dashboard).toHaveBeenLastCalledWith({ ascii: true, noMotion: true });
     expect(await runCli(["dashboard", "--ascii", "--ascii"], service, createIo())).toBe(1);
     expect(await runCli(["dashboard", "--host", "127.0.0.1"], service, createIo())).toBe(1);
-    expect(dashboard).toHaveBeenCalledTimes(2);
+    expect(dashboard).toHaveBeenCalledTimes(3);
   });
 
   it("renders approved exact runtime evidence and bounded non-TTY JSON without guessing", async () => {

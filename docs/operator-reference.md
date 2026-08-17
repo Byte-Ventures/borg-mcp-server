@@ -117,9 +117,12 @@ state.
 The dashboard uses box-drawing terminal glyphs by default. `--ascii` forces a
 strict 7-bit rendering, and incompatible terminal/locale settings select that
 fallback automatically. `NO_COLOR` removes color without removing status
-labels or layout cues. `--no-motion` disables the ambient scope marker and
-event pulse. `BORGMCP_DASHBOARD_MOTION=ambient|calm|off` selects ambient motion
-(the default), event effects only, or a static view; `--no-motion` always wins.
+labels or layout cues. `BORGMCP_DASHBOARD_MOTION=ambient` (the default) moves
+the scope marker every 500 milliseconds and retains event pulses. `calm`
+advances the marker once after each successful data refresh, including the
+five-second idle refresh, and retains event pulses. `off` leaves the marker
+fixed at its terminal position with no marker animation or event pulse.
+`--no-motion` selects `off` and always wins over the environment setting.
 An interactive `TERM=dumb` terminal keeps the same Sensor Grid hierarchy with
 strict ASCII and no color. Terminals below 40 columns or 10 rows receive a
 bounded plain-text status view; at constrained sizes lower-priority feed and

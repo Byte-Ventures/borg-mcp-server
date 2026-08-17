@@ -35,6 +35,7 @@ export type DebugEvent =
   | { readonly event: "decision_write"; readonly cubeId: string; readonly decisionId: string; readonly principal: Principal }
   | { readonly event: "sse_subscribe"; readonly connectionId: string; readonly cubeId: string; readonly principal: Principal; readonly replayCount: number; readonly truncated: boolean }
   | { readonly event: "sse_unsubscribe"; readonly connectionId: string; readonly cubeId: string; readonly principal: Principal; readonly deliveryCount: number }
+  | { readonly event: "sse_overflow"; readonly connectionId: string; readonly cubeId: string; readonly principal: Principal; readonly bufferedCount: number }
   | { readonly event: "credential"; readonly action: "invitation_created" | "enrollment_accepted" | "enrollment_rejected" | "session_created" | "session_revoked" | "client_rotated" | "client_revoked"; readonly purpose?: "owner" | "client"; readonly clientId?: string; readonly cubeId?: string; readonly droneId?: string; readonly sessionId?: string }
   | { readonly event: "transport_rejection"; readonly reason: "tls_client_error" | "http_parser_error" };
 
@@ -112,6 +113,8 @@ function projectEvent(event: DebugEvent): Record<string, unknown> | null {
       return { event: "sse_subscribe", connection_id: uuid(value["connectionId"]), cube_id: uuid(value["cubeId"]), ...principalFields(value["principal"]), replay_count: boundedInteger(value["replayCount"], 0, 200), truncated: value["truncated"] === true };
     case "sse_unsubscribe":
       return { event: "sse_unsubscribe", connection_id: uuid(value["connectionId"]), cube_id: uuid(value["cubeId"]), ...principalFields(value["principal"]), delivery_count: boundedInteger(value["deliveryCount"], 0, Number.MAX_SAFE_INTEGER) };
+    case "sse_overflow":
+      return { event: "sse_overflow", connection_id: uuid(value["connectionId"]), cube_id: uuid(value["cubeId"]), ...principalFields(value["principal"]), buffered_count: boundedInteger(value["bufferedCount"], 0, 200) };
     case "credential":
       return {
         event: "credential",

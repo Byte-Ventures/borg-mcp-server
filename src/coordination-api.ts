@@ -98,6 +98,8 @@ interface ReplayBarrier {
   readonly markReached: () => void;
 }
 
+const STREAM_QUEUE_LIMIT = 200;
+
 export class CoordinationApi {
   readonly #runtime: StoreRuntime;
   readonly #authority: CredentialAuthority;
@@ -826,10 +828,22 @@ export class CoordinationApi {
     let notificationIndex = 0;
     let live = false;
     try {
-       unsubscribe = store.subscribeActivity(cubeId, (entry) => {
-         if (live) queue.push(encodeLogEvent(entry));
-         else if ("kind" in entry || entry.wake_nonce !== undefined) pendingNotifications.push(entry);
-         else replayDirty = true;
+      unsubscribe = store.subscribeActivity(cubeId, (entry) => {
+        if (live) queue.push(encodeLogEvent(entry));
+        else if ("kind" in entry || entry.wake_nonce !== undefined) {
+          if (pendingNotifications.length >= STREAM_QUEUE_LIMIT) {
+            this.#debugLogger.emit({
+              event: "sse_overflow",
+              connectionId,
+              cubeId,
+              principal,
+              bufferedCount: pendingNotifications.length,
+            });
+            queue.close();
+            return;
+          }
+          pendingNotifications.push(entry);
+        } else replayDirty = true;
       }, () => {
         queue.terminate(encodeCubeDeletedEvent());
       });
@@ -942,7 +956,7 @@ class AsyncStringQueue implements AsyncIterable<string> {
 
   push(value: string): void {
     if (this.#closed) return;
-    if (this.#values.length >= 200) {
+    if (this.#values.length >= STREAM_QUEUE_LIMIT) {
       this.close();
       return;
     }
@@ -950,13 +964,13 @@ class AsyncStringQueue implements AsyncIterable<string> {
   }
 
   tryPush(value: string): boolean {
-    if (this.#closed || this.#values.length >= 200) return false;
+    if (this.#closed || this.#values.length >= STREAM_QUEUE_LIMIT) return false;
     this.#enqueue(value);
     return true;
   }
 
   async write(value: string): Promise<boolean> {
-    while (!this.#closed && this.#values.length >= 200) {
+    while (!this.#closed && this.#values.length >= STREAM_QUEUE_LIMIT) {
       if (!await this.waitForSpace()) return false;
     }
     if (this.#closed) return false;
@@ -966,7 +980,7 @@ class AsyncStringQueue implements AsyncIterable<string> {
 
   waitForSpace(): Promise<boolean> {
     if (this.#closed) return Promise.resolve(false);
-    if (this.#values.length < 200) return Promise.resolve(true);
+    if (this.#values.length < STREAM_QUEUE_LIMIT) return Promise.resolve(true);
     return new Promise((resolve) => this.#spaceWaiters.push(resolve));
   }
 

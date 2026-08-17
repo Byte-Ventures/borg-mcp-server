@@ -383,6 +383,147 @@ describe("coordination stream setup", () => {
     await iterator.return?.();
   }, 15_000);
 
+  it("keeps 200 replay-time notifications ordered before the bookmark", async () => {
+    const fixture = await createNotificationPressureFixture(200, "ordered");
+    const barrier = fixture.api.armReplayTransition();
+    const opening = fixture.api.handle({
+      method: "GET",
+      path: `/api/cubes/${fixture.cubeId}/stream`,
+      principal: fixture.authorPrincipal,
+      cursor: fixture.cursor,
+      signal: new AbortController().signal,
+    });
+    await barrier.reached;
+    for (const entry of fixture.entries) fixture.peerStore.acknowledge(fixture.cubeId, entry.id, "ack");
+    barrier.release();
+
+    const response = await opening;
+    const iterator = response.stream![Symbol.asyncIterator]();
+    const replayed: string[] = [];
+    const notifications: string[] = [];
+    for (;;) {
+      const next = await iterator.next();
+      expect(next.done).toBe(false);
+      if (next.value.includes("event: bookmark")) break;
+      const data = JSON.parse(next.value.match(/data: (.+)\n\n/u)![1]!);
+      if (data.entry.kind === "ack") notifications.push(data.entry.log_entry_id);
+      else replayed.push(data.entry.id);
+    }
+
+    expect(replayed).toEqual(fixture.entries.map((entry) => entry.id));
+    expect(notifications).toEqual(fixture.entries.map((entry) => entry.id));
+    await iterator.return?.();
+  });
+
+  it("closes on the 201st replay-time notification and replays durable entries after reconnect", async () => {
+    const lines: string[] = [];
+    const fixture = await createNotificationPressureFixture(
+      201,
+      "overflow",
+      createDebugLogger((line) => lines.push(line)),
+    );
+    const barrier = fixture.api.armReplayTransition();
+    const opening = fixture.api.handle({
+      method: "GET",
+      path: `/api/cubes/${fixture.cubeId}/stream`,
+      principal: fixture.authorPrincipal,
+      cursor: fixture.cursor,
+      signal: new AbortController().signal,
+    });
+    await barrier.reached;
+    for (const entry of fixture.entries) fixture.peerStore.acknowledge(fixture.cubeId, entry.id, "ack");
+    const durableAfterOverflow = fixture.authorStore.appendLog(fixture.cubeId, {
+      visibility: "broadcast",
+      message: "durable-after-overflow",
+    });
+    barrier.release();
+
+    const response = await opening;
+    const iterator = response.stream![Symbol.asyncIterator]();
+    expect(await iterator.next()).toEqual({ value: undefined, done: true });
+    const overflowEvents = lines.map((line) => JSON.parse(line));
+    expect(overflowEvents).toContainEqual(expect.objectContaining({
+      event: "sse_overflow",
+      buffered_count: 200,
+    }));
+    expect(overflowEvents).toContainEqual(expect.objectContaining({ event: "sse_unsubscribe" }));
+    expect(overflowEvents).not.toContainEqual(expect.objectContaining({ event: "sse_subscribe" }));
+
+    const reconnect = await fixture.api.handle({
+      method: "GET",
+      path: `/api/cubes/${fixture.cubeId}/stream`,
+      principal: fixture.authorPrincipal,
+      cursor: fixture.cursor,
+      signal: new AbortController().signal,
+    });
+    const reconnectIterator = reconnect.stream![Symbol.asyncIterator]();
+    const replayed: string[] = [];
+    for (;;) {
+      const next = await reconnectIterator.next();
+      expect(next.done).toBe(false);
+      if (next.value.includes("event: bookmark")) break;
+      const data = JSON.parse(next.value.match(/data: (.+)\n\n/u)![1]!);
+      expect(data.entry.kind).toBeUndefined();
+      replayed.push(data.entry.id);
+    }
+    expect(replayed).toEqual([...fixture.entries.map((entry) => entry.id), durableAfterOverflow.id]);
+    await reconnectIterator.return?.();
+  });
+
+  it("keeps 201 peer-targeted wake retries isolated from a nonrecipient pre-live stream", async () => {
+    const lines: string[] = [];
+    let now = new Date("2026-07-14T12:00:00.000Z");
+    const fixture = await createNotificationPressureFixture(
+      201,
+      "recipient-isolation",
+      createDebugLogger((line) => lines.push(line)),
+      true,
+      () => now,
+    );
+    const intended = await fixture.api.handle({
+      method: "GET",
+      path: `/api/cubes/${fixture.cubeId}/stream`,
+      principal: fixture.authorPrincipal,
+      cursor: fixture.lastEntryCursor,
+      signal: new AbortController().signal,
+    });
+    const intendedIterator = intended.stream![Symbol.asyncIterator]();
+    expect((await intendedIterator.next()).value).toContain("event: bookmark");
+
+    const barrier = fixture.api.armReplayTransition();
+    const opening = fixture.api.handle({
+      method: "GET",
+      path: `/api/cubes/${fixture.cubeId}/stream`,
+      principal: fixture.outsiderPrincipal,
+      cursor: fixture.lastEntryCursor,
+      signal: new AbortController().signal,
+    });
+    await barrier.reached;
+    now = new Date("2026-07-14T12:01:01.000Z");
+    const firstWake = intendedIterator.next();
+    runtime!.liveness.scan();
+    barrier.release();
+
+    const response = await opening;
+    const iterator = response.stream![Symbol.asyncIterator]();
+    expect((await iterator.next()).value).toContain("event: bookmark");
+
+    const wakeEntryIds: string[] = [];
+    for (let index = 0; index < fixture.entries.length; index += 1) {
+      const next = index === 0 ? await firstWake : await intendedIterator.next();
+      expect(next.done).toBe(false);
+      const data = JSON.parse(next.value!.match(/data: (.+)\n\n/u)![1]!);
+      expect(data.entry.wake_nonce).toEqual(expect.any(String));
+      wakeEntryIds.push(data.entry.id);
+    }
+    expect(wakeEntryIds).toEqual(fixture.entries.map((entry) => entry.id));
+    expect(lines.map((line) => JSON.parse(line))).not.toContainEqual(
+      expect.objectContaining({ event: "sse_overflow" }),
+    );
+    await iterator.return?.();
+    await intendedIterator.return?.();
+  });
+
   it("emits heartbeat events while a live stream is idle", async () => {
     const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-api-heartbeat-")));
     directories.push(directory);
@@ -2380,6 +2521,79 @@ describe("coordination stream setup", () => {
     expect(events).toContainEqual(expect.objectContaining({ event: "sse_unsubscribe", delivery_count: 1 }));
   });
 });
+
+async function createNotificationPressureFixture(
+  entryCount: number,
+  name: string,
+  debugLogger = disabledDebugLogger,
+  direct = false,
+  clock?: () => Date,
+) {
+  const directory = await realpath(await mkdtemp(join(tmpdir(), `borg-api-notification-${name}-`)));
+  directories.push(directory);
+  runtime = await openStore({ path: join(directory, "borg.db"), ...(clock === undefined ? {} : { clock }) });
+  digester = new CredentialDigester(Buffer.alloc(32, 36));
+  const authority = new CredentialAuthority(runtime.credentials, digester);
+  const clientId = "00000000-0000-4000-8000-000000000401";
+  const cubeId = "00000000-0000-4000-8000-000000000402";
+  const roleId = "00000000-0000-4000-8000-000000000403";
+  const authorDroneId = "00000000-0000-4000-8000-000000000404";
+  const peerDroneId = "00000000-0000-4000-8000-000000000405";
+  const outsiderDroneId = "00000000-0000-4000-8000-000000000406";
+  runtime.maintenance.createClient({ id: clientId, name: "Notification pressure" });
+  runtime.maintenance.createCube({ id: cubeId, name: "Notification pressure", directive: "" });
+  runtime.maintenance.grantClientCube({ clientId, cubeId, access: "manage" });
+  runtime.maintenance.createRole({ id: roleId, cubeId, name: "Builder" });
+  const droneRecords = [
+    [authorDroneId, "00000000-0000-4000-8000-000000000407", "author"],
+    [peerDroneId, "00000000-0000-4000-8000-000000000408", "peer"],
+    [outsiderDroneId, "00000000-0000-4000-8000-000000000409", "outsider"],
+  ] as const;
+  for (const [droneId, sessionId, label] of droneRecords) {
+    runtime.maintenance.createDrone({ id: droneId, cubeId, roleId, clientId, label });
+    runtime.maintenance.createDroneSession({ id: sessionId, clientId, cubeId, droneId });
+  }
+  const authorPrincipal = droneSessionPrincipal({
+    id: droneRecords[0][1], clientId, cubeId, droneId: authorDroneId,
+  });
+  const peerPrincipal = droneSessionPrincipal({
+    id: droneRecords[1][1], clientId, cubeId, droneId: peerDroneId,
+  });
+  const outsiderPrincipal = droneSessionPrincipal({
+    id: droneRecords[2][1], clientId, cubeId, droneId: outsiderDroneId,
+  });
+  const authorStore = runtime.forPrincipal(authorPrincipal);
+  const peerStore = runtime.forPrincipal(peerPrincipal);
+  const cursorEntry = authorStore.appendLog(cubeId, { visibility: "broadcast", message: "cursor seed" });
+  const entries = Array.from({ length: entryCount }, (_, index) => authorStore.appendLog(
+    cubeId,
+    direct
+      ? {
+          visibility: "direct",
+          recipientDroneIds: [authorDroneId],
+          message: `notification-${index}`,
+        }
+      : { visibility: "broadcast", message: `notification-${index}` },
+  ));
+  const lastEntry = entries.at(-1) ?? cursorEntry;
+  return {
+    api: new CoordinationApi(runtime, authority, debugLogger),
+    cubeId,
+    cursor: Buffer.from(JSON.stringify({
+      id: cursorEntry.id,
+      created_at: cursorEntry.created_at,
+    })).toString("base64url"),
+    lastEntryCursor: Buffer.from(JSON.stringify({
+      id: lastEntry.id,
+      created_at: lastEntry.created_at,
+    })).toString("base64url"),
+    entries,
+    authorStore,
+    peerStore,
+    authorPrincipal,
+    outsiderPrincipal,
+  };
+}
 
 describe("decision removal API", () => {
   it("removes by topic or id and returns the retained audit record", async () => {

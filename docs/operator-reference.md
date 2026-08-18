@@ -91,19 +91,25 @@ its terminal and stops with Ctrl-C.
 terminal it opens a read-only dashboard showing the verified server identity,
 the effective endpoint and bind mode, and an attention-first Sensor Grid. The
 layout prioritizes the ATTN band, the focused cube's per-drone status and
-activity traces, a recent activity feed, and then a paged cube list ranked by
-coordination posts in the trailing 15 minutes. Distinct posting drones break
-ties. The status words LIVE, RECENT, QUIET, and DARK keep liveness meaningful
-without color. The feed contains at most the eight newest entries and displays
-only a sanitized, terminal-width-truncated head of each message; the database
-query bounds that head to 256 code points. It does not display full message
-bodies, actor or recipient IDs, or document contents.
+attention cells, one shared cube-level Sensor Scope, a recent activity feed,
+and then a paged cube list ranked by coordination posts in the trailing 15
+minutes. The scope aggregates the existing five-second activity samples across
+the focused cube; it does not draw per-drone activity graphs. Distinct posting
+drones break ranking ties. The scope has a separate dotted baseline and labels
+the start, intermediate thirds, and current end of the selected window. The
+status words LIVE, RECENT, QUIET, and DARK keep liveness meaningful without
+color. The feed query retains at most the eight newest entries, while the
+interactive layout shows up to four according to the available height. Each
+row contains only a sanitized, terminal-width-truncated head of its message;
+the database query bounds that head to 256 code points. It does not display
+full message bodies, actor or recipient IDs, or document contents.
 
 The Sensor Grid refreshes on committed activity, acknowledgements, terminal
 resize, and a bounded five-second age tick. New activity produces a short,
-event-driven cube pulse. By default, one scope marker advances at no more than
-two frames per second without reading the database. A frame taking longer than
-50 milliseconds disables ambient motion for that viewer session and reports
+event-driven cube pulse. By default, one scan column advances inside the shared
+scope at no more than two frames per second without reading the database. A
+frame taking longer than 50 milliseconds disables ambient motion for that
+viewer session and reports
 `motion: calm (auto)` in the footer.
 
 No input is required. When stdin is also an interactive terminal, `<` and `>`
@@ -114,19 +120,27 @@ activity window without changing it automatically, and Space pages the cube
 list. These keys change presentation only and never mutate server or cube
 state.
 
-The dashboard uses box-drawing terminal glyphs by default. `--ascii` forces a
-strict 7-bit rendering, and incompatible terminal/locale settings select that
-fallback automatically. `NO_COLOR` removes color without removing status
-labels or layout cues. `BORGMCP_DASHBOARD_MOTION=ambient` (the default) moves
-the scope marker every 500 milliseconds and retains event pulses. `calm`
-advances the marker once after each successful data refresh, including the
-five-second idle refresh, and retains event pulses. `off` leaves the marker
-fixed at its terminal position with no marker animation or event pulse.
-`--no-motion` selects `off` and always wins over the environment setting.
+At 100 columns and wider, the shared scope and drone board render side by side;
+at narrower widths they stack. Below 12 rows, the endpoint/bind row, feed, and
+cube list yield to a compact deck with an inline scope ramp and the highest
+priority drone status cells. Stale and then unacknowledged attention targets
+precede liveness ordering, so exact 40-by-10 terminals retain ATTN plus the
+target STATUS/name/age cell. The dashboard uses box-drawing terminal glyphs by
+default. `--ascii` forces a strict 7-bit rendering, and incompatible
+terminal/locale settings select that fallback automatically. `NO_COLOR`
+removes color without removing status labels or layout cues.
+`BORGMCP_DASHBOARD_MOTION=ambient` (the default) moves the in-scope scan column
+every 500 milliseconds and retains event pulses. `calm` advances the scan
+column once after each successful data refresh, including the five-second idle
+refresh, and retains event pulses. `off` leaves the marker fixed at its
+terminal position with no marker animation or event pulse.
+`--no-motion` selects `off`, fixes the scan column at the scope's terminal
+position, and always wins over the environment setting.
 An interactive `TERM=dumb` terminal keeps the same Sensor Grid hierarchy with
 strict ASCII and no color. Terminals below 40 columns or 10 rows receive a
 bounded plain-text status view; at constrained sizes lower-priority feed and
-cube-list rows yield before ATTN and the focused drone's status, name, and age.
+cube-list rows yield before ATTN and the focused drone board's status, name,
+and age.
 
 Ctrl-C or terminal teardown stops the server, restores the prior terminal screen and cursor, and
 does not install or enable persistence. Redirected output and managed-service

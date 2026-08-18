@@ -37,6 +37,27 @@ function stripAnsi(value: string): string {
   return value.replace(/\u001b\[[0-?]*[ -/]*[@-~]/gu, "");
 }
 
+function asciiScopeGraphRows(frame: string): string[] {
+  const lines = frame.split("\n");
+  const title = lines.findIndex((line) => line.includes("SENSOR SCOPE"));
+  const divider = lines[title]!.indexOf("+", 1);
+  const graph: string[] = [];
+  for (const line of lines.slice(title + 1)) {
+    const scope = line.slice(0, divider + 1);
+    if (scope.startsWith("+")) break;
+    if (!scope.startsWith("|") || scope.includes("15m")) continue;
+    const content = scope.slice(1, -1);
+    if (/^\.+$/u.test(content)) continue;
+    graph.push(content);
+  }
+  return graph;
+}
+
+function boardSegment(line: string): string {
+  const dividers = [...line.matchAll(/\|/gu)].map((match) => match.index);
+  return dividers.length >= 3 ? line.slice(dividers[1]! + 1, dividers[2]) : line;
+}
+
 const server: DashboardServerIdentity = Object.freeze({
   name: "borgmcp-server",
   version: "2.0.0",
@@ -192,14 +213,96 @@ describe("dashboard renderer", () => {
     expect(frame).toContain("██ BORGMCP-SERVER ██");
     expect(frame).toContain("SCOPE");
     expect(frame).toContain("cube-01");
-    expect(frame).toContain("collecting");
+    expect(frame).toContain("cov 0%");
     expect(frame).toContain("up 3h");
     expect(frame).not.toContain("CUBE DETAIL");
     expect(renderer(eight, 80, 24)).toBe(frame);
+    const stackedLines = frame.split("\n");
+    expect(stackedLines.findIndex((line) => line.includes("SENSOR SCOPE")))
+      .toBeLessThan(stackedLines.findIndex((line) => line.includes("DRONES")));
+
+    const wide = createDashboardRenderer({ glyphMode: "ascii", color: false })(eight, 120, 40);
+    const wideLines = wide.split("\n");
+    const wideTitleIndex = wideLines.findIndex((line) => line.includes("SENSOR SCOPE"));
+    const wideTitle = wideLines[wideTitleIndex]!;
+    expect(wideTitle).toContain("DRONES");
+    expect(wideTitle.match(/\+/gu)).toHaveLength(3);
+    expect(wideTitle).not.toContain("++");
+    const wideBottom = wideLines.slice(wideTitleIndex + 1).find((line) => line.startsWith("+"))!;
+    expect(wideBottom.match(/\+/gu)).toHaveLength(3);
+    expect(wideLines.slice(wideTitleIndex + 1, wideLines.indexOf(wideBottom))
+      .every((line) => (line.match(/\|/gu) ?? []).length === 3)).toBe(true);
+    expect(wideLines.some((line) => /^\|\.{10,}\|/u.test(line))).toBe(true);
+    expect(wideLines.some((line) =>
+      line.includes("15m") && line.includes("10m") && line.includes("5m") && line.includes("now")))
+      .toBe(true);
+    const wideBox = renderer(eight, 120, 40).split("\n");
+    const boxTitleIndex = wideBox.findIndex((line) => line.includes("SENSOR SCOPE"));
+    expect(wideBox[boxTitleIndex]).toContain("┬");
+    expect(wideBox[boxTitleIndex]).not.toContain("┐┌");
+    expect(wideBox.slice(boxTitleIndex + 1).find((line) => line.startsWith("└"))).toContain("┴");
 
     const crowded = renderer(rankDashboardSnapshot(snapshotData(47), server), 80, 24);
     expect(crowded).toContain("page 1/");
     expect(crowded.split("\n").length).toBeLessThanOrEqual(24);
+  });
+
+  it("keeps graph, baseline, and intermediate axis ticks in the exact 80x24 stacked allocation", () => {
+    const data = snapshotData(3);
+    const focus = data.cubes[0]!;
+    const drones = Array.from({ length: 11 }, (_unused, index) => ({
+      ...focus.drones[0]!,
+      id: `60000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`,
+      label: `drone-${index + 1}`,
+    }));
+    const recent = Array.from({ length: 3 }, (_unused, index) => ({
+      id: `70000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`,
+      cube_name: focus.name,
+      actor_kind: "drone-session" as const,
+      actor_label: drones[index]!.label,
+      actor_role: drones[index]!.role,
+      created_at: new Date(Date.parse(data.captured_at) - (index * 60_000)).toISOString(),
+      visibility: "broadcast" as const,
+      recipient_count: 0,
+      activity_class: null,
+      message_head: `activity ${index + 1}`,
+    }));
+    const snapshot = rankDashboardSnapshot({
+      ...data,
+      recent_activity: recent,
+      cubes: [{ ...focus, drones, drones_total: drones.length }, ...data.cubes.slice(1)],
+    }, server);
+    const frame = createDashboardRenderer({ glyphMode: "ascii", color: false, motionMode: "off" })(
+      snapshot,
+      80,
+      24,
+      {
+        autoFollow: true,
+        focusedCubeId: null,
+        pulseCubeIds: new Set(),
+        pulsePhase: 0,
+        activity: new Map(drones.map((drone) => [
+          `${focus.id}:${drone.id}`,
+          [{ capturedAt: data.captured_at, sentRate: 1 }],
+        ])),
+        observation: [{ capturedAt: data.captured_at, sentRate: 0 }],
+        activityWindowMs: 15 * 60_000,
+        motionMode: "off",
+      },
+    );
+    const lines = frame.split("\n");
+    const scopeTitle = lines.findIndex((line) => line.includes("SENSOR SCOPE"));
+    const boardTitle = lines.findIndex((line) => line.includes("DRONES 11"));
+    const scope = lines.slice(scopeTitle + 1, boardTitle);
+    const graph = scope.findIndex((line) => /^\|.*[.:+*#].*\|$/u.test(line));
+    const baseline = scope.findIndex((line) => /^\|\.{20,}\|$/u.test(line));
+    const axis = scope.findIndex((line) =>
+      line.includes("15m") && line.includes("10m") && line.includes("5m") && line.includes("now"));
+    expect(graph).toBeGreaterThanOrEqual(0);
+    expect(baseline).toBeGreaterThan(graph);
+    expect(axis).toBeGreaterThan(baseline);
+    expect(frame.match(/^FEED /gmu)).toHaveLength(1);
+    expect(frame.match(/^\s{5}\d/gmu)).toHaveLength(2);
   });
 
   it("uses one layout with a strict ASCII glyph map and an honest tiny fallback", () => {
@@ -213,7 +316,7 @@ describe("dashboard renderer", () => {
     expect(ascii).toContain("+");
     for (const line of ascii.split("\n")) expect([...line]).toHaveLength(60);
     expect(ascii).toContain("SCOPE");
-    expect(ascii).toContain("collecting -");
+    expect(ascii).toContain("cov 0%");
 
     for (let width = 20; width <= 100; width += 1) {
       const rendered = createDashboardRenderer({ glyphMode: "ascii", color: true })(
@@ -314,10 +417,58 @@ describe("dashboard renderer", () => {
       10,
     );
     expect(frame).toContain("ATTN STALE 1");
-    expect(frame).toContain("RECENT builder-01");
+    expect(frame).toContain("SCOPE cube-01");
+    expect(frame).toMatch(/RECENT !1 builder-01.*1m/u);
     expect(frame).toContain("1m");
+    expect(frame).toContain("Server data and identity remain saved.");
+    expect(frame).toContain("^C stop server  |  read-only");
+    expect(frame).not.toContain("Endpoint:");
     expect(frame).not.toContain("FEED");
     expect(frame.split("\n").some((line) => /^[.:+*#]\s+\d/u.test(line))).toBe(false);
+  });
+
+  it("keeps stale attention targets visible when compacting and styles their marker independently", () => {
+    const data = snapshotData(1);
+    const cube = data.cubes[0]!;
+    const staleAttention = {
+      unacked_directed: 2,
+      stale_directed: 2,
+      oldest_unacked: {
+        created_at: "2026-07-25T11:20:00.000Z",
+        cube_name: cube.name,
+        recipient_label: "attention-target",
+      },
+    } as const;
+    const drones = Array.from({ length: 6 }, (_unused, index) => ({
+      ...cube.drones[0]!,
+      id: `50000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`,
+      label: index === 5 ? "attention-target" : `live-${index + 1}`,
+      last_seen: index === 5 ? "2026-07-25T11:20:00.000Z" : "2026-07-25T11:59:50.000Z",
+      attention: index === 5 ? staleAttention : cube.drones[0]!.attention,
+    }));
+    const snapshot = rankDashboardSnapshot({
+      ...data,
+      attention: staleAttention,
+      cubes: [{ ...cube, drones, drones_total: drones.length, attention: staleAttention }],
+    }, server);
+    const mono = createDashboardRenderer({ glyphMode: "ascii", color: false, motionMode: "off" })(
+      snapshot,
+      40,
+      10,
+    );
+    expect(mono).toMatch(/QUIET !2 attention-target\s+40m/u);
+    expect(mono.indexOf("attention-target")).toBeLessThan(mono.indexOf("live-1"));
+    expect(mono).not.toContain("\u001b[");
+
+    const color = createDashboardRenderer({ glyphMode: "ascii", color: true, motionMode: "off" })(
+      snapshot,
+      120,
+      30,
+    );
+    const target = boardSegment(color.split("\n").find((line) =>
+      line.includes("attention-target") && line.includes("QUIET"))!);
+    expect(target).toContain("QUIET");
+    expect(target).toContain("\u001b[7m\u001b[33m !2\u001b[0m");
   });
 
   it("keeps the live foreground fallback outside Ink while crossing the boundary", async () => {
@@ -446,7 +597,7 @@ describe("dashboard renderer", () => {
     expect(auto).toContain("1 cube");
     expect(auto).toContain("SCOPE");
     expect(auto).toContain("1 poster");
-    expect(auto).toContain("collecting");
+    expect(auto).toContain("cov 0%");
     expect(auto).not.toContain("< > switch");
     expect(pinned).toContain("SCOPE");
     expect(empty).not.toContain("< > switch");
@@ -498,7 +649,7 @@ describe("dashboard renderer", () => {
     expect(busy).toContain("^1");
   });
 
-  it("normalizes activity graphs per focused cube rather than per drone", () => {
+  it("renders one aggregate scope whose shared bucket grows when two drones post", () => {
     const data = snapshotData(1);
     const original = data.cubes[0]!;
     const quiet = original.drones[0]!;
@@ -507,31 +658,37 @@ describe("dashboard renderer", () => {
       ...data,
       cubes: [{ ...original, drones: [quiet, busy], drones_total: 2 }],
     }, server);
-    const timestamp = snapshot.captured_at;
-    const frame = createDashboardRenderer({ glyphMode: "ascii", color: false })(
+    const shared = snapshot.captured_at;
+    const render = (includeBusy: boolean, width = 120) => createDashboardRenderer({ glyphMode: "ascii", color: false })(
       snapshot,
-      100,
-      24,
+      width,
+      30,
       {
         autoFollow: true,
         focusedCubeId: null,
         pulseCubeIds: new Set(),
         pulsePhase: 0,
         activity: new Map([
-          [`${snapshot.cubes[0]!.id}:${quiet.id}`, [{ capturedAt: timestamp, sentRate: 1 }]],
-          [`${snapshot.cubes[0]!.id}:${busy.id}`, [{ capturedAt: timestamp, sentRate: 10 }]],
+          [`${snapshot.cubes[0]!.id}:${quiet.id}`, [
+            { capturedAt: shared, sentRate: 3 },
+          ]],
+          [`${snapshot.cubes[0]!.id}:${busy.id}`, includeBusy
+            ? [{ capturedAt: shared, sentRate: 3 }]
+            : []],
         ]),
-        observation: [{ capturedAt: timestamp, sentRate: 1 }],
+        observation: [{ capturedAt: shared, sentRate: 0 }],
       },
     );
-    const lines = frame.split("\n");
-    const quietIndex = lines.findIndex((line) => line.includes("builder-01"));
-    const busyIndex = lines.findIndex((line) => line.includes("busy"));
-    const quietGraph = lines[quietIndex + 2]!;
-    const busyGraph = lines[busyIndex + 2]!;
-    expect(quietGraph).toContain(":");
-    expect(quietGraph).not.toContain("#");
-    expect(busyGraph).toContain("#");
+    const single = asciiScopeGraphRows(render(false));
+    const combinedFrame = render(true);
+    const combined = asciiScopeGraphRows(combinedFrame);
+    const lastColumnHeight = (rows: readonly string[]) => rows.filter((row) => row.at(-1) !== " ").length;
+    expect(lastColumnHeight(combined)).toBeGreaterThan(lastColumnHeight(single));
+    expect(combinedFrame.match(/builder-01/gu)).toHaveLength(1);
+    expect(combinedFrame.match(/busy/gu)).toHaveLength(1);
+    expect(combinedFrame.match(/SENSOR SCOPE/gu)).toHaveLength(1);
+    expect(render(true, 80).split("\n").some((line) =>
+      line.includes("builder-01") && line.includes("busy"))).toBe(true);
   });
 
   it("uses liveness color on the whole row and stays semantic in mono", () => {
@@ -552,10 +709,10 @@ describe("dashboard renderer", () => {
     const render = (color: boolean) => createDashboardRenderer({ glyphMode: "ascii", color })(snapshot, 100, 36);
     const colorFrame = render(true);
     const lines = colorFrame.split("\n");
-    expect(lines.find((line) => line.includes("live"))).toContain("\u001b[32;1m");
-    expect(lines.find((line) => line.includes("recent"))).toContain("\u001b[33m");
-    expect(lines.find((line) => line.includes("idle"))).not.toContain("\u001b[");
-    expect(lines.find((line) => line.includes("stale"))).toContain("\u001b[2m");
+    expect(boardSegment(lines.find((line) => line.includes("live"))!)).toContain("\u001b[32;1m");
+    expect(boardSegment(lines.find((line) => line.includes("recent"))!)).toContain("\u001b[33m");
+    expect(boardSegment(lines.find((line) => line.includes("idle"))!)).not.toContain("\u001b[");
+    expect(boardSegment(lines.find((line) => line.includes("stale"))!)).toContain("\u001b[2m");
     expect(stripAnsi(colorFrame).match(/[^\u0000-\u007F]/gu)).toEqual(null);
     expect(render(false)).not.toContain("\u001b[");
   });
@@ -645,7 +802,7 @@ describe("dashboard renderer", () => {
     expect(sanitizeTerminalText("a\nb\u001b[2Jc")).toBe("a bc");
   });
 
-  it("renders sanitized wide drone labels with sent, directed, last-active, and right-edge activity", () => {
+  it("renders sanitized wide drone labels with compact status metrics beside the shared scope", () => {
     const data = snapshotData(1);
     const cube = data.cubes[0]!;
     const snapshot = rankDashboardSnapshot({
@@ -671,9 +828,9 @@ describe("dashboard renderer", () => {
       activityWindowMs: 15 * 60_000,
     });
     expect(frame).toContain("東京🚀-red");
-    expect(frame).toContain("SENT 12  DIRECTED 8");
-    expect(frame).toContain("LAST 1m");
-    expect(frame).toContain("██");
+    expect(frame).toMatch(/RECENT 東京🚀-red\s+Builde… 12 1m/u);
+    expect(frame).toContain("SENSOR SCOPE");
+    expect(frame).not.toContain("DIRECTED 8");
     expect(frame).not.toContain("\u001b");
     expect(frame).not.toContain("clipboard");
     expect(frame.split("\n").every((line) => stringWidth(line) <= 100)).toBe(true);
@@ -696,11 +853,10 @@ describe("dashboard renderer", () => {
         activityWindowMs: 15 * 60_000,
       },
     );
-    expect(frame).toContain("collecting - 0% of 15m observed");
-    const lines = frame.split("\n");
-    const identity = lines.findIndex((line) => line.includes(drone.label));
-    expect(lines[identity + 1]!.slice(1, -1)).toMatch(/^\s+$/u);
-    expect(lines[identity + 2]!.slice(1, -1)).toMatch(/^\s+$/u);
+    expect(frame).toContain("cov 0%");
+    expect(frame).not.toContain("collecting");
+    expect(frame.match(new RegExp(drone.label, "gu"))).toHaveLength(1);
+    expect(asciiScopeGraphRows(frame).every((line) => /^:\s*$/u.test(line))).toBe(true);
   });
 
   it("keeps poll buckets in their timestamp positions across the four coverage compositions", () => {
@@ -722,40 +878,43 @@ describe("dashboard renderer", () => {
         focusedCubeId: null,
         pulseCubeIds: new Set(),
         pulsePhase: 0,
+        ambientPhase: 30,
         activity: new Map([[key, samples]]),
         observation: samples,
         activityWindowMs: 15 * 60_000,
       });
-      const lines = frame.split("\n");
-      const identity = lines.findIndex((line) => line.includes(drone.label));
-      return { frame, graph: lines[identity + 2]!.slice(1, -1) };
+      const rows = asciiScopeGraphRows(frame);
+      const graph = Array.from({ length: rows[0]?.length ?? 0 }, (_unused, column) =>
+        rows.map((row) => row[column]!).find((character) => character !== " ") ?? " ").join("");
+      return { frame, graph };
     };
+    const withoutSweep = (graph: string) => `${graph.slice(0, 30)} ${graph.slice(31)}`;
 
     const clustered = [
-      ...Array.from({ length: 90 }, (_, index) => sample(start + (index * 100), 1)),
+      ...Array.from({ length: 90 }, (_, index) => sample(start + 5_000 + (index * 100), 1)),
       ...Array.from({ length: 90 }, (_, index) => sample(end - 9_000 + (index * 100), 4)),
     ];
     const clusteredFrame = graphFor(clustered);
-    expect(clusteredFrame.frame).toContain("collecting");
-    expect(clusteredFrame.graph).toMatch(/[.:+*#]\s{40,}[.:+*#]/u);
+    expect(clusteredFrame.frame).toContain("cov 2%");
+    expect(withoutSweep(clusteredFrame.graph)).toMatch(/[.:+*#]\s{40,}[.:+*#]/u);
 
     const uniformMinute = Array.from(
       { length: 180 },
       (_, index) => sample(end - 60_000 + Math.floor(index * 60_000 / 180), 1 + (index % 4)),
     );
     const uniformGraph = graphFor(uniformMinute).graph;
-    expect(uniformGraph.search(/[.:+*#]/u)).toBeGreaterThan(85);
+    expect(withoutSweep(uniformGraph).search(/[+*#]/u)).toBeGreaterThan(45);
 
     const endpoints = graphFor([sample(start, 1), sample(end, 4)]).graph;
     expect(endpoints[0]).toMatch(/[.:+*#]/u);
     expect(endpoints.at(-1)).toMatch(/[.:+*#]/u);
-    expect(endpoints.slice(1, -1)).toMatch(/^\s+$/u);
+    expect(withoutSweep(endpoints).slice(1, -1)).toMatch(/^\s+$/u);
 
     const full = Array.from(
       { length: 180 },
       (_, index) => sample(start + (index * 5_000), 1 + (index % 4)),
     );
-    expect(graphFor(full).frame).not.toContain("collecting");
+    expect(graphFor(full).frame).toContain("cov 100%");
   });
 
   it("uses the global observation timeline instead of reducing per-drone histories", () => {
@@ -808,7 +967,7 @@ describe("dashboard renderer", () => {
         activityWindowMs: 15 * 60_000,
       },
     );
-    expect(sparseFrame).toContain("collecting");
+    expect(sparseFrame).toContain("cov 10%");
 
     const frame = createDashboardRenderer({ glyphMode: "ascii", color: false })(
       snapshot,
@@ -827,10 +986,9 @@ describe("dashboard renderer", () => {
         activityWindowMs: 15 * 60_000,
       },
     );
-    expect(frame).not.toContain("collecting");
-    const lines = frame.split("\n");
-    const lateLine = lines.findIndex((line) => line.includes("late-joiner"));
-    expect(lines[lateLine + 1]!.slice(1, -1)).toMatch(/^\s{70,}[.:+*#]+$/u);
+    expect(frame).toContain("cov 100%");
+    expect(frame.match(/late-joiner/gu)).toHaveLength(1);
+    expect(asciiScopeGraphRows(frame).some((line) => /[.:+*#]\s*$/u.test(line))).toBe(true);
   });
 
   it("treats NO_COLOR and terminal/locale fallback as first-class variants", () => {
@@ -1150,9 +1308,9 @@ describe("foreground dashboard lifecycle", () => {
     expect(harness.output.at(-1)).toContain("SCOPE cube-01 . (auto)");
 
     harness.input("w");
-    expect(harness.output.at(-1)).toContain("of 60m");
+    expect(harness.output.at(-1)).toContain("w 60m");
     harness.input("w");
-    expect(harness.output.at(-1)).toContain("of 5m");
+    expect(harness.output.at(-1)).toContain("w 5m");
     harness.setDimensions(80, 13);
     harness.resize();
     harness.input(" ");

@@ -463,7 +463,12 @@ describe("dashboard renderer", () => {
     expect(mono.indexOf("attention-target")).toBeLessThan(mono.indexOf("live-1"));
     expect(mono).not.toContain("\u001b[");
 
-    const color = createDashboardRenderer({ glyphMode: "box", color: true, motionMode: "off" })(
+    const color = createDashboardRenderer({
+      glyphMode: "box",
+      color: true,
+      colorDepth: "truecolor",
+      motionMode: "off",
+    })(
       snapshot,
       120,
       30,
@@ -471,7 +476,17 @@ describe("dashboard renderer", () => {
     const target = color.split("\n").find((line) =>
       line.includes("attention-target") && line.includes("QUIET"))!;
     expect(target).toContain("QUIET");
-    expect(target).toContain("\u001b[7m\u001b[33m!2\u001b[0m");
+    expect(target).toContain("\u001b[38;2;255;122;144m!2\u001b[0m");
+    expect(color).not.toContain("\u001b[7m");
+    expect(color).not.toContain("\u001b[49m");
+    const baseStyle = "\u001b[48;2;9;11;16m\u001b[38;2;230;161;90m";
+    for (const line of color.split("\n")) {
+      expect(line.startsWith("\u001b[48;2;9;11;16m")).toBe(true);
+      const content = line.slice(0, -"\u001b[0m".length);
+      for (const match of content.matchAll(/\u001b\[0m/gu)) {
+        expect(content.slice(match.index + match[0].length).startsWith(baseStyle)).toBe(true);
+      }
+    }
   });
 
   it("keeps the live foreground fallback outside Ink while crossing the boundary", async () => {
@@ -1372,8 +1387,9 @@ describe("dashboard renderer", () => {
       expect(frame).not.toContain("\u001b[2J");
     }
     expect(ink).toContain("safe message");
-    const inverse = createDashboardRenderer({ glyphMode: "box", color: true, motionMode: "off" })(snapshot, 100, 24);
-    expect(inverse).toContain("\u001b[7m");
+    const color = createDashboardRenderer({ glyphMode: "box", color: true, motionMode: "off" })(snapshot, 100, 24);
+    expect(color).toContain("\u001b[33m");
+    expect(color).not.toContain("\u001b[7m");
     expect(ink).not.toContain("\u001b[7m");
   });
 

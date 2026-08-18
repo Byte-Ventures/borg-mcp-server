@@ -337,7 +337,7 @@ function InkAttention(input: {
   const active = input.palette.attention !== "" && attention.unacked_directed > 0;
   const visible = truncateCell(value, input.width, input.glyphs.ellipsis);
   const rendered = active
-    ? `\u001b[7m${attention.stale_directed > 0 ? input.palette.attention : input.palette.liveness}${visible}${reset}`
+    ? `${attention.stale_directed > 0 ? input.palette.attention : input.palette.liveness}${visible}${reset}`
     : styledText(visible, { sequence: input.palette.muted });
   return h(Box, { width: input.width, height: 1, overflow: "hidden" },
     h(Text, null, rendered));
@@ -818,7 +818,7 @@ function InkDroneTableRow(input: {
       status: liveness,
       attention: { sequence: input.palette.attention === ""
         ? ""
-        : `\u001b[7m${input.drone.attention.stale_directed > 0
+        : `${input.drone.attention.stale_directed > 0
           ? input.palette.attention
           : input.palette.liveness}` },
       drone: { sequence: input.palette.data },
@@ -1433,7 +1433,7 @@ function attentionMarker(
   palette: NightwatchPalette,
 ): string {
   if (palette.attention === "") return value;
-  return `\u001b[7m${drone.attention.stale_directed > 0 ? palette.attention : palette.liveness}${value}${reset}`;
+  return `${drone.attention.stale_directed > 0 ? palette.attention : palette.liveness}${value}${reset}`;
 }
 
 function activityCoverage(samples: readonly DashboardActivitySample[], capturedAt: string, windowMs: number): number {

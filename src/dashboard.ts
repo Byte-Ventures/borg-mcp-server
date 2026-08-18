@@ -723,12 +723,13 @@ function dashboardFrameKey(
 ): string {
   const width = Math.min(500, Math.max(20, finiteDashboardDimension(dimensions.columns, 20)));
   const height = Math.min(200, Math.max(4, finiteDashboardDimension(dimensions.rows, 4)));
-  const lifecycleRows = options.footer === EMBEDDED_DASHBOARD_FOOTER
+  const compact = height < 12;
+  const lifecycleRows = !compact && options.footer === EMBEDDED_DASHBOARD_FOOTER
     ? dashboardLifecycleFooterRows(EMBEDDED_DASHBOARD_LIFECYCLE_FOOTER, width)
     : 0;
   const footerRows = lifecycleRows + 1;
-  const bodyRows = Math.max(0, height - (5 + footerRows));
-  const desiredFeedRows = snapshot.recent_activity.length === 0 ? 0 : Math.min(
+  const bodyRows = compact ? Math.max(1, height - 5) : Math.max(0, height - (5 + footerRows));
+  const desiredFeedRows = compact || snapshot.recent_activity.length === 0 ? 0 : Math.min(
     snapshot.recent_activity.length,
     bodyRows < 10 ? 1 : height >= 36 ? 4 : 3,
   );
@@ -740,7 +741,7 @@ function dashboardFrameKey(
     snapshot.cubes.length > 1 && listSpace >= 4 ? 2 : 1,
     Math.floor(listSpace * 0.42),
   );
-  const listCap = Math.min(listLimit, desiredListCap);
+  const listCap = compact ? 0 : Math.min(listLimit, desiredListCap);
   const pageCount = listCap === 0 ? 1 : Math.max(1, Math.ceil(snapshot.cubes.length / listCap));
   const page = Math.max(0, view.page ?? 0) % pageCount;
   const summaryCubes = snapshot.cubes.slice(page * listCap, page * listCap + Math.min(snapshot.cubes.length, listCap));
@@ -755,7 +756,6 @@ function dashboardFrameKey(
     .map((cube) => cube.id)
     .sort();
   const activityWindowMs = view.activityWindowMs ?? DASHBOARD_ACTIVITY_WINDOW_MS;
-  const panelRows = Math.max(1, bodyRows - Math.min(snapshot.cubes.length, listCap) - feedRows);
   return JSON.stringify({
     kind: "ink-dashboard",
     dimensions: { columns: width, rows: height },
@@ -782,7 +782,9 @@ function dashboardFrameKey(
       page,
       motionMode: view.motionMode ?? options.motionMode ?? "ambient",
       motionAutoDegraded: view.motionAutoDegraded === true,
-      ambientPhase: panelRows >= 4 ? view.ambientPhase ?? 0 : 0,
+      ambientPhase: (view.motionMode ?? options.motionMode ?? "ambient") === "off"
+        ? 0
+        : view.ambientPhase ?? 0,
     },
   });
 }

@@ -156,7 +156,7 @@ describe("HTTPS service", () => {
     expect(invalid.status).toBe(401);
     expect(accepted.status).toBe(200);
     expect(JSON.parse(accepted.body)).toEqual({
-      package_version: "2.0.0",
+      package_version: "2.1.0",
       source_sha: "a".repeat(40),
       artifact_integrity: `sha512-${"A".repeat(86)}==`,
       protocol_version: "12",

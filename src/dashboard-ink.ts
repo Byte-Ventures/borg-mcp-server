@@ -399,7 +399,7 @@ function InkFocusPanel(input: {
   if (width >= 100) {
     return h(InkWideDeck, { snapshot, cube, width, rows, glyphs, view, color });
   }
-  const scopeRows = Math.max(3, Math.min(rows - 3, Math.floor(rows * 0.4)));
+  const scopeRows = Math.max(3, Math.min(rows - 3, Math.max(5, Math.floor(rows * 0.4))));
   return h(Box, { width, height: rows, flexDirection: "column", overflow: "hidden" }, [
     h(InkSensorScope, { key: "scope", snapshot, cube, width, rows: scopeRows, glyphs, view, color }),
     h(InkDroneBoard, {

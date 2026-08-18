@@ -247,6 +247,64 @@ describe("dashboard renderer", () => {
     expect(crowded.split("\n").length).toBeLessThanOrEqual(24);
   });
 
+  it("keeps graph, baseline, and intermediate axis ticks in the exact 80x24 stacked allocation", () => {
+    const data = snapshotData(3);
+    const focus = data.cubes[0]!;
+    const drones = Array.from({ length: 11 }, (_unused, index) => ({
+      ...focus.drones[0]!,
+      id: `60000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`,
+      label: `drone-${index + 1}`,
+    }));
+    const recent = Array.from({ length: 3 }, (_unused, index) => ({
+      id: `70000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`,
+      cube_name: focus.name,
+      actor_kind: "drone-session" as const,
+      actor_label: drones[index]!.label,
+      actor_role: drones[index]!.role,
+      created_at: new Date(Date.parse(data.captured_at) - (index * 60_000)).toISOString(),
+      visibility: "broadcast" as const,
+      recipient_count: 0,
+      activity_class: null,
+      message_head: `activity ${index + 1}`,
+    }));
+    const snapshot = rankDashboardSnapshot({
+      ...data,
+      recent_activity: recent,
+      cubes: [{ ...focus, drones, drones_total: drones.length }, ...data.cubes.slice(1)],
+    }, server);
+    const frame = createDashboardRenderer({ glyphMode: "ascii", color: false, motionMode: "off" })(
+      snapshot,
+      80,
+      24,
+      {
+        autoFollow: true,
+        focusedCubeId: null,
+        pulseCubeIds: new Set(),
+        pulsePhase: 0,
+        activity: new Map(drones.map((drone) => [
+          `${focus.id}:${drone.id}`,
+          [{ capturedAt: data.captured_at, sentRate: 1 }],
+        ])),
+        observation: [{ capturedAt: data.captured_at, sentRate: 0 }],
+        activityWindowMs: 15 * 60_000,
+        motionMode: "off",
+      },
+    );
+    const lines = frame.split("\n");
+    const scopeTitle = lines.findIndex((line) => line.includes("SENSOR SCOPE"));
+    const boardTitle = lines.findIndex((line) => line.includes("DRONES 11"));
+    const scope = lines.slice(scopeTitle + 1, boardTitle);
+    const graph = scope.findIndex((line) => /^\|.*[.:+*#].*\|$/u.test(line));
+    const baseline = scope.findIndex((line) => /^\|\.{20,}\|$/u.test(line));
+    const axis = scope.findIndex((line) =>
+      line.includes("15m") && line.includes("10m") && line.includes("5m") && line.includes("now"));
+    expect(graph).toBeGreaterThanOrEqual(0);
+    expect(baseline).toBeGreaterThan(graph);
+    expect(axis).toBeGreaterThan(baseline);
+    expect(frame.match(/^FEED /gmu)).toHaveLength(1);
+    expect(frame.match(/^\s{5}\d/gmu)).toHaveLength(2);
+  });
+
   it("uses one layout with a strict ASCII glyph map and an honest tiny fallback", () => {
     const snapshot = rankDashboardSnapshot(snapshotData(3), server);
     const ascii = createDashboardRenderer({ glyphMode: "ascii", color: false })(

@@ -1181,16 +1181,18 @@ function InkFeedRow(input: {
   const classification = input.showClass && activity.activity_class !== null
     ? ` [${dashboardText(activity.activity_class, input.glyphs)}]`
     : "";
-  const prefix = `${input.first ? "FEED " : "     "}${formatAge(input.snapshot.captured_at, activity.created_at)} ` +
-    `${dashboardText(activity.cube_name, input.glyphs)}/${actor}${classification} `;
-  const head = dashboardText(activity.message_head, input.glyphs);
-  const visible = truncateCell(`${prefix}${head}`, input.width, input.glyphs.ellipsis);
-  const actorStart = visible.indexOf(actor);
-  const rendered = actorStart < 0
+  const beforeActor = `${input.first ? "FEED " : "     "}` +
+    `${formatAge(input.snapshot.captured_at, activity.created_at)} ` +
+    `${dashboardText(activity.cube_name, input.glyphs)}/`;
+  const afterActor = `${classification} ${dashboardText(activity.message_head, input.glyphs)}`;
+  const visible = truncateCell(`${beforeActor}${actor}${afterActor}`, input.width, input.glyphs.ellipsis);
+  const actorStart = beforeActor.length;
+  const actorEnd = Math.min(visible.length, actorStart + actor.length);
+  const rendered = actorStart >= visible.length
     ? styledText(visible, { sequence: input.palette.muted })
     : `${styledText(visible.slice(0, actorStart), { sequence: input.palette.muted })}` +
-      `${styledText(actor, { sequence: input.palette.data })}` +
-      `${styledText(visible.slice(actorStart + actor.length), { sequence: input.palette.muted })}`;
+      `${styledText(visible.slice(actorStart, actorEnd), { sequence: input.palette.data })}` +
+      `${styledText(visible.slice(actorEnd), { sequence: input.palette.muted })}`;
   return h(Box, { width: input.width, height: 1, overflow: "hidden" },
     h(Text, null, rendered));
 }

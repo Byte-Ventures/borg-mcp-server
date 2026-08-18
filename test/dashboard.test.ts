@@ -834,6 +834,36 @@ describe("dashboard renderer", () => {
     expect(lines.at(-1)).toContain("\u001b[38;5;245m");
   });
 
+  it("styles the actor structurally when cube and actor labels collide", () => {
+    const data = snapshotData(1);
+    const recent = [{
+      id: "40000000-0000-4000-8000-000000000011",
+      cube_name: "same",
+      actor_kind: "drone-session" as const,
+      actor_label: "same",
+      actor_role: "Builder",
+      created_at: data.captured_at,
+      visibility: "broadcast" as const,
+      recipient_count: 0,
+      activity_class: "status",
+      message_head: "head",
+    }];
+    const snapshot = rankDashboardSnapshot({ ...data, recent_activity: recent }, server);
+    const feed = createDashboardRenderer({
+      glyphMode: "box",
+      color: true,
+      colorDepth: "ansi256",
+    })(snapshot, 120, 40).split("\n").find((line) => stripAnsi(line).startsWith("FEED"))!;
+    expect(stripAnsi(feed)).toContain("FEED <1m same/same [status] head");
+    const firstLabel = feed.indexOf("same");
+    const separator = feed.indexOf("/", firstLabel);
+    const actor = feed.indexOf("same", separator);
+    const dataToken = feed.indexOf("\u001b[38;5;147m");
+    expect(dataToken).toBeGreaterThan(separator);
+    expect(dataToken).toBeLessThan(actor);
+    expect(feed.slice(0, separator)).not.toContain("\u001b[38;5;147m");
+  });
+
   it("keeps fixed two-cell scope buckets stable within a resolution mode", () => {
     const data = snapshotData(1);
     const snapshot = rankDashboardSnapshot(data, server);

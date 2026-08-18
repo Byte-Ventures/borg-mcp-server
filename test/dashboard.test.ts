@@ -6,6 +6,7 @@ import stringWidth from "string-width";
 
 import {
   createDashboardRenderer as createRenderer,
+  dashboardColorDepth,
   dashboardColorEnabled,
   EMBEDDED_DASHBOARD_FOOTER,
   EMBEDDED_DASHBOARD_LIFECYCLE_FOOTER,
@@ -47,7 +48,7 @@ function asciiScopeGraphRows(frame: string): string[] {
     if (scope.startsWith("+")) break;
     if (!scope.startsWith("|") || scope.includes("15m")) continue;
     const content = scope.slice(1, -1);
-    if (/^\.+$/u.test(content)) continue;
+    if (/^[ .]+$/u.test(content)) continue;
     graph.push(content);
   }
   return graph;
@@ -131,7 +132,7 @@ describe("dashboard snapshot source", () => {
           drones_total: 1,
           drones_seen_15m: 1,
           last_post_at: "2026-07-25T11:51:00.000Z",
-          drones: [{ id: ids.droneA, label: "builder-alpha", role: "Builder", last_seen: "2026-07-25T11:51:00.000Z", sent: 1, sent_5s: 0, received: 0 }],
+          drones: [{ id: ids.droneA, label: "builder-alpha", role: "Builder", reported_model: "model-alpha", last_seen: "2026-07-25T11:51:00.000Z", sent: 1, sent_5s: 0, received: 0 }],
         },
         {
           id: ids.cubeB,
@@ -141,7 +142,7 @@ describe("dashboard snapshot source", () => {
           drones_total: 1,
           drones_seen_15m: 1,
           last_post_at: "2026-07-25T11:56:00.000Z",
-          drones: [{ id: ids.droneB, label: "builder-beta", role: "Builder", last_seen: "2026-07-25T11:56:00.000Z", sent: 1, sent_5s: 0, received: 0 }],
+          drones: [{ id: ids.droneB, label: "builder-beta", role: "Builder", reported_model: "model-beta", last_seen: "2026-07-25T11:56:00.000Z", sent: 1, sent_5s: 0, received: 0 }],
         },
       ],
     });
@@ -221,7 +222,10 @@ describe("dashboard renderer", () => {
     expect(stackedLines.findIndex((line) => line.includes("SENSOR SCOPE")))
       .toBeLessThan(stackedLines.findIndex((line) => line.includes("DRONES")));
 
-    const wide = createDashboardRenderer({ glyphMode: "ascii", color: false })(eight, 120, 40);
+    const stacked120 = createDashboardRenderer({ glyphMode: "ascii", color: false })(eight, 120, 40);
+    expect(stacked120.split("\n").findIndex((line) => line.includes("SENSOR SCOPE")))
+      .toBeLessThan(stacked120.split("\n").findIndex((line) => line.includes("DRONES")));
+    const wide = createDashboardRenderer({ glyphMode: "ascii", color: false })(eight, 200, 50);
     const wideLines = wide.split("\n");
     const wideTitleIndex = wideLines.findIndex((line) => line.includes("SENSOR SCOPE"));
     const wideTitle = wideLines[wideTitleIndex]!;
@@ -232,11 +236,10 @@ describe("dashboard renderer", () => {
     expect(wideBottom.match(/\+/gu)).toHaveLength(3);
     expect(wideLines.slice(wideTitleIndex + 1, wideLines.indexOf(wideBottom))
       .every((line) => (line.match(/\|/gu) ?? []).length === 3)).toBe(true);
-    expect(wideLines.some((line) => /^\|\.{10,}\|/u.test(line))).toBe(true);
     expect(wideLines.some((line) =>
       line.includes("15m") && line.includes("10m") && line.includes("5m") && line.includes("now")))
       .toBe(true);
-    const wideBox = renderer(eight, 120, 40).split("\n");
+    const wideBox = renderer(eight, 200, 50).split("\n");
     const boxTitleIndex = wideBox.findIndex((line) => line.includes("SENSOR SCOPE"));
     expect(wideBox[boxTitleIndex]).toContain("┬");
     expect(wideBox[boxTitleIndex]).not.toContain("┐┌");
@@ -295,7 +298,7 @@ describe("dashboard renderer", () => {
     const boardTitle = lines.findIndex((line) => line.includes("DRONES 11"));
     const scope = lines.slice(scopeTitle + 1, boardTitle);
     const graph = scope.findIndex((line) => /^\|.*[.:+*#].*\|$/u.test(line));
-    const baseline = scope.findIndex((line) => /^\|\.{20,}\|$/u.test(line));
+    const baseline = scope.findIndex((line) => /\.\.\|$/u.test(line));
     const axis = scope.findIndex((line) =>
       line.includes("15m") && line.includes("10m") && line.includes("5m") && line.includes("now"));
     expect(graph).toBeGreaterThanOrEqual(0);
@@ -309,12 +312,12 @@ describe("dashboard renderer", () => {
     const snapshot = rankDashboardSnapshot(snapshotData(3), server);
     const ascii = createDashboardRenderer({ glyphMode: "ascii", color: false })(
       snapshot,
-      60,
+      64,
       18,
     );
     expect(ascii).toContain("== BORGMCP-SERVER ==");
     expect(ascii).toContain("+");
-    for (const line of ascii.split("\n")) expect([...line]).toHaveLength(60);
+    for (const line of ascii.split("\n")) expect([...line]).toHaveLength(64);
     expect(ascii).toContain("SCOPE");
     expect(ascii).toContain("cov 0%");
 
@@ -468,7 +471,7 @@ describe("dashboard renderer", () => {
     const target = boardSegment(color.split("\n").find((line) =>
       line.includes("attention-target") && line.includes("QUIET"))!);
     expect(target).toContain("QUIET");
-    expect(target).toContain("\u001b[7m\u001b[33m !2\u001b[0m");
+    expect(target).toContain("\u001b[7m\u001b[33m!2\u001b[0m");
   });
 
   it("keeps the live foreground fallback outside Ink while crossing the boundary", async () => {
@@ -687,8 +690,196 @@ describe("dashboard renderer", () => {
     expect(combinedFrame.match(/builder-01/gu)).toHaveLength(1);
     expect(combinedFrame.match(/busy/gu)).toHaveLength(1);
     expect(combinedFrame.match(/SENSOR SCOPE/gu)).toHaveLength(1);
-    expect(render(true, 80).split("\n").some((line) =>
-      line.includes("builder-01") && line.includes("busy"))).toBe(true);
+    expect(render(true, 80).split("\n").filter((line) =>
+      line.includes("builder-01") || line.includes("busy"))).toHaveLength(2);
+  });
+
+  it("renders exact Nightwatch grids and keeps color character-identical to NO_COLOR", () => {
+    const snapshot = rankDashboardSnapshot(snapshotData(3), server);
+    const monoRenderer = createDashboardRenderer({ glyphMode: "box", color: false, motionMode: "off" });
+    const colorRenderer = createDashboardRenderer({
+      glyphMode: "box",
+      color: true,
+      colorDepth: "truecolor",
+      motionMode: "off",
+    });
+    for (const [columns, rows, resolution] of [
+      [80, 24, "30s/bar"],
+      [120, 40, "20s/bar"],
+      [200, 50, "20s/bar"],
+    ] as const) {
+      const mono = monoRenderer(snapshot, columns, rows);
+      const color = colorRenderer(snapshot, columns, rows);
+      expect(stripAnsi(color)).toBe(mono);
+      expect(mono.split("\n")).toHaveLength(rows);
+      expect(mono.split("\n").every((line) => stringWidth(line) === columns)).toBe(true);
+      expect(mono).toContain(resolution);
+      expect(mono).not.toContain("\u001b");
+      for (const line of color.split("\n")) {
+        expect(line.startsWith("\u001b[48;2;9;11;16m")).toBe(true);
+        expect(line.endsWith("\u001b[0m")).toBe(true);
+      }
+    }
+    const stacked = monoRenderer(snapshot, 120, 40).split("\n");
+    expect(stacked.findIndex((line) => line.includes("SENSOR SCOPE")))
+      .toBeLessThan(stacked.findIndex((line) => line.includes("DRONES")));
+    const wideTitle = monoRenderer(snapshot, 200, 50).split("\n")
+      .find((line) => line.includes("SENSOR SCOPE"))!;
+    expect(wideTitle).toContain("DRONES");
+
+    const compactMono = monoRenderer(snapshot, 40, 10);
+    const compactColor = colorRenderer(snapshot, 40, 10);
+    expect(stripAnsi(compactColor)).toBe(compactMono);
+    expect(compactMono).toContain("Server data and identity remain saved.");
+    expect(compactMono).toContain("^C stop server  |  read-only");
+
+    const ansi256 = createDashboardRenderer({
+      glyphMode: "box",
+      color: true,
+      colorDepth: "ansi256",
+    })(snapshot, 80, 24);
+    expect(ansi256).toContain("\u001b[48;5;232m");
+    expect(ansi256).toContain("\u001b[38;5;215m");
+    const ansi16 = createDashboardRenderer({
+      glyphMode: "box",
+      color: true,
+      colorDepth: "ansi16",
+    })(snapshot, 80, 24);
+    expect(ansi16).not.toMatch(/\u001b\[48;/u);
+    expect(ansi16).toContain("\u001b[33m");
+  });
+
+  it("keeps fixed two-cell scope buckets stable within a resolution mode", () => {
+    const data = snapshotData(1);
+    const snapshot = rankDashboardSnapshot(data, server);
+    const cube = snapshot.cubes[0]!;
+    const drone = cube.drones[0]!;
+    const end = Date.parse(snapshot.captured_at);
+    const start = end - 15 * 60_000;
+    const samples = Array.from({ length: 30 }, (_, index) => ({
+      capturedAt: new Date(start + index * 30_000 + 15_000).toISOString(),
+      sentRate: index % 4,
+    }));
+    const render = (width: number) => createDashboardRenderer({ glyphMode: "ascii", color: false, motionMode: "off" })(
+      snapshot,
+      width,
+      24,
+      {
+        autoFollow: true,
+        focusedCubeId: null,
+        pulseCubeIds: new Set(),
+        pulsePhase: 0,
+        activity: new Map([[`${cube.id}:${drone.id}`, samples]]),
+        observation: samples,
+        activityWindowMs: 15 * 60_000,
+        motionMode: "off",
+      },
+    );
+    const sixtyCellCanvas = (frame: string) => asciiScopeGraphRows(frame).map((row) => row.slice(-60));
+    expect(sixtyCellCanvas(render(80))).toEqual(sixtyCellCanvas(render(88)));
+    expect(render(80)).toContain("30s/bar");
+    expect(render(88)).toContain("30s/bar");
+  });
+
+  it("fills aggregate bars bottom-up and distinguishes observed from missing buckets", () => {
+    const data = snapshotData(1);
+    const snapshot = rankDashboardSnapshot(data, server);
+    const cube = snapshot.cubes[0]!;
+    const drone = cube.drones[0]!;
+    const end = Date.parse(snapshot.captured_at);
+    const start = end - 15 * 60_000;
+    const bucket = (index: number, sentRate: number) => ({
+      capturedAt: new Date(start + index * 20_000 + 10_000).toISOString(),
+      sentRate,
+    });
+    const activity = [bucket(41, 0), bucket(42, 1), bucket(43, 4), bucket(44, 8)];
+    const observations = Array.from({ length: 45 }, (_, index) => bucket(index, 0));
+    const render = (ambientPhase: number) => createDashboardRenderer({ glyphMode: "ascii", color: false })(
+      snapshot,
+      120,
+      40,
+      {
+        autoFollow: true,
+        focusedCubeId: null,
+        pulseCubeIds: new Set(),
+        pulsePhase: 0,
+        ambientPhase,
+        activity: new Map([[`${cube.id}:${drone.id}`, activity]]),
+        observation: observations,
+        activityWindowMs: 15 * 60_000,
+        motionMode: "ambient",
+      },
+    );
+    const rows = asciiScopeGraphRows(render(5)).map((row) => row.slice(-90));
+    const heightAt = (bucketIndex: number) => rows.filter((row) =>
+      row.slice(bucketIndex * 2, bucketIndex * 2 + 2) === "##").length;
+    expect(heightAt(41)).toBe(0);
+    expect(heightAt(42)).toBe(1);
+    expect(heightAt(43)).toBe(Math.ceil(rows.length / 2));
+    expect(heightAt(44)).toBe(rows.length);
+    for (const bucketIndex of [42, 43, 44]) {
+      const occupied = rows.map((row) => row.slice(bucketIndex * 2, bucketIndex * 2 + 2) === "##");
+      expect(occupied.slice(occupied.indexOf(true)).every(Boolean)).toBe(true);
+    }
+    const frame = render(5);
+    const lines = frame.split("\n");
+    const axis = lines.findIndex((line) => line.includes("15m") && line.includes("now"));
+    expect(lines[axis - 1]!.slice(-91, -1)).toBe(".".repeat(90));
+
+    const missing = createDashboardRenderer({ glyphMode: "ascii", color: false })(snapshot, 120, 40, {
+      autoFollow: true,
+      focusedCubeId: null,
+      pulseCubeIds: new Set(),
+      pulsePhase: 0,
+      activity: new Map([[`${cube.id}:${drone.id}`, activity]]),
+      observation: observations.filter((_sample, index) => index % 2 === 0),
+      activityWindowMs: 15 * 60_000,
+      motionMode: "off",
+    });
+    const missingLines = missing.split("\n");
+    const missingAxis = missingLines.findIndex((line) => line.includes("15m") && line.includes("now"));
+    expect(missingLines[missingAxis - 1]!.slice(-91, -1)).toMatch(/\.\.  \.\.  /u);
+
+    const occupancy = (value: string) => asciiScopeGraphRows(value)
+      .map((row) => row.replace(/[^#]/gu, " "));
+    expect(occupancy(render(5))).toEqual(occupancy(render(37)));
+  });
+
+  it("uses fixed drone columns, sanitizes models, and drops whole columns", () => {
+    const data = snapshotData(1);
+    const cube = data.cubes[0]!;
+    const drones = [
+      { ...cube.drones[0]!, id: "long", label: "very-long-drone-label-that-must-truncate", role: "Very Long Role", reported_model: "model\u001b[31m-unsafe-name-that-is-long" },
+      { ...cube.drones[0]!, id: "null", label: "short", reported_model: null },
+    ];
+    const snapshot = rankDashboardSnapshot({
+      ...data,
+      cubes: [{ ...cube, drones, drones_total: drones.length }],
+    }, server);
+    const frame = createDashboardRenderer({ glyphMode: "ascii", color: false })(snapshot, 120, 40);
+    const lines = frame.split("\n");
+    const header = lines.find((line) => line.includes("STATUS") && line.includes("MODEL"))!;
+    const long = lines.find((line) => line.includes("very-long"))!;
+    const absent = lines.find((line) => line.includes("short"))!;
+    for (const label of ["STATUS", "!", "DRONE", "ROLE", "MODEL", "SENT", "AGE"]) {
+      expect(header.indexOf(label)).toBeGreaterThanOrEqual(0);
+    }
+    expect(long).not.toContain("\u001b");
+    expect(long).toContain("model-unsafe-name-that-is-long");
+    const modelStart = header.indexOf("MODEL");
+    const sentStart = header.indexOf("SENT");
+    expect(absent.slice(modelStart, sentStart).trim()).toBe("-");
+    expect(long.indexOf("1", sentStart)).toBe(sentStart + 3);
+    expect(absent.indexOf("1", sentStart)).toBe(sentStart + 3);
+
+    const noModel = createDashboardRenderer({ glyphMode: "ascii", color: false })(snapshot, 68, 30);
+    const compact = createDashboardRenderer({ glyphMode: "ascii", color: false })(snapshot, 56, 30);
+    expect(noModel).not.toContain("MODEL");
+    expect(noModel).toContain("SENT");
+    expect(compact).not.toContain("MODEL");
+    expect(compact).not.toContain("SENT");
+    expect(compact).not.toContain("ROLE");
+    expect(compact).toContain("short");
   });
 
   it("uses liveness color on the whole row and stays semantic in mono", () => {
@@ -710,8 +901,8 @@ describe("dashboard renderer", () => {
     const colorFrame = render(true);
     const lines = colorFrame.split("\n");
     expect(boardSegment(lines.find((line) => line.includes("live"))!)).toContain("\u001b[32;1m");
-    expect(boardSegment(lines.find((line) => line.includes("recent"))!)).toContain("\u001b[33m");
-    expect(boardSegment(lines.find((line) => line.includes("idle"))!)).not.toContain("\u001b[");
+    expect(boardSegment(lines.find((line) => line.includes("recent"))!)).toContain("RECENT");
+    expect(boardSegment(lines.find((line) => line.includes("idle"))!)).toContain("QUIET");
     expect(boardSegment(lines.find((line) => line.includes("stale"))!)).toContain("\u001b[2m");
     expect(stripAnsi(colorFrame).match(/[^\u0000-\u007F]/gu)).toEqual(null);
     expect(render(false)).not.toContain("\u001b[");
@@ -828,7 +1019,7 @@ describe("dashboard renderer", () => {
       activityWindowMs: 15 * 60_000,
     });
     expect(frame).toContain("東京🚀-red");
-    expect(frame).toMatch(/RECENT 東京🚀-red\s+Builde… 12 1m/u);
+    expect(frame).toMatch(/RECENT\s+東京🚀-red\s+Builder r…\s+claude-opus-5\s+12\s+1m/u);
     expect(frame).toContain("SENSOR SCOPE");
     expect(frame).not.toContain("DIRECTED 8");
     expect(frame).not.toContain("\u001b");
@@ -856,7 +1047,7 @@ describe("dashboard renderer", () => {
     expect(frame).toContain("cov 0%");
     expect(frame).not.toContain("collecting");
     expect(frame.match(new RegExp(drone.label, "gu"))).toHaveLength(1);
-    expect(asciiScopeGraphRows(frame).every((line) => /^:\s*$/u.test(line))).toBe(true);
+    expect(asciiScopeGraphRows(frame).every((line) => /^\s*:\s*$/u.test(line))).toBe(true);
   });
 
   it("keeps poll buckets in their timestamp positions across the four coverage compositions", () => {
@@ -906,9 +1097,9 @@ describe("dashboard renderer", () => {
     expect(withoutSweep(uniformGraph).search(/[+*#]/u)).toBeGreaterThan(45);
 
     const endpoints = graphFor([sample(start, 1), sample(end, 4)]).graph;
-    expect(endpoints[0]).toMatch(/[.:+*#]/u);
+    expect(endpoints.search(/[.:+*#]/u)).toBeGreaterThan(0);
     expect(endpoints.at(-1)).toMatch(/[.:+*#]/u);
-    expect(withoutSweep(endpoints).slice(1, -1)).toMatch(/^\s+$/u);
+    expect(endpoints.replace(":", " ")).toMatch(/^\s*##\s+##$/u);
 
     const full = Array.from(
       { length: 180 },
@@ -994,6 +1185,11 @@ describe("dashboard renderer", () => {
   it("treats NO_COLOR and terminal/locale fallback as first-class variants", () => {
     expect(dashboardColorEnabled({ NO_COLOR: "" })).toBe(false);
     expect(dashboardColorEnabled({ TERM: "xterm-256color" })).toBe(true);
+    expect(dashboardColorDepth({ NO_COLOR: "", TERM: "xterm-256color" })).toBe("none");
+    expect(dashboardColorDepth({ TERM: "dumb", COLORTERM: "truecolor" })).toBe("none");
+    expect(dashboardColorDepth({ TERM: "xterm-256color" })).toBe("ansi256");
+    expect(dashboardColorDepth({ TERM: "xterm", COLORTERM: "24bit" })).toBe("truecolor");
+    expect(dashboardColorDepth({ TERM: "xterm" })).toBe("ansi16");
     expect(selectDashboardGlyphMode({
       asciiRequested: false,
       environment: { TERM: "dumb", LANG: "en_US.UTF-8" },
@@ -1425,7 +1621,7 @@ describe("foreground dashboard lifecycle", () => {
       source,
       server,
       terminal: harness.terminal,
-      renderer: createDashboardRenderer({ glyphMode: "ascii", color: false }),
+      renderer: createDashboardRenderer({ glyphMode: "ascii", color: true, colorDepth: "ansi256" }),
     });
     await new Promise<void>((resolve) => setImmediate(resolve));
     const beforeResume = harness.output.length;
@@ -1433,8 +1629,11 @@ describe("foreground dashboard lifecycle", () => {
     harness.input("\u001a");
     await new Promise<void>((resolve) => setImmediate(resolve));
 
+    expect(harness.output).toContain("\u001b[0m\u001b[?25h\u001b[?1049l\u001b[?25h");
+    expect(harness.output).toContain("\u001b[?1049h\u001b[?25l");
     expect(harness.output.slice(beforeResume).join("")).toContain("SCOPE");
     dashboard.close();
+    expect(harness.output.at(-1)).toBe("\u001b[0m\u001b[?25h\u001b[?1049l\u001b[?25h");
   });
 
   it("restores terminal state, emits bounded plain status, and rejects on render failure", async () => {
@@ -1442,25 +1641,28 @@ describe("foreground dashboard lifecycle", () => {
     const harness = terminalHarness();
     const source = sourceHarness(snapshotData(1));
     let calls = 0;
+    const baseRenderer = createDashboardRenderer({
+      glyphMode: "ascii",
+      color: true,
+      colorDepth: "ansi256",
+    });
+    const failingRenderer: DashboardRenderer = (snapshot, columns, rows) => {
+      calls += 1;
+      if (calls === 2) throw new Error("render failed");
+      return baseRenderer(snapshot, columns, rows);
+    };
+    Object.defineProperty(failingRenderer, "inkOptions", { value: baseRenderer.inkOptions });
     const dashboard = startForegroundDashboard({
       source,
       server,
       terminal: harness.terminal,
-      renderer: (snapshot, columns, rows) => {
-        calls += 1;
-        if (calls === 2) throw new Error("render failed");
-        return createDashboardRenderer({ glyphMode: "ascii", color: false })(
-          snapshot,
-          columns,
-          rows,
-        );
-      },
+      renderer: failingRenderer,
     });
     const rejected = expect(dashboard.failure).rejects.toThrow("render failed");
     source.emit();
     await vi.advanceTimersByTimeAsync(250);
     await rejected;
-    expect(harness.output).toContain("\u001b[?25h\u001b[?1049l\u001b[?25h");
+    expect(harness.output).toContain("\u001b[0m\u001b[?25h\u001b[?1049l\u001b[?25h");
     expect(harness.output.at(-1)).toContain("borgmcp-server online");
     expect(source.listenerCount()).toBe(0);
     expect(harness.resizeListenerCount()).toBe(0);
@@ -1489,6 +1691,12 @@ function seedDashboard(store: StoreRuntime): void {
       cubeId,
       droneId,
     });
+    store.forPrincipal(droneSessionPrincipal({
+      id: sessionId,
+      clientId: ids.client,
+      cubeId,
+      droneId,
+    })).updateOwnRuntimeMetadata(cubeId, { reported_model: `model-${name.toLowerCase()}` });
   }
 }
 
@@ -1514,6 +1722,7 @@ function snapshotData(count: number): DashboardDataSnapshot {
         id: `10000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`,
         label: `builder-${String(index + 1).padStart(2, "0")}`,
         role: "Builder",
+        reported_model: index % 2 === 0 ? "claude-opus-5" : null,
         last_seen: new Date(Date.parse("2026-07-25T12:00:00.000Z") - ((index + 1) * 60_000)).toISOString(),
         sent: index + 1,
         sent_5s: index + 1,

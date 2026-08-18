@@ -54,7 +54,7 @@ export function createDashboardSnapshotReader(
     LIMIT ?
   `);
   const drones = database.prepare(`
-    SELECT drone.id, drone.label, role.name AS role,
+    SELECT drone.id, drone.label, role.name AS role, drone.reported_model,
            COALESCE(drone.last_seen, drone.created_at) AS last_seen,
            (SELECT COUNT(*) FROM activity_log AS entry
             WHERE entry.cube_id = drone.cube_id AND entry.drone_id = drone.id
@@ -155,6 +155,7 @@ function dashboardDrone(row: Record<string, unknown>, cubeName: string): Dashboa
     id: requiredText(row, "id"),
     label: requiredText(row, "label"),
     role: requiredText(row, "role"),
+    reported_model: nullableText(row, "reported_model"),
     last_seen: requiredText(row, "last_seen"),
     sent: requiredInteger(row, "sent"),
     sent_5s: requiredInteger(row, "sent_5s"),

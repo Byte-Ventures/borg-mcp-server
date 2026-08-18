@@ -43,6 +43,7 @@ export interface DashboardDroneData {
   readonly id: string;
   readonly label: string;
   readonly role: string;
+  readonly reported_model: string | null;
   readonly last_seen: string;
   readonly sent: number;
   readonly sent_5s: number;
@@ -97,6 +98,7 @@ export interface DashboardSnapshot {
 }
 
 export type DashboardGlyphMode = "box" | "ascii";
+export type DashboardColorDepth = "none" | "ansi16" | "ansi256" | "truecolor";
 
 export const EMBEDDED_DASHBOARD_LIFECYCLE_FOOTER =
   "Press Ctrl-C or close this terminal to stop the server. Your server data and identity remain saved.";
@@ -109,6 +111,7 @@ export type DashboardFooter =
 export interface DashboardRenderOptions {
   readonly glyphMode: DashboardGlyphMode;
   readonly color: boolean;
+  readonly colorDepth?: DashboardColorDepth;
   readonly footer: DashboardFooter;
   readonly navigation?: boolean;
   readonly motionMode?: DashboardMotionMode;
@@ -283,7 +286,16 @@ export function selectDashboardGlyphMode(input: {
 export function dashboardColorEnabled(
   environment: Readonly<Record<string, string | undefined>>,
 ): boolean {
-  return environment["NO_COLOR"] === undefined && environment["TERM"] !== "dumb";
+  return dashboardColorDepth(environment) !== "none";
+}
+
+export function dashboardColorDepth(
+  environment: Readonly<Record<string, string | undefined>>,
+): DashboardColorDepth {
+  if (environment["NO_COLOR"] !== undefined || environment["TERM"] === "dumb") return "none";
+  if (/^(?:truecolor|24bit)$/iu.test(environment["COLORTERM"] ?? "")) return "truecolor";
+  if (/256(?:color)?/iu.test(environment["TERM"] ?? "")) return "ansi256";
+  return "ansi16";
 }
 
 export function resolveDashboardMotionMode(input: {
@@ -342,6 +354,7 @@ export function startForegroundDashboard(input: {
   readonly ambientFrameMs?: number;
   readonly frameBudgetMs?: number;
 }): ForegroundDashboard {
+  const colorReset = input.renderer.inkOptions?.color === true ? "\u001b[0m" : "";
   let closed = false;
   let restored = false;
   let priorRanks = new Map<string, number>();
@@ -375,7 +388,7 @@ export function startForegroundDashboard(input: {
   const restore = (): void => {
     if (restored) return;
     restored = true;
-    try { input.terminal.write(alternateScreenRestore); } catch { /* Best-effort terminal repair. */ }
+    try { input.terminal.write(`${colorReset}${alternateScreenRestore}`); } catch { /* Best-effort terminal repair. */ }
   };
   const clearTimers = (): void => {
     if (idleTimer !== undefined) clearTimeout(idleTimer);
@@ -616,7 +629,7 @@ export function startForegroundDashboard(input: {
     ambientTimer = undefined;
     unmountInk();
     lastFrame = undefined;
-    input.terminal.write(alternateScreenRestore);
+    input.terminal.write(`${colorReset}${alternateScreenRestore}`);
     input.terminal.requestSuspend(() => {
       if (closed) return;
       try {

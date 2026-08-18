@@ -3,7 +3,6 @@ import {
   Box,
   renderToString,
   Text,
-  type TextProps,
 } from "ink";
 import stringWidth from "string-width";
 
@@ -15,6 +14,7 @@ import {
   EMBEDDED_DASHBOARD_LIFECYCLE_FOOTER,
   sanitizeTerminalText,
   type DashboardActivitySample,
+  type DashboardColorDepth,
   type DashboardCubeSnapshot,
   type DashboardDroneData,
   type DashboardRenderOptions,
@@ -27,12 +27,20 @@ export interface InkRenderOptions extends DashboardRenderOptions {
   readonly baseFooter: string;
 }
 
-type InkTextStyle = Pick<TextProps, "bold" | "color" | "dimColor">;
+type InkTextStyle = { readonly sequence?: string };
+
+interface NightwatchPalette {
+  readonly background: string;
+  readonly chrome: string;
+  readonly data: string;
+  readonly liveness: string;
+  readonly attention: string;
+  readonly muted: string;
+  readonly inactive: string;
+}
 
 const DASHBOARD_PULSE_PHASES = 4;
 const DASHBOARD_ACTIVITY_PULSE_MARKERS = [" ", "_", "-", "o", "O"] as const;
-const green = "\u001b[32;1m";
-const amber = "\u001b[33m";
 const reset = "\u001b[0m";
 
 /**
@@ -53,7 +61,8 @@ export function renderInkDashboardFrame(
     createInkDashboardElement(snapshot, width, height, view, options),
     { columns: width },
   );
-  return normalizeInkFrame(rendered, width, height);
+  const palette = nightwatchPalette(options.color ? options.colorDepth ?? "ansi16" : "none");
+  return normalizeInkFrame(rendered, width, height, palette.background);
 }
 
 export function createInkDashboardElement(
@@ -74,6 +83,7 @@ function InkDashboard(input: {
   readonly options: InkRenderOptions;
 }): ReactNode {
   const { snapshot, width, height, view, options } = input;
+  const palette = nightwatchPalette(options.color ? options.colorDepth ?? "ansi16" : "none");
   const focus = view.autoFollow || view.focusedCubeId === null
     ? snapshot.cubes[0]
     : snapshot.cubes.find((cube) => cube.id === view.focusedCubeId) ?? snapshot.cubes[0];
@@ -108,9 +118,9 @@ function InkDashboard(input: {
   const pageStart = page * listCap;
 
   const children: ReactNode[] = [
-    h(InkRail, { key: "rail", snapshot, width, glyphs, color: options.color }),
+    h(InkRail, { key: "rail", snapshot, width, glyphs, palette }),
     h(InkBindStatus, { key: "bind", snapshot, width, glyphs }),
-    h(InkAttention, { key: "attention", snapshot, width, glyphs, color: options.color }),
+    h(InkAttention, { key: "attention", snapshot, width, glyphs, palette }),
     h(InkRule, { key: "separator-top", width, glyphs }),
     focus === undefined
       ? h(InkEmptyPanel, { key: "empty-panel", width, glyphs })
@@ -122,7 +132,7 @@ function InkDashboard(input: {
           rows: panelRows,
           glyphs,
           view,
-          color: options.color,
+          palette,
         }),
     h(InkRule, { key: "separator-bottom", width, glyphs }),
   ];
@@ -147,7 +157,7 @@ function InkDashboard(input: {
       glyphs,
       view,
       maximumPosts,
-      color: options.color,
+      palette,
     }));
   }
   if (lifecycleRows > 0) {
@@ -184,11 +194,14 @@ function InkCompactDashboard(input: {
   readonly options: InkRenderOptions;
   readonly glyphs: Glyphs;
 }): ReactNode {
+  const palette = nightwatchPalette(
+    input.options.color ? input.options.colorDepth ?? "ansi16" : "none",
+  );
   const lifecycleRows = input.options.footer === EMBEDDED_DASHBOARD_FOOTER ? 1 : 0;
   const bodyRows = Math.max(1, input.height - 5 - lifecycleRows);
   return h(Box, { width: input.width, height: input.height, flexDirection: "column", overflow: "hidden" }, [
-    h(InkRail, { key: "rail", snapshot: input.snapshot, width: input.width, glyphs: input.glyphs, color: input.options.color }),
-    h(InkAttention, { key: "attention", snapshot: input.snapshot, width: input.width, glyphs: input.glyphs, color: input.options.color }),
+    h(InkRail, { key: "rail", snapshot: input.snapshot, width: input.width, glyphs: input.glyphs, palette }),
+    h(InkAttention, { key: "attention", snapshot: input.snapshot, width: input.width, glyphs: input.glyphs, palette }),
     h(InkRule, { key: "separator-top", width: input.width, glyphs: input.glyphs }),
     input.focus === undefined
       ? h(InkEmptyCompactDeck, { key: "empty", width: input.width, rows: bodyRows })
@@ -200,7 +213,7 @@ function InkCompactDashboard(input: {
           rows: bodyRows,
           glyphs: input.glyphs,
           view: input.view,
-          color: input.options.color,
+          palette,
         }),
     h(InkRule, { key: "separator-bottom", width: input.width, glyphs: input.glyphs }),
     lifecycleRows > 0
@@ -239,7 +252,7 @@ function InkCompactDeck(input: {
   readonly rows: number;
   readonly glyphs: Glyphs;
   readonly view: DashboardViewState;
-  readonly color: boolean;
+  readonly palette: NightwatchPalette;
 }): ReactNode {
   const windowMs = input.view.activityWindowMs ?? DASHBOARD_ACTIVITY_WINDOW_MS;
   const mode = input.view.autoFollow || input.view.focusedCubeId === null ? "(auto)" : "(pinned)";
@@ -274,7 +287,7 @@ function InkCompactDeck(input: {
       capturedAt: input.snapshot.captured_at,
       width: input.width,
       glyphs: input.glyphs,
-      color: input.color,
+      palette: input.palette,
       detailed: false,
     })),
   ];
@@ -288,7 +301,7 @@ function InkAttention(input: {
   readonly snapshot: DashboardSnapshot;
   readonly width: number;
   readonly glyphs: Glyphs;
-  readonly color: boolean;
+  readonly palette: NightwatchPalette;
 }): ReactNode {
   const attention = input.snapshot.attention;
   let value = "ATTN 0";
@@ -301,11 +314,11 @@ function InkAttention(input: {
       ? `>> ATTN STALE ${attention.stale_directed}  unacked ${attention.unacked_directed}  oldest ${age}${origin}`
       : `ATTN PENDING ${attention.unacked_directed}  oldest ${age}${origin}`;
   }
-  const active = input.color && attention.unacked_directed > 0;
+  const active = input.palette.attention !== "" && attention.unacked_directed > 0;
   const visible = truncateCell(value, input.width, input.glyphs.ellipsis);
   const rendered = active
-    ? `\u001b[7m${attention.stale_directed > 0 ? amber : green}${visible}${reset}`
-    : visible;
+    ? `\u001b[7m${attention.stale_directed > 0 ? input.palette.attention : input.palette.liveness}${visible}${reset}`
+    : styledText(visible, { sequence: input.palette.muted });
   return h(Box, { width: input.width, height: 1, overflow: "hidden" },
     h(Text, null, rendered));
 }
@@ -314,9 +327,9 @@ function InkRail(input: {
   readonly snapshot: DashboardSnapshot;
   readonly width: number;
   readonly glyphs: Glyphs;
-  readonly color: boolean;
+  readonly palette: NightwatchPalette;
 }): ReactNode {
-  const { snapshot, width, glyphs, color } = input;
+  const { snapshot, width, glyphs, palette } = input;
   const identity = sanitizeTerminalText(snapshot.server.name).toUpperCase();
   const version = sanitizeTerminalText(snapshot.server.version);
   const uptime = formatUptime(snapshot.captured_at, snapshot.server.started_at);
@@ -328,8 +341,8 @@ function InkRail(input: {
   const uptimeSuffix = `  up ${uptime}`;
   const bodyWidth = Math.max(0, width - terminalCellWidth(uptimeSuffix));
   const visibleBody = truncateCell(body, bodyWidth, glyphs.ellipsis);
-  const bodyNode = color
-    ? styledRailText(visibleBody, brand, state)
+  const bodyNode = palette.chrome !== ""
+    ? styledRailText(visibleBody, brand, state, palette)
     : h(Text, { wrap: "truncate-end" }, visibleBody);
 
   return h(Box, { width, height: 1, flexDirection: "row", overflow: "hidden" },
@@ -353,11 +366,18 @@ function InkBindStatus(input: {
   );
 }
 
-function styledRailText(value: string, brand: string, state: string): ReactNode {
+function styledRailText(
+  value: string,
+  brand: string,
+  state: string,
+  palette: NightwatchPalette,
+): ReactNode {
   return h(
     Text,
     { wrap: "truncate-end" },
-    value.replace(brand, `${amber}${brand}${reset}`).replace(state, `${green}${state}${reset}`),
+    value
+      .replace(brand, `${palette.chrome}${brand}${reset}`)
+      .replace(state, `${palette.liveness}${state}${reset}`),
   );
 }
 
@@ -399,18 +419,18 @@ function InkFocusPanel(input: {
   readonly rows: number;
   readonly glyphs: Glyphs;
   readonly view: DashboardViewState;
-  readonly color: boolean;
+  readonly palette: NightwatchPalette;
 }): ReactNode {
-  const { snapshot, cube, width, rows, glyphs, view, color } = input;
-  if (rows < 6) {
-    return h(InkCompactDeck, { snapshot, cube, width, rows, glyphs, view, color });
+  const { snapshot, cube, width, rows, glyphs, view, palette } = input;
+  if (rows < 6 || width < 64) {
+    return h(InkCompactDeck, { snapshot, cube, width, rows, glyphs, view, palette });
   }
-  if (width >= 100) {
-    return h(InkWideDeck, { snapshot, cube, width, rows, glyphs, view, color });
+  if (width >= 144) {
+    return h(InkWideDeck, { snapshot, cube, width, rows, glyphs, view, palette });
   }
   const scopeRows = Math.max(3, Math.min(rows - 3, Math.max(5, Math.floor(rows * 0.4))));
   return h(Box, { width, height: rows, flexDirection: "column", overflow: "hidden" }, [
-    h(InkSensorScope, { key: "scope", snapshot, cube, width, rows: scopeRows, glyphs, view, color }),
+    h(InkSensorScope, { key: "scope", snapshot, cube, width, rows: scopeRows, glyphs, view, palette }),
     h(InkDroneBoard, {
       key: "board",
       snapshot,
@@ -418,8 +438,8 @@ function InkFocusPanel(input: {
       width,
       rows: rows - scopeRows,
       glyphs,
-      color,
-      twoColumns: true,
+      palette,
+      twoColumns: false,
     }),
   ]);
 }
@@ -431,17 +451,19 @@ function InkWideDeck(input: {
   readonly rows: number;
   readonly glyphs: Glyphs;
   readonly view: DashboardViewState;
-  readonly color: boolean;
+  readonly palette: NightwatchPalette;
 }): ReactNode {
   const innerWidth = Math.max(3, input.width - 3);
-  const boardWidth = Math.max(35, Math.floor(innerWidth * 0.4));
+  const boardWidth = Math.min(99, Math.max(76, innerWidth - 60));
   const scopeWidth = innerWidth - boardWidth;
   const contentRows = Math.max(1, input.rows - 2);
   const windowMs = input.view.activityWindowMs ?? DASHBOARD_ACTIVITY_WINDOW_MS;
   const mode = input.view.autoFollow || input.view.focusedCubeId === null ? "(auto)" : "(pinned)";
   const coverage = activityCoverage(input.view.observation ?? [], input.snapshot.captured_at, windowMs);
+  const resolution = formatBucketResolution(windowMs, scopeCanvasWidth(scopeWidth) / 2);
   const scopeTitle = ` SENSOR SCOPE ${dashboardText(input.cube.name, input.glyphs)} ${input.glyphs.separator} ${mode} ` +
-    `${input.glyphs.separator} ${formatWindow(windowMs)} ${input.glyphs.separator} cov ${Math.round(coverage * 100)}% `;
+    `${input.glyphs.separator} ${formatWindow(windowMs)} ${input.glyphs.separator} ${resolution} ` +
+    `${input.glyphs.separator} cov ${Math.round(coverage * 100)}% `;
   const boardTitle = ` DRONES ${input.cube.drones.length} ${input.glyphs.separator} ` +
     `ATTN ${input.cube.attention.unacked_directed} `;
   return h(Box, { width: input.width, height: input.rows, flexDirection: "column", overflow: "hidden" }, [
@@ -451,7 +473,7 @@ function InkWideDeck(input: {
       scopeWidth,
       boardWidth,
       input.glyphs,
-      input.color,
+      input.palette,
     )),
     h(Box, {
       key: "body",
@@ -499,53 +521,64 @@ function InkSensorScope(input: {
   readonly rows: number;
   readonly glyphs: Glyphs;
   readonly view: DashboardViewState;
-  readonly color: boolean;
+  readonly palette: NightwatchPalette;
   readonly unframed?: boolean;
 }): ReactNode {
   const inner = Math.max(1, input.unframed ? input.width : input.width - 2);
   const windowMs = input.view.activityWindowMs ?? DASHBOARD_ACTIVITY_WINDOW_MS;
   const mode = input.view.autoFollow || input.view.focusedCubeId === null ? "(auto)" : "(pinned)";
   const coverage = activityCoverage(input.view.observation ?? [], input.snapshot.captured_at, windowMs);
-  const title = ` SENSOR SCOPE ${dashboardText(input.cube.name, input.glyphs)} ${input.glyphs.separator} ${mode} ` +
-    `${input.glyphs.separator} ${formatWindow(windowMs)} ${input.glyphs.separator} cov ${Math.round(coverage * 100)}% `;
   const contentRows = Math.max(1, input.unframed ? input.rows : input.rows - 2);
   const graphRows = Math.max(1, contentRows - (contentRows >= 3 ? 2 : 1));
   const samples = aggregateActivitySamples(input.cube, input.view.activity);
-  const maximum = scopeActivityScale(samples);
+  const canvasWidth = scopeCanvasWidth(inner);
+  const buckets = resolvedScopeBuckets(
+    samples,
+    input.view.observation ?? [],
+    input.snapshot.captured_at,
+    windowMs,
+    canvasWidth / 2,
+  );
+  const maximum = scopeActivityScale(buckets.map((bucket) => ({
+    capturedAt: input.snapshot.captured_at,
+    sentRate: bucket.sentRate,
+  })));
+  const title = ` SENSOR SCOPE ${dashboardText(input.cube.name, input.glyphs)} ${input.glyphs.separator} ${mode} ` +
+    `${input.glyphs.separator} ${formatWindow(windowMs)} ${input.glyphs.separator} ` +
+    `${formatBucketResolution(windowMs, buckets.length)} ${input.glyphs.separator} cov ${Math.round(coverage * 100)}% `;
+  const leftMargin = " ".repeat(Math.max(0, inner - canvasWidth));
   const sweep = scopeSweepPosition(
-    inner,
+    canvasWidth,
     input.view.ambientPhase ?? 0,
     input.view.motionMode ?? "ambient",
   );
   const body: ReactNode[] = Array.from({ length: graphRows }, (_unused, row) => {
-    const graph = graphText(
-      samples,
-      inner,
-      graphRows,
-      windowMs,
-      input.snapshot.captured_at,
-      input.glyphs,
-      maximum,
-      row,
-    );
-    const graphStyle = input.color ? { color: "green" as const, bold: true } : undefined;
+    const graph = resolvedGraphRow(buckets, graphRows, maximum, row, input.glyphs);
+    const sweepValue = graph[sweep] === " " ? scopeSweepGlyph(input.glyphs) : graph[sweep]!;
     return h(Box, { key: `graph-${row}`, width: inner, height: 1, flexDirection: "row", overflow: "hidden" }, [
-      h(Text, { key: "before" }, styledText(graph.slice(0, sweep), graphStyle)),
-      h(Text, { key: "sweep", dimColor: input.color }, scopeSweepGlyph(input.glyphs)),
-      h(Text, { key: "after" }, styledText(graph.slice(sweep + 1), graphStyle)),
+      h(Text, { key: "margin" }, leftMargin),
+      h(Text, { key: "before" }, styledText(graph.slice(0, sweep), { sequence: input.palette.data })),
+      h(Text, { key: "sweep" }, styledText(sweepValue, { sequence: input.palette.inactive })),
+      h(Text, { key: "after" }, styledText(graph.slice(sweep + 1), { sequence: input.palette.data })),
     ]);
   });
   if (contentRows >= 3) {
-    body.push(h(Text, { key: "baseline", dimColor: input.color }, input.glyphs.cube[0]!.repeat(inner)));
+    body.push(h(Text, { key: "baseline" }, styledText(
+      `${leftMargin}${scopeObservationBaseline(buckets, input.glyphs)}`,
+      { sequence: input.palette.muted },
+    )));
   }
   if (contentRows >= 2) {
-    body.push(h(Text, { key: "axis", dimColor: input.color }, scopeAxis(inner, windowMs, input.glyphs)));
+    body.push(h(Text, { key: "axis" }, styledText(
+      `${leftMargin}${scopeAxis(canvasWidth, windowMs, input.glyphs)}`,
+      { sequence: input.palette.chrome },
+    )));
   }
   if (input.unframed) {
     return h(Box, { width: input.width, height: input.rows, flexDirection: "column", overflow: "hidden" }, body);
   }
   return h(Box, { width: input.width, height: input.rows, flexDirection: "column", overflow: "hidden" }, [
-    h(InkPanelTitle, { key: "title", title, width: input.width, glyphs: input.glyphs, color: input.color }),
+    h(InkPanelTitle, { key: "title", title, width: input.width, glyphs: input.glyphs, palette: input.palette }),
     h(Box, {
       key: "body",
       width: input.width,
@@ -564,18 +597,24 @@ function InkDroneBoard(input: {
   readonly width: number;
   readonly rows: number;
   readonly glyphs: Glyphs;
-  readonly color: boolean;
+  readonly palette: NightwatchPalette;
   readonly twoColumns: boolean;
   readonly unframed?: boolean;
 }): ReactNode {
   const inner = Math.max(1, input.unframed ? input.width : input.width - 2);
   const contentRows = Math.max(1, input.unframed ? input.rows : input.rows - 2);
+  const tableContentWidth = Math.max(1, inner - 2);
+  const table = !input.twoColumns && tableContentWidth >= 40 && contentRows >= 2;
+  const headerRows = table ? 1 : 0;
   const attentionRows = input.cube.attention.unacked_directed > 0 ? 1 : 0;
-  const itemRows = Math.max(1, contentRows - attentionRows);
+  const itemRows = Math.max(1, contentRows - attentionRows - headerRows);
   const capacity = itemRows * (input.twoColumns ? 2 : 1);
   const prioritized = prioritizeDrones(input.snapshot.captured_at, input.cube.drones);
   const counts = livenessCounts(input.snapshot.captured_at, prioritized);
-  const summary = `LIVE ${counts.LIVE}  RECENT ${counts.RECENT}  QUIET ${counts.QUIET}  DARK ${counts.DARK}`;
+  const reportedModels = prioritized.filter((drone) => drone.reported_model != null).length;
+  const showsModel = table && droneTableColumns(tableContentWidth).some(({ key }) => key === "model");
+  const summary = `LIVE ${counts.LIVE}  RECENT ${counts.RECENT}  QUIET ${counts.QUIET}  DARK ${counts.DARK}` +
+    `${showsModel ? `  MODEL ${reportedModels}/${prioritized.length} reported` : ""}`;
   let visibleCount = Math.min(input.cube.drones.length, Math.max(1, capacity - 1));
   if (visibleCount < input.cube.drones.length) visibleCount = Math.max(1, capacity - 2);
   const items: Array<{ readonly key: string; readonly drone?: DashboardDroneData; readonly value?: string }> =
@@ -584,8 +623,16 @@ function InkDroneBoard(input: {
   if (hidden > 0) items.push({ key: "hidden", value: `+${hidden} more drones` });
   items.push({ key: "summary", value: summary });
   const body: ReactNode[] = [];
+  if (table) {
+    body.push(h(InkDroneTableHeader, {
+      key: "header",
+      width: inner,
+      glyphs: input.glyphs,
+      palette: input.palette,
+    }));
+  }
   const columns = input.twoColumns ? 2 : 1;
-  for (let index = 0; index < items.length && body.length < itemRows; index += columns) {
+  for (let index = 0; index < items.length && body.length < itemRows + headerRows; index += columns) {
     const row = items.slice(index, index + columns);
     const leftWidth = input.twoColumns ? Math.floor(inner / 2) : inner;
     body.push(h(Box, { key: `row-${index}`, width: inner, height: 1, flexDirection: "row", overflow: "hidden" },
@@ -602,7 +649,7 @@ function InkDroneBoard(input: {
             capturedAt: input.snapshot.captured_at,
             width: input.twoColumns && cellIndex === 1 ? inner - leftWidth : leftWidth,
             glyphs: input.glyphs,
-            color: input.color,
+            palette: input.palette,
             detailed: !input.twoColumns,
           })),
     ));
@@ -622,7 +669,7 @@ function InkDroneBoard(input: {
   }
   const title = ` DRONES ${input.cube.drones.length} ${input.glyphs.separator} ATTN ${input.cube.attention.unacked_directed} `;
   return h(Box, { width: input.width, height: input.rows, flexDirection: "column", overflow: "hidden" }, [
-    h(InkPanelTitle, { key: "title", title, width: input.width, glyphs: input.glyphs, color: input.color }),
+    h(InkPanelTitle, { key: "title", title, width: input.width, glyphs: input.glyphs, palette: input.palette }),
     h(Box, {
       key: "body",
       width: input.width,
@@ -640,7 +687,7 @@ function InkDroneCell(input: {
   readonly capturedAt: string;
   readonly width: number;
   readonly glyphs: Glyphs;
-  readonly color: boolean;
+  readonly palette: NightwatchPalette;
   readonly detailed: boolean;
 }): ReactNode {
   const status = livenessStatus(input.capturedAt, input.drone.last_seen);
@@ -648,32 +695,175 @@ function InkDroneCell(input: {
     ? ` !${input.drone.attention.unacked_directed}`
     : "";
   const age = formatAge(input.capturedAt, input.drone.last_seen);
-  const role = truncateCell(dashboardText(input.drone.role, input.glyphs), 7, input.glyphs.ellipsis);
-  const suffix = input.detailed ? `  ${role} ${input.drone.sent} ${age}` : ` ${age}`;
+  if (input.detailed) {
+    return h(InkDroneTableRow, input);
+  }
+  const suffix = ` ${age}`;
   const prefix = `${status}${marker} `;
   const labelWidth = Math.max(1, input.width - terminalCellWidth(prefix) - terminalCellWidth(suffix));
   const label = truncateCell(dashboardText(input.drone.label, input.glyphs), labelWidth, input.glyphs.ellipsis);
-  const style = livenessStyle(input.capturedAt, input.drone.last_seen, input.color);
+  const style = livenessStyle(input.capturedAt, input.drone.last_seen, input.palette);
   return h(Box, { width: input.width, height: 1, flexDirection: "row", overflow: "hidden" }, [
     h(Text, { key: "status" }, styledText(status, style)),
-    marker === "" ? null : h(Text, { key: "attention" }, attentionMarker(marker, input.drone, input.color)),
+    marker === "" ? null : h(Text, { key: "attention" }, attentionMarker(marker, input.drone, input.palette)),
     h(Text, { key: "details" }, styledText(` ${label}${suffix}`, style)),
   ]);
+}
+
+type DroneTableColumn = "status" | "attention" | "drone" | "role" | "model" | "sent" | "age";
+
+function InkDroneTableHeader(input: {
+  readonly width: number;
+  readonly glyphs: Glyphs;
+  readonly palette: NightwatchPalette;
+}): ReactNode {
+  const columns = droneTableColumns(Math.max(1, input.width - 2));
+  const labels: Record<DroneTableColumn, string> = {
+    status: "STATUS",
+    attention: "!",
+    drone: "DRONE",
+    role: "ROLE",
+    model: "MODEL",
+    sent: "SENT",
+    age: "AGE",
+  };
+  return h(Box, { width: input.width, height: 1, flexDirection: "row", overflow: "hidden" }, [
+    h(Text, { key: "left" }, " "),
+    h(DroneTableCells, {
+      key: "cells",
+      columns,
+      glyphs: input.glyphs,
+      values: labels,
+      alignEnd: new Set<DroneTableColumn>(["sent", "age"]),
+      styles: Object.fromEntries(columns.map(({ key }) => [key, { sequence: input.palette.chrome }])),
+    }),
+    h(Text, { key: "right" }, " "),
+  ]);
+}
+
+function InkDroneTableRow(input: {
+  readonly drone: DashboardDroneData;
+  readonly capturedAt: string;
+  readonly width: number;
+  readonly glyphs: Glyphs;
+  readonly palette: NightwatchPalette;
+}): ReactNode {
+  const columns = droneTableColumns(Math.max(1, input.width - 2));
+  const status = livenessStatus(input.capturedAt, input.drone.last_seen);
+  const attention = input.drone.attention.unacked_directed > 0
+    ? `!${input.drone.attention.unacked_directed}`
+    : "";
+  const values: Record<DroneTableColumn, string> = {
+    status,
+    attention,
+    drone: dashboardText(input.drone.label, input.glyphs),
+    role: dashboardText(input.drone.role, input.glyphs),
+    model: input.drone.reported_model == null
+      ? "-"
+      : dashboardText(input.drone.reported_model, input.glyphs),
+    sent: String(input.drone.sent),
+    age: formatAge(input.capturedAt, input.drone.last_seen),
+  };
+  const liveness = livenessStyle(input.capturedAt, input.drone.last_seen, input.palette);
+  return h(Box, { width: input.width, height: 1, flexDirection: "row", overflow: "hidden" }, [
+    h(Text, { key: "left" }, " "),
+    h(DroneTableCells, {
+      key: "cells",
+      columns,
+      glyphs: input.glyphs,
+      values,
+      alignEnd: new Set<DroneTableColumn>(["sent", "age"]),
+      styles: {
+      status: liveness,
+      attention: { sequence: input.palette.attention === ""
+        ? ""
+        : `\u001b[7m${input.drone.attention.stale_directed > 0
+          ? input.palette.attention
+          : input.palette.liveness}` },
+      drone: { sequence: input.palette.data },
+      role: { sequence: input.palette.muted },
+      model: { sequence: input.drone.reported_model == null
+        ? input.palette.inactive
+        : input.palette.muted },
+      sent: { sequence: input.palette.data },
+      age: { sequence: input.palette.muted },
+      },
+    }),
+    h(Text, { key: "right" }, " "),
+  ]);
+}
+
+function DroneTableCells(input: {
+  readonly columns: readonly { readonly key: DroneTableColumn; readonly width: number }[];
+  readonly glyphs: Glyphs;
+  readonly values: Readonly<Record<DroneTableColumn, string>>;
+  readonly alignEnd: ReadonlySet<DroneTableColumn>;
+  readonly styles: Partial<Record<DroneTableColumn, InkTextStyle>>;
+}): ReactNode {
+  const children: ReactNode[] = [];
+  input.columns.forEach((column, index) => {
+    if (index > 0) children.push(h(Text, { key: `gap-${column.key}` }, " "));
+    children.push(h(InkFixedText, {
+      key: column.key,
+      value: input.values[column.key],
+      width: column.width,
+      ellipsis: input.glyphs.ellipsis,
+      align: input.alignEnd.has(column.key) ? "end" : "start",
+      ...(input.styles[column.key] === undefined ? {} : { style: input.styles[column.key] }),
+    }));
+  });
+  const width = input.columns.reduce((sum, column) => sum + column.width, 0) +
+    Math.max(0, input.columns.length - 1);
+  return h(Box, { width, height: 1, flexDirection: "row", overflow: "hidden" }, children);
+}
+
+function droneTableColumns(width: number): readonly {
+  readonly key: DroneTableColumn;
+  readonly width: number;
+}[] {
+  let values: Array<readonly [DroneTableColumn, number]>;
+  let baseWidth: number;
+  if (width >= 116) {
+    values = [["status", 6], ["attention", 3], ["drone", 33], ["role", 16], ["model", 41], ["sent", 6], ["age", 5]];
+    baseWidth = 116;
+  } else if (width >= 97) {
+    values = [["status", 6], ["attention", 3], ["drone", 28], ["role", 16], ["model", 28], ["sent", 5], ["age", 5]];
+    baseWidth = 97;
+  } else if (width >= 72) {
+    values = [["status", 6], ["attention", 3], ["drone", 21], ["role", 10], ["model", 20], ["sent", 5], ["age", 5]];
+    baseWidth = 76;
+  } else if (width >= 60) {
+    values = [["status", 6], ["attention", 3], ["drone", 31], ["role", 10], ["sent", 5], ["age", 5]];
+    baseWidth = 65;
+  } else if (width >= 48) {
+    values = [["status", 6], ["attention", 3], ["drone", 20], ["role", 10], ["age", 5]];
+    baseWidth = 48;
+  } else {
+    values = [["status", 6], ["attention", 3], ["drone", 23], ["age", 5]];
+    baseWidth = 40;
+  }
+  const flexible = values.findIndex(([key]) => key === "drone");
+  const delta = width - baseWidth;
+  const selected = values[flexible]!;
+  values[flexible] = [selected[0], Math.max(4, selected[1] + delta)];
+  return values.map(([key, columnWidth]) => ({ key, width: columnWidth }));
 }
 
 function InkPanelTitle(input: {
   readonly title: string;
   readonly width: number;
   readonly glyphs: Glyphs;
-  readonly color: boolean;
+  readonly palette: NightwatchPalette;
 }): ReactNode {
   const plainLeft = `${input.glyphs.topLeft}${input.title}`;
-  const left = input.color ? `${input.glyphs.topLeft}${amber}${input.title}${reset}` : plainLeft;
+  const left = input.palette.chrome === ""
+    ? plainLeft
+    : `${input.glyphs.topLeft}${input.palette.chrome}${input.title}${reset}`;
   if (terminalCellWidth(plainLeft) + terminalCellWidth(input.glyphs.topRight) > input.width) {
     const visible = truncateCell(plainLeft, input.width, input.glyphs.ellipsis);
     return h(Text, { wrap: "truncate-end" }, styledText(
       visible,
-      input.color ? { color: "yellow" } : undefined,
+      { sequence: input.palette.chrome },
     ));
   }
   return h(Box, { width: input.width, height: 1, flexDirection: "row", overflow: "hidden" },
@@ -713,6 +903,73 @@ function graphText(
   }).join("");
 }
 
+interface ResolvedScopeBucket {
+  readonly sentRate: number;
+  readonly observed: boolean;
+}
+
+function scopeCanvasWidth(innerWidth: number): 60 | 90 | 120 {
+  if (innerWidth >= 120) return 120;
+  if (innerWidth >= 90) return 90;
+  return 60;
+}
+
+function resolvedScopeBuckets(
+  samples: readonly DashboardActivitySample[],
+  observations: readonly DashboardActivitySample[],
+  capturedAt: string,
+  windowMs: number,
+  bucketCount: number,
+): readonly ResolvedScopeBucket[] {
+  const end = Date.parse(capturedAt);
+  const start = end - windowMs;
+  const rates = Array.from({ length: bucketCount }, () => 0);
+  const observed = Array.from({ length: bucketCount }, () => false);
+  const indexFor = (value: DashboardActivitySample): number | undefined => {
+    const timestamp = Date.parse(value.capturedAt);
+    if (!Number.isFinite(timestamp) || timestamp < start || timestamp > end) return undefined;
+    return Math.min(bucketCount - 1, Math.floor((timestamp - start) * bucketCount / windowMs));
+  };
+  for (const sample of samples) {
+    const index = indexFor(sample);
+    if (index !== undefined) rates[index] = rates[index]! + sample.sentRate;
+  }
+  for (const observation of observations) {
+    const index = indexFor(observation);
+    if (index !== undefined) observed[index] = true;
+  }
+  return rates.map((sentRate, index) => Object.freeze({ sentRate, observed: observed[index]! }));
+}
+
+function resolvedGraphRow(
+  buckets: readonly ResolvedScopeBucket[],
+  graphRows: number,
+  maximum: number,
+  row: number,
+  glyphs: Glyphs,
+): string {
+  const bar = glyphs === ASCII_GLYPHS ? "#" : "█";
+  return buckets.map((bucket) => {
+    const height = bucket.sentRate <= 0 || maximum <= 0
+      ? 0
+      : Math.min(graphRows, Math.max(1, Math.ceil(bucket.sentRate / maximum * graphRows)));
+    return (row >= graphRows - height ? bar : " ").repeat(2);
+  }).join("");
+}
+
+function scopeObservationBaseline(
+  buckets: readonly ResolvedScopeBucket[],
+  glyphs: Glyphs,
+): string {
+  const marker = glyphs === ASCII_GLYPHS ? "." : "·";
+  return buckets.map((bucket) => (bucket.observed ? marker : " ").repeat(2)).join("");
+}
+
+function formatBucketResolution(windowMs: number, bucketCount: number): string {
+  const seconds = Math.max(1, Math.round(windowMs / bucketCount / 1_000));
+  return seconds < 60 ? `${seconds}s/bar` : `${Math.round(seconds / 60)}m/bar`;
+}
+
 
 function InkSummaryRow(input: {
   readonly snapshot: DashboardSnapshot;
@@ -721,10 +978,10 @@ function InkSummaryRow(input: {
   readonly glyphs: Glyphs;
   readonly view: DashboardViewState;
   readonly maximumPosts: number;
-  readonly color: boolean;
+  readonly palette: NightwatchPalette;
 }): ReactNode {
-  const { snapshot, cube, width, glyphs, view, maximumPosts, color } = input;
-  const style = livenessStyle(snapshot.captured_at, cube.last_post_at, color);
+  const { snapshot, cube, width, glyphs, view, maximumPosts, palette } = input;
+  const style = livenessStyle(snapshot.captured_at, cube.last_post_at, palette);
   const compact = width < 60;
   const nameWidth = compact ? Math.max(6, width - 32) : Math.max(10, width - 54);
   const pulse = activityPulseMarker(view.pulsePhase);
@@ -898,25 +1155,21 @@ function footerSegmentsWidth(segments: readonly string[]): number {
 }
 
 function styledText(value: string, style: InkTextStyle | undefined): string {
-  const opening = style === undefined ? "" : styleSequence(style);
+  const opening = style?.sequence ?? "";
   return opening === "" ? value : `${opening}${value}${reset}`;
 }
 
-function styleSequence(style: InkTextStyle): string {
-  if (style.color === "green" && style.bold === true) return green;
-  if (style.color === "yellow") return amber;
-  if (style.dimColor === true) return "\u001b[2m";
-  return "";
-}
-
-function livenessStyle(capturedAt: string, lastActivity: string | null, color: boolean): InkTextStyle {
-  if (!color) return {};
-  if (lastActivity === null) return { dimColor: true };
+function livenessStyle(
+  capturedAt: string,
+  lastActivity: string | null,
+  palette: NightwatchPalette,
+): InkTextStyle {
+  if (lastActivity === null) return { sequence: palette.inactive };
   const age = Date.parse(capturedAt) - Date.parse(lastActivity);
-  if (!Number.isFinite(age) || age >= 60 * 60_000) return { dimColor: true };
-  if (age < 60_000) return { color: "green", bold: true };
-  if (age < 15 * 60_000) return { color: "yellow" };
-  return {};
+  if (!Number.isFinite(age) || age >= 60 * 60_000) return { sequence: palette.inactive };
+  if (age < 60_000) return { sequence: palette.liveness };
+  if (age < 15 * 60_000) return { sequence: palette.data };
+  return { sequence: palette.muted };
 }
 
 function livenessStatus(capturedAt: string, lastActivity: string | null): "LIVE" | "RECENT" | "QUIET" | "DARK" {
@@ -1041,11 +1294,11 @@ function sharedDeckTitle(
   scopeWidth: number,
   boardWidth: number,
   glyphs: Glyphs,
-  color: boolean,
+  palette: NightwatchPalette,
 ): string {
   const segment = (title: string, width: number): string => {
     const visible = truncateCell(title, width, glyphs.ellipsis);
-    const styled = color ? `${amber}${visible}${reset}` : visible;
+    const styled = palette.chrome === "" ? visible : `${palette.chrome}${visible}${reset}`;
     return `${styled}${glyphs.horizontal.repeat(Math.max(0, width - terminalCellWidth(visible)))}`;
   };
   const junction = glyphs === ASCII_GLYPHS ? "+" : "┬";
@@ -1109,9 +1362,13 @@ function prioritizeDrones(
   });
 }
 
-function attentionMarker(value: string, drone: DashboardDroneData, color: boolean): string {
-  if (!color) return value;
-  return `\u001b[7m${drone.attention.stale_directed > 0 ? amber : green}${value}${reset}`;
+function attentionMarker(
+  value: string,
+  drone: DashboardDroneData,
+  palette: NightwatchPalette,
+): string {
+  if (palette.attention === "") return value;
+  return `\u001b[7m${drone.attention.stale_directed > 0 ? palette.attention : palette.liveness}${value}${reset}`;
 }
 
 function activityCoverage(samples: readonly DashboardActivitySample[], capturedAt: string, windowMs: number): number {
@@ -1187,14 +1444,60 @@ function formatUptime(capturedAt: string, startedAt: string): string {
   return hours < 24 ? `${hours}h` : `${Math.floor(hours / 24)}d${String(hours % 24).padStart(2, "0")}h`;
 }
 
-export function normalizeInkFrame(value: string, width: number, height: number): string {
+export function normalizeInkFrame(
+  value: string,
+  width: number,
+  height: number,
+  background = "",
+): string {
   const withoutInkControls = stripInkFrameControls(value);
   const withoutTrailingNewline = withoutInkControls.endsWith("\n")
     ? withoutInkControls.slice(0, -1)
     : withoutInkControls;
   const lines = withoutTrailingNewline.split("\n").slice(0, height);
   while (lines.length < height) lines.push("");
-  return lines.map((line) => padInkRow(normalizeInkAnsi(line), width)).join("\n");
+  return lines.map((line) => {
+    const padded = padInkRow(normalizeInkAnsi(line), width);
+    if (background === "") return padded;
+    return `${background}${padded.replaceAll(reset, `${reset}${background}`)}${reset}`;
+  }).join("\n");
+}
+
+function nightwatchPalette(depth: DashboardColorDepth): NightwatchPalette {
+  if (depth === "none") {
+    return { background: "", chrome: "", data: "", liveness: "", attention: "", muted: "", inactive: "" };
+  }
+  if (depth === "truecolor") {
+    return {
+      background: "\u001b[48;2;9;11;16m",
+      chrome: "\u001b[38;2;230;161;90m",
+      data: "\u001b[38;2;184;199;255m",
+      liveness: "\u001b[38;2;121;214;159m",
+      attention: "\u001b[38;2;255;122;144m",
+      muted: "\u001b[38;2;155;167;184m",
+      inactive: "\u001b[38;2;88;98;115m",
+    };
+  }
+  if (depth === "ansi256") {
+    return {
+      background: "\u001b[48;5;232m",
+      chrome: "\u001b[38;5;215m",
+      data: "\u001b[38;5;147m",
+      liveness: "\u001b[38;5;115m",
+      attention: "\u001b[38;5;210m",
+      muted: "\u001b[38;5;245m",
+      inactive: "\u001b[38;5;60m",
+    };
+  }
+  return {
+    background: "",
+    chrome: "\u001b[33m",
+    data: "",
+    liveness: "\u001b[32;1m",
+    attention: "\u001b[33m",
+    muted: "",
+    inactive: "\u001b[2m",
+  };
 }
 
 const ansiSequence = /\u001b(?:\][^\u0007]*(?:\u0007|\u001b\\)|\[[0-?]*[ -/]*[@-~])/gu;

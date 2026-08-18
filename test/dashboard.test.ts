@@ -40,18 +40,22 @@ function stripAnsi(value: string): string {
 function asciiScopeGraphRows(frame: string): string[] {
   const lines = frame.split("\n");
   const title = lines.findIndex((line) => line.includes("SENSOR SCOPE"));
+  const divider = lines[title]!.indexOf("+", 1);
   const graph: string[] = [];
   for (const line of lines.slice(title + 1)) {
-    const scope = line.split("||", 1)[0]!;
+    const scope = line.slice(0, divider + 1);
     if (scope.startsWith("+")) break;
     if (!scope.startsWith("|") || scope.includes("15m")) continue;
-    graph.push(scope.slice(1));
+    const content = scope.slice(1, -1);
+    if (/^\.+$/u.test(content)) continue;
+    graph.push(content);
   }
   return graph;
 }
 
 function boardSegment(line: string): string {
-  return line.slice(line.lastIndexOf("||") + 2);
+  const dividers = [...line.matchAll(/\|/gu)].map((match) => match.index);
+  return dividers.length >= 3 ? line.slice(dividers[1]! + 1, dividers[2]) : line;
 }
 
 const server: DashboardServerIdentity = Object.freeze({
@@ -217,9 +221,26 @@ describe("dashboard renderer", () => {
     expect(stackedLines.findIndex((line) => line.includes("SENSOR SCOPE")))
       .toBeLessThan(stackedLines.findIndex((line) => line.includes("DRONES")));
 
-    const wide = renderer(eight, 120, 40);
-    const wideTitle = wide.split("\n").find((line) => line.includes("SENSOR SCOPE"))!;
+    const wide = createDashboardRenderer({ glyphMode: "ascii", color: false })(eight, 120, 40);
+    const wideLines = wide.split("\n");
+    const wideTitleIndex = wideLines.findIndex((line) => line.includes("SENSOR SCOPE"));
+    const wideTitle = wideLines[wideTitleIndex]!;
     expect(wideTitle).toContain("DRONES");
+    expect(wideTitle.match(/\+/gu)).toHaveLength(3);
+    expect(wideTitle).not.toContain("++");
+    const wideBottom = wideLines.slice(wideTitleIndex + 1).find((line) => line.startsWith("+"))!;
+    expect(wideBottom.match(/\+/gu)).toHaveLength(3);
+    expect(wideLines.slice(wideTitleIndex + 1, wideLines.indexOf(wideBottom))
+      .every((line) => (line.match(/\|/gu) ?? []).length === 3)).toBe(true);
+    expect(wideLines.some((line) => /^\|\.{10,}\|/u.test(line))).toBe(true);
+    expect(wideLines.some((line) =>
+      line.includes("15m") && line.includes("10m") && line.includes("5m") && line.includes("now")))
+      .toBe(true);
+    const wideBox = renderer(eight, 120, 40).split("\n");
+    const boxTitleIndex = wideBox.findIndex((line) => line.includes("SENSOR SCOPE"));
+    expect(wideBox[boxTitleIndex]).toContain("┬");
+    expect(wideBox[boxTitleIndex]).not.toContain("┐┌");
+    expect(wideBox.slice(boxTitleIndex + 1).find((line) => line.startsWith("└"))).toContain("┴");
 
     const crowded = renderer(rankDashboardSnapshot(snapshotData(47), server), 80, 24);
     expect(crowded).toContain("page 1/");
@@ -344,6 +365,50 @@ describe("dashboard renderer", () => {
     expect(frame).not.toContain("Endpoint:");
     expect(frame).not.toContain("FEED");
     expect(frame.split("\n").some((line) => /^[.:+*#]\s+\d/u.test(line))).toBe(false);
+  });
+
+  it("keeps stale attention targets visible when compacting and styles their marker independently", () => {
+    const data = snapshotData(1);
+    const cube = data.cubes[0]!;
+    const staleAttention = {
+      unacked_directed: 2,
+      stale_directed: 2,
+      oldest_unacked: {
+        created_at: "2026-07-25T11:20:00.000Z",
+        cube_name: cube.name,
+        recipient_label: "attention-target",
+      },
+    } as const;
+    const drones = Array.from({ length: 6 }, (_unused, index) => ({
+      ...cube.drones[0]!,
+      id: `50000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`,
+      label: index === 5 ? "attention-target" : `live-${index + 1}`,
+      last_seen: index === 5 ? "2026-07-25T11:20:00.000Z" : "2026-07-25T11:59:50.000Z",
+      attention: index === 5 ? staleAttention : cube.drones[0]!.attention,
+    }));
+    const snapshot = rankDashboardSnapshot({
+      ...data,
+      attention: staleAttention,
+      cubes: [{ ...cube, drones, drones_total: drones.length, attention: staleAttention }],
+    }, server);
+    const mono = createDashboardRenderer({ glyphMode: "ascii", color: false, motionMode: "off" })(
+      snapshot,
+      40,
+      10,
+    );
+    expect(mono).toMatch(/QUIET !2 attention-target\s+40m/u);
+    expect(mono.indexOf("attention-target")).toBeLessThan(mono.indexOf("live-1"));
+    expect(mono).not.toContain("\u001b[");
+
+    const color = createDashboardRenderer({ glyphMode: "ascii", color: true, motionMode: "off" })(
+      snapshot,
+      120,
+      30,
+    );
+    const target = boardSegment(color.split("\n").find((line) =>
+      line.includes("attention-target") && line.includes("QUIET"))!);
+    expect(target).toContain("QUIET");
+    expect(target).toContain("\u001b[7m\u001b[33m !2\u001b[0m");
   });
 
   it("keeps the live foreground fallback outside Ink while crossing the boundary", async () => {
@@ -533,8 +598,6 @@ describe("dashboard renderer", () => {
       ...data,
       cubes: [{ ...original, drones: [quiet, busy], drones_total: 2 }],
     }, server);
-    const end = Date.parse(snapshot.captured_at);
-    const anchor = new Date(end - 30_000).toISOString();
     const shared = snapshot.captured_at;
     const render = (includeBusy: boolean, width = 120) => createDashboardRenderer({ glyphMode: "ascii", color: false })(
       snapshot,
@@ -547,7 +610,6 @@ describe("dashboard renderer", () => {
         pulsePhase: 0,
         activity: new Map([
           [`${snapshot.cubes[0]!.id}:${quiet.id}`, [
-            { capturedAt: anchor, sentRate: 10 },
             { capturedAt: shared, sentRate: 3 },
           ]],
           [`${snapshot.cubes[0]!.id}:${busy.id}`, includeBusy
@@ -761,28 +823,32 @@ describe("dashboard renderer", () => {
         observation: samples,
         activityWindowMs: 15 * 60_000,
       });
-      return { frame, graph: asciiScopeGraphRows(frame).at(-1)! };
+      const rows = asciiScopeGraphRows(frame);
+      const graph = Array.from({ length: rows[0]?.length ?? 0 }, (_unused, column) =>
+        rows.map((row) => row[column]!).find((character) => character !== " ") ?? " ").join("");
+      return { frame, graph };
     };
+    const withoutSweep = (graph: string) => `${graph.slice(0, 30)} ${graph.slice(31)}`;
 
     const clustered = [
-      ...Array.from({ length: 90 }, (_, index) => sample(start + (index * 100), 1)),
+      ...Array.from({ length: 90 }, (_, index) => sample(start + 5_000 + (index * 100), 1)),
       ...Array.from({ length: 90 }, (_, index) => sample(end - 9_000 + (index * 100), 4)),
     ];
     const clusteredFrame = graphFor(clustered);
     expect(clusteredFrame.frame).toContain("cov 2%");
-    expect(clusteredFrame.graph.replace(":", " ")).toMatch(/[.:+*#]\s{40,}[.:+*#]/u);
+    expect(withoutSweep(clusteredFrame.graph)).toMatch(/[.:+*#]\s{40,}[.:+*#]/u);
 
     const uniformMinute = Array.from(
       { length: 180 },
       (_, index) => sample(end - 60_000 + Math.floor(index * 60_000 / 180), 1 + (index % 4)),
     );
     const uniformGraph = graphFor(uniformMinute).graph;
-    expect(uniformGraph.replace(":", " ").search(/[+*#]/u)).toBeGreaterThan(45);
+    expect(withoutSweep(uniformGraph).search(/[+*#]/u)).toBeGreaterThan(45);
 
     const endpoints = graphFor([sample(start, 1), sample(end, 4)]).graph;
     expect(endpoints[0]).toMatch(/[.:+*#]/u);
     expect(endpoints.at(-1)).toMatch(/[.:+*#]/u);
-    expect(endpoints.slice(1, -1).replace(":", " ")).toMatch(/^\s+$/u);
+    expect(withoutSweep(endpoints).slice(1, -1)).toMatch(/^\s+$/u);
 
     const full = Array.from(
       { length: 180 },

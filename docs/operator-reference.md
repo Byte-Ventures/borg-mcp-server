@@ -95,13 +95,14 @@ attention cells, one shared cube-level Sensor Scope, a recent activity feed,
 and then a paged cube list ranked by coordination posts in the trailing 15
 minutes. The scope aggregates the existing five-second activity samples across
 the focused cube; it does not draw per-drone activity graphs. Distinct posting
-drones break ranking ties. The status words LIVE, RECENT, QUIET, and DARK keep
-liveness meaningful without color. The feed query retains at most the eight
-newest entries, while the interactive layout shows up to four according to the
-available height. Each row contains only a sanitized, terminal-width-truncated
-head of its message; the database query bounds that head to 256 code points. It
-does not display full message bodies, actor or recipient IDs, or document
-contents.
+drones break ranking ties. The scope has a separate dotted baseline and labels
+the start, intermediate thirds, and current end of the selected window. The
+status words LIVE, RECENT, QUIET, and DARK keep liveness meaningful without
+color. The feed query retains at most the eight newest entries, while the
+interactive layout shows up to four according to the available height. Each
+row contains only a sanitized, terminal-width-truncated head of its message;
+the database query bounds that head to 256 code points. It does not display
+full message bodies, actor or recipient IDs, or document contents.
 
 The Sensor Grid refreshes on committed activity, acknowledgements, terminal
 resize, and a bounded five-second age tick. New activity produces a short,
@@ -122,8 +123,9 @@ state.
 At 100 columns and wider, the shared scope and drone board render side by side;
 at narrower widths they stack. Below 12 rows, the endpoint/bind row, feed, and
 cube list yield to a compact deck with an inline scope ramp and the highest
-priority drone status cells. Exact 40-by-10 terminals retain ATTN plus at least
-one STATUS/name/age cell. The dashboard uses box-drawing terminal glyphs by
+priority drone status cells. Stale and then unacknowledged attention targets
+precede liveness ordering, so exact 40-by-10 terminals retain ATTN plus the
+target STATUS/name/age cell. The dashboard uses box-drawing terminal glyphs by
 default. `--ascii` forces a strict 7-bit rendering, and incompatible
 terminal/locale settings select that fallback automatically. `NO_COLOR`
 removes color without removing status labels or layout cues.

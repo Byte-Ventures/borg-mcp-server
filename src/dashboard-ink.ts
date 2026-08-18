@@ -238,7 +238,7 @@ function InkCompactDeck(input: {
   const suffix = ` ${formatWindow(windowMs)}`;
   const graphWidth = Math.max(1, input.width - terminalCellWidth(prefix) - terminalCellWidth(suffix));
   const samples = aggregateActivitySamples(input.cube, input.view.activity);
-  const maximum = activityRateMaximum(input.cube, input.view.activity);
+  const maximum = scopeActivityScale(samples);
   const phase = scopeSweepPosition(
     graphWidth,
     input.view.ambientPhase ?? 0,
@@ -250,7 +250,8 @@ function InkCompactDeck(input: {
     scopeSweepGlyph(input.glyphs),
   ).replaceAll(" ", input.glyphs.cube[0]!);
   const available = Math.max(0, input.rows - 1);
-  const visible = input.cube.drones.slice(0, Math.max(1, available - 1));
+  const prioritized = prioritizeDrones(input.snapshot.captured_at, input.cube.drones);
+  const visible = prioritized.slice(0, Math.max(1, available - 1));
   const hidden = Math.max(0, input.cube.drones.length - visible.length);
   const lines: ReactNode[] = [
     h(Text, { key: "scope", wrap: "truncate-end" }, truncateCell(
@@ -396,12 +397,7 @@ function InkFocusPanel(input: {
     return h(InkCompactDeck, { snapshot, cube, width, rows, glyphs, view, color });
   }
   if (width >= 100) {
-    const boardWidth = Math.max(38, Math.floor(width * 0.4));
-    const scopeWidth = width - boardWidth;
-    return h(Box, { width, height: rows, flexDirection: "row", overflow: "hidden" }, [
-      h(InkSensorScope, { key: "scope", snapshot, cube, width: scopeWidth, rows, glyphs, view, color }),
-      h(InkDroneBoard, { key: "board", snapshot, cube, width: boardWidth, rows, glyphs, color, twoColumns: false }),
-    ]);
+    return h(InkWideDeck, { snapshot, cube, width, rows, glyphs, view, color });
   }
   const scopeRows = Math.max(3, Math.min(rows - 3, Math.floor(rows * 0.4)));
   return h(Box, { width, height: rows, flexDirection: "column", overflow: "hidden" }, [
@@ -419,7 +415,7 @@ function InkFocusPanel(input: {
   ]);
 }
 
-function InkSensorScope(input: {
+function InkWideDeck(input: {
   readonly snapshot: DashboardSnapshot;
   readonly cube: DashboardCubeSnapshot;
   readonly width: number;
@@ -428,16 +424,85 @@ function InkSensorScope(input: {
   readonly view: DashboardViewState;
   readonly color: boolean;
 }): ReactNode {
-  const inner = Math.max(1, input.width - 2);
+  const innerWidth = Math.max(3, input.width - 3);
+  const boardWidth = Math.max(35, Math.floor(innerWidth * 0.4));
+  const scopeWidth = innerWidth - boardWidth;
+  const contentRows = Math.max(1, input.rows - 2);
+  const windowMs = input.view.activityWindowMs ?? DASHBOARD_ACTIVITY_WINDOW_MS;
+  const mode = input.view.autoFollow || input.view.focusedCubeId === null ? "(auto)" : "(pinned)";
+  const coverage = activityCoverage(input.view.observation ?? [], input.snapshot.captured_at, windowMs);
+  const scopeTitle = ` SENSOR SCOPE ${dashboardText(input.cube.name, input.glyphs)} ${input.glyphs.separator} ${mode} ` +
+    `${input.glyphs.separator} ${formatWindow(windowMs)} ${input.glyphs.separator} cov ${Math.round(coverage * 100)}% `;
+  const boardTitle = ` DRONES ${input.cube.drones.length} ${input.glyphs.separator} ` +
+    `ATTN ${input.cube.attention.unacked_directed} `;
+  return h(Box, { width: input.width, height: input.rows, flexDirection: "column", overflow: "hidden" }, [
+    h(Text, { key: "title" }, sharedDeckTitle(
+      scopeTitle,
+      boardTitle,
+      scopeWidth,
+      boardWidth,
+      input.glyphs,
+      input.color,
+    )),
+    h(Box, {
+      key: "body",
+      width: input.width,
+      height: contentRows,
+      flexDirection: "row",
+      borderStyle: borderStyle(input.glyphs),
+      borderTop: false,
+      borderBottom: false,
+      overflow: "hidden",
+    }, [
+      h(InkSensorScope, {
+        key: "scope",
+        ...input,
+        width: scopeWidth,
+        rows: contentRows,
+        unframed: true,
+      }),
+      h(Box, {
+        key: "divider",
+        width: 1,
+        height: contentRows,
+        borderStyle: borderStyle(input.glyphs),
+        borderTop: false,
+        borderBottom: false,
+        borderRight: false,
+      }),
+      h(InkDroneBoard, {
+        key: "board",
+        ...input,
+        width: boardWidth,
+        rows: contentRows,
+        twoColumns: false,
+        unframed: true,
+      }),
+    ]),
+    h(Text, { key: "bottom" }, sharedDeckBottom(scopeWidth, boardWidth, input.glyphs)),
+  ]);
+}
+
+function InkSensorScope(input: {
+  readonly snapshot: DashboardSnapshot;
+  readonly cube: DashboardCubeSnapshot;
+  readonly width: number;
+  readonly rows: number;
+  readonly glyphs: Glyphs;
+  readonly view: DashboardViewState;
+  readonly color: boolean;
+  readonly unframed?: boolean;
+}): ReactNode {
+  const inner = Math.max(1, input.unframed ? input.width : input.width - 2);
   const windowMs = input.view.activityWindowMs ?? DASHBOARD_ACTIVITY_WINDOW_MS;
   const mode = input.view.autoFollow || input.view.focusedCubeId === null ? "(auto)" : "(pinned)";
   const coverage = activityCoverage(input.view.observation ?? [], input.snapshot.captured_at, windowMs);
   const title = ` SENSOR SCOPE ${dashboardText(input.cube.name, input.glyphs)} ${input.glyphs.separator} ${mode} ` +
     `${input.glyphs.separator} ${formatWindow(windowMs)} ${input.glyphs.separator} cov ${Math.round(coverage * 100)}% `;
-  const contentRows = Math.max(1, input.rows - 2);
-  const graphRows = Math.max(1, contentRows - 1);
+  const contentRows = Math.max(1, input.unframed ? input.rows : input.rows - 2);
+  const graphRows = Math.max(1, contentRows - (contentRows >= 3 ? 2 : 1));
   const samples = aggregateActivitySamples(input.cube, input.view.activity);
-  const maximum = activityRateMaximum(input.cube, input.view.activity);
+  const maximum = scopeActivityScale(samples);
   const sweep = scopeSweepPosition(
     inner,
     input.view.ambientPhase ?? 0,
@@ -461,8 +526,14 @@ function InkSensorScope(input: {
       h(Text, { key: "after" }, styledText(graph.slice(sweep + 1), graphStyle)),
     ]);
   });
-  if (contentRows > 1) {
+  if (contentRows >= 3) {
+    body.push(h(Text, { key: "baseline", dimColor: input.color }, input.glyphs.cube[0]!.repeat(inner)));
+  }
+  if (contentRows >= 2) {
     body.push(h(Text, { key: "axis", dimColor: input.color }, scopeAxis(inner, windowMs, input.glyphs)));
+  }
+  if (input.unframed) {
+    return h(Box, { width: input.width, height: input.rows, flexDirection: "column", overflow: "hidden" }, body);
   }
   return h(Box, { width: input.width, height: input.rows, flexDirection: "column", overflow: "hidden" }, [
     h(InkPanelTitle, { key: "title", title, width: input.width, glyphs: input.glyphs, color: input.color }),
@@ -486,18 +557,20 @@ function InkDroneBoard(input: {
   readonly glyphs: Glyphs;
   readonly color: boolean;
   readonly twoColumns: boolean;
+  readonly unframed?: boolean;
 }): ReactNode {
-  const inner = Math.max(1, input.width - 2);
-  const contentRows = Math.max(1, input.rows - 2);
+  const inner = Math.max(1, input.unframed ? input.width : input.width - 2);
+  const contentRows = Math.max(1, input.unframed ? input.rows : input.rows - 2);
   const attentionRows = input.cube.attention.unacked_directed > 0 ? 1 : 0;
   const itemRows = Math.max(1, contentRows - attentionRows);
   const capacity = itemRows * (input.twoColumns ? 2 : 1);
-  const counts = livenessCounts(input.snapshot.captured_at, input.cube.drones);
+  const prioritized = prioritizeDrones(input.snapshot.captured_at, input.cube.drones);
+  const counts = livenessCounts(input.snapshot.captured_at, prioritized);
   const summary = `LIVE ${counts.LIVE}  RECENT ${counts.RECENT}  QUIET ${counts.QUIET}  DARK ${counts.DARK}`;
   let visibleCount = Math.min(input.cube.drones.length, Math.max(1, capacity - 1));
   if (visibleCount < input.cube.drones.length) visibleCount = Math.max(1, capacity - 2);
   const items: Array<{ readonly key: string; readonly drone?: DashboardDroneData; readonly value?: string }> =
-    input.cube.drones.slice(0, visibleCount).map((drone) => ({ key: drone.id, drone }));
+    prioritized.slice(0, visibleCount).map((drone) => ({ key: drone.id, drone }));
   const hidden = input.cube.drones.length - visibleCount;
   if (hidden > 0) items.push({ key: "hidden", value: `+${hidden} more drones` });
   items.push({ key: "summary", value: summary });
@@ -535,6 +608,9 @@ function InkDroneBoard(input: {
       input.glyphs.ellipsis,
     )));
   }
+  if (input.unframed) {
+    return h(Box, { width: input.width, height: input.rows, flexDirection: "column", overflow: "hidden" }, body);
+  }
   const title = ` DRONES ${input.cube.drones.length} ${input.glyphs.separator} ATTN ${input.cube.attention.unacked_directed} `;
   return h(Box, { width: input.width, height: input.rows, flexDirection: "column", overflow: "hidden" }, [
     h(InkPanelTitle, { key: "title", title, width: input.width, glyphs: input.glyphs, color: input.color }),
@@ -568,9 +644,12 @@ function InkDroneCell(input: {
   const prefix = `${status}${marker} `;
   const labelWidth = Math.max(1, input.width - terminalCellWidth(prefix) - terminalCellWidth(suffix));
   const label = truncateCell(dashboardText(input.drone.label, input.glyphs), labelWidth, input.glyphs.ellipsis);
-  const value = truncateCell(`${prefix}${label}${suffix}`, input.width, input.glyphs.ellipsis);
-  return h(Box, { width: input.width, height: 1, overflow: "hidden" },
-    h(Text, null, styledText(value, livenessStyle(input.capturedAt, input.drone.last_seen, input.color))));
+  const style = livenessStyle(input.capturedAt, input.drone.last_seen, input.color);
+  return h(Box, { width: input.width, height: 1, flexDirection: "row", overflow: "hidden" }, [
+    h(Text, { key: "status" }, styledText(status, style)),
+    marker === "" ? null : h(Text, { key: "attention" }, attentionMarker(marker, input.drone, input.color)),
+    h(Text, { key: "details" }, styledText(` ${label}${suffix}`, style)),
+  ]);
 }
 
 function InkPanelTitle(input: {
@@ -947,11 +1026,48 @@ function overlayScopeSweep(value: string, position: number, marker: string): str
   return `${value.slice(0, bounded)}${marker}${value.slice(bounded + 1)}`;
 }
 
+function sharedDeckTitle(
+  scopeTitle: string,
+  boardTitle: string,
+  scopeWidth: number,
+  boardWidth: number,
+  glyphs: Glyphs,
+  color: boolean,
+): string {
+  const segment = (title: string, width: number): string => {
+    const visible = truncateCell(title, width, glyphs.ellipsis);
+    const styled = color ? `${amber}${visible}${reset}` : visible;
+    return `${styled}${glyphs.horizontal.repeat(Math.max(0, width - terminalCellWidth(visible)))}`;
+  };
+  const junction = glyphs === ASCII_GLYPHS ? "+" : "┬";
+  return `${glyphs.topLeft}${segment(scopeTitle, scopeWidth)}${junction}` +
+    `${segment(boardTitle, boardWidth)}${glyphs.topRight}`;
+}
+
+function sharedDeckBottom(scopeWidth: number, boardWidth: number, glyphs: Glyphs): string {
+  const junction = glyphs === ASCII_GLYPHS ? "+" : "┴";
+  return `${glyphs.bottomLeft}${glyphs.horizontal.repeat(scopeWidth)}${junction}` +
+    `${glyphs.horizontal.repeat(boardWidth)}${glyphs.bottomRight}`;
+}
+
 function scopeAxis(width: number, windowMs: number, glyphs: Glyphs): string {
-  const left = formatWindow(windowMs);
-  const right = "now";
-  const fill = glyphs.cube[0]!.repeat(Math.max(1, width - terminalCellWidth(left) - terminalCellWidth(right)));
-  return truncateCell(`${left}${fill}${right}`, width, glyphs.ellipsis);
+  const minutes = Math.max(1, Math.round(windowMs / 60_000));
+  const labels = [
+    `${minutes}m`,
+    `${Math.max(1, Math.round(minutes * 2 / 3))}m`,
+    `${Math.max(1, Math.round(minutes / 3))}m`,
+    "now",
+  ];
+  const cells = Array.from({ length: width }, () => glyphs.horizontal);
+  labels.forEach((label, index) => {
+    const position = index === labels.length - 1
+      ? Math.max(0, width - label.length)
+      : Math.floor(index * Math.max(0, width - 1) / (labels.length - 1));
+    [...label].forEach((character, offset) => {
+      if (position + offset < cells.length) cells[position + offset] = character;
+    });
+  });
+  return cells.join("");
 }
 
 function livenessCounts(
@@ -963,15 +1079,30 @@ function livenessCounts(
   return counts;
 }
 
-function activityRateMaximum(
-  cube: DashboardCubeSnapshot,
-  activity: ReadonlyMap<string, readonly DashboardActivitySample[]> | undefined,
-): number {
-  let maximum = 0;
-  for (const drone of cube.drones) {
-    for (const sample of activity?.get(`${cube.id}:${drone.id}`) ?? []) maximum = Math.max(maximum, sample.sentRate);
-  }
-  return maximum;
+function scopeActivityScale(samples: readonly DashboardActivitySample[]): number {
+  return Math.max(8, ...samples.map((sample) => sample.sentRate));
+}
+
+function prioritizeDrones(
+  capturedAt: string,
+  drones: readonly DashboardDroneData[],
+): readonly DashboardDroneData[] {
+  const livenessPriority = { LIVE: 0, RECENT: 1, QUIET: 2, DARK: 3 } as const;
+  return [...drones].sort((left, right) => {
+    const attention = Number(right.attention.stale_directed > 0) - Number(left.attention.stale_directed > 0) ||
+      Number(right.attention.unacked_directed > 0) - Number(left.attention.unacked_directed > 0) ||
+      right.attention.stale_directed - left.attention.stale_directed ||
+      right.attention.unacked_directed - left.attention.unacked_directed;
+    if (attention !== 0) return attention;
+    const liveness = livenessPriority[livenessStatus(capturedAt, left.last_seen)] -
+      livenessPriority[livenessStatus(capturedAt, right.last_seen)];
+    return liveness || left.label.localeCompare(right.label);
+  });
+}
+
+function attentionMarker(value: string, drone: DashboardDroneData, color: boolean): string {
+  if (!color) return value;
+  return `\u001b[7m${drone.attention.stale_directed > 0 ? amber : green}${value}${reset}`;
 }
 
 function activityCoverage(samples: readonly DashboardActivitySample[], capturedAt: string, windowMs: number): number {

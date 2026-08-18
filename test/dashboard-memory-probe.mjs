@@ -35,6 +35,7 @@ const source = {
           id: "10000000-0000-4000-8000-000000000001",
           label: "builder",
           role: "Builder",
+          reported_model: "probe-model",
           last_seen: capturedAt,
           sent: reads,
           sent_5s: reads,

@@ -39,7 +39,10 @@ describe("dashboard command", () => {
         await waitForLiveRuntime(directory);
       }
 
-      const result = await runDashboardInPty(command, directory);
+      const result = await runDashboardInPty(command, directory, [], {
+        TERM: "xterm-256color",
+        NO_COLOR: undefined,
+      });
 
       expect({
         code: result.code,
@@ -52,6 +55,7 @@ describe("dashboard command", () => {
         enteredAlternateScreen: true,
         exitedAlternateScreen: true,
       });
+      expect(result.output).toContain("\u001b[0m\u001b[?25h\u001b[?1049l");
 
       if (server !== undefined) {
         server.kill("SIGTERM");

@@ -81,6 +81,7 @@ import {
 } from "./managed-service-uninstall.js";
 import {
   createDashboardRenderer,
+  dashboardColorDepth,
   dashboardColorEnabled,
   EMBEDDED_DASHBOARD_FOOTER,
   STANDALONE_DASHBOARD_FOOTER,
@@ -782,6 +783,7 @@ const startOnlyService = createNodeServerService({
           environment: process.env,
         }),
         color: dashboardColorEnabled(process.env),
+        colorDepth: dashboardColorDepth(process.env),
         motionMode: resolveDashboardMotionMode({ noMotion, environment: serverEnvironment }),
         footer: EMBEDDED_DASHBOARD_FOOTER,
         navigation,
@@ -908,6 +910,7 @@ async function runNodeDashboardViewer(
           environment: process.env,
         }),
         color: dashboardColorEnabled(process.env),
+        colorDepth: dashboardColorDepth(process.env),
         motionMode: resolveDashboardMotionMode({ noMotion: options.noMotion, environment: serverEnvironment }),
         footer: STANDALONE_DASHBOARD_FOOTER,
         navigation,

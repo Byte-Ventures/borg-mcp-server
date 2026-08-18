@@ -49,6 +49,7 @@ const snapshot = {
       id: "10000000-0000-4000-8000-000000000001",
       label: "builder",
       role: "Builder",
+      reported_model: "test-model",
       last_seen: "2026-07-25T12:00:00.000Z",
       sent: 1,
       sent_5s: 1,

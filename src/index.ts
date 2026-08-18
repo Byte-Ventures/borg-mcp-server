@@ -50,6 +50,7 @@ export type { RegistryArtifactSource, RegistryRuntimeArtifact } from "./registry
 export {
   createDashboardRenderer,
   dashboardColorEnabled,
+  dashboardColorDepth,
   rankDashboardSnapshot,
   renderPlainDashboard,
   resolveDashboardMotionMode,
@@ -59,6 +60,7 @@ export {
 export type {
   DashboardCubeData,
   DashboardCubeSnapshot,
+  DashboardColorDepth,
   DashboardDataSnapshot,
   DashboardGlyphMode,
   DashboardRenderOptions,

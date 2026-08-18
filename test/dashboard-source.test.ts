@@ -114,6 +114,7 @@ describe("read-only dashboard snapshot source", () => {
         id: ids.drone,
         label: "builder-dashboard",
         role: "Builder",
+        reported_model: "source-model",
         last_seen: "2026-07-25T12:00:00.000Z",
         sent: 0,
         sent_5s: 0,
@@ -437,6 +438,12 @@ function seed(runtime: StoreRuntime): void {
     cubeId: ids.cube,
     droneId: ids.drone,
   });
+  runtime.forPrincipal(droneSessionPrincipal({
+    id: ids.session,
+    clientId: ids.client,
+    cubeId: ids.cube,
+    droneId: ids.drone,
+  })).updateOwnRuntimeMetadata(ids.cube, { reported_model: "source-model" });
 }
 
 function insertCube(databasePath: string, name: string): void {

@@ -43,6 +43,7 @@ export interface DashboardDroneData {
   readonly id: string;
   readonly label: string;
   readonly role: string;
+  readonly reported_model: string | null;
   readonly last_seen: string;
   readonly sent: number;
   readonly sent_5s: number;
@@ -97,6 +98,7 @@ export interface DashboardSnapshot {
 }
 
 export type DashboardGlyphMode = "box" | "ascii";
+export type DashboardColorDepth = "none" | "ansi16" | "ansi256" | "truecolor";
 
 export const EMBEDDED_DASHBOARD_LIFECYCLE_FOOTER =
   "Press Ctrl-C or close this terminal to stop the server. Your server data and identity remain saved.";
@@ -109,6 +111,7 @@ export type DashboardFooter =
 export interface DashboardRenderOptions {
   readonly glyphMode: DashboardGlyphMode;
   readonly color: boolean;
+  readonly colorDepth?: DashboardColorDepth;
   readonly footer: DashboardFooter;
   readonly navigation?: boolean;
   readonly motionMode?: DashboardMotionMode;
@@ -236,7 +239,10 @@ export function rankDashboardSnapshot(
 }
 
 export function createDashboardRenderer(options: DashboardRenderOptions): DashboardRenderer {
-  const baseFooter = sanitizeTerminalLabel(options.footer);
+  const effectiveOptions: DashboardRenderOptions = options.glyphMode === "ascii"
+    ? { ...options, color: false, colorDepth: "none" }
+    : options;
+  const baseFooter = sanitizeTerminalLabel(effectiveOptions.footer);
   const renderer: DashboardRenderer = (snapshot, columns, rows, view = {
     autoFollow: true,
     focusedCubeId: null,
@@ -245,23 +251,23 @@ export function createDashboardRenderer(options: DashboardRenderOptions): Dashbo
     activity: new Map(),
     activityWindowMs: DASHBOARD_ACTIVITY_WINDOW_MS,
     page: 0,
-    motionMode: options.motionMode ?? "ambient",
+    motionMode: effectiveOptions.motionMode ?? "ambient",
     motionAutoDegraded: false,
     ambientPhase: 0,
   }) => {
     if (!usesInkDashboard(columns, rows)) {
-      return renderPlainDashboard(snapshot, columns, rows, options.footer);
+      return renderPlainDashboard(snapshot, columns, rows, effectiveOptions.footer);
     }
     return renderInkDashboardFrame(snapshot, columns, rows, view, {
-      ...options,
-      footer: options.footer,
+      ...effectiveOptions,
+      footer: effectiveOptions.footer,
       baseFooter,
     });
   };
   Object.defineProperty(renderer, "inkOptions", {
     configurable: false,
     enumerable: false,
-    value: Object.freeze({ ...options, baseFooter }),
+    value: Object.freeze({ ...effectiveOptions, baseFooter }),
     writable: false,
   });
   inkRenderers.add(renderer);
@@ -283,7 +289,16 @@ export function selectDashboardGlyphMode(input: {
 export function dashboardColorEnabled(
   environment: Readonly<Record<string, string | undefined>>,
 ): boolean {
-  return environment["NO_COLOR"] === undefined && environment["TERM"] !== "dumb";
+  return dashboardColorDepth(environment) !== "none";
+}
+
+export function dashboardColorDepth(
+  environment: Readonly<Record<string, string | undefined>>,
+): DashboardColorDepth {
+  if (environment["NO_COLOR"] !== undefined || environment["TERM"] === "dumb") return "none";
+  if (/^(?:truecolor|24bit)$/iu.test(environment["COLORTERM"] ?? "")) return "truecolor";
+  if (/256(?:color)?/iu.test(environment["TERM"] ?? "")) return "ansi256";
+  return "ansi16";
 }
 
 export function resolveDashboardMotionMode(input: {
@@ -342,6 +357,7 @@ export function startForegroundDashboard(input: {
   readonly ambientFrameMs?: number;
   readonly frameBudgetMs?: number;
 }): ForegroundDashboard {
+  const colorReset = input.renderer.inkOptions?.color === true ? "\u001b[0m" : "";
   let closed = false;
   let restored = false;
   let priorRanks = new Map<string, number>();
@@ -352,6 +368,7 @@ export function startForegroundDashboard(input: {
   let ambientTimer: ReturnType<typeof setTimeout> | undefined;
   let inkInstance: InkInstance | undefined;
   let inkStdout: NodeJS.WriteStream | undefined;
+  let paintedBackgroundKey: string | undefined;
   let autoFollow = true;
   let focusedCubeId: string | null = null;
   let pulseCubeIds = new Set<string>();
@@ -375,7 +392,7 @@ export function startForegroundDashboard(input: {
   const restore = (): void => {
     if (restored) return;
     restored = true;
-    try { input.terminal.write(alternateScreenRestore); } catch { /* Best-effort terminal repair. */ }
+    try { input.terminal.write(`${colorReset}${alternateScreenRestore}`); } catch { /* Best-effort terminal repair. */ }
   };
   const clearTimers = (): void => {
     if (idleTimer !== undefined) clearTimeout(idleTimer);
@@ -406,7 +423,17 @@ export function startForegroundDashboard(input: {
     view: DashboardViewState,
     options: NonNullable<DashboardRenderer["inkOptions"]>,
   ): void => {
-    inkStdout = createInkStdout(input.terminal);
+    const frameStyle = dashboardInkFrameStyle(options);
+    const backgroundKey = `${dimensions.columns}x${dimensions.rows}:${frameStyle.background}`;
+    if (frameStyle.background !== "" && paintedBackgroundKey !== backgroundKey) {
+      input.terminal.write(dashboardBackgroundFill(
+        dimensions.columns,
+        dimensions.rows,
+        frameStyle.background,
+      ));
+      paintedBackgroundKey = backgroundKey;
+    }
+    inkStdout = createInkStdout(input.terminal, frameStyle);
     inkInstance = renderInk(
       createInkDashboardElement(snapshot, dimensions.columns, dimensions.rows, view, options),
       {
@@ -481,10 +508,14 @@ export function startForegroundDashboard(input: {
         finishFrame(startedAt, true);
         return;
       }
-      if (inkInstance !== undefined || inkStdout !== undefined) unmountInk();
+      const leavingInk = inkInstance !== undefined || inkStdout !== undefined;
+      if (leavingInk) {
+        unmountInk();
+        paintedBackgroundKey = undefined;
+      }
       const frame = input.renderer(lastSnapshot, dimensions.columns, dimensions.rows, view);
       if (frame === lastFrame) return;
-      input.terminal.write(`${clearScreen}${frame}`);
+      input.terminal.write(`${leavingInk ? colorReset : ""}${clearScreen}${frame}`);
       lastFrame = frame;
       finishFrame(startedAt, false);
     } catch (error) {
@@ -616,7 +647,8 @@ export function startForegroundDashboard(input: {
     ambientTimer = undefined;
     unmountInk();
     lastFrame = undefined;
-    input.terminal.write(alternateScreenRestore);
+    paintedBackgroundKey = undefined;
+    input.terminal.write(`${colorReset}${alternateScreenRestore}`);
     input.terminal.requestSuspend(() => {
       if (closed) return;
       try {
@@ -676,7 +708,10 @@ export function startForegroundDashboard(input: {
   return Object.freeze({ failure, close: stop });
 }
 
-function createInkStdout(terminal: DashboardTerminal): NodeJS.WriteStream {
+function createInkStdout(
+  terminal: DashboardTerminal,
+  frameStyle: { readonly background: string; readonly foreground: string },
+): NodeJS.WriteStream {
   let pending = "";
   const stream = new Writable({
     write(chunk, _encoding, callback) {
@@ -700,11 +735,35 @@ function createInkStdout(terminal: DashboardTerminal): NodeJS.WriteStream {
       if (pending === "") return;
       const value = pending;
       pending = "";
-      terminal.write(value);
+      const base = `${frameStyle.background}${frameStyle.foreground}`;
+      terminal.write(base === ""
+        ? value
+        : `${base}${value.replaceAll("\u001b[0m", `\u001b[0m${base}`)}\u001b[0m`);
     },
     writable: false,
   });
   return stream as unknown as NodeJS.WriteStream;
+}
+
+function dashboardInkFrameStyle(
+  options: NonNullable<DashboardRenderer["inkOptions"]>,
+): { readonly background: string; readonly foreground: string } {
+  if (!options.color) return { background: "", foreground: "" };
+  if (options.colorDepth === "truecolor") {
+    return { background: "\u001b[48;2;9;11;16m", foreground: "\u001b[38;2;230;161;90m" };
+  }
+  if (options.colorDepth === "ansi256") {
+    return { background: "\u001b[48;5;232m", foreground: "\u001b[38;5;215m" };
+  }
+  return { background: "", foreground: "" };
+}
+
+function dashboardBackgroundFill(columns: number, rows: number, background: string): string {
+  const width = Math.min(500, Math.max(20, finiteDashboardDimension(columns, 20)));
+  const height = Math.min(200, Math.max(4, finiteDashboardDimension(rows, 4)));
+  const lines = Array.from({ length: height }, (_unused, index) =>
+    `${" ".repeat(width)}${index + 1 < height ? `\u001b[${index + 2};1H` : ""}`);
+  return `${background}\u001b[H${lines.join("")}\u001b[0m\u001b[H`;
 }
 
 function flushInkStdout(stream: NodeJS.WriteStream): void {

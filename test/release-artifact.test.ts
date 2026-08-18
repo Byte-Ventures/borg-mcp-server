@@ -53,6 +53,8 @@ describe("packed release artifact", () => {
       "--ignore-scripts",
       "--access",
       "public",
+      "--tag",
+      "fixture",
       "--registry=https://registry.npmjs.org",
     ], { cwd: fixture })).resolves.toBeDefined();
   });

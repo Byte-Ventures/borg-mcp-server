@@ -463,13 +463,13 @@ describe("dashboard renderer", () => {
     expect(mono.indexOf("attention-target")).toBeLessThan(mono.indexOf("live-1"));
     expect(mono).not.toContain("\u001b[");
 
-    const color = createDashboardRenderer({ glyphMode: "ascii", color: true, motionMode: "off" })(
+    const color = createDashboardRenderer({ glyphMode: "box", color: true, motionMode: "off" })(
       snapshot,
       120,
       30,
     );
-    const target = boardSegment(color.split("\n").find((line) =>
-      line.includes("attention-target") && line.includes("QUIET"))!);
+    const target = color.split("\n").find((line) =>
+      line.includes("attention-target") && line.includes("QUIET"))!;
     expect(target).toContain("QUIET");
     expect(target).toContain("\u001b[7m\u001b[33m!2\u001b[0m");
   });
@@ -482,7 +482,7 @@ describe("dashboard renderer", () => {
       source,
       server,
       terminal: harness.terminal,
-      renderer: createDashboardRenderer({ glyphMode: "ascii", color: false }),
+      renderer: createDashboardRenderer({ glyphMode: "box", color: true, colorDepth: "ansi256" }),
     });
 
     expect(harness.output.at(-1)).toContain("borgmcp-server online");
@@ -499,7 +499,10 @@ describe("dashboard renderer", () => {
     expect(inkIndex).toBeGreaterThan(clearIndex);
 
     harness.setDimensions(39, 24);
+    const beforePlain = harness.output.length;
     harness.resize();
+    const plainTransition = harness.output.slice(beforePlain).join("");
+    expect(plainTransition).toContain("\u001b[0m\u001b[2J\u001b[H");
     expect(harness.output.at(-1)).toContain("borgmcp-server online");
     expect(harness.output.at(-1)).not.toContain("SCOPE");
     dashboard.close();
@@ -694,7 +697,7 @@ describe("dashboard renderer", () => {
       line.includes("builder-01") || line.includes("busy"))).toHaveLength(2);
   });
 
-  it("renders exact Nightwatch grids and keeps color character-identical to NO_COLOR", () => {
+  it("matches literal Nightwatch grids and keeps color character-identical to NO_COLOR", () => {
     const snapshot = rankDashboardSnapshot(snapshotData(3), server);
     const monoRenderer = createDashboardRenderer({ glyphMode: "box", color: false, motionMode: "off" });
     const colorRenderer = createDashboardRenderer({
@@ -715,6 +718,7 @@ describe("dashboard renderer", () => {
       expect(mono.split("\n").every((line) => stringWidth(line) === columns)).toBe(true);
       expect(mono).toContain(resolution);
       expect(mono).not.toContain("\u001b");
+      expect(JSON.stringify(mono)).toMatchSnapshot(`${columns}x${rows} NO_COLOR`);
       for (const line of color.split("\n")) {
         expect(line.startsWith("\u001b[48;2;9;11;16m")).toBe(true);
         expect(line.endsWith("\u001b[0m")).toBe(true);
@@ -747,6 +751,87 @@ describe("dashboard renderer", () => {
     })(snapshot, 80, 24);
     expect(ansi16).not.toMatch(/\u001b\[48;/u);
     expect(ansi16).toContain("\u001b[33m");
+  });
+
+  it("paints the live Ink frame background and full rows", async () => {
+    const harness = terminalHarness();
+    const dashboard = startForegroundDashboard({
+      source: sourceHarness(snapshotData(1)),
+      server,
+      terminal: harness.terminal,
+      renderer: createDashboardRenderer({
+        glyphMode: "box",
+        color: true,
+        colorDepth: "ansi256",
+        motionMode: "off",
+      }),
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const output = harness.output.join("");
+    expect(output).toContain(`\u001b[48;5;232m\u001b[H${" ".repeat(80)}`);
+    expect(output).toContain("\u001b[48;5;232m\u001b[38;5;215m");
+    dashboard.close();
+  });
+
+  it("forces strict ASCII frames to remain escape-free", () => {
+    const renderer = createDashboardRenderer({
+      glyphMode: "ascii",
+      color: true,
+      colorDepth: "truecolor",
+    });
+    const frame = renderer(rankDashboardSnapshot(snapshotData(1), server), 80, 24);
+    expect(frame).not.toContain("\u001b");
+    expect(frame).not.toMatch(/[^\x00-\x7F]/u);
+    expect(renderer.inkOptions).toMatchObject({ color: false, colorDepth: "none" });
+  });
+
+  it("uses adjacent fixed scope modes and fixed board geometry at 143/144", () => {
+    const snapshot = rankDashboardSnapshot(snapshotData(1), server);
+    const renderer = createDashboardRenderer({ glyphMode: "box", color: false, motionMode: "off" });
+    const stacked = renderer(snapshot, 143, 40).split("\n");
+    const wide = renderer(snapshot, 144, 40).split("\n");
+    const stackedTitle = stacked.find((line) => line.includes("SENSOR SCOPE"))!;
+    const wideTitle = wide.find((line) => line.includes("SENSOR SCOPE"))!;
+    expect(stackedTitle).toContain("20s/bar");
+    expect(stackedTitle).not.toContain("DRONES");
+    expect(wideTitle).toContain("30s/bar");
+    expect(wideTitle).toContain("DRONES");
+    expect(wideTitle.indexOf("┬")).toBe(66);
+    expect(stringWidth(wideTitle)).toBe(144);
+    const stackedAxis = stacked.find((line) => line.includes("15m") && line.includes("now"))!;
+    const wideAxis = wide.find((line) => line.includes("15m") && line.includes("now"))!;
+    expect(stackedAxis.indexOf("15m")).toBe(52);
+    expect(wideAxis.indexOf("15m")).toBe(6);
+  });
+
+  it("maps Nightwatch tokens across chrome, bind, feed, lifecycle, and footer regions", () => {
+    const data = snapshotData(1);
+    const recent = [{
+      id: "40000000-0000-4000-8000-000000000010",
+      cube_name: "cube-01",
+      actor_kind: "drone-session" as const,
+      actor_label: "builder-01",
+      actor_role: "Builder",
+      created_at: data.captured_at,
+      visibility: "broadcast" as const,
+      recipient_count: 0,
+      activity_class: "status",
+      message_head: "feed message",
+    }];
+    const snapshot = rankDashboardSnapshot({ ...data, recent_activity: recent }, server);
+    const lines = createDashboardRenderer({
+      glyphMode: "box",
+      color: true,
+      colorDepth: "ansi256",
+    })(snapshot, 120, 40).split("\n");
+    const find = (text: string) => lines.find((line) => stripAnsi(line).includes(text))!;
+    expect(find("Endpoint:")).toContain("\u001b[38;5;245m");
+    expect(find("────────")).toContain("\u001b[38;5;215m");
+    expect(find("SENSOR SCOPE")).toContain("\u001b[38;5;215m");
+    expect(find("FEED")).toContain("\u001b[38;5;147m");
+    expect(find("FEED")).toContain("\u001b[38;5;245m");
+    expect(find("server data and identity")).toContain("\u001b[38;5;245m");
+    expect(lines.at(-1)).toContain("\u001b[38;5;245m");
   });
 
   it("keeps fixed two-cell scope buckets stable within a resolution mode", () => {
@@ -897,15 +982,16 @@ describe("dashboard renderer", () => {
       ...data,
       cubes: [{ ...cube, drones, drones_total: drones.length }],
     }, server);
-    const render = (color: boolean) => createDashboardRenderer({ glyphMode: "ascii", color })(snapshot, 100, 36);
-    const colorFrame = render(true);
+    const render = (color: boolean, glyphMode: "ascii" | "box" = "ascii") =>
+      createDashboardRenderer({ glyphMode, color })(snapshot, 100, 36);
+    const colorFrame = render(true, "box");
     const lines = colorFrame.split("\n");
     expect(boardSegment(lines.find((line) => line.includes("live"))!)).toContain("\u001b[32;1m");
     expect(boardSegment(lines.find((line) => line.includes("recent"))!)).toContain("RECENT");
     expect(boardSegment(lines.find((line) => line.includes("idle"))!)).toContain("QUIET");
     expect(boardSegment(lines.find((line) => line.includes("stale"))!)).toContain("\u001b[2m");
-    expect(stripAnsi(colorFrame).match(/[^\u0000-\u007F]/gu)).toEqual(null);
     expect(render(false)).not.toContain("\u001b[");
+    expect(render(true)).not.toContain("\u001b[");
   });
 
   it("keeps the read-only footer intact when optional controls do not fit", () => {
@@ -1256,7 +1342,7 @@ describe("dashboard renderer", () => {
       expect(frame).not.toContain("\u001b[2J");
     }
     expect(ink).toContain("safe message");
-    const inverse = createDashboardRenderer({ glyphMode: "ascii", color: true, motionMode: "off" })(snapshot, 100, 24);
+    const inverse = createDashboardRenderer({ glyphMode: "box", color: true, motionMode: "off" })(snapshot, 100, 24);
     expect(inverse).toContain("\u001b[7m");
     expect(ink).not.toContain("\u001b[7m");
   });
@@ -1621,7 +1707,7 @@ describe("foreground dashboard lifecycle", () => {
       source,
       server,
       terminal: harness.terminal,
-      renderer: createDashboardRenderer({ glyphMode: "ascii", color: true, colorDepth: "ansi256" }),
+      renderer: createDashboardRenderer({ glyphMode: "box", color: true, colorDepth: "ansi256" }),
     });
     await new Promise<void>((resolve) => setImmediate(resolve));
     const beforeResume = harness.output.length;
@@ -1642,7 +1728,7 @@ describe("foreground dashboard lifecycle", () => {
     const source = sourceHarness(snapshotData(1));
     let calls = 0;
     const baseRenderer = createDashboardRenderer({
-      glyphMode: "ascii",
+      glyphMode: "box",
       color: true,
       colorDepth: "ansi256",
     });

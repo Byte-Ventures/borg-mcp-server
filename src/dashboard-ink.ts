@@ -31,7 +31,9 @@ type InkTextStyle = { readonly sequence?: string };
 
 interface NightwatchPalette {
   readonly background: string;
+  readonly backgroundColor: string;
   readonly chrome: string;
+  readonly chromeColor: string;
   readonly data: string;
   readonly liveness: string;
   readonly attention: string;
@@ -62,7 +64,7 @@ export function renderInkDashboardFrame(
     { columns: width },
   );
   const palette = nightwatchPalette(options.color ? options.colorDepth ?? "ansi16" : "none");
-  return normalizeInkFrame(rendered, width, height, palette.background);
+  return normalizeInkFrame(rendered, width, height, palette.background, palette.chrome);
 }
 
 export function createInkDashboardElement(
@@ -119,11 +121,11 @@ function InkDashboard(input: {
 
   const children: ReactNode[] = [
     h(InkRail, { key: "rail", snapshot, width, glyphs, palette }),
-    h(InkBindStatus, { key: "bind", snapshot, width, glyphs }),
+    h(InkBindStatus, { key: "bind", snapshot, width, glyphs, palette }),
     h(InkAttention, { key: "attention", snapshot, width, glyphs, palette }),
-    h(InkRule, { key: "separator-top", width, glyphs }),
+    h(InkRule, { key: "separator-top", width, glyphs, palette }),
     focus === undefined
-      ? h(InkEmptyPanel, { key: "empty-panel", width, glyphs })
+      ? h(InkEmptyPanel, { key: "empty-panel", width, glyphs, palette })
       : h(InkFocusPanel, {
           key: "focus-panel",
           snapshot,
@@ -134,7 +136,7 @@ function InkDashboard(input: {
           view,
           palette,
         }),
-    h(InkRule, { key: "separator-bottom", width, glyphs }),
+    h(InkRule, { key: "separator-bottom", width, glyphs, palette }),
   ];
 
   snapshot.recent_activity.slice(0, feedRows).forEach((activity, index) => {
@@ -144,6 +146,7 @@ function InkDashboard(input: {
       activity,
       width,
       glyphs,
+      palette,
       showClass: width >= 100,
       first: index === 0,
     }));
@@ -166,6 +169,7 @@ function InkDashboard(input: {
       value: EMBEDDED_DASHBOARD_LIFECYCLE_FOOTER,
       width,
       rows: lifecycleRows,
+      palette,
     }));
   }
   children.push(h(InkFooter, {
@@ -180,9 +184,16 @@ function InkDashboard(input: {
     ellipsis: glyphs.ellipsis,
     motionMode: view.motionMode ?? options.motionMode ?? "ambient",
     motionAutoDegraded: view.motionAutoDegraded === true,
+    palette,
   }));
 
-  return h(Box, { width, height, flexDirection: "column", overflow: "hidden" }, children);
+  return h(Box, {
+    width,
+    height,
+    flexDirection: "column",
+    overflow: "hidden",
+    ...(palette.backgroundColor === "" ? {} : { backgroundColor: palette.backgroundColor }),
+  }, children);
 }
 
 function InkCompactDashboard(input: {
@@ -199,10 +210,10 @@ function InkCompactDashboard(input: {
   );
   const lifecycleRows = input.options.footer === EMBEDDED_DASHBOARD_FOOTER ? 1 : 0;
   const bodyRows = Math.max(1, input.height - 5 - lifecycleRows);
-  return h(Box, { width: input.width, height: input.height, flexDirection: "column", overflow: "hidden" }, [
+  const children: ReactNode[] = [
     h(InkRail, { key: "rail", snapshot: input.snapshot, width: input.width, glyphs: input.glyphs, palette }),
     h(InkAttention, { key: "attention", snapshot: input.snapshot, width: input.width, glyphs: input.glyphs, palette }),
-    h(InkRule, { key: "separator-top", width: input.width, glyphs: input.glyphs }),
+    h(InkRule, { key: "separator-top", width: input.width, glyphs: input.glyphs, palette }),
     input.focus === undefined
       ? h(InkEmptyCompactDeck, { key: "empty", width: input.width, rows: bodyRows })
       : h(InkCompactDeck, {
@@ -215,13 +226,14 @@ function InkCompactDashboard(input: {
           view: input.view,
           palette,
         }),
-    h(InkRule, { key: "separator-bottom", width: input.width, glyphs: input.glyphs }),
+    h(InkRule, { key: "separator-bottom", width: input.width, glyphs: input.glyphs, palette }),
     lifecycleRows > 0
       ? h(InkLifecycleFooter, {
           key: "lifecycle",
           value: "Server data and identity remain saved.",
           width: input.width,
           rows: lifecycleRows,
+          palette,
         })
       : null,
     h(InkFooter, {
@@ -236,8 +248,16 @@ function InkCompactDashboard(input: {
       ellipsis: input.glyphs.ellipsis,
       motionMode: input.view.motionMode ?? input.options.motionMode ?? "ambient",
       motionAutoDegraded: input.view.motionAutoDegraded === true,
+      palette,
     }),
-  ]);
+  ];
+  return h(Box, {
+    width: input.width,
+    height: input.height,
+    flexDirection: "column",
+    overflow: "hidden",
+    ...(palette.backgroundColor === "" ? {} : { backgroundColor: palette.backgroundColor }),
+  }, children);
 }
 
 function InkEmptyCompactDeck(input: { readonly width: number; readonly rows: number }): ReactNode {
@@ -358,11 +378,15 @@ function InkBindStatus(input: {
   readonly snapshot: DashboardSnapshot;
   readonly width: number;
   readonly glyphs: Glyphs;
+  readonly palette: NightwatchPalette;
 }): ReactNode {
   const endpoint = sanitizeTerminalText(input.snapshot.server.endpoint);
   const value = `Endpoint: ${endpoint}  Bind mode: ${input.snapshot.server.bind_mode}`;
   return h(Box, { width: input.width, height: 1, overflow: "hidden" },
-    h(Text, null, truncateCell(value, input.width, input.glyphs.ellipsis)),
+    h(Text, null, styledText(
+      truncateCell(value, input.width, input.glyphs.ellipsis),
+      { sequence: input.palette.muted },
+    )),
   );
 }
 
@@ -381,7 +405,11 @@ function styledRailText(
   );
 }
 
-function InkRule(input: { readonly width: number; readonly glyphs: Glyphs }): ReactNode {
+function InkRule(input: {
+  readonly width: number;
+  readonly glyphs: Glyphs;
+  readonly palette: NightwatchPalette;
+}): ReactNode {
   return h(Box, {
     width: input.width,
     height: 1,
@@ -390,10 +418,15 @@ function InkRule(input: { readonly width: number; readonly glyphs: Glyphs }): Re
     borderBottom: false,
     borderLeft: false,
     borderRight: false,
+    ...(input.palette.chromeColor === "" ? {} : { borderColor: input.palette.chromeColor }),
   });
 }
 
-function InkEmptyPanel(input: { readonly width: number; readonly glyphs: Glyphs }): ReactNode {
+function InkEmptyPanel(input: {
+  readonly width: number;
+  readonly glyphs: Glyphs;
+  readonly palette: NightwatchPalette;
+}): ReactNode {
   const inner = Math.max(1, input.width - 2);
   return h(
     Box,
@@ -401,7 +434,8 @@ function InkEmptyPanel(input: { readonly width: number; readonly glyphs: Glyphs 
       width: input.width,
       height: 3,
       flexDirection: "column",
-    borderStyle: borderStyle(input.glyphs),
+      borderStyle: borderStyle(input.glyphs),
+      ...(input.palette.chromeColor === "" ? {} : { borderColor: input.palette.chromeColor }),
       overflow: "hidden",
     },
     h(Text, { wrap: "truncate-end" }, truncateCell(
@@ -454,13 +488,13 @@ function InkWideDeck(input: {
   readonly palette: NightwatchPalette;
 }): ReactNode {
   const innerWidth = Math.max(3, input.width - 3);
-  const boardWidth = Math.min(99, Math.max(76, innerWidth - 60));
+  const boardWidth = input.width >= 200 ? 99 : 76;
   const scopeWidth = innerWidth - boardWidth;
   const contentRows = Math.max(1, input.rows - 2);
   const windowMs = input.view.activityWindowMs ?? DASHBOARD_ACTIVITY_WINDOW_MS;
   const mode = input.view.autoFollow || input.view.focusedCubeId === null ? "(auto)" : "(pinned)";
   const coverage = activityCoverage(input.view.observation ?? [], input.snapshot.captured_at, windowMs);
-  const resolution = formatBucketResolution(windowMs, scopeCanvasWidth(scopeWidth) / 2);
+  const resolution = formatBucketResolution(windowMs, scopeCanvasWidth(scopeWidth, true) / 2);
   const scopeTitle = ` SENSOR SCOPE ${dashboardText(input.cube.name, input.glyphs)} ${input.glyphs.separator} ${mode} ` +
     `${input.glyphs.separator} ${formatWindow(windowMs)} ${input.glyphs.separator} ${resolution} ` +
     `${input.glyphs.separator} cov ${Math.round(coverage * 100)}% `;
@@ -484,6 +518,7 @@ function InkWideDeck(input: {
       borderTop: false,
       borderBottom: false,
       overflow: "hidden",
+      ...(input.palette.chromeColor === "" ? {} : { borderColor: input.palette.chromeColor }),
     }, [
       h(InkSensorScope, {
         key: "scope",
@@ -500,6 +535,7 @@ function InkWideDeck(input: {
         borderTop: false,
         borderBottom: false,
         borderRight: false,
+        ...(input.palette.chromeColor === "" ? {} : { borderColor: input.palette.chromeColor }),
       }),
       h(InkDroneBoard, {
         key: "board",
@@ -510,7 +546,10 @@ function InkWideDeck(input: {
         unframed: true,
       }),
     ]),
-    h(Text, { key: "bottom" }, sharedDeckBottom(scopeWidth, boardWidth, input.glyphs)),
+    h(Text, { key: "bottom" }, styledText(
+      sharedDeckBottom(scopeWidth, boardWidth, input.glyphs),
+      { sequence: input.palette.chrome },
+    )),
   ]);
 }
 
@@ -531,7 +570,7 @@ function InkSensorScope(input: {
   const contentRows = Math.max(1, input.unframed ? input.rows : input.rows - 2);
   const graphRows = Math.max(1, contentRows - (contentRows >= 3 ? 2 : 1));
   const samples = aggregateActivitySamples(input.cube, input.view.activity);
-  const canvasWidth = scopeCanvasWidth(inner);
+  const canvasWidth = scopeCanvasWidth(inner, input.unframed === true);
   const buckets = resolvedScopeBuckets(
     samples,
     input.view.observation ?? [],
@@ -587,6 +626,7 @@ function InkSensorScope(input: {
       borderStyle: borderStyle(input.glyphs),
       borderTop: false,
       overflow: "hidden",
+      ...(input.palette.chromeColor === "" ? {} : { borderColor: input.palette.chromeColor }),
     }, body),
   ]);
 }
@@ -678,6 +718,7 @@ function InkDroneBoard(input: {
       borderStyle: borderStyle(input.glyphs),
       borderTop: false,
       overflow: "hidden",
+      ...(input.palette.chromeColor === "" ? {} : { borderColor: input.palette.chromeColor }),
     }, body),
   ]);
 }
@@ -875,6 +916,7 @@ function InkPanelTitle(input: {
       borderBottom: false,
       borderLeft: false,
       borderRight: false,
+      ...(input.palette.chromeColor === "" ? {} : { borderColor: input.palette.chromeColor }),
     }),
     h(Text, null, input.glyphs.topRight),
   );
@@ -908,9 +950,10 @@ interface ResolvedScopeBucket {
   readonly observed: boolean;
 }
 
-function scopeCanvasWidth(innerWidth: number): 60 | 90 | 120 {
-  if (innerWidth >= 120) return 120;
-  if (innerWidth >= 90) return 90;
+function scopeCanvasWidth(innerWidth: number, allow120: boolean): 60 | 90 | 120 {
+  const usableWidth = Math.max(0, innerWidth - 4);
+  if (allow120 && usableWidth >= 120) return 120;
+  if (usableWidth >= 90) return 90;
   return 60;
 }
 
@@ -1076,6 +1119,7 @@ function InkFooter(input: {
   readonly ellipsis: string;
   readonly motionMode: "ambient" | "calm" | "off";
   readonly motionAutoDegraded: boolean;
+  readonly palette: NightwatchPalette;
 }): ReactNode {
   const pageSegment = input.pageCount > 1
     ? `${input.navigation ? "SPACE " : "page "}${input.page + 1}/${input.pageCount}`
@@ -1101,16 +1145,23 @@ function InkFooter(input: {
   const finalWidth = Math.max(0, input.width - fixedWidth);
   const children: ReactNode[] = [];
   segments.forEach((segment, index) => {
-    if (index > 0) children.push(h(Text, { key: `separator-${index}` }, "  |  "));
+    if (index > 0) children.push(h(Text, { key: `separator-${index}` }, styledText(
+      "  |  ",
+      { sequence: input.palette.muted },
+    )));
     if (index === segments.length - 1) {
       children.push(h(InkFixedText, {
         key: `footer-${index}`,
         value: segment,
         width: finalWidth,
         ellipsis: input.ellipsis,
+        style: { sequence: input.palette.muted },
       }));
     } else {
-      children.push(h(Text, { key: `footer-${index}` }, segment));
+      children.push(h(Text, { key: `footer-${index}` }, styledText(
+        segment,
+        { sequence: input.palette.muted },
+      )));
     }
   });
   return h(Box, { width: input.width, height: 1, flexDirection: "row", overflow: "hidden" }, children);
@@ -1123,6 +1174,7 @@ function InkFeedRow(input: {
   readonly glyphs: Glyphs;
   readonly showClass: boolean;
   readonly first: boolean;
+  readonly palette: NightwatchPalette;
 }): ReactNode {
   const activity = input.activity;
   const actor = dashboardText(activity.actor_label ?? activity.actor_kind, input.glyphs);
@@ -1131,19 +1183,30 @@ function InkFeedRow(input: {
     : "";
   const prefix = `${input.first ? "FEED " : "     "}${formatAge(input.snapshot.captured_at, activity.created_at)} ` +
     `${dashboardText(activity.cube_name, input.glyphs)}/${actor}${classification} `;
-  const value = `${prefix}${dashboardText(activity.message_head, input.glyphs)}`;
+  const head = dashboardText(activity.message_head, input.glyphs);
+  const visible = truncateCell(`${prefix}${head}`, input.width, input.glyphs.ellipsis);
+  const actorStart = visible.indexOf(actor);
+  const rendered = actorStart < 0
+    ? styledText(visible, { sequence: input.palette.muted })
+    : `${styledText(visible.slice(0, actorStart), { sequence: input.palette.muted })}` +
+      `${styledText(actor, { sequence: input.palette.data })}` +
+      `${styledText(visible.slice(actorStart + actor.length), { sequence: input.palette.muted })}`;
   return h(Box, { width: input.width, height: 1, overflow: "hidden" },
-    h(Text, null, truncateCell(value, input.width, input.glyphs.ellipsis)));
+    h(Text, null, rendered));
 }
 
 function InkLifecycleFooter(input: {
   readonly value: string;
   readonly width: number;
   readonly rows: number;
+  readonly palette: NightwatchPalette;
 }): ReactNode {
   const sentences = lifecycleSentences(input.value);
   return h(Box, { width: input.width, height: input.rows, flexDirection: "column", overflow: "hidden" },
-    sentences.map((sentence, index) => h(Text, { key: `sentence-${index}`, wrap: "wrap" }, sentence)),
+    sentences.map((sentence, index) => h(Text, { key: `sentence-${index}`, wrap: "wrap" }, styledText(
+      sentence,
+      { sequence: input.palette.muted },
+    ))),
   );
 }
 
@@ -1449,6 +1512,7 @@ export function normalizeInkFrame(
   width: number,
   height: number,
   background = "",
+  defaultForeground = "",
 ): string {
   const withoutInkControls = stripInkFrameControls(value);
   const withoutTrailingNewline = withoutInkControls.endsWith("\n")
@@ -1459,18 +1523,21 @@ export function normalizeInkFrame(
   return lines.map((line) => {
     const padded = padInkRow(normalizeInkAnsi(line), width);
     if (background === "") return padded;
-    return `${background}${padded.replaceAll(reset, `${reset}${background}`)}${reset}`;
+    const base = `${background}${defaultForeground}`;
+    return `${base}${padded.replaceAll(reset, `${reset}${base}`)}${reset}`;
   }).join("\n");
 }
 
 function nightwatchPalette(depth: DashboardColorDepth): NightwatchPalette {
   if (depth === "none") {
-    return { background: "", chrome: "", data: "", liveness: "", attention: "", muted: "", inactive: "" };
+    return { background: "", backgroundColor: "", chrome: "", chromeColor: "", data: "", liveness: "", attention: "", muted: "", inactive: "" };
   }
   if (depth === "truecolor") {
     return {
       background: "\u001b[48;2;9;11;16m",
+      backgroundColor: "rgb(9, 11, 16)",
       chrome: "\u001b[38;2;230;161;90m",
+      chromeColor: "rgb(230, 161, 90)",
       data: "\u001b[38;2;184;199;255m",
       liveness: "\u001b[38;2;121;214;159m",
       attention: "\u001b[38;2;255;122;144m",
@@ -1481,7 +1548,9 @@ function nightwatchPalette(depth: DashboardColorDepth): NightwatchPalette {
   if (depth === "ansi256") {
     return {
       background: "\u001b[48;5;232m",
+      backgroundColor: "ansi256(232)",
       chrome: "\u001b[38;5;215m",
+      chromeColor: "ansi256(215)",
       data: "\u001b[38;5;147m",
       liveness: "\u001b[38;5;115m",
       attention: "\u001b[38;5;210m",
@@ -1491,7 +1560,9 @@ function nightwatchPalette(depth: DashboardColorDepth): NightwatchPalette {
   }
   return {
     background: "",
+    backgroundColor: "",
     chrome: "\u001b[33m",
+    chromeColor: "yellow",
     data: "",
     liveness: "\u001b[32;1m",
     attention: "\u001b[33m",

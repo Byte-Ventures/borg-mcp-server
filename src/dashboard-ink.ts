@@ -184,7 +184,8 @@ function InkCompactDashboard(input: {
   readonly options: InkRenderOptions;
   readonly glyphs: Glyphs;
 }): ReactNode {
-  const bodyRows = Math.max(1, input.height - 5);
+  const lifecycleRows = input.options.footer === EMBEDDED_DASHBOARD_FOOTER ? 1 : 0;
+  const bodyRows = Math.max(1, input.height - 5 - lifecycleRows);
   return h(Box, { width: input.width, height: input.height, flexDirection: "column", overflow: "hidden" }, [
     h(InkRail, { key: "rail", snapshot: input.snapshot, width: input.width, glyphs: input.glyphs, color: input.options.color }),
     h(InkAttention, { key: "attention", snapshot: input.snapshot, width: input.width, glyphs: input.glyphs, color: input.options.color }),
@@ -202,6 +203,14 @@ function InkCompactDashboard(input: {
           color: input.options.color,
         }),
     h(InkRule, { key: "separator-bottom", width: input.width, glyphs: input.glyphs }),
+    lifecycleRows > 0
+      ? h(InkLifecycleFooter, {
+          key: "lifecycle",
+          value: "Server data and identity remain saved.",
+          width: input.width,
+          rows: lifecycleRows,
+        })
+      : null,
     h(InkFooter, {
       key: "footer",
       snapshot: input.snapshot,

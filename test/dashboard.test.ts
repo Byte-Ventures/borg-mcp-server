@@ -420,6 +420,8 @@ describe("dashboard renderer", () => {
     expect(frame).toContain("SCOPE cube-01");
     expect(frame).toMatch(/RECENT !1 builder-01.*1m/u);
     expect(frame).toContain("1m");
+    expect(frame).toContain("Server data and identity remain saved.");
+    expect(frame).toContain("^C stop server  |  read-only");
     expect(frame).not.toContain("Endpoint:");
     expect(frame).not.toContain("FEED");
     expect(frame.split("\n").some((line) => /^[.:+*#]\s+\d/u.test(line))).toBe(false);

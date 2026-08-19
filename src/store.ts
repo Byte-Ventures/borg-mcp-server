@@ -2396,6 +2396,13 @@ class SqliteScopedStore implements ScopedStore {
       SELECT drone_id, message, visibility FROM activity_log WHERE id = ? AND cube_id = ?
     `).get(entryId, cubeId);
     if (original === undefined) throw new ScopedStoreError();
+    if (this.#principal.kind === "drone-session" &&
+        requiredText(original, "visibility") === "direct") {
+      const addressed = this.#database.prepare(`
+        SELECT 1 AS present FROM activity_log_recipients WHERE entry_id = ? AND drone_id = ?
+      `).get(entryId, this.#principal.droneId);
+      if (addressed === undefined) throw new ScopedStoreError();
+    }
     this.#capacityGuard.assertCanGrow(512);
     const claimant = this.#principal.kind === "drone-session"
       ? this.#principal.droneId
@@ -2991,7 +2998,23 @@ class SqliteScopedStore implements ScopedStore {
     const valid = this.#database.prepare(`
       SELECT 1 AS present FROM activity_log WHERE cube_id = ? AND id = ? AND created_at = ?
     `).get(cubeId, cursor.id, cursor.created_at);
-    if (valid === undefined) throw new ScopedStoreError();
+    if (valid !== undefined) return;
+    // The expiry ledger is capped, so a pruned entry can outlive its own ledger
+    // row. The newest ledger row always survives the trim and every pruned entry
+    // sorts at or below it, so cursors at or below that horizon stay expired.
+    const horizon = this.#database.prepare(`
+      SELECT entry_id, created_at FROM expired_activity_cursors
+      WHERE cube_id = ? ORDER BY created_at DESC, entry_id DESC LIMIT 1
+    `).get(cubeId);
+    if (horizon !== undefined) {
+      const horizonCreatedAt = requiredText(horizon, "created_at");
+      if (cursor.created_at < horizonCreatedAt ||
+          (cursor.created_at === horizonCreatedAt &&
+            cursor.id <= requiredText(horizon, "entry_id"))) {
+        throw new CursorExpiredError();
+      }
+    }
+    throw new ScopedStoreError();
   }
 
   #resolveCursor(cubeId: string, cursor: LogCursor, broadcastOnly: boolean): LogCursor {

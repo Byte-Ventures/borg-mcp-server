@@ -1636,3 +1636,191 @@ describe("Principal to ScopedStore isolation", () => {
     stop();
   });
 });
+
+describe("directed-entry acknowledgement authorization", () => {
+  const recipientDroneId = "00000000-0000-4000-8000-000000000031";
+  const recipientSessionId = "00000000-0000-4000-8000-000000000032";
+  const outsiderDroneId = "00000000-0000-4000-8000-000000000033";
+  const outsiderSessionId = "00000000-0000-4000-8000-000000000034";
+
+  function seats() {
+    runtime.maintenance.grantClientCube({
+      clientId: ids.clientB,
+      cubeId: ids.cubeA,
+      access: "write",
+    });
+    runtime.maintenance.createDrone({
+      id: recipientDroneId,
+      cubeId: ids.cubeA,
+      roleId: ids.roleA,
+      clientId: ids.clientA,
+      label: "two-of-three-queen",
+    });
+    runtime.maintenance.createDroneSession({
+      id: recipientSessionId,
+      clientId: ids.clientA,
+      cubeId: ids.cubeA,
+      droneId: recipientDroneId,
+    });
+    runtime.maintenance.createDrone({
+      id: outsiderDroneId,
+      cubeId: ids.cubeA,
+      roleId: ids.roleA,
+      clientId: ids.clientB,
+      label: "three-of-three-queen",
+    });
+    runtime.maintenance.createDroneSession({
+      id: outsiderSessionId,
+      clientId: ids.clientB,
+      cubeId: ids.cubeA,
+      droneId: outsiderDroneId,
+    });
+    return {
+      author: runtime.forPrincipal(droneSessionPrincipal({
+        id: ids.sessionA,
+        clientId: ids.clientA,
+        cubeId: ids.cubeA,
+        droneId: ids.droneA,
+      })),
+      recipient: runtime.forPrincipal(droneSessionPrincipal({
+        id: recipientSessionId,
+        clientId: ids.clientA,
+        cubeId: ids.cubeA,
+        droneId: recipientDroneId,
+      })),
+      outsider: runtime.forPrincipal(droneSessionPrincipal({
+        id: outsiderSessionId,
+        clientId: ids.clientB,
+        cubeId: ids.cubeA,
+        droneId: outsiderDroneId,
+      })),
+    };
+  }
+
+  it("accepts ack and claim from an addressed recipient", () => {
+    const { author, recipient } = seats();
+    const entry = author.appendLog(ids.cubeA, {
+      message: "routed work",
+      visibility: "direct",
+      recipientDroneIds: [recipientDroneId],
+    });
+    recipient.acknowledge(ids.cubeA, entry.id, "ack");
+    recipient.acknowledge(ids.cubeA, entry.id, "claim");
+    const status = runtime.forPrincipal(clientPrincipal(ids.clientA))
+      .readAckStatus(ids.cubeA, entry.id);
+    expect(status.recipients).toEqual([expect.objectContaining({
+      drone_id: recipientDroneId,
+      acknowledged_at: expect.any(String),
+    })]);
+    expect(status.claims).toEqual([expect.objectContaining({ drone_id: recipientDroneId })]);
+  });
+
+  it("refuses ack and claim from a write-capable unaddressed drone without persisting", () => {
+    const { author, outsider } = seats();
+    const entry = author.appendLog(ids.cubeA, {
+      message: "routed work",
+      visibility: "direct",
+      recipientDroneIds: [recipientDroneId],
+    });
+    const before = runtime.maintenance.observeAuthorityState();
+    expect(() => outsider.acknowledge(ids.cubeA, entry.id, "ack")).toThrow(ScopedStoreError);
+    expect(() => outsider.acknowledge(ids.cubeA, entry.id, "claim")).toThrow(ScopedStoreError);
+    expect(runtime.maintenance.observeAuthorityState()).toEqual(before);
+    const status = runtime.forPrincipal(clientPrincipal(ids.clientA))
+      .readAckStatus(ids.cubeA, entry.id);
+    expect(status.recipients).toEqual([expect.objectContaining({
+      drone_id: recipientDroneId,
+      acknowledged_at: null,
+    })]);
+    expect(status.claims).toEqual([]);
+  });
+
+  it("refuses the author's own ack when the author is not an addressed recipient", () => {
+    const { author } = seats();
+    const entry = author.appendLog(ids.cubeA, {
+      message: "routed elsewhere",
+      visibility: "direct",
+      recipientDroneIds: [recipientDroneId],
+    });
+    expect(() => author.acknowledge(ids.cubeA, entry.id, "ack")).toThrow(ScopedStoreError);
+  });
+
+  it("keeps broadcast entries acknowledgeable and claimable by any write-capable drone", () => {
+    const { author, outsider } = seats();
+    const entry = author.appendLog(ids.cubeA, { visibility: "broadcast", message: "open work" });
+    outsider.acknowledge(ids.cubeA, entry.id, "ack");
+    outsider.acknowledge(ids.cubeA, entry.id, "claim");
+    const status = runtime.forPrincipal(clientPrincipal(ids.clientA))
+      .readAckStatus(ids.cubeA, entry.id);
+    expect(status.claims).toEqual([expect.objectContaining({ drone_id: outsiderDroneId })]);
+  });
+
+  it("keeps client-principal acknowledgement of directed entries unchanged", () => {
+    const { author } = seats();
+    const entry = author.appendLog(ids.cubeA, {
+      message: "administrative",
+      visibility: "direct",
+      recipientDroneIds: [recipientDroneId],
+    });
+    runtime.forPrincipal(clientPrincipal(ids.clientA)).acknowledge(ids.cubeA, entry.id, "claim");
+  });
+});
+
+describe("pruned cursor expiry recognition", () => {
+  it("keeps CURSOR_EXPIRED after the expiry ledger row itself is pruned", async () => {
+    runtime.close();
+    runtime = await openStore({
+      path: join(directory, "borg.db"),
+      clock: () => storeNow,
+      storageLimits: {
+        maxActivityEntriesPerCube: 10,
+        maxDatabaseBytes: 1_000_000,
+        minFreeDiskBytes: 1,
+      },
+      capacityProbe: () => ({ databaseBytes: 0, freeDiskBytes: 1_000_000 }),
+    });
+    const client = runtime.forPrincipal(clientPrincipal(ids.clientA));
+    const appended = [];
+    for (let index = 0; index < 50; index += 1) {
+      appended.push(client.appendLog(ids.cubeA, {
+        visibility: "broadcast",
+        message: `entry-${index.toString().padStart(2, "0")}`,
+      }));
+    }
+    // Entries 0-39 are pruned; the expiry ledger retains only the newest ten pruned rows.
+    const inLedger = appended[35]!;
+    expect(() => client.readLog(
+      ids.cubeA,
+      { id: inLedger.id, created_at: inLedger.created_at },
+      10,
+    )).toThrow(CursorExpiredError);
+    const agedOut = appended[0]!;
+    expect(() => client.readLog(
+      ids.cubeA,
+      { id: agedOut.id, created_at: agedOut.created_at },
+      10,
+    )).toThrow(CursorExpiredError);
+    // Unknown cursors inside and above the retained range stay NOT_FOUND.
+    const retained = appended[45]!;
+    expect(() => client.readLog(
+      ids.cubeA,
+      { id: randomUUID(), created_at: retained.created_at },
+      10,
+    )).toThrow(ScopedStoreError);
+    expect(() => client.readLog(
+      ids.cubeA,
+      { id: randomUUID(), created_at: "2026-07-15T00:00:00.000Z" },
+      10,
+    )).toThrow(ScopedStoreError);
+  });
+
+  it("reports an unknown below-range cursor as NOT_FOUND while the cube has never pruned", () => {
+    const client = runtime.forPrincipal(clientPrincipal(ids.clientA));
+    client.appendLog(ids.cubeA, { visibility: "broadcast", message: "only entry" });
+    expect(() => client.readLog(
+      ids.cubeA,
+      { id: randomUUID(), created_at: "2020-01-01T00:00:00.000Z" },
+      10,
+    )).toThrow(ScopedStoreError);
+  });
+});

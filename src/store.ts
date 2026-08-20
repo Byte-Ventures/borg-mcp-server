@@ -2714,6 +2714,19 @@ class SqliteScopedStore implements ScopedStore {
       } else {
         droneId = input.droneId;
         droneLabel = seatLabel(requiredText(roleRow, "role_name"), droneId);
+        if (requiredInteger(roleRow, "is_human_seat") === 1) {
+          const occupied = this.#database.prepare(`
+            SELECT label FROM drones
+            WHERE cube_id = ? AND role_id = ? AND evicted_at IS NULL
+            ORDER BY created_at, id
+            LIMIT 1
+          `).get(input.cubeId, input.roleId);
+          if (occupied !== undefined) {
+            throw new RoleInUseError(
+              `The human-seat role is already occupied by ${requiredText(occupied, "label")}.`,
+            );
+          }
+        }
         const metadata = input.runtimeMetadata ?? EMPTY_RUNTIME_METADATA;
         this.#database.prepare(`
           INSERT INTO drones (

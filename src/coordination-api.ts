@@ -185,6 +185,9 @@ export class CoordinationApi {
         if (error instanceof AttachSessionRejectedError) {
           return failure(401, ErrorCode.SESSION_REJECTED, error.message, requestId);
         }
+        if (error instanceof RoleInUseError) {
+          return failure(409, error.code, error.message, requestId);
+        }
         if (error instanceof ScopedStoreError) {
           return failure(404, "NOT_FOUND", error.message, requestId);
         }

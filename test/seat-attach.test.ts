@@ -83,6 +83,76 @@ describe("client seat attach", () => {
     }
   });
 
+  it("keeps a human-seat role singly occupied until its current holder is evicted", async () => {
+    const humanRoleId = randomUUID();
+    runtime.maintenance.createRole({
+      id: humanRoleId,
+      cubeId: ids.cubeA,
+      name: "Coordinator",
+      isHumanSeat: true,
+    });
+    runtime.maintenance.grantClientCube({
+      clientId: clientB.clientId,
+      cubeId: ids.cubeA,
+      access: "manage",
+    });
+    const firstCredential = generateSecret();
+    const first = await attach(
+      clientA.credential,
+      ids.cubeA,
+      humanRoleId,
+      firstCredential,
+      "attach-human-first",
+    );
+    const reused = await attach(
+      clientA.credential,
+      ids.cubeA,
+      humanRoleId,
+      firstCredential,
+      "attach-human-reused",
+    );
+    expect(reused).toMatchObject({
+      status: 200,
+      payload: { result: "reused", drone: first.payload.drone, session: first.payload.session },
+    });
+
+    const refusedCredential = generateSecret();
+    const refused = await attach(
+      clientB.credential,
+      ids.cubeA,
+      humanRoleId,
+      refusedCredential,
+      "attach-human-refused",
+    );
+    expect(refused).toMatchObject({
+      status: 409,
+      error: {
+        code: "ROLE_IN_USE",
+        message: `The human-seat role is already occupied by ${first.payload.drone.label}.`,
+      },
+    });
+    expect(count("drones")).toBe(1);
+    expect(count("drone_sessions")).toBe(1);
+    expect(authority.authenticateStatus(`Bearer ${refusedCredential}`)).toBe("invalid");
+
+    runtime.forPrincipal(authenticatedPrincipal(clientA.credential))
+      .evictDrone(ids.cubeA, first.payload.drone.id);
+    const replacementCredential = generateSecret();
+    const replacement = await attach(
+      clientB.credential,
+      ids.cubeA,
+      humanRoleId,
+      replacementCredential,
+      "attach-human-replacement",
+    );
+    expect(replacement).toMatchObject({ status: 200, payload: { result: "created" } });
+    expect(authority.authenticateStatus(`Bearer ${replacementCredential}`)).toMatchObject({
+      kind: "drone-session",
+      clientId: clientB.clientId,
+      cubeId: ids.cubeA,
+    });
+  });
+
   it("keeps eviction and revocation distinct while time never expires a session", async () => {
     const revokedCredential = generateSecret();
     const revoked = await attach(
@@ -499,7 +569,7 @@ async function attach(
     readonly session: { readonly id: string };
     readonly initial_log_cursor: { readonly id: string; readonly created_at: string } | null;
   };
-  readonly error?: { readonly code: string };
+  readonly error?: { readonly code: string; readonly message: string };
 }> {
   const response = await api.handle({
     method: "POST",
@@ -513,7 +583,7 @@ async function attach(
     }),
     signal: new AbortController().signal,
   });
-  const body = response.body as { payload?: unknown; error?: { code: string } };
+  const body = response.body as { payload?: unknown; error?: { code: string; message: string } };
   const payload = body.payload === undefined
     ? undefined
     : decodeAttachResponseEnvelope(response.body).payload;

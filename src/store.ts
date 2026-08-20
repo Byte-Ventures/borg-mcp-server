@@ -349,6 +349,7 @@ export interface ScopedStore {
   ) => RepositoryCubeRecord;
   readonly listCubes: () => CubeRecord[];
   readonly getCube: (cubeId: string) => CubeRecord | null;
+  readonly assertCanManageCube: (cubeId: string) => void;
   readonly deleteCube: (cubeId: string) => void;
   readonly updateCube: (cubeId: string, input: UpdateCubeInput) => CubeRecord;
   readonly updateDirective: (cubeId: string, directive: string) => void;
@@ -1413,6 +1414,10 @@ class SqliteScopedStore implements ScopedStore {
     `).get(cubeId, ...scope.parameters);
     if (row === undefined && this.#wasDeletedForPrincipal(cubeId)) throw new CubeDeletedError();
     return row === undefined ? null : cubeRecord(cubeRow(row));
+  }
+
+  assertCanManageCube(cubeId: string): void {
+    this.#requireCube(cubeId, "manage");
   }
 
   deleteCube(cubeId: string): void {

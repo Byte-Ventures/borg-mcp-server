@@ -1578,6 +1578,29 @@ describe("coordination stream setup", () => {
          message_taxonomy: taxonomy,
       }, advisory: "Directive updated (8 bytes). Review it for relevance and compactness." } },
     });
+    const malformedTaxonomy = await api.handle({
+      method: "PATCH",
+      path: `/api/cubes/${cubeId}`,
+      principal: manager,
+      body: {
+        protocol_version: "12",
+        request_id: "cube-taxonomy-invalid",
+        payload: {
+          message_taxonomy: [{ class: "completion", lifecycle: "finished" }],
+        },
+      },
+      signal: new AbortController().signal,
+    });
+    expect(malformedTaxonomy).toMatchObject({
+      status: 400,
+      body: {
+        request_id: "cube-taxonomy-invalid",
+        error: {
+          code: "INVALID_INPUT",
+          message: "Invalid message_taxonomy: Message taxonomy lifecycle must be dispatch or completion.",
+        },
+      },
+    });
     const largeDirective = await api.handle({
       method: "PATCH",
       path: `/api/cubes/${cubeId}`,
@@ -1609,6 +1632,23 @@ describe("coordination stream setup", () => {
       signal: new AbortController().signal,
     });
     expect(denied).toMatchObject({
+      status: 403,
+      body: { error: { code: "ACCESS_DENIED", message: "Access denied." } },
+    });
+    const malformedDenied = await api.handle({
+      method: "PATCH",
+      path: `/api/cubes/${cubeId}`,
+      principal: clientPrincipal(readerId),
+      body: {
+        protocol_version: "12",
+        request_id: "cube-taxonomy-denied",
+        payload: {
+          message_taxonomy: [{ class: "completion", lifecycle: "finished" }],
+        },
+      },
+      signal: new AbortController().signal,
+    });
+    expect(malformedDenied).toMatchObject({
       status: 403,
       body: { error: { code: "ACCESS_DENIED", message: "Access denied." } },
     });

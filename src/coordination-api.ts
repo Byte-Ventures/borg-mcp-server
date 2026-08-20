@@ -354,6 +354,7 @@ export class CoordinationApi {
       }
       if (resource === undefined && request.method === "PATCH") {
         const envelope = decodeEnvelope(request.body);
+        store.assertCanManageCube(cubeId);
         exactKeys(envelope.payload, [], ["cube_directive", "message_taxonomy"]);
         if (Object.keys(envelope.payload).length === 0) throw new InputError();
         const directive = optionalText(envelope.payload, "cube_directive", 100_000);
@@ -1100,7 +1101,15 @@ function optionalRoleClass(value: unknown): "queen" | "worker" | undefined {
 }
 
 function optionalMessageTaxonomy(value: unknown) {
-  return value === undefined ? undefined : validateMessageTaxonomy(value);
+  if (value === undefined) return undefined;
+  try {
+    return validateMessageTaxonomy(value);
+  } catch (error) {
+    if (error instanceof TypeError) {
+      throw new InputError(`Invalid message_taxonomy: ${error.message.slice(0, 256)}`);
+    }
+    throw error;
+  }
 }
 
 function requiredSectionHeading(record: Record<string, unknown>, key: string): string {

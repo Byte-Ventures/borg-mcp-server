@@ -1,5 +1,7 @@
 import { Agent, request as httpsRequest } from "node:https";
-import type { IncomingHttpHeaders } from "node:http";
+import type { IncomingHttpHeaders, IncomingMessage, ServerResponse } from "node:http";
+import { EventEmitter } from "node:events";
+import { Readable } from "node:stream";
 import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { connect as connectTcp, type Socket } from "node:net";
 import { tmpdir } from "node:os";
@@ -12,6 +14,7 @@ import {
   createRequestHandlerContext,
   ConcurrentQuota,
   DEFAULT_SERVICE_LIMITS,
+  handleRequest,
   PreAuthAdmissionLimiter,
   RequestRateLimiter,
   startHttpsServer,
@@ -1722,6 +1725,61 @@ describe("HTTPS service", () => {
     } finally {
       await delayed.close();
     }
+  });
+
+  it("does not exchange enrollment after an abort during the body read", async () => {
+    const body = JSON.stringify({ request_id: "delayed-enrollment" });
+    let finishBody!: () => void;
+    let markBodyStarted!: () => void;
+    const bodyReady = new Promise<void>((resolve) => { finishBody = resolve; });
+    const bodyStarted = new Promise<void>((resolve) => { markBodyStarted = resolve; });
+    const requestBody = Readable.from((async function* () {
+      markBodyStarted();
+      await bodyReady;
+      yield body;
+    })());
+    const request = Object.assign(requestBody, {
+      headers: { "content-length": byteLength(body).toString() },
+      method: "POST",
+      url: "/api/enrollment/exchange",
+      socket: {},
+    }) as unknown as IncomingMessage;
+    const responseEvents = new EventEmitter();
+    const response = Object.assign(responseEvents, {
+      destroyed: false,
+      headersSent: false,
+      statusCode: 0,
+      writeHead(status: number) {
+        this.headersSent = true;
+        this.statusCode = status;
+        return this;
+      },
+      end() {
+        responseEvents.emit("finish");
+        return this;
+      },
+    }) as unknown as ServerResponse;
+    const exchangeEnrollment = vi.fn(async () => ({ status: 201 as const }));
+    const controller = new AbortController();
+    const handled = handleRequest(
+      request,
+      response,
+      { exchangeEnrollment, debugLogger: disabledDebugLogger },
+      DEFAULT_SERVICE_LIMITS,
+      new PreAuthAdmissionLimiter(DEFAULT_SERVICE_LIMITS),
+      new RequestRateLimiter(DEFAULT_SERVICE_LIMITS),
+      new ConcurrentQuota(DEFAULT_SERVICE_LIMITS.maxStreamsPerCredential),
+      () => "127.0.0.1",
+      controller.signal,
+      { route: "enrollment_exchange", method: "POST", authentication: "not_required" },
+    );
+
+    await bodyStarted;
+    controller.abort();
+    finishBody();
+    await handled;
+
+    expect(exchangeEnrollment).not.toHaveBeenCalled();
   });
 });
 

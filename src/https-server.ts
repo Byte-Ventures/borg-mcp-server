@@ -284,7 +284,7 @@ function createRequestListener(
   };
 }
 
-async function handleRequest(
+export async function handleRequest(
   request: IncomingMessage,
   response: ServerResponse,
   context: RequestHandlerContext,
@@ -385,6 +385,7 @@ async function handleRequest(
         decoded = undefined;
       }
     }
+    if (signal.aborted) return;
     const result = await context.exchangeEnrollment(decoded);
     if (signal.aborted) return;
     if (result.body === undefined) sendEmpty(response, result.status, result.status === 400);

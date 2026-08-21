@@ -1581,6 +1581,22 @@ describe("Principal to ScopedStore isolation", () => {
     stopResumed();
   });
 
+  it("redacts database failures from liveness scans", () => {
+    const database = new DatabaseSync(join(directory, "borg.db"));
+    database.exec("DROP TABLE activity_log_recipients");
+    database.close();
+    let failure: unknown;
+
+    try {
+      runtime.liveness.scan();
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toBe(operatorErrors.LIVENESS_SCAN_FAILED);
+    expect((failure as Error).message).not.toContain("activity_log_recipients");
+  });
+
   it("keeps overlapping wake subscriptions registered until the last one closes", () => {
     const manager = runtime.forPrincipal(clientPrincipal(ids.clientA));
     const drone = runtime.forPrincipal(droneSessionPrincipal({

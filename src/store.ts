@@ -3955,39 +3955,43 @@ class SqliteLivenessStore implements LivenessStore {
   }
 
   scan(): ActivityNotificationRecord[] {
-    const now = this.#clock();
-    const threshold = new Date(now.getTime() - WAKE_RETRY_INTERVAL_MS).toISOString();
-    const rows = this.#database.prepare(`
-      SELECT entry.id, entry.cube_id, recipient.drone_id, entry.created_at,
-             COALESCE(attempt.attempt_count, 0) AS attempt_count,
-             attempt.last_ping_at
-      FROM activity_log AS entry
-      JOIN activity_log_recipients AS recipient ON recipient.entry_id = entry.id
-      LEFT JOIN activity_acks AS ack
-        ON ack.entry_id = entry.id AND ack.claimant_drone_id = recipient.drone_id AND ack.kind = 'ack'
-      LEFT JOIN activity_wake_attempts AS attempt
-        ON attempt.entry_id = entry.id AND attempt.drone_id = recipient.drone_id
-      WHERE entry.visibility = 'direct' AND ack.entry_id IS NULL AND entry.created_at <= ?
-        AND COALESCE(attempt.attempt_count, 0) < ?
-        AND (attempt.last_ping_at IS NULL OR attempt.last_ping_at <= ?)
-      ORDER BY entry.created_at, entry.id, recipient.drone_id
-    `).all(threshold, WAKE_MAX_ATTEMPTS, threshold);
-    for (const row of rows) {
-      const cubeId = requiredText(row, "cube_id");
-      const entryId = requiredText(row, "id");
-      const droneId = requiredText(row, "drone_id");
-      if (!this.#activityHub.hasListener(cubeId, droneId)) continue;
-      const wakeNonce = randomUUID();
-      this.#database.prepare(`
-        INSERT INTO activity_wake_attempts (entry_id, drone_id, attempt_count, last_ping_at)
-        VALUES (?, ?, 1, ?)
-        ON CONFLICT (entry_id, drone_id) DO UPDATE SET
-          attempt_count = activity_wake_attempts.attempt_count + 1,
-          last_ping_at = excluded.last_ping_at
-      `).run(entryId, droneId, this.#clock().toISOString());
-      this.#activityHub.publish(cubeId, this.#enrichedEntry(cubeId, entryId, wakeNonce));
+    try {
+      const now = this.#clock();
+      const threshold = new Date(now.getTime() - WAKE_RETRY_INTERVAL_MS).toISOString();
+      const rows = this.#database.prepare(`
+        SELECT entry.id, entry.cube_id, recipient.drone_id, entry.created_at,
+               COALESCE(attempt.attempt_count, 0) AS attempt_count,
+               attempt.last_ping_at
+        FROM activity_log AS entry
+        JOIN activity_log_recipients AS recipient ON recipient.entry_id = entry.id
+        LEFT JOIN activity_acks AS ack
+          ON ack.entry_id = entry.id AND ack.claimant_drone_id = recipient.drone_id AND ack.kind = 'ack'
+        LEFT JOIN activity_wake_attempts AS attempt
+          ON attempt.entry_id = entry.id AND attempt.drone_id = recipient.drone_id
+        WHERE entry.visibility = 'direct' AND ack.entry_id IS NULL AND entry.created_at <= ?
+          AND COALESCE(attempt.attempt_count, 0) < ?
+          AND (attempt.last_ping_at IS NULL OR attempt.last_ping_at <= ?)
+        ORDER BY entry.created_at, entry.id, recipient.drone_id
+      `).all(threshold, WAKE_MAX_ATTEMPTS, threshold);
+      for (const row of rows) {
+        const cubeId = requiredText(row, "cube_id");
+        const entryId = requiredText(row, "id");
+        const droneId = requiredText(row, "drone_id");
+        if (!this.#activityHub.hasListener(cubeId, droneId)) continue;
+        const wakeNonce = randomUUID();
+        this.#database.prepare(`
+          INSERT INTO activity_wake_attempts (entry_id, drone_id, attempt_count, last_ping_at)
+          VALUES (?, ?, 1, ?)
+          ON CONFLICT (entry_id, drone_id) DO UPDATE SET
+            attempt_count = activity_wake_attempts.attempt_count + 1,
+            last_ping_at = excluded.last_ping_at
+        `).run(entryId, droneId, this.#clock().toISOString());
+        this.#activityHub.publish(cubeId, this.#enrichedEntry(cubeId, entryId, wakeNonce));
+      }
+      return [];
+    } catch {
+      throw operatorErrors.LIVENESS_SCAN_FAILED;
     }
-    return [];
   }
 
   #enrichedEntry(cubeId: string, entryId: string, wakeNonce?: string): EnrichedActivityRecord {

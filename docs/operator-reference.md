@@ -231,10 +231,15 @@ cube visibility rules as paginated reads.
 
 Roster `wake_state` is `idle` when no directed dispatch is pending, `pending`
 while an unacknowledged dispatch is within the three-minute wake window, `awake`
-after an acknowledgement, and `stale` after the window expires. The server
-re-pings registered wake paths at most twice, once per minute; it then gives up
-without creating additional log entries. Acknowledgement is the liveness signal,
-not an idle drone's last-seen timestamp.
+after an acknowledgement, and `stale` after the window expires. For each pending
+directed dispatch, the server sends its recipient at most two delivered wake-path
+pings, no more than one per minute. An offline recipient is skipped without
+consuming an attempt, nothing is queued for later delivery, and an arbitrary
+interval may therefore separate the two delivered pings. Each ping is ephemeral,
+non-durable, and directed only to that recipient: other drones cannot observe it,
+it is not written to or replayed from the activity log, and it leaves no durable
+record for a reconnecting drone.
+Acknowledgement is the liveness signal, not an idle drone's last-seen timestamp.
 
 ## Debugging
 

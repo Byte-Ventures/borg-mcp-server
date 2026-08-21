@@ -262,10 +262,12 @@ interface ServiceDependencies {
   }) => ForegroundDashboard | undefined;
   readonly waitForShutdown: (server: RunningServer, signal?: AbortSignal) => Promise<void>;
   readonly debugOutput?: (line: string) => void;
+  readonly operatorOutput?: (line: string) => void;
   readonly installShutdownHandlers?: () => { readonly signal: AbortSignal; readonly dispose: () => void };
   readonly openStore?: typeof openStore;
   readonly startLivenessScheduler?: (
     liveness: LivenessStore,
+    reportFailure: (failure: Error) => void,
   ) => { readonly stop: () => void };
   readonly onStartupPhase?: (
     phase: "pre-lock" | "post-lock" | "pre-listen",
@@ -512,6 +514,9 @@ export function createNodeServerService(dependencies: ServiceDependencies): Serv
         if (authRuntime !== undefined) {
           livenessScheduler = (dependencies.startLivenessScheduler ?? startLivenessScheduler)(
             authRuntime.liveness,
+            (failure) => dependencies.operatorOutput?.(
+              `LIVENESS_SCAN_FAILED: ${failure.message}`,
+            ),
           );
         }
       } catch (error) {
@@ -803,6 +808,7 @@ const startOnlyService = createNodeServerService({
   bindOwnerCredential: (origin) =>
     bindPortableOwnerCredentialPort(dataDirectory, credentialFile, runtimeOriginPort(origin), origin),
   debugOutput: (line) => console.error(line),
+  operatorOutput: (line) => console.error(line),
 });
 export const nodeServerService: ServerService = {
   start: startOnlyService.start,
@@ -1780,13 +1786,24 @@ function waitForAbort(signal: AbortSignal): Promise<void> {
   }));
 }
 
-function startLivenessScheduler(liveness: { readonly scan: () => unknown }): { readonly stop: () => void } {
+export function startLivenessScheduler(
+  liveness: { readonly scan: () => unknown },
+  reportFailure: (failure: Error) => void,
+): { readonly stop: () => void } {
   let stopped = false;
+  let failureReported = false;
   let timer: NodeJS.Timeout;
   const schedule = (): void => {
     timer = setTimeout(() => {
       if (stopped) return;
-      try { liveness.scan(); } catch { /* Retry on the next bounded tick. */ }
+      try {
+        liveness.scan();
+        failureReported = false;
+      } catch {
+        // Report once per consecutive failure episode; a successful scan re-arms reporting.
+        if (!failureReported) reportFailure(operatorErrors.LIVENESS_SCAN_FAILED);
+        failureReported = true;
+      }
       schedule();
     }, 60_000);
     timer.unref();

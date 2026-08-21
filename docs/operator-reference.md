@@ -236,9 +236,11 @@ directed dispatch, the server sends its recipient at most two delivered wake-pat
 pings, no more than one per minute. An offline recipient is skipped without
 consuming an attempt, nothing is queued for later delivery, and an arbitrary
 interval may therefore separate the two delivered pings. Each ping is ephemeral,
-non-durable, and directed only to that recipient: other drones cannot observe it,
-it is not written to or replayed from the activity log, and it leaves no durable
-record for a reconnecting drone.
+non-durable, and delivered to every drone on that dispatch's recipient list;
+drones outside the list never observe it. Co-recipients therefore observe one
+another's pings, so a dispatch with N unacknowledged recipients can deliver up to
+N wake events to each recipient. A ping is not written to or replayed from the
+activity log, and it leaves no durable record for a reconnecting drone.
 Acknowledgement is the liveness signal, not an idle drone's last-seen timestamp.
 
 ## Debugging

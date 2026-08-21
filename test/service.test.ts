@@ -28,6 +28,7 @@ import {
   recoverStaleRuntimeLock,
   renderBindIntentMismatch,
   renderStartMachineOutput,
+  startLivenessScheduler,
   stopServerRuntime,
   resolveStorageLimits,
   selectServerEnvironment,
@@ -56,6 +57,36 @@ function serviceProbeError(code: string | number): Error {
 }
 
 describe("node server service", () => {
+  it("reports one redacted failure per liveness scan failure episode and keeps ticking", async () => {
+    vi.useFakeTimers();
+    try {
+      const databaseFailure = new Error("SQLITE_CORRUPT at /private/server/borg.db");
+      const scan = vi.fn()
+        .mockImplementationOnce(() => { throw databaseFailure; })
+        .mockImplementationOnce(() => { throw databaseFailure; })
+        .mockReturnValueOnce([])
+        .mockImplementationOnce(() => { throw databaseFailure; });
+      const reportFailure = vi.fn();
+      const scheduler = startLivenessScheduler({ scan }, reportFailure);
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(reportFailure).toHaveBeenCalledWith(operatorErrors.LIVENESS_SCAN_FAILED);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(reportFailure).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(scan).toHaveBeenCalledTimes(4);
+      expect(reportFailure).toHaveBeenCalledTimes(2);
+      expect(reportFailure.mock.calls.flat().join(" ")).not.toContain("SQLITE_CORRUPT");
+      expect(reportFailure.mock.calls.flat().join(" ")).not.toContain("/private/server/borg.db");
+
+      scheduler.stop();
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(scan).toHaveBeenCalledTimes(4);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it.each([
     [null, true],
     [false, true],
@@ -401,8 +432,15 @@ describe("node server service", () => {
     try {
       await bootstrapServer(directory);
       const stop = vi.fn();
+      const operatorOutput = vi.fn();
       const bindOwnerCredential = vi.fn().mockResolvedValue(undefined);
-      const startLivenessScheduler = vi.fn((_liveness: LivenessStore) => ({ stop }));
+      const startLivenessScheduler = vi.fn((
+        _liveness: LivenessStore,
+        reportFailure: (failure: Error) => void,
+      ) => {
+        reportFailure(operatorErrors.LIVENESS_SCAN_FAILED);
+        return { stop };
+      });
       const service = createNodeServerService({
         environment: { BORG_SERVER_DATA_DIR: directory },
         readFile: vi.fn().mockResolvedValue(Buffer.from("certificate")),
@@ -416,6 +454,7 @@ describe("node server service", () => {
         bindOwnerCredential,
         waitForShutdown: vi.fn().mockResolvedValue(undefined),
         startLivenessScheduler,
+        operatorOutput,
       });
 
       await service.start([]);
@@ -423,6 +462,9 @@ describe("node server service", () => {
       expect(bindOwnerCredential).toHaveBeenCalledWith("https://127.0.0.1:7091");
       expect(startLivenessScheduler).toHaveBeenCalledOnce();
       expect(startLivenessScheduler.mock.calls[0]![0]).toMatchObject({ scan: expect.any(Function) });
+      expect(operatorOutput).toHaveBeenCalledWith(
+        `LIVENESS_SCAN_FAILED: ${operatorErrors.LIVENESS_SCAN_FAILED.message}`,
+      );
       expect(stop).toHaveBeenCalledOnce();
     } finally {
       await rm(directory, { recursive: true, force: true });

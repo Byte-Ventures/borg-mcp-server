@@ -1581,6 +1581,74 @@ describe("Principal to ScopedStore isolation", () => {
     stopResumed();
   });
 
+  it("redacts database failures from liveness scans", () => {
+    const database = new DatabaseSync(join(directory, "borg.db"));
+    database.exec("DROP TABLE activity_log_recipients");
+    database.close();
+    let failure: unknown;
+
+    try {
+      runtime.liveness.scan();
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toBe(operatorErrors.LIVENESS_SCAN_FAILED);
+    expect((failure as Error).message).not.toContain("activity_log_recipients");
+  });
+
+  it("delivers every multi-recipient wake ping to each co-recipient", () => {
+    const peerDroneId = "00000000-0000-4000-8000-000000000031";
+    const peerSessionId = "00000000-0000-4000-8000-000000000032";
+    runtime.maintenance.createDrone({
+      id: peerDroneId,
+      cubeId: ids.cubeA,
+      roleId: ids.roleA,
+      clientId: ids.clientA,
+      label: "wake-peer",
+    });
+    runtime.maintenance.createDroneSession({
+      id: peerSessionId,
+      clientId: ids.clientA,
+      cubeId: ids.cubeA,
+      droneId: peerDroneId,
+    });
+    const first = runtime.forPrincipal(droneSessionPrincipal({
+      id: ids.sessionA,
+      clientId: ids.clientA,
+      cubeId: ids.cubeA,
+      droneId: ids.droneA,
+    }));
+    const peer = runtime.forPrincipal(droneSessionPrincipal({
+      id: peerSessionId,
+      clientId: ids.clientA,
+      cubeId: ids.cubeA,
+      droneId: peerDroneId,
+    }));
+    const firstEvents: ActivityStreamRecord[] = [];
+    const peerEvents: ActivityStreamRecord[] = [];
+    const stopFirst = first.subscribeActivity(ids.cubeA, (entry) => firstEvents.push(entry));
+    const stopPeer = peer.subscribeActivity(ids.cubeA, (entry) => peerEvents.push(entry));
+    runtime.forPrincipal(clientPrincipal(ids.clientA)).appendLog(ids.cubeA, {
+      message: "wake both recipients",
+      visibility: "direct",
+      recipientDroneIds: [ids.droneA, peerDroneId],
+    });
+
+    storeNow = new Date("2026-07-14T12:01:01.000Z");
+    runtime.liveness.scan();
+
+    const firstWakeNonces = firstEvents.flatMap((entry) =>
+      "wake_nonce" in entry ? [entry.wake_nonce] : []);
+    const peerWakeNonces = peerEvents.flatMap((entry) =>
+      "wake_nonce" in entry ? [entry.wake_nonce] : []);
+    expect(firstWakeNonces).toHaveLength(2);
+    expect(new Set(firstWakeNonces).size).toBe(2);
+    expect(peerWakeNonces).toEqual(firstWakeNonces);
+    stopFirst();
+    stopPeer();
+  });
+
   it("keeps overlapping wake subscriptions registered until the last one closes", () => {
     const manager = runtime.forPrincipal(clientPrincipal(ids.clientA));
     const drone = runtime.forPrincipal(droneSessionPrincipal({

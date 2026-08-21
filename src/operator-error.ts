@@ -55,6 +55,7 @@ export type OperatorErrorCode =
   | "CONTEXT_GUIDELINE_INVALID"
   | "DATABASE_LIMIT_INVALID"
   | "DISK_RESERVE_INVALID"
+  | "LIVENESS_SCAN_FAILED"
   | "CLIENT_NOT_FOUND"
   | "CLIENT_SELECTOR_NOT_FOUND"
   | "CLIENT_REVOKED"
@@ -123,6 +124,7 @@ const publicMessages: Readonly<Record<OperatorErrorCode, string>> = Object.freez
   CONTEXT_GUIDELINE_INVALID: "Set BORG_SERVER_CONTEXT_GUIDELINE_BYTES to a positive integer.",
   DATABASE_LIMIT_INVALID: "Set BORG_SERVER_MAX_DATABASE_BYTES to a positive integer.",
   DISK_RESERVE_INVALID: "Set BORG_SERVER_MIN_FREE_DISK_BYTES to a positive integer.",
+  LIVENESS_SCAN_FAILED: "The liveness watchdog could not scan pending wake deliveries. It will retry; check the server database and storage health.",
   CLIENT_NOT_FOUND: "Provide an existing active client ID.",
   CLIENT_SELECTOR_NOT_FOUND: "Provide an existing client name, handle, or ID.",
   CLIENT_REVOKED: "Client exists but is revoked.",

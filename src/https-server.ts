@@ -432,8 +432,11 @@ export async function handleRequest(
     const credentialRetry = credentialRateLimiter.consume(rateLimitIdentity);
     if (credentialRetry !== null) return sendRateLimited(response, credentialRetry);
     const query = parseCoordinationQuery(request.url, path);
-    if (query === INVALID_COORDINATION_QUERY) {
-      sendJson(response, 400, protocolError("INVALID_INPUT", "Invalid query parameters."), true);
+    if ("reason" in query) {
+      sendJson(response, 400, protocolError(
+        "INVALID_INPUT",
+        coordinationQueryErrorMessage(query),
+      ), true);
       return;
     }
     const result = await context.handleCoordination({
@@ -658,26 +661,52 @@ function protocolError(code: string, message: string): object {
   return { protocol_version: PROTOCOL_VERSION, error: { code, message } };
 }
 
-const INVALID_COORDINATION_QUERY = Symbol("invalid-coordination-query");
+type CoordinationQueryParameter = "cursor" | "since";
 
-function parseCoordinationQuery(
+export type CoordinationQueryError = Readonly<{
+  reason: "parameters_not_allowed" | "unknown_parameter" | "repeated_parameter" |
+    "empty_parameter" | "malformed_query";
+  allowed: CoordinationQueryParameter | null;
+}>;
+
+export function parseCoordinationQuery(
   value: string | undefined,
   path: string,
-): { readonly cursor?: string; readonly since?: string } | typeof INVALID_COORDINATION_QUERY {
+): { readonly cursor?: string; readonly since?: string } | CoordinationQueryError {
   if (value === undefined) return {};
+  const allowed = path.endsWith("/stream") ? "cursor" : path.endsWith("/drones") ? "since" : null;
   try {
     const parsed = new URL(value, "https://local.invalid");
     const keys = [...parsed.searchParams.keys()];
-    const allowed = path.endsWith("/stream") ? "cursor" : path.endsWith("/drones") ? "since" : null;
-    if (allowed === null) return keys.length === 0 ? {} : INVALID_COORDINATION_QUERY;
-    if (keys.some((key) => key !== allowed)) return INVALID_COORDINATION_QUERY;
+    if (allowed === null) {
+      return keys.length === 0 ? {} : { reason: "parameters_not_allowed", allowed };
+    }
+    if (keys.some((key) => key !== allowed)) return { reason: "unknown_parameter", allowed };
     const values = parsed.searchParams.getAll(allowed);
     if (values.length === 0) return {};
-    if (values.length !== 1 || values[0]!.length === 0) return INVALID_COORDINATION_QUERY;
+    if (values.length !== 1) return { reason: "repeated_parameter", allowed };
+    if (values[0]!.length === 0) return { reason: "empty_parameter", allowed };
     return allowed === "cursor" ? { cursor: values[0]! } : { since: values[0]! };
   } catch {
-    return INVALID_COORDINATION_QUERY;
+    return { reason: "malformed_query", allowed };
   }
+}
+
+export function coordinationQueryErrorMessage(error: CoordinationQueryError): string {
+  if (error.reason === "parameters_not_allowed") return "This path accepts no query parameters.";
+  const parameter = `"${error.allowed ?? "query"}"`;
+  if (error.reason === "unknown_parameter") {
+    return `Use only the ${parameter} query parameter on this path.`;
+  }
+  if (error.reason === "repeated_parameter") {
+    return `Provide the ${parameter} query parameter at most once.`;
+  }
+  if (error.reason === "empty_parameter") {
+    return `Provide a non-empty value for the ${parameter} query parameter.`;
+  }
+  return error.allowed === null
+    ? "Provide a valid URL without query parameters on this path."
+    : `Provide a valid query string using only the ${parameter} query parameter.`;
 }
 
 function isCoordinationPath(path: string | null): path is string {

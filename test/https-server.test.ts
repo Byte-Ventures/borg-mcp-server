@@ -12,9 +12,11 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import {
   createRequestHandlerContext,
+  coordinationQueryErrorMessage,
   ConcurrentQuota,
   DEFAULT_SERVICE_LIMITS,
   handleRequest,
+  parseCoordinationQuery,
   PreAuthAdmissionLimiter,
   RequestRateLimiter,
   startHttpsServer,
@@ -552,21 +554,51 @@ describe("HTTPS service", () => {
   });
 
   it.each([
-    "?cursor=first&cursor=second",
-    "?cursor=first&unknown=value",
-    "?unknown=value",
-  ])("rejects ambiguous stream queries before invoking the handler: %s", async (query) => {
+    {
+      name: "parameters on a path that accepts none",
+      path: "/api/cubes?cursor=first",
+      message: "This path accepts no query parameters.",
+    },
+    {
+      name: "a parameter outside the path allowlist",
+      path: "/api/cubes/00000000-0000-4000-8000-000000000001/stream?since=now",
+      message: 'Use only the "cursor" query parameter on this path.',
+    },
+    {
+      name: "a repeated accepted parameter",
+      path: "/api/cubes/00000000-0000-4000-8000-000000000001/stream?cursor=first&cursor=second",
+      message: 'Provide the "cursor" query parameter at most once.',
+    },
+    {
+      name: "an empty accepted parameter",
+      path: "/api/cubes/00000000-0000-4000-8000-000000000001/stream?cursor=",
+      message: 'Provide a non-empty value for the "cursor" query parameter.',
+    },
+  ])("explains $name before invoking the handler", async ({ path, message }) => {
     coordinationCalls = 0;
     const response = await request(
       server.origin,
       certificate,
-      `/api/cubes/00000000-0000-4000-8000-000000000001/stream${query}`,
+      path,
       { authorization: "Bearer accepted-test-token" },
     );
 
     expect(response.status).toBe(400);
-    expect(JSON.parse(response.body).error.code).toBe("INVALID_INPUT");
+    expect(JSON.parse(response.body).error).toEqual({ code: "INVALID_INPUT", message });
     expect(coordinationCalls).toBe(0);
+  });
+
+  it("explains a malformed coordination query URL", () => {
+    const result = parseCoordinationQuery(
+      "http://[",
+      "/api/cubes/00000000-0000-4000-8000-000000000001/stream",
+    );
+    if (!("reason" in result)) throw new Error("Expected the malformed query to be rejected.");
+
+    expect(result).toEqual({ reason: "malformed_query", allowed: "cursor" });
+    expect(coordinationQueryErrorMessage(result)).toBe(
+      'Provide a valid query string using only the "cursor" query parameter.',
+    );
   });
 
   it("forwards one roster liveness anchor and rejects ambiguous anchors", async () => {

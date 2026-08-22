@@ -124,7 +124,7 @@ describe("SQLite migrations", () => {
     expect(first.diagnostics()).toEqual({
       journalMode: "wal",
       foreignKeys: true,
-      schemaVersions: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25],
+      schemaVersions: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26],
     });
     expect((await stat(join(directory, "data"))).mode & 0o777).toBe(0o700);
     expect((await stat(databasePath)).mode & 0o777).toBe(0o600);
@@ -134,9 +134,27 @@ describe("SQLite migrations", () => {
 
     const second = await openStore({ path: databasePath });
     expect(second.diagnostics().schemaVersions)
-      .toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25]);
+      .toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26]);
     second.close();
     await expect(access(databasePath)).resolves.toBeUndefined();
+  });
+
+  it("adds the ordered direct-entry liveness scan index when upgrading a v25 database", () => {
+    const database = new DatabaseSync(":memory:");
+    applyMigrations(database, STORE_MIGRATIONS.slice(0, 25));
+    expect(database.prepare(
+      "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'activity_log_direct_wake_scan_idx'",
+    ).get()).toBeUndefined();
+
+    applyMigrations(database);
+
+    expect(database.prepare(
+      "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'activity_log_direct_wake_scan_idx'",
+    ).get()).toEqual({
+      sql: "CREATE INDEX activity_log_direct_wake_scan_idx\n" +
+        "      ON activity_log (cube_id, created_at, id) WHERE visibility = 'direct'",
+    });
+    database.close();
   });
 
   it("rolls back every statement and version record when a migration fails", () => {
@@ -760,7 +778,7 @@ describe("SQLite migrations", () => {
     ).get()).toBeUndefined();
     expect(database.prepare(
       "SELECT version, name FROM schema_migrations ORDER BY version DESC LIMIT 1",
-    ).get()).toEqual({ version: 25, name: "explicit_log_addressing" });
+    ).get()).toEqual({ version: 26, name: "bounded_liveness_scan" });
     database.close();
   });
 
@@ -955,7 +973,7 @@ Structured message routing:
     }).toEqual(historyBefore);
     expect(database.prepare(
       "SELECT version, name FROM schema_migrations ORDER BY version DESC LIMIT 1",
-    ).get()).toEqual({ version: 25, name: "explicit_log_addressing" });
+    ).get()).toEqual({ version: 26, name: "bounded_liveness_scan" });
     database.close();
   });
 

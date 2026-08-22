@@ -30,4 +30,5 @@ export const MIGRATION_CHECKSUM_MANIFEST = Object.freeze([
   { version: 23, name: "reliable_coordination_replay", checksum: "c92eb33106eb8cded214df19f39bd7f4cef7ac263d964d155cb50b35576e347d" },
   { version: 24, name: "cube_documents", checksum: "378155b6650a1e7490e891e41df0f4970ecf8e5b90ef7a43dc874fc6ee02228a" },
   { version: 25, name: "explicit_log_addressing", checksum: "8b7473129d0e5cf5cce41ee949a6529726f5dbad37e85a7f795eb23c936956e8" },
+  { version: 26, name: "bounded_liveness_scan", checksum: "010895aba3aaa6f0694d3d3474d56441a07765e6244816c2fa5cb9bda77c30a7" },
 ] satisfies readonly MigrationChecksumEntry[]);

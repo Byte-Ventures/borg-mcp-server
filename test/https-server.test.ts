@@ -236,6 +236,7 @@ describe("HTTPS service", () => {
 
       expect(lines.map((line) => JSON.parse(line))).toEqual([
         {
+          ts: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u),
           level: "info",
           event: "request",
           method: "GET",
@@ -244,6 +245,7 @@ describe("HTTPS service", () => {
           elapsed_ms: 1_001,
         },
         {
+          ts: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u),
           level: "warn",
           event: "slow_request",
           method: "GET",

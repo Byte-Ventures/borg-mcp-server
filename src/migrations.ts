@@ -840,6 +840,12 @@ Structured message routing:
       );
     `,
   },
+  {
+    version: 26,
+    name: "bounded_liveness_scan",
+    sql: `CREATE INDEX activity_log_direct_wake_scan_idx
+      ON activity_log (cube_id, created_at, id) WHERE visibility = 'direct';`,
+  },
 ]);
 
 interface AppliedMigrationRow {

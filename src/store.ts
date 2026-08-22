@@ -4005,9 +4005,47 @@ class ActivityHub {
     this.#notifyAll();
   }
 
-  hasListener(cubeId: string, droneId: string): boolean {
-    return (this.#wakeListeners.get(cubeId)?.get(droneId) ?? 0) > 0;
+  wakeTargets(): readonly { readonly cubeId: string; readonly droneId: string }[] {
+    return [...this.#wakeListeners.entries()].flatMap(([cubeId, drones]) =>
+      [...drones.keys()].map((droneId) => ({ cubeId, droneId })),
+    );
   }
+}
+
+const LIVENESS_SCAN_BATCH_SIZE = 500;
+
+export const LIVENESS_CANDIDATE_QUERY = `
+  SELECT entry.id, entry.cube_id, recipient.drone_id, entry.created_at,
+         COALESCE(attempt.attempt_count, 0) AS attempt_count,
+         attempt.last_ping_at
+  FROM activity_log AS entry INDEXED BY activity_log_direct_wake_scan_idx
+  JOIN activity_log_recipients AS recipient ON recipient.entry_id = entry.id
+  LEFT JOIN activity_acks AS ack
+    ON ack.entry_id = entry.id AND ack.claimant_drone_id = recipient.drone_id AND ack.kind = 'ack'
+  LEFT JOIN activity_wake_attempts AS attempt
+    ON attempt.entry_id = entry.id AND attempt.drone_id = recipient.drone_id
+  WHERE entry.visibility = 'direct' AND entry.cube_id = ?
+    AND ack.entry_id IS NULL AND entry.created_at <= ?
+    AND recipient.drone_id IN (SELECT value FROM json_each(?))
+    AND COALESCE(attempt.attempt_count, 0) < ?
+    AND (attempt.last_ping_at IS NULL OR attempt.last_ping_at <= ?)
+    AND (entry.created_at, entry.id, recipient.drone_id) > (?, ?, ?)
+  ORDER BY entry.created_at, entry.id, recipient.drone_id
+  LIMIT ?
+`;
+
+interface LivenessWork {
+  readonly cubeId: string;
+  readonly entryId: string;
+  readonly droneId: string;
+  readonly createdAt: string;
+  readonly pingAt: string;
+  readonly wakeNonce: string;
+}
+
+interface LivenessPublication {
+  readonly cubeId: string;
+  readonly entry: EnrichedActivityRecord;
 }
 
 class SqliteLivenessStore implements LivenessStore {
@@ -4024,62 +4062,127 @@ class SqliteLivenessStore implements LivenessStore {
     try {
       const now = this.#clock();
       const threshold = new Date(now.getTime() - WAKE_RETRY_INTERVAL_MS).toISOString();
-      const rows = this.#database.prepare(`
-        SELECT entry.id, entry.cube_id, recipient.drone_id, entry.created_at,
-               COALESCE(attempt.attempt_count, 0) AS attempt_count,
-               attempt.last_ping_at
-        FROM activity_log AS entry
-        JOIN activity_log_recipients AS recipient ON recipient.entry_id = entry.id
-        LEFT JOIN activity_acks AS ack
-          ON ack.entry_id = entry.id AND ack.claimant_drone_id = recipient.drone_id AND ack.kind = 'ack'
-        LEFT JOIN activity_wake_attempts AS attempt
-          ON attempt.entry_id = entry.id AND attempt.drone_id = recipient.drone_id
-        WHERE entry.visibility = 'direct' AND ack.entry_id IS NULL AND entry.created_at <= ?
-          AND COALESCE(attempt.attempt_count, 0) < ?
-          AND (attempt.last_ping_at IS NULL OR attempt.last_ping_at <= ?)
-        ORDER BY entry.created_at, entry.id, recipient.drone_id
-      `).all(threshold, WAKE_MAX_ATTEMPTS, threshold);
-      observeCandidates?.(rows.length);
-      for (const row of rows) {
-        const cubeId = requiredText(row, "cube_id");
-        const entryId = requiredText(row, "id");
-        const droneId = requiredText(row, "drone_id");
-        if (!this.#activityHub.hasListener(cubeId, droneId)) continue;
-        const wakeNonce = randomUUID();
-        this.#database.prepare(`
-          INSERT INTO activity_wake_attempts (entry_id, drone_id, attempt_count, last_ping_at)
-          VALUES (?, ?, 1, ?)
-          ON CONFLICT (entry_id, drone_id) DO UPDATE SET
-            attempt_count = activity_wake_attempts.attempt_count + 1,
-            last_ping_at = excluded.last_ping_at
-        `).run(entryId, droneId, this.#clock().toISOString());
-        this.#activityHub.publish(cubeId, this.#enrichedEntry(cubeId, entryId, wakeNonce));
+      const targets = this.#activityHub.wakeTargets();
+      if (targets.length === 0) {
+        observeCandidates?.(0);
+        return [];
       }
+      const selectCandidates = this.#database.prepare(LIVENESS_CANDIDATE_QUERY);
+      const targetsByCube = new Map<string, string[]>();
+      for (const target of targets) {
+        const droneIds = targetsByCube.get(target.cubeId) ?? [];
+        droneIds.push(target.droneId);
+        targetsByCube.set(target.cubeId, droneIds);
+      }
+      let candidateCount = 0;
+      const publications: LivenessPublication[] = [];
+      this.#database.exec("BEGIN IMMEDIATE");
+      try {
+        for (const [cubeId, droneIds] of targetsByCube) {
+          let cursor = { createdAt: "", entryId: "", droneId: "" };
+          const targetJson = JSON.stringify(droneIds);
+          while (true) {
+            const rows = selectCandidates.all(
+              cubeId,
+              threshold,
+              targetJson,
+              WAKE_MAX_ATTEMPTS,
+              threshold,
+              cursor.createdAt,
+              cursor.entryId,
+              cursor.droneId,
+              LIVENESS_SCAN_BATCH_SIZE,
+            );
+            if (rows.length === 0) break;
+            candidateCount += rows.length;
+            const work = rows.map((row): LivenessWork => ({
+              cubeId: requiredText(row, "cube_id"),
+              entryId: requiredText(row, "id"),
+              droneId: requiredText(row, "drone_id"),
+              createdAt: requiredText(row, "created_at"),
+              pingAt: this.#clock().toISOString(),
+              wakeNonce: randomUUID(),
+            }));
+            publications.push(...this.#prepareWakeBatch(work));
+            const last = work.at(-1)!;
+            cursor = { createdAt: last.createdAt, entryId: last.entryId, droneId: last.droneId };
+            if (rows.length < LIVENESS_SCAN_BATCH_SIZE) break;
+          }
+        }
+        this.#database.exec("COMMIT");
+      } catch (error) {
+        this.#database.exec("ROLLBACK");
+        throw error;
+      }
+      for (const publication of publications) {
+        this.#activityHub.publish(publication.cubeId, publication.entry);
+      }
+      observeCandidates?.(candidateCount);
       return [];
     } catch {
       throw operatorErrors.LIVENESS_SCAN_FAILED;
     }
   }
 
-  #enrichedEntry(cubeId: string, entryId: string, wakeNonce?: string): EnrichedActivityRecord {
-    const row = this.#database.prepare(`
+  #prepareWakeBatch(work: readonly LivenessWork[]): LivenessPublication[] {
+    const entryIds = JSON.stringify([...new Set(work.map((candidate) => candidate.entryId))]);
+    const entryRows = this.#database.prepare(`
       SELECT l.id, l.cube_id, l.drone_id, l.message, l.visibility, l.created_at,
              d.label AS drone_label, r.name AS role_name
       FROM activity_log AS l
       LEFT JOIN drones AS d ON d.id = l.drone_id AND d.cube_id = l.cube_id
       LEFT JOIN roles AS r ON r.id = d.role_id AND r.cube_id = d.cube_id
-      WHERE l.cube_id = ? AND l.id = ?
-    `).get(cubeId, entryId);
-    if (row === undefined) throw new ScopedStoreError();
-    const recipients = this.#database.prepare(
-      "SELECT drone_id FROM activity_log_recipients WHERE entry_id = ? ORDER BY drone_id",
-    ).all(entryId).map((recipient) => requiredText(recipient, "drone_id"));
-    return enrichedActivityRecord(
-      row,
-      recipients,
-      wakeNonce,
-      documentCitations(this.#database, entryId),
-    );
+      WHERE l.id IN (SELECT value FROM json_each(?))
+    `).all(entryIds);
+    const entries = new Map(entryRows.map((row) => [requiredText(row, "id"), row]));
+    const recipients = new Map<string, string[]>();
+    for (const row of this.#database.prepare(`
+      SELECT entry_id, drone_id FROM activity_log_recipients
+      WHERE entry_id IN (SELECT value FROM json_each(?))
+      ORDER BY entry_id, drone_id
+    `).all(entryIds)) {
+      const entryId = requiredText(row, "entry_id");
+      const values = recipients.get(entryId) ?? [];
+      values.push(requiredText(row, "drone_id"));
+      recipients.set(entryId, values);
+    }
+    const citations = new Map<string, DocumentCitation[]>();
+    for (const row of this.#database.prepare(`
+      SELECT citation.entry_id, document.id, document.title, document.size_bytes, document.state
+      FROM activity_log_documents AS citation
+      JOIN documents AS document ON document.id = citation.document_id
+        AND document.cube_id = citation.cube_id
+      WHERE citation.entry_id IN (SELECT value FROM json_each(?))
+      ORDER BY citation.entry_id, citation.ordinal
+    `).all(entryIds)) {
+      const entryId = requiredText(row, "entry_id");
+      const values = citations.get(entryId) ?? [];
+      values.push(documentCitationRecord(row));
+      citations.set(entryId, values);
+    }
+    const publications = work.map((candidate): LivenessPublication => {
+      const row = entries.get(candidate.entryId);
+      if (row === undefined) throw new ScopedStoreError();
+      return {
+        cubeId: candidate.cubeId,
+        entry: enrichedActivityRecord(
+          row,
+          recipients.get(candidate.entryId) ?? [],
+          candidate.wakeNonce,
+          citations.get(candidate.entryId) ?? [],
+        ),
+      };
+    });
+    this.#database.prepare(`
+      INSERT INTO activity_wake_attempts (entry_id, drone_id, attempt_count, last_ping_at)
+      SELECT json_extract(value, '$.entryId'), json_extract(value, '$.droneId'), 1,
+             json_extract(value, '$.pingAt')
+      FROM json_each(?) WHERE true
+      ON CONFLICT (entry_id, drone_id) DO UPDATE SET
+        attempt_count = activity_wake_attempts.attempt_count + 1,
+        last_ping_at = excluded.last_ping_at
+    `).run(JSON.stringify(work));
+    return publications;
   }
 }
 

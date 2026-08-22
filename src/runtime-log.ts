@@ -58,12 +58,15 @@ export interface RuntimeLogger {
 
 export const disabledRuntimeLogger: RuntimeLogger = Object.freeze({ emit: () => undefined });
 
-export function createRuntimeLogger(write: ((line: string) => void) | undefined): RuntimeLogger {
+export function createRuntimeLogger(
+  write: ((line: string) => void) | undefined,
+  clock: () => Date = () => new Date(),
+): RuntimeLogger {
   if (write === undefined) return disabledRuntimeLogger;
   return Object.freeze({
     emit(event: RuntimeLogEvent): void {
       try {
-        write(JSON.stringify(projectRuntimeEvent(event)));
+        write(JSON.stringify(projectRuntimeEvent(event, clock().toISOString())));
       } catch {
         // Runtime diagnostics cannot alter request or server behavior.
       }
@@ -75,41 +78,38 @@ export function elapsedMilliseconds(startedAt: number, clock: () => number): num
   return Math.max(0, Math.round(clock() - startedAt));
 }
 
-function projectRuntimeEvent(event: RuntimeLogEvent): Record<string, unknown> {
+function projectRuntimeEvent(event: RuntimeLogEvent, ts: string): Record<string, unknown> {
   const level = event.event.startsWith("slow_") ? "warn" : "info";
+  const common = { ts, level, event: event.event };
   switch (event.event) {
     case "request":
     case "slow_request":
       return {
-        level,
-        event: event.event,
+        ...common,
         method: event.method,
         path: event.path,
         status: event.status,
         elapsed_ms: event.elapsedMs,
       };
     case "liveness_scan_start":
-      return { level, event: event.event };
+      return common;
     case "liveness_scan_end":
     case "slow_liveness_scan":
       return {
-        level,
-        event: event.event,
+        ...common,
         elapsed_ms: event.elapsedMs,
         candidate_count: event.candidateCount,
         outcome: event.outcome,
       };
     case "activity_append":
       return {
-        level,
-        event: event.event,
+        ...common,
         transaction_elapsed_ms: event.transactionElapsedMs,
         prune_elapsed_ms: event.pruneElapsedMs,
       };
     case "activity_read":
       return {
-        level,
-        event: event.event,
+        ...common,
         elapsed_ms: event.elapsedMs,
         page_size: event.pageSize,
         enriched_entry_count: event.enrichedEntryCount,

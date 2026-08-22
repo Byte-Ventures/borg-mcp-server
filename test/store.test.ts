@@ -16,6 +16,7 @@ import {
   CubeDeletedError,
   CursorExpiredError,
   DefaultRoleRequiredError,
+  LIVENESS_CANDIDATE_QUERY,
   RoleConflictError,
   RoleSectionConflictError,
   PostIdConflictError,
@@ -1055,12 +1056,14 @@ describe("Principal to ScopedStore isolation", () => {
 
     expect(lines.map((line) => JSON.parse(line))).toEqual([
       {
+        ts: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u),
         level: "info",
         event: "activity_append",
         transaction_elapsed_ms: 1_500,
         prune_elapsed_ms: 1_250,
       },
       {
+        ts: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u),
         level: "info",
         event: "activity_read",
         elapsed_ms: 25,
@@ -1623,6 +1626,13 @@ describe("Principal to ScopedStore isolation", () => {
   });
 
   it("redacts database failures from liveness scans", () => {
+    const drone = runtime.forPrincipal(droneSessionPrincipal({
+      id: ids.sessionA,
+      clientId: ids.clientA,
+      cubeId: ids.cubeA,
+      droneId: ids.droneA,
+    }));
+    const stop = drone.subscribeActivity(ids.cubeA, () => undefined);
     const database = new DatabaseSync(join(directory, "borg.db"));
     database.exec("DROP TABLE activity_log_recipients");
     database.close();
@@ -1636,6 +1646,7 @@ describe("Principal to ScopedStore isolation", () => {
 
     expect(failure).toBe(operatorErrors.LIVENESS_SCAN_FAILED);
     expect((failure as Error).message).not.toContain("activity_log_recipients");
+    stop();
   });
 
   it("delivers every multi-recipient wake ping to each co-recipient", () => {
@@ -1891,6 +1902,157 @@ describe("Principal to ScopedStore isolation", () => {
       database.close();
     }
   });
+
+  it("bounds a realistic liveness scan without changing wake selection", () => {
+    const historyRoleId = "00000000-0000-4000-8000-000000000041";
+    const historyDroneId = "00000000-0000-4000-8000-000000000042";
+    runtime.maintenance.createRole({ id: historyRoleId, cubeId: ids.cubeB, name: "History" });
+    runtime.maintenance.createDrone({
+      id: historyDroneId,
+      cubeId: ids.cubeB,
+      roleId: historyRoleId,
+      clientId: ids.clientB,
+      label: "history-drone",
+    });
+    const document = runtime.forPrincipal(clientPrincipal(ids.clientA)).putDocument(ids.cubeA, {
+      title: "Wake evidence",
+      contentType: "text/plain",
+      content: "synthetic citation",
+    });
+    const path = join(directory, "borg.db");
+    const database = new DatabaseSync(path);
+    database.exec("PRAGMA synchronous = FULL; PRAGMA busy_timeout = 5000;");
+    expect({
+      journalMode: database.prepare("PRAGMA journal_mode").get()?.["journal_mode"],
+      synchronous: database.prepare("PRAGMA synchronous").get()?.["synchronous"],
+      busyTimeout: database.prepare("PRAGMA busy_timeout").get()?.["timeout"],
+    }).toEqual({ journalMode: "wal", synchronous: 2, busyTimeout: 5_000 });
+    const insertEntry = database.prepare(`
+      INSERT INTO activity_log (
+        id, cube_id, drone_id, actor_kind, actor_id, message, created_at, visibility
+      ) VALUES (?, ?, NULL, 'client', ?, ?, ?, ?)
+    `);
+    const insertRecipient = database.prepare(
+      "INSERT INTO activity_log_recipients (entry_id, drone_id) VALUES (?, ?)",
+    );
+    const insertAck = database.prepare(`
+      INSERT INTO activity_acks (
+        entry_id, principal_kind, principal_id, kind, created_at, claimant_drone_id
+      ) VALUES (?, 'drone-session', ?, 'ack', ?, ?)
+    `);
+    const insertCitation = database.prepare(`
+      INSERT INTO activity_log_documents (entry_id, document_id, cube_id, ordinal)
+      VALUES (?, ?, ?, 0)
+    `);
+    const wakeIds = Array.from({ length: 60 }, (_, index) => `wake-${index.toString().padStart(3, "0")}`);
+    database.exec("BEGIN IMMEDIATE");
+    try {
+      for (let index = 0; index < 60_000; index += 1) {
+        insertEntry.run(
+          `history-${index.toString().padStart(5, "0")}`,
+          ids.cubeA,
+          ids.clientA,
+          "historical broadcast",
+          "2026-07-14T11:00:00.000Z",
+          "broadcast",
+        );
+      }
+      for (let index = 0; index < 30_000; index += 1) {
+        const entryId = `acknowledged-${index.toString().padStart(5, "0")}`;
+        insertEntry.run(
+          entryId,
+          ids.cubeB,
+          ids.clientB,
+          "acknowledged direct history",
+          "2026-07-14T11:00:00.000Z",
+          "direct",
+        );
+        insertRecipient.run(entryId, historyDroneId);
+        insertAck.run(entryId, ids.sessionA, "2026-07-14T11:01:00.000Z", historyDroneId);
+      }
+      for (const entryId of wakeIds) {
+        insertEntry.run(
+          entryId,
+          ids.cubeA,
+          ids.clientA,
+          "wake candidate",
+          "2026-07-14T11:59:00.000Z",
+          "direct",
+        );
+        insertRecipient.run(entryId, ids.droneA);
+        insertCitation.run(entryId, document.id, ids.cubeA);
+      }
+      database.exec("COMMIT");
+    } catch (error) {
+      database.exec("ROLLBACK");
+      throw error;
+    }
+    database.exec("ANALYZE");
+
+    const threshold = "2026-07-14T12:00:01.000Z";
+    const legacyElapsed = measureLegacyLivenessScan(database, threshold);
+    database.exec("DELETE FROM activity_wake_attempts");
+    const plan = database.prepare(`EXPLAIN QUERY PLAN ${LIVENESS_CANDIDATE_QUERY}`)
+      .all(
+        ids.cubeA,
+        threshold,
+        JSON.stringify([ids.droneA]),
+        2,
+        threshold,
+        "",
+        "",
+        "",
+        500,
+      ).map((row) => String(row["detail"]));
+
+    const drone = runtime.forPrincipal(droneSessionPrincipal({
+      id: ids.sessionA,
+      clientId: ids.clientA,
+      cubeId: ids.cubeA,
+      droneId: ids.droneA,
+    }));
+    const delivered: ActivityStreamRecord[] = [];
+    const stop = drone.subscribeActivity(ids.cubeA, (entry) => delivered.push(entry));
+    const elapsed: number[] = [];
+    const candidateCounts: number[] = [];
+    const attemptRows: number[] = [];
+    try {
+      for (let tick = 0; tick < 5; tick += 1) {
+        if (tick > 0) {
+          database.prepare(
+            "UPDATE activity_wake_attempts SET attempt_count = 0, last_ping_at = NULL",
+          ).run();
+        }
+        storeNow = new Date(`2026-07-14T12:0${tick + 1}:01.000Z`);
+        const startedAt = performance.now();
+        runtime.liveness.scan((count) => candidateCounts.push(count));
+        elapsed.push(performance.now() - startedAt);
+        attemptRows.push(Number(database.prepare(
+          "SELECT COUNT(*) AS count FROM activity_wake_attempts",
+        ).get()!["count"]));
+      }
+
+      const medianElapsed = [...elapsed].sort((left, right) => left - right)[2]!;
+      expect(medianElapsed).toBeLessThan(legacyElapsed / 10);
+      expect(Math.max(...elapsed.slice(1))).toBeLessThan(elapsed[0]! * 4 + 5);
+      expect(candidateCounts).toEqual([60, 60, 60, 60, 60]);
+      expect(attemptRows).toEqual([60, 60, 60, 60, 60]);
+      expect(delivered.map((entry) => entry.id)).toEqual(
+        Array.from({ length: 5 }, () => wakeIds).flat(),
+      );
+      expect(delivered.every((entry) => entry.documents?.[0]?.id === document.id)).toBe(true);
+      expect(new Set(delivered.map((entry) => entry.wake_nonce)).size).toBe(300);
+      expect(plan.some((detail) => detail.includes("activity_log_direct_wake_scan_idx"))).toBe(true);
+      expect(plan.some((detail) => detail.includes("activity_log_recipients_drone_idx"))).toBe(true);
+      expect(plan.some((detail) => detail.includes("ack USING PRIMARY KEY"))).toBe(true);
+      expect(plan.some((detail) => detail.includes("attempt USING PRIMARY KEY"))).toBe(true);
+      expect(plan.filter((detail) => detail.includes("USE TEMP B-TREE")))
+        .toEqual(["USE TEMP B-TREE FOR LAST TERM OF ORDER BY"]);
+    } finally {
+      stop();
+      database.close();
+    }
+  });
 });
 
 function measureLegacyRoster(
@@ -1978,6 +2140,54 @@ function measureLegacyRoster(
     };
   });
   return { drones, elapsed: performance.now() - startedAt, statementCount: rows.length + 1 };
+}
+
+function measureLegacyLivenessScan(database: DatabaseSync, threshold: string): number {
+  const startedAt = performance.now();
+  const rows = database.prepare(`
+    SELECT entry.id, entry.cube_id, recipient.drone_id
+    FROM activity_log AS entry NOT INDEXED
+    JOIN activity_log_recipients AS recipient ON recipient.entry_id = entry.id
+    LEFT JOIN activity_acks AS ack
+      ON ack.entry_id = entry.id AND ack.claimant_drone_id = recipient.drone_id AND ack.kind = 'ack'
+    LEFT JOIN activity_wake_attempts AS attempt
+      ON attempt.entry_id = entry.id AND attempt.drone_id = recipient.drone_id
+    WHERE entry.visibility = 'direct' AND ack.entry_id IS NULL AND entry.created_at <= ?
+      AND COALESCE(attempt.attempt_count, 0) < 2
+      AND (attempt.last_ping_at IS NULL OR attempt.last_ping_at <= ?)
+    ORDER BY entry.created_at, entry.id, recipient.drone_id
+  `).all(threshold, threshold);
+  for (const row of rows) {
+    const entryId = String(row["id"]);
+    const droneId = String(row["drone_id"]);
+    const cubeId = String(row["cube_id"]);
+    database.prepare(`
+      INSERT INTO activity_wake_attempts (entry_id, drone_id, attempt_count, last_ping_at)
+      VALUES (?, ?, 1, ?)
+      ON CONFLICT (entry_id, drone_id) DO UPDATE SET
+        attempt_count = activity_wake_attempts.attempt_count + 1,
+        last_ping_at = excluded.last_ping_at
+    `).run(entryId, droneId, "2026-07-14T12:01:01.000Z");
+    database.prepare(`
+      SELECT l.id, l.cube_id, l.drone_id, l.message, l.visibility, l.created_at,
+             d.label AS drone_label, r.name AS role_name
+      FROM activity_log AS l
+      LEFT JOIN drones AS d ON d.id = l.drone_id AND d.cube_id = l.cube_id
+      LEFT JOIN roles AS r ON r.id = d.role_id AND r.cube_id = d.cube_id
+      WHERE l.cube_id = ? AND l.id = ?
+    `).get(cubeId, entryId);
+    database.prepare(
+      "SELECT drone_id FROM activity_log_recipients WHERE entry_id = ? ORDER BY drone_id",
+    ).all(entryId);
+    database.prepare(`
+      SELECT document.id, document.title, document.size_bytes, document.state
+      FROM activity_log_documents AS citation
+      JOIN documents AS document ON document.id = citation.document_id
+        AND document.cube_id = citation.cube_id
+      WHERE citation.entry_id = ? ORDER BY citation.ordinal
+    `).all(entryId);
+  }
+  return performance.now() - startedAt;
 }
 
 describe("directed-entry acknowledgement authorization", () => {

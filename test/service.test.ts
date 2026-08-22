@@ -44,6 +44,7 @@ import type { ForegroundDashboard } from "../src/dashboard.js";
 import { createManagedServiceDefinition } from "../src/managed-service.js";
 import { operatorErrors } from "../src/operator-error.js";
 import { clientPrincipal } from "../src/principal.js";
+import { createRuntimeLogger } from "../src/runtime-log.js";
 
 function requireFreshSetup(
   result: Awaited<ReturnType<typeof setupNodeServerInstallation>>,
@@ -57,6 +58,46 @@ function serviceProbeError(code: string | number): Error {
 }
 
 describe("node server service", () => {
+  it("logs a liveness scan start, completion, and slow-tick event with its candidate count", async () => {
+    vi.useFakeTimers();
+    try {
+      const lines: string[] = [];
+      const scan = vi.fn((observeCandidates?: (count: number) => void) => {
+        observeCandidates?.(7);
+        return [];
+      });
+      const scheduler = startLivenessScheduler(
+        { scan },
+        vi.fn(),
+        createRuntimeLogger((line) => lines.push(line)),
+        vi.fn().mockReturnValueOnce(0).mockReturnValue(1_001),
+      );
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      scheduler.stop();
+
+      expect(lines.map((line) => JSON.parse(line))).toEqual([
+        { level: "info", event: "liveness_scan_start" },
+        {
+          level: "info",
+          event: "liveness_scan_end",
+          elapsed_ms: 1_001,
+          candidate_count: 7,
+          outcome: "success",
+        },
+        {
+          level: "warn",
+          event: "slow_liveness_scan",
+          elapsed_ms: 1_001,
+          candidate_count: 7,
+          outcome: "success",
+        },
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("reports one redacted failure per liveness scan failure episode and keeps ticking", async () => {
     vi.useFakeTimers();
     try {

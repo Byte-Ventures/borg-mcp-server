@@ -55,6 +55,11 @@ import {
   WAKE_RETRY_INTERVAL_MS,
   WAKE_STALE_AFTER_MS,
 } from "./wake-policy.js";
+import {
+  disabledRuntimeLogger,
+  elapsedMilliseconds,
+  type RuntimeLogger,
+} from "./runtime-log.js";
 
 export type CubeAccess = "read" | "write" | "manage";
 
@@ -209,6 +214,8 @@ export interface OpenStoreOptions {
   readonly cubeLimits?: CubeLimits;
   readonly mutationHook?: (phase: string) => void;
   readonly migrationMode?: "apply" | "require-current";
+  readonly runtimeLogger?: RuntimeLogger;
+  readonly elapsedClock?: () => number;
 }
 
 export interface CubeLimits {
@@ -261,7 +268,7 @@ export interface StoreRuntime {
 }
 
 export interface LivenessStore {
-  readonly scan: () => ActivityNotificationRecord[];
+  readonly scan: (observeCandidates?: (count: number) => void) => ActivityNotificationRecord[];
 }
 
 export interface DigestPair {
@@ -998,6 +1005,8 @@ export async function openStore(options: OpenStoreOptions): Promise<StoreRuntime
     enableDoubleQuotedStringLiterals: false,
   });
   const clock = options.clock ?? (() => new Date());
+  const elapsedClock = options.elapsedClock ?? Date.now;
+  const runtimeLogger = options.runtimeLogger ?? disabledRuntimeLogger;
   try {
     if (options.migrationMode === "require-current") {
       configureExistingDatabase(database);
@@ -1038,6 +1047,8 @@ export async function openStore(options: OpenStoreOptions): Promise<StoreRuntime
         capacityGuard,
         cubeLimits,
         options.mutationHook,
+        runtimeLogger,
+        elapsedClock,
       );
     },
     maintenance,
@@ -1074,6 +1085,8 @@ class SqliteScopedStore implements ScopedStore {
   readonly #capacityGuard: StorageCapacityGuard;
   readonly #cubeLimits: CubeLimits;
   readonly #mutationHook: ((phase: string) => void) | undefined;
+  readonly #runtimeLogger: RuntimeLogger;
+  readonly #elapsedClock: () => number;
 
   constructor(
     database: DatabaseSync,
@@ -1084,6 +1097,8 @@ class SqliteScopedStore implements ScopedStore {
     capacityGuard: StorageCapacityGuard,
     cubeLimits: CubeLimits,
     mutationHook: ((phase: string) => void) | undefined,
+    runtimeLogger: RuntimeLogger,
+    elapsedClock: () => number,
   ) {
     this.#database = database;
     this.#principal = principal;
@@ -1093,6 +1108,8 @@ class SqliteScopedStore implements ScopedStore {
     this.#capacityGuard = capacityGuard;
     this.#cubeLimits = cubeLimits;
     this.#mutationHook = mutationHook;
+    this.#runtimeLogger = runtimeLogger;
+    this.#elapsedClock = elapsedClock;
   }
 
   createCube(input: CreateCubeInput): CreateCubeRecord {
@@ -2174,6 +2191,8 @@ class SqliteScopedStore implements ScopedStore {
       recipients: [...recipients].sort(),
       documents,
     });
+    const transactionStartedAt = this.#elapsedClock();
+    let pruneElapsedMs = 0;
     this.#database.exec("BEGIN IMMEDIATE");
     try {
       if (input.postId !== undefined) {
@@ -2193,6 +2212,11 @@ class SqliteScopedStore implements ScopedStore {
             if (!(error instanceof ScopedStoreError)) throw error;
           }
           this.#database.exec("COMMIT");
+          this.#runtimeLogger.emit({
+            event: "activity_append",
+            transactionElapsedMs: elapsedMilliseconds(transactionStartedAt, this.#elapsedClock),
+            pruneElapsedMs,
+          });
           return appendLogRecord(entry, true);
         }
       }
@@ -2261,8 +2285,15 @@ class SqliteScopedStore implements ScopedStore {
           ) VALUES (?, ?, ?, ?, ?)
         `).run(cubeId, postAuthorId, input.postId, tupleJson, JSON.stringify(entry));
       }
+      const pruneStartedAt = this.#elapsedClock();
       this.#pruneActivity(cubeId);
+      pruneElapsedMs = elapsedMilliseconds(pruneStartedAt, this.#elapsedClock);
       this.#database.exec("COMMIT");
+      this.#runtimeLogger.emit({
+        event: "activity_append",
+        transactionElapsedMs: elapsedMilliseconds(transactionStartedAt, this.#elapsedClock),
+        pruneElapsedMs,
+      });
       this.#activityHub.publish(cubeId, entry);
       return appendLogRecord(entry, false);
     } catch (error) {
@@ -2285,6 +2316,7 @@ class SqliteScopedStore implements ScopedStore {
   }
 
   readLog(cubeId: string, cursor: LogCursor | null, limit: number): ActivityPage {
+    const startedAt = this.#elapsedClock();
     this.#requireCube(cubeId, "read");
     if (!Number.isInteger(limit) || limit < 1 || limit > 500) {
       throw new Error("Activity read limit must be an integer from 1 to 500.");
@@ -2314,13 +2346,20 @@ class SqliteScopedStore implements ScopedStore {
     const behind = nextCursor === null
       ? this.#countAfter(cubeId, null, broadcastOnly)
       : this.#countAfter(cubeId, nextCursor, broadcastOnly);
-    return {
+    const page = {
       entries,
       cursor: nextCursor,
       behind_by: behind,
       has_more: behind > 0,
       claims: this.#claims(cubeId, broadcastOnly),
     };
+    this.#runtimeLogger.emit({
+      event: "activity_read",
+      elapsedMs: elapsedMilliseconds(startedAt, this.#elapsedClock),
+      pageSize: limit,
+      enrichedEntryCount: entries.length,
+    });
+    return page;
   }
 
   readLogEntry(cubeId: string, selector: string): EnrichedActivityRecord {
@@ -3954,7 +3993,7 @@ class SqliteLivenessStore implements LivenessStore {
     this.#activityHub = activityHub;
   }
 
-  scan(): ActivityNotificationRecord[] {
+  scan(observeCandidates?: (count: number) => void): ActivityNotificationRecord[] {
     try {
       const now = this.#clock();
       const threshold = new Date(now.getTime() - WAKE_RETRY_INTERVAL_MS).toISOString();
@@ -3973,6 +4012,7 @@ class SqliteLivenessStore implements LivenessStore {
           AND (attempt.last_ping_at IS NULL OR attempt.last_ping_at <= ?)
         ORDER BY entry.created_at, entry.id, recipient.drone_id
       `).all(threshold, WAKE_MAX_ATTEMPTS, threshold);
+      observeCandidates?.(rows.length);
       for (const row of rows) {
         const cubeId = requiredText(row, "cube_id");
         const entryId = requiredText(row, "id");

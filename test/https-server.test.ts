@@ -27,6 +27,7 @@ import { clientPrincipal, droneSessionPrincipal } from "../src/principal.js";
 import { CoordinationApi } from "../src/coordination-api.js";
 import { CredentialAuthority, CredentialDigester, generateSecret } from "../src/credentials.js";
 import { createDebugLogger, disabledDebugLogger } from "../src/debug-log.js";
+import { createRuntimeLogger, disabledRuntimeLogger } from "../src/runtime-log.js";
 import { createRuntimeBuildIdentity } from "../src/runtime-identity.js";
 import { openStore } from "../src/store.js";
 
@@ -199,6 +200,62 @@ describe("HTTPS service", () => {
       for (const sink of sinks) expect(sink).not.toHaveBeenCalled();
     } finally {
       for (const sink of sinks) sink.mockRestore();
+    }
+  });
+
+  it("logs a held request and a distinct slow-request event without query parameters or credentials", async () => {
+    const lines: string[] = [];
+    let releaseAuthorization!: () => void;
+    const authorizationHeld = new Promise<void>((resolve) => { releaseAuthorization = resolve; });
+    const slow = await startHttpsServer({
+      bind: { port: 0 },
+      tls: { key, cert: certificate },
+      authorizeCoordination: async () => {
+        await authorizationHeld;
+        return clientPrincipal("00000000-0000-4000-8000-000000000200");
+      },
+      runtimeIdentity: createRuntimeBuildIdentity({
+        sourceSha: "a".repeat(40),
+        artifactIntegrity: `sha512-${"A".repeat(86)}==`,
+        startedAt: new Date("2026-07-21T12:00:00.000Z"),
+      }),
+      runtimeLogger: createRuntimeLogger((line) => lines.push(line)),
+      testHooks: { elapsedClock: vi.fn().mockReturnValueOnce(0).mockReturnValue(1_001) },
+    });
+    try {
+      const response = request(
+        slow.origin,
+        certificate,
+        "/api/runtime?token=query-secret",
+        { authorization: "Bearer credential-secret" },
+      );
+      await vi.waitFor(() => expect(lines).toEqual([]));
+      releaseAuthorization();
+      expect((await response).status).toBe(200);
+      await vi.waitFor(() => expect(lines).toHaveLength(2));
+
+      expect(lines.map((line) => JSON.parse(line))).toEqual([
+        {
+          level: "info",
+          event: "request",
+          method: "GET",
+          path: "/api/runtime",
+          status: 200,
+          elapsed_ms: 1_001,
+        },
+        {
+          level: "warn",
+          event: "slow_request",
+          method: "GET",
+          path: "/api/runtime",
+          status: 200,
+          elapsed_ms: 1_001,
+        },
+      ]);
+      expect(lines.join("\n")).not.toContain("query-secret");
+      expect(lines.join("\n")).not.toContain("credential-secret");
+    } finally {
+      await slow.close();
     }
   });
 
@@ -801,7 +858,10 @@ describe("HTTPS service", () => {
       tls: { key, cert: certificate },
     });
 
-    expect(context).toEqual({ debugLogger: disabledDebugLogger });
+    expect(context).toEqual({
+      debugLogger: disabledDebugLogger,
+      runtimeLogger: disabledRuntimeLogger,
+    });
     expect("tls" in context).toBe(false);
   });
 
@@ -1796,7 +1856,7 @@ describe("HTTPS service", () => {
     const handled = handleRequest(
       request,
       response,
-      { exchangeEnrollment, debugLogger: disabledDebugLogger },
+      { exchangeEnrollment, debugLogger: disabledDebugLogger, runtimeLogger: disabledRuntimeLogger },
       DEFAULT_SERVICE_LIMITS,
       new PreAuthAdmissionLimiter(DEFAULT_SERVICE_LIMITS),
       new RequestRateLimiter(DEFAULT_SERVICE_LIMITS),

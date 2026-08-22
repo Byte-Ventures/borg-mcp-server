@@ -21,6 +21,13 @@ import type { CoordinationRequest, CoordinationResponse } from "./coordination-a
 import type { Principal } from "./principal.js";
 import { disabledDebugLogger, type DebugLogger, type DebugRoute } from "./debug-log.js";
 import { RUNTIME_INFO_PATH, type RuntimeBuildIdentity } from "./runtime-identity.js";
+import {
+  disabledRuntimeLogger,
+  elapsedMilliseconds,
+  SLOW_RUNTIME_OPERATION_MS,
+  type RuntimeLogger,
+  type RuntimeRequestPath,
+} from "./runtime-log.js";
 
 export interface ServiceLimits {
   readonly maxConnections: number;
@@ -70,6 +77,7 @@ export interface RequestHandlerContext {
   ) => Promise<Principal | "missing" | "invalid" | "revoked" | "evicted" | "rejected" | "cube-deleted">;
   readonly handleCoordination?: (request: CoordinationRequest) => Promise<CoordinationResponse>;
   readonly debugLogger: DebugLogger;
+  readonly runtimeLogger: RuntimeLogger;
   readonly runtimeIdentity?: RuntimeBuildIdentity;
 }
 
@@ -85,11 +93,13 @@ export interface HttpsServerOptions {
   readonly handleCoordination?: RequestHandlerContext["handleCoordination"];
   readonly limits?: ServiceLimits;
   readonly debugLogger?: DebugLogger;
+  readonly runtimeLogger?: RuntimeLogger;
   readonly runtimeIdentity?: RuntimeBuildIdentity;
   readonly testHooks?: {
     readonly identifyRemoteAddress?: (socket: Socket) => string;
     readonly identifyConnectionAddress?: (socket: Socket) => string;
     readonly connectionLimitMode?: "loopback" | "lan";
+    readonly elapsedClock?: () => number;
   };
 }
 
@@ -136,6 +146,7 @@ export async function startHttpsServer(options: HttpsServerOptions): Promise<Run
       identifyRemoteAddress,
       (socket) => addressConnectionLimiter.isRejected(socket),
       bind.mode,
+      options.testHooks?.elapsedClock,
     ),
   );
 
@@ -204,6 +215,7 @@ export function createRequestHandlerContext(
       : { handleCoordination: options.handleCoordination }),
     ...(options.runtimeIdentity === undefined ? {} : { runtimeIdentity: options.runtimeIdentity }),
     debugLogger: options.debugLogger ?? disabledDebugLogger,
+    runtimeLogger: options.runtimeLogger ?? disabledRuntimeLogger,
   });
 }
 
@@ -213,18 +225,21 @@ function createRequestListener(
   identifyRemoteAddress: (socket: Socket) => string = (socket) => socket.remoteAddress ?? "unknown",
   isConnectionRejected: (socket: Socket) => boolean = () => false,
   bindMode: "loopback" | "lan",
+  elapsedClock: () => number = Date.now,
 ): (request: IncomingMessage, response: ServerResponse) => void {
   const admissionLimiter = new PreAuthAdmissionLimiter(limits, Date.now, bindMode);
   const credentialRateLimiter = new RequestRateLimiter(limits, limits.maxRequestsPerWindow);
   const streamQuota = new ConcurrentQuota(limits.maxStreamsPerCredential);
   return (request, response) => {
-    const startedAt = Date.now();
+    const startedAt = elapsedClock();
+    const debugStartedAt = Date.now();
     const trace: RequestTrace = {
       route: debugRoute(request.url),
       method: debugMethod(request.method),
       authentication: "not_required",
     };
     let debugEmitted = false;
+    let runtimeEmitted = false;
     const emitDebug = (): void => {
       if (debugEmitted) return;
       debugEmitted = true;
@@ -239,11 +254,29 @@ function createRequestListener(
           : "not_checked",
         ...(trace.principal === undefined ? {} : { principal: trace.principal }),
         status,
-        durationMs: Math.max(0, Date.now() - startedAt),
+        durationMs: Math.max(0, Date.now() - debugStartedAt),
       });
+    };
+    const emitRuntime = (): void => {
+      if (runtimeEmitted) return;
+      runtimeEmitted = true;
+      const status = response.headersSent ? response.statusCode : 0;
+      const elapsedMs = elapsedMilliseconds(startedAt, elapsedClock);
+      const event = {
+        method: debugMethod(request.method),
+        path: runtimeRequestPath(trace.route),
+        status,
+        elapsedMs,
+      } as const;
+      context.runtimeLogger.emit({ event: "request", ...event });
+      if (elapsedMs >= SLOW_RUNTIME_OPERATION_MS) {
+        context.runtimeLogger.emit({ event: "slow_request", ...event });
+      }
     };
     response.once("finish", emitDebug);
     response.once("close", emitDebug);
+    response.once("finish", emitRuntime);
+    response.once("close", emitRuntime);
     if (isConnectionRejected(request.socket)) {
       request.resume();
       sendRateLimited(response, 1);
@@ -477,7 +510,9 @@ interface RequestTrace {
   principal?: Principal;
 }
 
-function debugMethod(method: string | undefined): string {
+function debugMethod(
+  method: string | undefined,
+): "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "OTHER" {
   return method === "GET" || method === "POST" || method === "PUT" ||
     method === "PATCH" || method === "DELETE" ? method : "OTHER";
 }
@@ -514,6 +549,34 @@ function debugRoute(rawUrl: string | undefined): DebugRoute {
   if (/^\/api\/cubes\/[0-9a-f-]{36}\/documents(?:\/[^/]+)?$/iu.test(path)) return "cube_documents";
   if (/^\/api\/cubes\/[0-9a-f-]{36}\/stream$/iu.test(path)) return "cube_stream";
   return "unknown";
+}
+
+function runtimeRequestPath(route: DebugRoute): RuntimeRequestPath {
+  switch (route) {
+    case "health": return "/healthz";
+    case "protocol": return "/api/protocol";
+    case "runtime": return "/api/runtime";
+    case "enrollment_exchange": return "/api/enrollment/exchange";
+    case "client_attach": return "/api/client/attach";
+    case "repository_cube_resolve": return "/api/repository-cubes/resolve";
+    case "repository_cube_association": return "/api/repository-cubes/association";
+    case "cubes": return "/api/cubes";
+    case "cube": return "/api/cubes/:cube_id";
+    case "cube_roles": return "/api/cubes/:cube_id/roles";
+    case "cube_role": return "/api/cubes/:cube_id/roles/:role_id";
+    case "cube_role_section_patch": return "/api/cubes/:cube_id/roles/:role_id/section-patch";
+    case "cube_taxonomy_patch": return "/api/cubes/:cube_id/taxonomy-patch";
+    case "cube_drones": return "/api/cubes/:cube_id/drones";
+    case "cube_drone_self_metadata": return "/api/cubes/:cube_id/drones/self/metadata";
+    case "cube_logs": return "/api/cubes/:cube_id/logs";
+    case "cube_log_entry": return "/api/cubes/:cube_id/logs/:entry_id";
+    case "cube_ack_status": return "/api/cubes/:cube_id/logs/:entry_id/ack-status";
+    case "cube_acks": return "/api/cubes/:cube_id/acks";
+    case "cube_decisions": return "/api/cubes/:cube_id/decisions";
+    case "cube_documents": return "/api/cubes/:cube_id/documents";
+    case "cube_stream": return "/api/cubes/:cube_id/stream";
+    case "unknown": return "unknown";
+  }
 }
 
 function isLogEntryPath(path: string): boolean {

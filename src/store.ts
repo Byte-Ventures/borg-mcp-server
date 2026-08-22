@@ -1076,6 +1076,20 @@ function createDashboardSnapshotSource(
   });
 }
 
+export const ACTIVITY_PRUNE_EXCESS_QUERY = `
+  SELECT id, created_at FROM activity_log WHERE cube_id = ?
+  ORDER BY created_at, id
+  LIMIT MAX(0, (SELECT COUNT(*) FROM activity_log WHERE cube_id = ?) - ?)
+`;
+
+export const ACTIVITY_PRUNE_CURSOR_TRIM_QUERY = `
+  DELETE FROM expired_activity_cursors
+  WHERE (cube_id, entry_id, created_at) IN (
+    SELECT cube_id, entry_id, created_at FROM expired_activity_cursors WHERE cube_id = ?
+    ORDER BY created_at DESC, entry_id DESC LIMIT -1 OFFSET ?
+  )
+`;
+
 class SqliteScopedStore implements ScopedStore {
   readonly #database: DatabaseSync;
   readonly #principal: Principal;
@@ -3043,31 +3057,22 @@ class SqliteScopedStore implements ScopedStore {
   }
 
   #pruneActivity(cubeId: string): void {
-    const excess = this.#database.prepare(`
-      SELECT id, created_at FROM activity_log WHERE cube_id = ?
-      ORDER BY created_at, id
-      LIMIT MAX(0, (SELECT COUNT(*) FROM activity_log WHERE cube_id = ?) - ?)
-    `).all(cubeId, cubeId, this.#storageLimits.maxActivityEntriesPerCube);
-    const expire = this.#database.prepare(`
-      INSERT OR IGNORE INTO expired_activity_cursors (cube_id, entry_id, created_at)
-      VALUES (?, ?, ?)
-    `);
-    const remove = this.#database.prepare("DELETE FROM activity_log WHERE cube_id = ? AND id = ?");
-    for (const row of excess) {
-      const entryId = requiredText(row, "id");
-      expire.run(cubeId, entryId, requiredText(row, "created_at"));
-      remove.run(cubeId, entryId);
+    const excess = this.#database.prepare(ACTIVITY_PRUNE_EXCESS_QUERY)
+      .all(cubeId, cubeId, this.#storageLimits.maxActivityEntriesPerCube);
+    if (excess.length > 0) {
+      const expire = this.#database.prepare(`
+        INSERT OR IGNORE INTO expired_activity_cursors (cube_id, entry_id, created_at)
+        VALUES (?, ?, ?)
+      `);
+      const remove = this.#database.prepare("DELETE FROM activity_log WHERE cube_id = ? AND id = ?");
+      for (const row of excess) {
+        const entryId = requiredText(row, "id");
+        expire.run(cubeId, entryId, requiredText(row, "created_at"));
+        remove.run(cubeId, entryId);
+      }
     }
-    const staleCursors = this.#database.prepare(`
-      SELECT entry_id, created_at FROM expired_activity_cursors WHERE cube_id = ?
-      ORDER BY created_at DESC, entry_id DESC LIMIT -1 OFFSET ?
-    `).all(cubeId, this.#storageLimits.maxActivityEntriesPerCube);
-    const removeCursor = this.#database.prepare(`
-      DELETE FROM expired_activity_cursors WHERE cube_id = ? AND entry_id = ? AND created_at = ?
-    `);
-    for (const row of staleCursors) {
-      removeCursor.run(cubeId, requiredText(row, "entry_id"), requiredText(row, "created_at"));
-    }
+    this.#database.prepare(ACTIVITY_PRUNE_CURSOR_TRIM_QUERY)
+      .run(cubeId, this.#storageLimits.maxActivityEntriesPerCube);
   }
 
   #validateCursor(cubeId: string, cursor: LogCursor | null): void {

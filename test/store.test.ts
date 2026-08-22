@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdtemp, realpath, rm } from "node:fs/promises";
+import { copyFile, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -13,6 +13,8 @@ import {
 import { CredentialAuthority, CredentialDigester, generateSecret } from "../src/credentials.js";
 import {
   AccessDeniedError,
+  ACTIVITY_PRUNE_EXCESS_QUERY,
+  ACTIVITY_PRUNE_CURSOR_TRIM_QUERY,
   CubeDeletedError,
   CursorExpiredError,
   DefaultRoleRequiredError,
@@ -1118,6 +1120,206 @@ describe("Principal to ScopedStore isolation", () => {
     expect(retained.entries.at(-1)?.id).toBe(appended.at(-1)?.id);
   });
 
+  it("preserves legacy prune and cursor-horizon semantics without no-excess ledger work", async () => {
+    const basePath = join(directory, "borg.db");
+    const optimizedPath = join(directory, "optimized.db");
+    const legacyPath = join(directory, "legacy.db");
+    runtime.close();
+    await copyFile(basePath, optimizedPath);
+    await copyFile(basePath, legacyPath);
+    const storageLimits = {
+      maxActivityEntriesPerCube: 10,
+      maxDatabaseBytes: 10_000_000,
+      minFreeDiskBytes: 1,
+    };
+    runtime = await openStore({
+      path: optimizedPath,
+      clock: () => storeNow,
+      storageLimits,
+      capacityProbe: () => ({ databaseBytes: 0, freeDiskBytes: 10_000_000 }),
+    });
+    const legacyRuntime = await openStore({ path: legacyPath, clock: () => storeNow, storageLimits });
+    const optimizedClient = runtime.forPrincipal(clientPrincipal(ids.clientA));
+    for (const path of [optimizedPath, legacyPath]) {
+      const database = new DatabaseSync(path);
+      try {
+        const insertCursor = database.prepare(`
+          INSERT INTO expired_activity_cursors (cube_id, entry_id, created_at) VALUES (?, ?, ?)
+        `);
+        for (let index = 0; index < 11; index += 1) {
+          insertCursor.run(
+            ids.cubeA,
+            `maintenance-${index.toString().padStart(2, "0")}`,
+            new Date(Date.parse("2026-07-13T10:00:00.000Z") + index).toISOString(),
+          );
+        }
+      } finally {
+        database.close();
+      }
+    }
+    const prepare = vi.spyOn(DatabaseSync.prototype, "prepare");
+    let appended: ReturnType<typeof optimizedClient.appendLog>[];
+    try {
+      prepare.mockClear();
+      const first = optimizedClient.appendLog(ids.cubeA, { visibility: "broadcast", message: "entry-00" });
+      const noExcessSql = prepare.mock.calls.map(([sql]) => String(sql));
+      expect(noExcessSql.some((sql) => sql.includes("INSERT OR IGNORE INTO expired_activity_cursors")))
+        .toBe(false);
+      expect(noExcessSql.some((sql) =>
+        sql.includes("DELETE FROM expired_activity_cursors WHERE cube_id = ? AND entry_id = ?")))
+        .toBe(false);
+      const optimizedDatabase = new DatabaseSync(optimizedPath);
+      expect(optimizedDatabase.prepare(
+        "SELECT COUNT(*) AS count FROM expired_activity_cursors WHERE cube_id = ?",
+      ).get(ids.cubeA)).toEqual({ count: 10 });
+      optimizedDatabase.close();
+      appended = [first];
+      for (let index = 1; index < 25; index += 1) {
+        appended.push(optimizedClient.appendLog(ids.cubeA, {
+          visibility: "broadcast",
+          message: `entry-${index.toString().padStart(2, "0")}`,
+        }));
+      }
+    } finally {
+      prepare.mockRestore();
+    }
+
+    const legacyDatabase = new DatabaseSync(legacyPath);
+    try {
+      const insert = legacyDatabase.prepare(`
+        INSERT INTO activity_log (
+          id, cube_id, drone_id, actor_kind, actor_id, message, created_at, visibility
+        ) VALUES (?, ?, NULL, 'client', ?, ?, ?, 'broadcast')
+      `);
+      for (const entry of appended) {
+        insert.run(entry.id, ids.cubeA, ids.clientA, entry.message, entry.created_at);
+        legacyPruneActivity(legacyDatabase, ids.cubeA, storageLimits.maxActivityEntriesPerCube);
+      }
+      const snapshot = (database: DatabaseSync) => ({
+        activity: database.prepare(`
+          SELECT id, created_at FROM activity_log WHERE cube_id = ? ORDER BY created_at, id
+        `).all(ids.cubeA),
+        ledger: database.prepare(`
+          SELECT entry_id, created_at FROM expired_activity_cursors
+          WHERE cube_id = ? ORDER BY created_at, entry_id
+        `).all(ids.cubeA),
+      });
+      const optimizedDatabase = new DatabaseSync(optimizedPath);
+      try {
+        expect(snapshot(optimizedDatabase)).toEqual(snapshot(legacyDatabase));
+      } finally {
+        optimizedDatabase.close();
+      }
+
+      const legacyClient = legacyRuntime.forPrincipal(clientPrincipal(ids.clientA));
+      const cursors = [
+        appended[0]!,
+        appended[14]!,
+        appended[15]!,
+        {
+          id: "ffffffff-ffff-4fff-8fff-ffffffffffff",
+          created_at: "2026-07-15T12:00:00.000Z",
+        },
+      ];
+      const outcome = (client: typeof optimizedClient, cursor: { id: string; created_at: string }) => {
+        try {
+          client.readLog(ids.cubeA, cursor, 10);
+          return "ok";
+        } catch (error) {
+          return error instanceof Error ? error.name : "unknown";
+        }
+      };
+      const optimizedOutcomes = cursors.map((cursor) => outcome(optimizedClient, cursor));
+      const legacyOutcomes = cursors.map((cursor) => outcome(legacyClient, cursor));
+      expect(optimizedOutcomes).toEqual(legacyOutcomes);
+      expect(optimizedOutcomes).toEqual([
+        "CursorExpiredError",
+        "CursorExpiredError",
+        "ok",
+        "ScopedStoreError",
+      ]);
+    } finally {
+      legacyDatabase.close();
+      legacyRuntime.close();
+    }
+  });
+
+  it("uses persistent ordering indexes for both prune scans", () => {
+    const database = new DatabaseSync(join(directory, "borg.db"));
+    try {
+      const excessPlan = database.prepare(`EXPLAIN QUERY PLAN ${ACTIVITY_PRUNE_EXCESS_QUERY}`)
+        .all(ids.cubeA, ids.cubeA, 10_000).map((row) => String(row["detail"]));
+      const cursorPlan = database.prepare(`EXPLAIN QUERY PLAN ${ACTIVITY_PRUNE_CURSOR_TRIM_QUERY}`)
+        .all(ids.cubeA, 10_000).map((row) => String(row["detail"]));
+      expect(excessPlan.some((detail) => detail.includes("USE TEMP B-TREE FOR ORDER BY"))).toBe(false);
+      expect(cursorPlan.some((detail) => detail.includes("USE TEMP B-TREE FOR ORDER BY"))).toBe(false);
+      expect(excessPlan.some((detail) => detail.includes("activity_log_cube_cursor_idx"))).toBe(true);
+      expect(cursorPlan.some((detail) => detail.includes("expired_activity_cursors_order_idx"))).toBe(true);
+    } finally {
+      database.close();
+    }
+  });
+
+  it("measures legacy and indexed pruning on an on-disk capped cube", async () => {
+    const basePath = join(directory, "borg.db");
+    const legacyPath = join(directory, "prune-legacy.db");
+    const indexedPath = join(directory, "prune-indexed.db");
+    runtime.close();
+    await copyFile(basePath, legacyPath);
+    await copyFile(basePath, indexedPath);
+    const legacyStore = await openStore({ path: legacyPath });
+    legacyStore.close();
+    runtime = await openStore({ path: indexedPath });
+    const legacyDatabase = new DatabaseSync(legacyPath);
+    const indexedDatabase = new DatabaseSync(indexedPath);
+    try {
+      legacyDatabase.exec("DROP INDEX expired_activity_cursors_order_idx");
+      for (const database of [legacyDatabase, indexedDatabase]) {
+        database.exec("PRAGMA synchronous = FULL; PRAGMA busy_timeout = 5000; BEGIN IMMEDIATE;");
+        const insertActivity = database.prepare(`
+          INSERT INTO activity_log (
+            id, cube_id, drone_id, actor_kind, actor_id, message, created_at, visibility
+          ) VALUES (?, ?, NULL, 'client', ?, 'capped history', ?, 'broadcast')
+        `);
+        const insertCursor = database.prepare(`
+          INSERT INTO expired_activity_cursors (cube_id, entry_id, created_at) VALUES (?, ?, ?)
+        `);
+        try {
+          for (let index = 0; index < 10_000; index += 1) {
+            const suffix = index.toString().padStart(5, "0");
+            insertActivity.run(
+              `active-${suffix}`,
+              ids.cubeA,
+              ids.clientA,
+              new Date(Date.parse("2026-07-14T10:00:00.000Z") + index).toISOString(),
+            );
+            insertCursor.run(
+              ids.cubeA,
+              `expired-${suffix}`,
+              new Date(Date.parse("2026-07-13T10:00:00.000Z") + index).toISOString(),
+            );
+          }
+          database.exec("COMMIT");
+        } catch (error) {
+          database.exec("ROLLBACK");
+          throw error;
+        }
+      }
+
+      legacyDatabase.exec("PRAGMA shrink_memory");
+      const legacyCold = measureCappedPrune(legacyDatabase, ids.cubeA, ids.clientA, false);
+      const legacyWarm = measureCappedPrune(legacyDatabase, ids.cubeA, ids.clientA, false);
+      indexedDatabase.exec("PRAGMA shrink_memory");
+      const indexedCold = measureCappedPrune(indexedDatabase, ids.cubeA, ids.clientA, true);
+      const indexedWarm = measureCappedPrune(indexedDatabase, ids.cubeA, ids.clientA, true);
+      expect([legacyCold, legacyWarm, indexedCold, indexedWarm]
+        .every((elapsed) => Number.isFinite(elapsed) && elapsed >= 0)).toBe(true);
+    } finally {
+      legacyDatabase.close();
+      indexedDatabase.close();
+    }
+  });
+
   it("fails closed before log mutation when disk or database capacity is exhausted", async () => {
     const path = join(directory, "borg.db");
     runtime.close();
@@ -2054,6 +2256,66 @@ describe("Principal to ScopedStore isolation", () => {
     }
   });
 });
+
+function measureCappedPrune(
+  database: DatabaseSync,
+  cubeId: string,
+  clientId: string,
+  indexed: boolean,
+): number {
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    database.prepare(`
+      INSERT INTO activity_log (
+        id, cube_id, drone_id, actor_kind, actor_id, message, created_at, visibility
+      ) VALUES ('overflow-entry', ?, NULL, 'client', ?, 'overflow',
+        '2026-07-14T12:00:00.000Z', 'broadcast')
+    `).run(cubeId, clientId);
+    const startedAt = performance.now();
+    if (indexed) indexedPruneActivity(database, cubeId, 10_000);
+    else legacyPruneActivity(database, cubeId, 10_000);
+    return performance.now() - startedAt;
+  } finally {
+    database.exec("ROLLBACK");
+  }
+}
+
+function legacyPruneActivity(database: DatabaseSync, cubeId: string, cap: number): void {
+  const excess = database.prepare(ACTIVITY_PRUNE_EXCESS_QUERY).all(cubeId, cubeId, cap);
+  const expire = database.prepare(`
+    INSERT OR IGNORE INTO expired_activity_cursors (cube_id, entry_id, created_at)
+    VALUES (?, ?, ?)
+  `);
+  const remove = database.prepare("DELETE FROM activity_log WHERE cube_id = ? AND id = ?");
+  for (const row of excess) {
+    expire.run(cubeId, String(row["id"]), String(row["created_at"]));
+    remove.run(cubeId, String(row["id"]));
+  }
+  const stale = database.prepare(`
+    SELECT entry_id, created_at FROM expired_activity_cursors WHERE cube_id = ?
+    ORDER BY created_at DESC, entry_id DESC LIMIT -1 OFFSET ?
+  `).all(cubeId, cap);
+  const removeCursor = database.prepare(`
+    DELETE FROM expired_activity_cursors WHERE cube_id = ? AND entry_id = ? AND created_at = ?
+  `);
+  for (const row of stale) {
+    removeCursor.run(cubeId, String(row["entry_id"]), String(row["created_at"]));
+  }
+}
+
+function indexedPruneActivity(database: DatabaseSync, cubeId: string, cap: number): void {
+  const excess = database.prepare(ACTIVITY_PRUNE_EXCESS_QUERY).all(cubeId, cubeId, cap);
+  const expire = database.prepare(`
+    INSERT OR IGNORE INTO expired_activity_cursors (cube_id, entry_id, created_at)
+    VALUES (?, ?, ?)
+  `);
+  const remove = database.prepare("DELETE FROM activity_log WHERE cube_id = ? AND id = ?");
+  for (const row of excess) {
+    expire.run(cubeId, String(row["id"]), String(row["created_at"]));
+    remove.run(cubeId, String(row["id"]));
+  }
+  database.prepare(ACTIVITY_PRUNE_CURSOR_TRIM_QUERY).run(cubeId, cap);
+}
 
 function measureLegacyRoster(
   database: DatabaseSync,

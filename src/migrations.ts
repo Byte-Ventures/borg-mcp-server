@@ -846,6 +846,12 @@ Structured message routing:
     sql: `CREATE INDEX activity_log_direct_wake_scan_idx
       ON activity_log (cube_id, created_at, id) WHERE visibility = 'direct';`,
   },
+  {
+    version: 27,
+    name: "ordered_expired_activity_cursors",
+    sql: `CREATE INDEX expired_activity_cursors_order_idx
+      ON expired_activity_cursors (cube_id, created_at, entry_id);`,
+  },
 ]);
 
 interface AppliedMigrationRow {

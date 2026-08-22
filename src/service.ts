@@ -332,7 +332,7 @@ export function createNodeServerService(dependencies: ServiceDependencies): Serv
       const shutdown = dependencies.installShutdownHandlers?.();
       let bind: ReturnType<typeof parseStartOptions>["bind"];
       let debugLogger = disabledDebugLogger;
-      let runtimeLogger = disabledRuntimeLogger;
+      let runtimeLogger: RuntimeLogger;
       let dataDirectory: string | undefined;
       let storageLimits: StorageLimits;
       let asciiRequested = false;

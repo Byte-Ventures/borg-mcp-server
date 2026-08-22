@@ -3,7 +3,7 @@ import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   clientPrincipal,
@@ -27,6 +27,7 @@ import {
 } from "../src/store.js";
 import { PLATFORM_QUEEN_DETAILED_DESCRIPTION } from "../src/platform-queen.js";
 import { operatorErrors } from "../src/operator-error.js";
+import { createRuntimeLogger } from "../src/runtime-log.js";
 
 const ids = {
   clientA: "00000000-0000-4000-8000-000000000001",
@@ -1028,6 +1029,46 @@ describe("Principal to ScopedStore isolation", () => {
       log_entry_id: beta.id,
       claimant_drone_id: ids.clientA,
     })]);
+  });
+
+  it("logs append transaction and prune timing plus read-log page size without entry content", async () => {
+    const path = join(directory, "borg.db");
+    runtime.close();
+    const lines: string[] = [];
+    const elapsedClock = vi.fn()
+      .mockReturnValueOnce(0)
+      .mockReturnValueOnce(0)
+      .mockReturnValueOnce(1_250)
+      .mockReturnValueOnce(1_500)
+      .mockReturnValueOnce(2_000)
+      .mockReturnValueOnce(2_025);
+    runtime = await openStore({
+      path,
+      clock: () => storeNow,
+      elapsedClock,
+      runtimeLogger: createRuntimeLogger((line) => lines.push(line)),
+    });
+    const client = runtime.forPrincipal(clientPrincipal(ids.clientA));
+
+    client.appendLog(ids.cubeA, { visibility: "broadcast", message: "entry-content-secret" });
+    client.readLog(ids.cubeA, null, 25);
+
+    expect(lines.map((line) => JSON.parse(line))).toEqual([
+      {
+        level: "info",
+        event: "activity_append",
+        transaction_elapsed_ms: 1_500,
+        prune_elapsed_ms: 1_250,
+      },
+      {
+        level: "info",
+        event: "activity_read",
+        elapsed_ms: 25,
+        page_size: 25,
+        enriched_entry_count: 1,
+      },
+    ]);
+    expect(lines.join("\n")).not.toContain("entry-content-secret");
   });
 
   it("transactionally prunes old log rows, cursors, recipients, and acknowledgements", async () => {

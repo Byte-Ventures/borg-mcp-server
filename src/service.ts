@@ -26,6 +26,13 @@ import {
 } from "./credentials.js";
 import { CoordinationApi } from "./coordination-api.js";
 import { createDebugLogger, disabledDebugLogger } from "./debug-log.js";
+import {
+  createRuntimeLogger,
+  disabledRuntimeLogger,
+  elapsedMilliseconds,
+  SLOW_RUNTIME_OPERATION_MS,
+  type RuntimeLogger,
+} from "./runtime-log.js";
 import { MigrationCompatibilityError } from "./migrations.js";
 import { createEnrollmentExchange } from "./enrollment.js";
 import {
@@ -268,6 +275,7 @@ interface ServiceDependencies {
   readonly startLivenessScheduler?: (
     liveness: LivenessStore,
     reportFailure: (failure: Error) => void,
+    runtimeLogger?: RuntimeLogger,
   ) => { readonly stop: () => void };
   readonly onStartupPhase?: (
     phase: "pre-lock" | "post-lock" | "pre-listen",
@@ -324,6 +332,7 @@ export function createNodeServerService(dependencies: ServiceDependencies): Serv
       const shutdown = dependencies.installShutdownHandlers?.();
       let bind: ReturnType<typeof parseStartOptions>["bind"];
       let debugLogger = disabledDebugLogger;
+      let runtimeLogger = disabledRuntimeLogger;
       let dataDirectory: string | undefined;
       let storageLimits: StorageLimits;
       let asciiRequested = false;
@@ -341,6 +350,7 @@ export function createNodeServerService(dependencies: ServiceDependencies): Serv
         asciiRequested = parsed.ascii;
         noMotion = parsed.noMotion;
         debugLogger = createDebugLogger(parsed.logLevel === "debug" ? dependencies.debugOutput : undefined);
+        runtimeLogger = createRuntimeLogger(dependencies.operatorOutput);
         const resolvedBind = resolveBindOptions(bind);
         bindMode = resolvedBind.mode;
         dataDirectory = dependencies.environment.BORG_SERVER_DATA_DIR;
@@ -445,6 +455,7 @@ export function createNodeServerService(dependencies: ServiceDependencies): Serv
           authRuntime = await (dependencies.openStore ?? openStore)({
             path: join(dataDirectory, "borg.db"),
             storageLimits,
+            runtimeLogger,
           });
           throwIfShutdown(shutdown?.signal);
           const digestKey = await loadDigestKey(join(dataDirectory, "credential-digest.key"));
@@ -490,6 +501,7 @@ export function createNodeServerService(dependencies: ServiceDependencies): Serv
             ? {}
             : { handleCoordination: (request) => coordinationApi.handle(request) }),
           debugLogger,
+          runtimeLogger,
           runtimeIdentity,
         } satisfies HttpsServerOptions;
         running = await dependencies.startServer(serverOptions);
@@ -517,6 +529,7 @@ export function createNodeServerService(dependencies: ServiceDependencies): Serv
             (failure) => dependencies.operatorOutput?.(
               `LIVENESS_SCAN_FAILED: ${failure.message}`,
             ),
+            runtimeLogger,
           );
         }
       } catch (error) {
@@ -1787,8 +1800,10 @@ function waitForAbort(signal: AbortSignal): Promise<void> {
 }
 
 export function startLivenessScheduler(
-  liveness: { readonly scan: () => unknown },
+  liveness: { readonly scan: (observeCandidates?: (count: number) => void) => unknown },
   reportFailure: (failure: Error) => void,
+  runtimeLogger: RuntimeLogger = disabledRuntimeLogger,
+  elapsedClock: () => number = Date.now,
 ): { readonly stop: () => void } {
   let stopped = false;
   let failureReported = false;
@@ -1796,13 +1811,24 @@ export function startLivenessScheduler(
   const schedule = (): void => {
     timer = setTimeout(() => {
       if (stopped) return;
+      const startedAt = elapsedClock();
+      let candidateCount = 0;
+      let outcome: "success" | "failure" = "success";
+      runtimeLogger.emit({ event: "liveness_scan_start" });
       try {
-        liveness.scan();
+        liveness.scan((count) => { candidateCount = count; });
         failureReported = false;
       } catch {
+        outcome = "failure";
         // Report once per consecutive failure episode; a successful scan re-arms reporting.
         if (!failureReported) reportFailure(operatorErrors.LIVENESS_SCAN_FAILED);
         failureReported = true;
+      }
+      const elapsedMs = elapsedMilliseconds(startedAt, elapsedClock);
+      const result = { elapsedMs, candidateCount, outcome } as const;
+      runtimeLogger.emit({ event: "liveness_scan_end", ...result });
+      if (elapsedMs >= SLOW_RUNTIME_OPERATION_MS) {
+        runtimeLogger.emit({ event: "slow_liveness_scan", ...result });
       }
       schedule();
     }, 60_000);

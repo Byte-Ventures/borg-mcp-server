@@ -258,7 +258,7 @@ function createRequestListener(
       });
     };
     const emitRuntime = (): void => {
-      if (runtimeEmitted || trace.runtimeAdmitted !== true) return;
+      if (runtimeEmitted || trace.runtimeAuthenticated !== true) return;
       runtimeEmitted = true;
       const status = response.headersSent ? response.statusCode : 0;
       const elapsedMs = elapsedMilliseconds(startedAt, elapsedClock);
@@ -336,7 +336,6 @@ export async function handleRequest(
     sendRateLimited(response, preAuthRetry);
     return;
   }
-  trace.runtimeAdmitted = true;
   if (request.headers.origin !== undefined) {
     request.resume();
     sendEmpty(response, 403, true);
@@ -372,6 +371,7 @@ export async function handleRequest(
       return;
     }
     authentication = result;
+    trace.runtimeAuthenticated = true;
     trace.principal = result;
   }
 
@@ -506,7 +506,7 @@ export async function handleRequest(
 interface RequestTrace {
   readonly route: DebugRoute;
   readonly method: string;
-  runtimeAdmitted?: true;
+  runtimeAuthenticated?: true;
   authentication: "not_required" | "missing" | "invalid" | "revoked" | "evicted" | "rejected" |
     "cube-deleted" | "accepted";
   principal?: Principal;

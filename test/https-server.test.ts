@@ -259,6 +259,29 @@ describe("HTTPS service", () => {
     }
   });
 
+  it("does not log health checks or admitted requests with missing or invalid authentication", async () => {
+    const lines: string[] = [];
+    const unauthenticated = await startHttpsServer({
+      bind: { port: 0 },
+      tls: { key, cert: certificate },
+      authorizeCoordination: async (authorization) => authorization === undefined ? "missing" : "invalid",
+      runtimeLogger: createRuntimeLogger((line) => lines.push(line)),
+    });
+    try {
+      expect((await request(unauthenticated.origin, certificate, "/healthz")).status).toBe(204);
+      const responses = await Promise.all(Array.from({ length: 12 }, (_, index) => request(
+        unauthenticated.origin,
+        certificate,
+        "/api/cubes",
+        index % 2 === 0 ? {} : { authorization: `Bearer invalid-${index}` },
+      )));
+      expect(responses.map((response) => response.status)).toEqual(Array.from({ length: 12 }, () => 401));
+      expect(lines).toEqual([]);
+    } finally {
+      await unauthenticated.close();
+    }
+  });
+
   it("emits normalized opt-in request diagnostics without URLs or authorization values", async () => {
     const lines: string[] = [];
     const debugServer = await startHttpsServer({
@@ -1125,8 +1148,7 @@ describe("HTTPS service", () => {
         .toBe(204);
       expect((await request(limited.origin, certificate, "/healthz")).status)
         .toBe(204);
-      await vi.waitFor(() => expect(lines).toHaveLength(4));
-      lines.length = 0;
+      expect(lines).toEqual([]);
       for (let attempt = 0; attempt < 18; attempt += 1) {
         const rejected = await request(
           limited.origin,

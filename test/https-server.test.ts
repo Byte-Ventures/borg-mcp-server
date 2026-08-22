@@ -1096,9 +1096,11 @@ describe("HTTPS service", () => {
 
   it("enforces the shared global pre-authentication bound for loopback bursts through the HTTPS handler", async () => {
     let connection = 0;
+    const lines: string[] = [];
     const limited = await startHttpsServer({
       bind: { port: 0 },
       tls: { key, cert: certificate },
+      runtimeLogger: createRuntimeLogger((line) => lines.push(line)),
       testHooks: {
         identifyRemoteAddress: () => {
           connection += 1;
@@ -1123,6 +1125,8 @@ describe("HTTPS service", () => {
         .toBe(204);
       expect((await request(limited.origin, certificate, "/healthz")).status)
         .toBe(204);
+      await vi.waitFor(() => expect(lines).toHaveLength(4));
+      lines.length = 0;
       for (let attempt = 0; attempt < 18; attempt += 1) {
         const rejected = await request(
           limited.origin,
@@ -1134,6 +1138,7 @@ describe("HTTPS service", () => {
       }
       expect((await request(limited.origin, certificate, "/healthz")).status)
         .toBe(429);
+      expect(lines).toEqual([]);
     } finally {
       await limited.close();
     }

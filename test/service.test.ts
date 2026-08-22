@@ -77,8 +77,13 @@ describe("node server service", () => {
       scheduler.stop();
 
       expect(lines.map((line) => JSON.parse(line))).toEqual([
-        { level: "info", event: "liveness_scan_start" },
         {
+          ts: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u),
+          level: "info",
+          event: "liveness_scan_start",
+        },
+        {
+          ts: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u),
           level: "info",
           event: "liveness_scan_end",
           elapsed_ms: 1_001,
@@ -86,6 +91,7 @@ describe("node server service", () => {
           outcome: "success",
         },
         {
+          ts: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u),
           level: "warn",
           event: "slow_liveness_scan",
           elapsed_ms: 1_001,

@@ -1845,24 +1845,30 @@ class SqliteScopedStore implements ScopedStore {
 
   listDrones(cubeId: string): DroneRecord[] {
     this.#requireCube(cubeId, "read");
+    const staleAt = new Date(this.#clock().getTime() - WAKE_STALE_AFTER_MS).toISOString();
     const rows = this.#database.prepare(`
+      WITH ${DRONE_WAKE_STATE_CTES}
       SELECT drone.id, drone.cube_id, drone.role_id, drone.label,
              COALESCE(drone.last_seen, drone.created_at) AS last_seen,
              drone.hostname, drone.agent_kind, drone.reported_model,
              drone.working_repo_name, drone.working_repo_origin,
              drone.runtime_metadata_reported, drone.created_at,
-              CASE WHEN client.revoked_at IS NULL AND grant_row.access IN ('write', 'manage')
-                THEN 'participant' ELSE 'observer' END AS posture
+             CASE WHEN client.revoked_at IS NULL AND grant_row.access IN ('write', 'manage')
+               THEN 'participant' ELSE 'observer' END AS posture,
+             ${DRONE_WAKE_STATE_CASE}
       FROM drones AS drone
       LEFT JOIN clients AS client ON client.id = drone.client_id
       LEFT JOIN client_cube_grants AS grant_row
         ON grant_row.client_id = drone.client_id AND grant_row.cube_id = drone.cube_id
+      LEFT JOIN latest_direct ON latest_direct.drone_id = drone.id
+      LEFT JOIN acknowledged_direct ON acknowledged_direct.entry_id = latest_direct.entry_id
+        AND acknowledged_direct.drone_id = drone.id
       WHERE drone.cube_id = ? AND drone.evicted_at IS NULL
       ORDER BY drone.label, drone.id
-    `).all(cubeId);
+    `).all(cubeId, staleAt, cubeId);
     return rows.map((row) => ({
       ...droneRecord(row),
-      wake_state: droneWakeState(this.#database, requiredText(row, "id"), this.#clock()),
+      wake_state: requiredDroneWakeState(row),
     }));
   }
 
@@ -1890,34 +1896,55 @@ class SqliteScopedStore implements ScopedStore {
       validateTimestamp(since);
       createdAt = since;
     }
+    const staleAt = new Date(this.#clock().getTime() - WAKE_STALE_AFTER_MS).toISOString();
     const rows = this.#database.prepare(`
+      WITH drone_activity AS (
+        SELECT post.drone_id, MAX(post.created_at) AS last_log_post_at,
+               MAX(CASE WHEN post.created_at > ? OR
+                 (? IS NOT NULL AND post.created_at = ? AND post.id > ?)
+                 THEN 1 ELSE 0 END) AS seen_since
+        FROM activity_log AS post
+        WHERE post.cube_id = ? AND post.drone_id IS NOT NULL
+        GROUP BY post.drone_id
+      ),
+      ${DRONE_WAKE_STATE_CTES}
       SELECT drone.id, drone.cube_id, drone.role_id, drone.label,
              COALESCE(drone.last_seen, drone.created_at) AS last_seen,
              drone.hostname, drone.agent_kind, drone.reported_model,
              drone.working_repo_name, drone.working_repo_origin,
              drone.runtime_metadata_reported, drone.created_at,
-             CASE WHEN client.revoked_at IS NULL AND grant_row.access IN ('write', 'manage')
-               THEN 'participant' ELSE 'observer' END AS posture,
-             (SELECT MAX(post.created_at) FROM activity_log AS post
-              WHERE post.cube_id = drone.cube_id AND post.drone_id = drone.id) AS last_log_post_at,
-             EXISTS (SELECT 1 FROM activity_log AS response
-              WHERE response.cube_id = drone.cube_id AND response.drone_id = drone.id
-                AND (response.created_at > ? OR
-                   (? IS NOT NULL AND response.created_at = ? AND response.id > ?))) AS seen_since
+              CASE WHEN client.revoked_at IS NULL AND grant_row.access IN ('write', 'manage')
+                THEN 'participant' ELSE 'observer' END AS posture,
+              drone_activity.last_log_post_at,
+              COALESCE(drone_activity.seen_since, 0) AS seen_since,
+              ${DRONE_WAKE_STATE_CASE}
       FROM drones AS drone
       LEFT JOIN clients AS client ON client.id = drone.client_id
       LEFT JOIN client_cube_grants AS grant_row
         ON grant_row.client_id = drone.client_id AND grant_row.cube_id = drone.cube_id
+      LEFT JOIN drone_activity ON drone_activity.drone_id = drone.id
+      LEFT JOIN latest_direct ON latest_direct.drone_id = drone.id
+      LEFT JOIN acknowledged_direct ON acknowledged_direct.entry_id = latest_direct.entry_id
+        AND acknowledged_direct.drone_id = drone.id
       WHERE drone.cube_id = ? AND drone.evicted_at IS NULL
       ORDER BY drone.label, drone.id
-    `).all(createdAt, anchorId, createdAt, anchorId, cubeId);
+    `).all(
+      createdAt,
+      anchorId,
+      createdAt,
+      anchorId,
+      cubeId,
+      cubeId,
+      staleAt,
+      cubeId,
+    );
     return {
       since: createdAt,
       drones: rows.map((row) => ({
         ...droneRecord(row),
         last_log_post_at: nullableText(row, "last_log_post_at"),
         seen_since: requiredInteger(row, "seen_since") === 1,
-        wake_state: droneWakeState(this.#database, requiredText(row, "id"), this.#clock()),
+        wake_state: requiredDroneWakeState(row),
       })),
     };
   }
@@ -4993,6 +5020,35 @@ function requiredCubeTemplate(row: Record<string, unknown>, key: string): CubeTe
   return requiredText(row, key) as CubeTemplate;
 }
 
+const DRONE_WAKE_STATE_CTES = `
+  latest_direct_key AS (
+    SELECT recipient.drone_id, MAX(entry.created_at || entry.id) AS sort_key
+    FROM activity_log AS entry
+    JOIN activity_log_recipients AS recipient ON recipient.entry_id = entry.id
+    WHERE entry.cube_id = ? AND entry.visibility = 'direct'
+    GROUP BY recipient.drone_id
+  ),
+  latest_direct AS (
+    SELECT drone_id, SUBSTR(sort_key, 25) AS entry_id,
+           SUBSTR(sort_key, 1, 24) AS created_at
+    FROM latest_direct_key
+  ),
+  acknowledged_direct AS (
+    SELECT latest_direct.entry_id, latest_direct.drone_id
+    FROM latest_direct
+    JOIN activity_acks AS ack ON ack.entry_id = latest_direct.entry_id
+      AND ack.claimant_drone_id = latest_direct.drone_id AND ack.kind = 'ack'
+    GROUP BY latest_direct.entry_id, latest_direct.drone_id
+  )
+`;
+
+const DRONE_WAKE_STATE_CASE = `
+  CASE WHEN latest_direct.entry_id IS NULL THEN 'idle'
+       WHEN acknowledged_direct.entry_id IS NOT NULL THEN 'awake'
+       WHEN latest_direct.created_at <= ? THEN 'stale'
+       ELSE 'pending' END AS wake_state
+`;
+
 function droneRecord(row: Record<string, unknown>): DroneRecord {
   const posture = requiredText(row, "posture");
   if (posture !== "observer" && posture !== "participant") {
@@ -5012,27 +5068,12 @@ function droneRecord(row: Record<string, unknown>): DroneRecord {
   };
 }
 
-function droneWakeState(
-  database: DatabaseSync,
-  droneId: string,
-  now: Date,
-): "idle" | "pending" | "awake" | "stale" {
-  const latest = database.prepare(`
-    SELECT entry.id, entry.created_at,
-           EXISTS(
-             SELECT 1 FROM activity_acks AS ack
-             WHERE ack.entry_id = entry.id AND ack.claimant_drone_id = ? AND ack.kind = 'ack'
-           ) AS acknowledged
-    FROM activity_log AS entry
-    JOIN activity_log_recipients AS recipient ON recipient.entry_id = entry.id
-    WHERE recipient.drone_id = ? AND entry.visibility = 'direct'
-    ORDER BY entry.created_at DESC, entry.id DESC
-    LIMIT 1
-  `).get(droneId, droneId);
-  if (latest === undefined) return "idle";
-  if (requiredInteger(latest, "acknowledged") === 1) return "awake";
-  const age = now.getTime() - Date.parse(requiredText(latest, "created_at"));
-  return age >= WAKE_STALE_AFTER_MS ? "stale" : "pending";
+function requiredDroneWakeState(row: Record<string, unknown>): DroneRecord["wake_state"] {
+  const wakeState = requiredText(row, "wake_state");
+  if (wakeState !== "idle" && wakeState !== "pending" && wakeState !== "awake" && wakeState !== "stale") {
+    throw new Error("Database produced an invalid drone wake state.");
+  }
+  return wakeState;
 }
 
 const EMPTY_RUNTIME_METADATA: DroneRuntimeMetadata = Object.freeze({

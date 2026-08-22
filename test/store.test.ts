@@ -1756,6 +1756,153 @@ describe("Principal to ScopedStore isolation", () => {
     stop();
   });
 
+  it("builds large plain and since rosters with O(1) statements and legacy-identical payloads", async () => {
+    const droneIds = [
+      ids.droneA,
+      ...Array.from({ length: 14 }, (_, index) =>
+        `00000000-0000-4000-8000-${(100 + index).toString().padStart(12, "0")}`),
+    ];
+    for (const [index, droneId] of droneIds.slice(1).entries()) {
+      runtime.maintenance.createDrone({
+        id: droneId,
+        cubeId: ids.cubeA,
+        roleId: ids.roleA,
+        clientId: ids.clientA,
+        label: `roster-${index.toString().padStart(2, "0")}`,
+      });
+    }
+    const database = new DatabaseSync(join(directory, "borg.db"));
+    database.exec("PRAGMA synchronous = FULL; PRAGMA busy_timeout = 5000; BEGIN IMMEDIATE;");
+    const insertEntry = database.prepare(`
+      INSERT INTO activity_log (
+        id, cube_id, drone_id, actor_kind, actor_id, message, created_at, visibility
+      ) VALUES (?, ?, ?, 'drone-session', ?, 'roster history', ?, 'direct')
+    `);
+    const insertRecipient = database.prepare(
+      "INSERT INTO activity_log_recipients (entry_id, drone_id) VALUES (?, ?)",
+    );
+    const insertAck = database.prepare(`
+      INSERT INTO activity_acks (
+        entry_id, principal_kind, principal_id, kind, created_at, claimant_drone_id
+      ) VALUES (?, 'drone-session', ?, 'ack', ?, ?)
+    `);
+    try {
+      const recipientIds = droneIds.slice(0, -1);
+      for (let index = 0; index < 30_000; index += 1) {
+        const entryId = `10000000-0000-4000-8000-${index.toString().padStart(12, "0")}`;
+        const authorId = droneIds[index % droneIds.length]!;
+        const recipientId = recipientIds[index % recipientIds.length]!;
+        const createdAt = new Date(Date.parse("2026-07-14T10:00:00.000Z") + index * 100).toISOString();
+        insertEntry.run(entryId, ids.cubeA, authorId, `session-${index}`, createdAt);
+        insertRecipient.run(entryId, recipientId);
+        if (index % 5 === 0) insertAck.run(entryId, `session-${index}`, createdAt, recipientId);
+      }
+      for (const [index, recipientId] of recipientIds.entries()) {
+        const entryId = `20000000-0000-4000-8000-${index.toString().padStart(12, "0")}`;
+        const createdAt = index % 3 === 2
+          ? "2026-07-14T11:50:00.000Z"
+          : `2026-07-14T11:59:${(index + 10).toString().padStart(2, "0")}.000Z`;
+        insertEntry.run(entryId, ids.cubeA, recipientId, `latest-session-${index}`, createdAt);
+        insertRecipient.run(entryId, recipientId);
+        if (index % 3 === 0) {
+          insertAck.run(entryId, `latest-session-${index}`, createdAt, recipientId);
+        }
+      }
+      database.exec("COMMIT");
+    } catch (error) {
+      database.exec("ROLLBACK");
+      throw error;
+    }
+    database.exec("ANALYZE");
+    expect({
+      drones: database.prepare(
+        "SELECT COUNT(*) AS count FROM drones WHERE cube_id = ? AND evicted_at IS NULL",
+      ).get(ids.cubeA)?.["count"],
+      entries: database.prepare(
+        "SELECT COUNT(*) AS count FROM activity_log WHERE cube_id = ?",
+      ).get(ids.cubeA)?.["count"],
+      recipients: database.prepare("SELECT COUNT(*) AS count FROM activity_log_recipients").get()?.["count"],
+      acknowledgements: database.prepare("SELECT COUNT(*) AS count FROM activity_acks").get()?.["count"],
+    }).toEqual({ drones: 15, entries: 30_014, recipients: 30_014, acknowledgements: 6_005 });
+
+    const since = "2026-07-14T11:00:00.000Z";
+    database.exec("PRAGMA shrink_memory");
+    const legacyPlainCold = measureLegacyRoster(database, ids.cubeA, storeNow);
+    const legacyPlainWarm = measureLegacyRoster(database, ids.cubeA, storeNow);
+    database.exec("PRAGMA shrink_memory");
+    const legacySinceCold = measureLegacyRoster(database, ids.cubeA, storeNow, since);
+    const legacySinceWarm = measureLegacyRoster(database, ids.cubeA, storeNow, since);
+    const prepare = vi.spyOn(DatabaseSync.prototype, "prepare");
+    try {
+      let manager = runtime.forPrincipal(clientPrincipal(ids.clientA));
+      prepare.mockClear();
+      const plainColdStartedAt = performance.now();
+      const plain = manager.listDrones(ids.cubeA);
+      const plainColdElapsed = performance.now() - plainColdStartedAt;
+      const plainColdStatementCount = prepare.mock.calls.length;
+
+      prepare.mockClear();
+      const plainWarmStartedAt = performance.now();
+      manager.listDrones(ids.cubeA);
+      const plainWarmElapsed = performance.now() - plainWarmStartedAt;
+      const plainWarmStatementCount = prepare.mock.calls.length;
+
+      runtime.close();
+      runtime = await openStore({ path: join(directory, "borg.db"), clock: () => storeNow });
+      manager = runtime.forPrincipal(clientPrincipal(ids.clientA));
+      prepare.mockClear();
+      const sinceColdStartedAt = performance.now();
+      const sinceRoster = manager.listDronesSince(ids.cubeA, since);
+      const sinceColdElapsed = performance.now() - sinceColdStartedAt;
+      const sinceColdStatementCount = prepare.mock.calls.length;
+
+      prepare.mockClear();
+      const sinceWarmStartedAt = performance.now();
+      manager.listDronesSince(ids.cubeA, since);
+      const sinceWarmElapsed = performance.now() - sinceWarmStartedAt;
+      const sinceWarmStatementCount = prepare.mock.calls.length;
+
+      prepare.mockClear();
+      manager.listDrones(ids.cubeB);
+      const emptyRosterStatementCount = prepare.mock.calls.length;
+
+      expect(JSON.stringify(plain)).toBe(JSON.stringify(legacyPlainCold.drones));
+      expect(JSON.stringify(sinceRoster)).toBe(JSON.stringify({ since, drones: legacySinceCold.drones }));
+      expect({
+        emptyRosterStatementCount,
+        plainColdStatementCount,
+        plainWarmStatementCount,
+        sinceColdStatementCount,
+        sinceWarmStatementCount,
+      }).toEqual({
+        emptyRosterStatementCount: 2,
+        plainColdStatementCount: 2,
+        plainWarmStatementCount: 2,
+        sinceColdStatementCount: 2,
+        sinceWarmStatementCount: 2,
+      });
+      expect([
+        legacyPlainCold.statementCount,
+        legacyPlainWarm.statementCount,
+        legacySinceCold.statementCount,
+        legacySinceWarm.statementCount,
+      ]).toEqual([16, 16, 16, 16]);
+      expect([
+        legacyPlainCold.elapsed,
+        legacyPlainWarm.elapsed,
+        legacySinceCold.elapsed,
+        legacySinceWarm.elapsed,
+        plainColdElapsed,
+        plainWarmElapsed,
+        sinceColdElapsed,
+        sinceWarmElapsed,
+      ].every((elapsed) => Number.isFinite(elapsed) && elapsed >= 0)).toBe(true);
+    } finally {
+      prepare.mockRestore();
+      database.close();
+    }
+  });
+
   it("bounds a realistic liveness scan without changing wake selection", () => {
     const historyRoleId = "00000000-0000-4000-8000-000000000041";
     const historyDroneId = "00000000-0000-4000-8000-000000000042";
@@ -1907,6 +2054,93 @@ describe("Principal to ScopedStore isolation", () => {
     }
   });
 });
+
+function measureLegacyRoster(
+  database: DatabaseSync,
+  cubeId: string,
+  now: Date,
+  since?: string,
+): { readonly drones: Record<string, unknown>[]; readonly elapsed: number; readonly statementCount: number } {
+  const startedAt = performance.now();
+  const rows = since === undefined
+    ? database.prepare(`
+        SELECT drone.id, drone.cube_id, drone.role_id, drone.label,
+               COALESCE(drone.last_seen, drone.created_at) AS last_seen,
+               drone.hostname, drone.agent_kind, drone.reported_model,
+               drone.working_repo_name, drone.working_repo_origin,
+               drone.runtime_metadata_reported, drone.created_at,
+               CASE WHEN client.revoked_at IS NULL AND grant_row.access IN ('write', 'manage')
+                 THEN 'participant' ELSE 'observer' END AS posture
+        FROM drones AS drone
+        LEFT JOIN clients AS client ON client.id = drone.client_id
+        LEFT JOIN client_cube_grants AS grant_row
+          ON grant_row.client_id = drone.client_id AND grant_row.cube_id = drone.cube_id
+        WHERE drone.cube_id = ? AND drone.evicted_at IS NULL
+        ORDER BY drone.label, drone.id
+      `).all(cubeId)
+    : database.prepare(`
+        SELECT drone.id, drone.cube_id, drone.role_id, drone.label,
+               COALESCE(drone.last_seen, drone.created_at) AS last_seen,
+               drone.hostname, drone.agent_kind, drone.reported_model,
+               drone.working_repo_name, drone.working_repo_origin,
+               drone.runtime_metadata_reported, drone.created_at,
+               CASE WHEN client.revoked_at IS NULL AND grant_row.access IN ('write', 'manage')
+                 THEN 'participant' ELSE 'observer' END AS posture,
+               (SELECT MAX(post.created_at) FROM activity_log AS post
+                WHERE post.cube_id = drone.cube_id AND post.drone_id = drone.id) AS last_log_post_at,
+               EXISTS (SELECT 1 FROM activity_log AS response
+                WHERE response.cube_id = drone.cube_id AND response.drone_id = drone.id
+                  AND response.created_at > ?) AS seen_since
+        FROM drones AS drone
+        LEFT JOIN clients AS client ON client.id = drone.client_id
+        LEFT JOIN client_cube_grants AS grant_row
+          ON grant_row.client_id = drone.client_id AND grant_row.cube_id = drone.cube_id
+        WHERE drone.cube_id = ? AND drone.evicted_at IS NULL
+        ORDER BY drone.label, drone.id
+      `).all(since, cubeId);
+  const latest = database.prepare(`
+    SELECT entry.id, entry.created_at,
+           EXISTS(
+             SELECT 1 FROM activity_acks AS ack
+             WHERE ack.entry_id = entry.id AND ack.claimant_drone_id = ? AND ack.kind = 'ack'
+           ) AS acknowledged
+    FROM activity_log AS entry
+    JOIN activity_log_recipients AS recipient ON recipient.entry_id = entry.id
+    WHERE recipient.drone_id = ? AND entry.visibility = 'direct'
+    ORDER BY entry.created_at DESC, entry.id DESC
+    LIMIT 1
+  `);
+  const drones = rows.map((row) => {
+    const wake = latest.get(String(row["id"]), String(row["id"]));
+    let wakeState: "idle" | "pending" | "awake" | "stale" = "idle";
+    if (wake !== undefined) {
+      if (Number(wake["acknowledged"]) === 1) wakeState = "awake";
+      else if (now.getTime() - Date.parse(String(wake["created_at"])) >= 120_000) wakeState = "stale";
+      else wakeState = "pending";
+    }
+    return {
+      id: row["id"],
+      cube_id: row["cube_id"],
+      role_id: row["role_id"],
+      label: row["label"],
+      last_seen: row["last_seen"],
+      hostname: row["hostname"],
+      posture: row["posture"],
+      agent_kind: row["agent_kind"],
+      reported_model: row["reported_model"],
+      working_repo_name: row["working_repo_name"],
+      working_repo_origin: row["working_repo_origin"],
+      runtime_metadata_reported: Number(row["runtime_metadata_reported"]) === 1,
+      created_at: row["created_at"],
+      wake_state: wakeState,
+      ...(since === undefined ? {} : {
+        last_log_post_at: row["last_log_post_at"],
+        seen_since: Number(row["seen_since"]) === 1,
+      }),
+    };
+  });
+  return { drones, elapsed: performance.now() - startedAt, statementCount: rows.length + 1 };
+}
 
 function measureLegacyLivenessScan(database: DatabaseSync, threshold: string): number {
   const startedAt = performance.now();

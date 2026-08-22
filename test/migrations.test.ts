@@ -124,7 +124,7 @@ describe("SQLite migrations", () => {
     expect(first.diagnostics()).toEqual({
       journalMode: "wal",
       foreignKeys: true,
-      schemaVersions: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26],
+      schemaVersions: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27],
     });
     expect((await stat(join(directory, "data"))).mode & 0o777).toBe(0o700);
     expect((await stat(databasePath)).mode & 0o777).toBe(0o600);
@@ -134,7 +134,7 @@ describe("SQLite migrations", () => {
 
     const second = await openStore({ path: databasePath });
     expect(second.diagnostics().schemaVersions)
-      .toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26]);
+      .toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27]);
     second.close();
     await expect(access(databasePath)).resolves.toBeUndefined();
   });
@@ -153,6 +153,24 @@ describe("SQLite migrations", () => {
     ).get()).toEqual({
       sql: "CREATE INDEX activity_log_direct_wake_scan_idx\n" +
         "      ON activity_log (cube_id, created_at, id) WHERE visibility = 'direct'",
+    });
+    database.close();
+  });
+
+  it("adds the expired-cursor ordering index when upgrading a v26 database", () => {
+    const database = new DatabaseSync(":memory:");
+    applyMigrations(database, STORE_MIGRATIONS.slice(0, 26));
+    expect(database.prepare(
+      "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'expired_activity_cursors_order_idx'",
+    ).get()).toBeUndefined();
+
+    applyMigrations(database);
+
+    expect(database.prepare(
+      "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'expired_activity_cursors_order_idx'",
+    ).get()).toEqual({
+      sql: "CREATE INDEX expired_activity_cursors_order_idx\n" +
+        "      ON expired_activity_cursors (cube_id, created_at, entry_id)",
     });
     database.close();
   });
@@ -778,7 +796,7 @@ describe("SQLite migrations", () => {
     ).get()).toBeUndefined();
     expect(database.prepare(
       "SELECT version, name FROM schema_migrations ORDER BY version DESC LIMIT 1",
-    ).get()).toEqual({ version: 26, name: "bounded_liveness_scan" });
+    ).get()).toEqual({ version: 27, name: "ordered_expired_activity_cursors" });
     database.close();
   });
 
@@ -973,7 +991,7 @@ Structured message routing:
     }).toEqual(historyBefore);
     expect(database.prepare(
       "SELECT version, name FROM schema_migrations ORDER BY version DESC LIMIT 1",
-    ).get()).toEqual({ version: 26, name: "bounded_liveness_scan" });
+    ).get()).toEqual({ version: 27, name: "ordered_expired_activity_cursors" });
     database.close();
   });
 

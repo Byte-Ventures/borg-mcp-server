@@ -2255,7 +2255,196 @@ describe("Principal to ScopedStore isolation", () => {
       database.close();
     }
   });
+
+  it("batches realistic read enrichment without changing entries, citations, recipients, or claims", () => {
+    const client = runtime.forPrincipal(clientPrincipal(ids.clientA));
+    const document = client.putDocument(ids.cubeA, {
+      title: "Read evidence",
+      contentType: "text/plain",
+      content: "batched citation",
+    });
+    const database = new DatabaseSync(join(directory, "borg.db"));
+    database.exec("PRAGMA synchronous = FULL; PRAGMA busy_timeout = 5000; BEGIN IMMEDIATE;");
+    const insertEntry = database.prepare(`
+      INSERT INTO activity_log (
+        id, cube_id, drone_id, actor_kind, actor_id, message, created_at, visibility
+      ) VALUES (?, ?, ?, 'client', ?, ?, ?, ?)
+    `);
+    const insertRecipient = database.prepare(
+      "INSERT INTO activity_log_recipients (entry_id, drone_id) VALUES (?, ?)",
+    );
+    const insertCitation = database.prepare(`
+      INSERT INTO activity_log_documents (entry_id, document_id, cube_id, ordinal)
+      VALUES (?, ?, ?, 0)
+    `);
+    const insertClaim = database.prepare(`
+      INSERT INTO activity_acks (
+        entry_id, principal_kind, principal_id, kind, created_at, claimant_drone_id
+      ) VALUES (?, 'client', ?, 'claim', ?, ?)
+    `);
+    try {
+      for (let index = 0; index < 10_000; index += 1) {
+        const entryId = `read-${index.toString().padStart(5, "0")}`;
+        const createdAt = new Date(Date.parse("2026-07-14T10:00:00.000Z") + index).toISOString();
+        const hasEnrichment = index < 500;
+        insertEntry.run(
+          entryId,
+          ids.cubeA,
+          ids.droneA,
+          ids.clientA,
+          `read message ${index}`,
+          createdAt,
+          hasEnrichment ? "direct" : "broadcast",
+        );
+        if (hasEnrichment) {
+          insertRecipient.run(entryId, ids.droneA);
+          insertCitation.run(entryId, document.id, ids.cubeA);
+        }
+        insertClaim.run(entryId, ids.clientA, createdAt, ids.clientA);
+      }
+      database.exec("COMMIT");
+    } catch (error) {
+      database.exec("ROLLBACK");
+      throw error;
+    }
+    database.exec("ANALYZE; PRAGMA shrink_memory;");
+
+    const legacyCold = measureLegacyReadPage(database, ids.cubeA, 500);
+    const legacyWarm = measureLegacyReadPage(database, ids.cubeA, 500);
+    const prepare = vi.spyOn(DatabaseSync.prototype, "prepare");
+    try {
+      prepare.mockClear();
+      const batchColdStartedAt = performance.now();
+      const batchPage = client.readLog(ids.cubeA, null, 500);
+      const batchCold = performance.now() - batchColdStartedAt;
+      const batchColdStatementCount = prepare.mock.calls.length;
+
+      prepare.mockClear();
+      const batchWarmStartedAt = performance.now();
+      client.readLog(ids.cubeA, null, 500);
+      const batchWarm = performance.now() - batchWarmStartedAt;
+      const batchWarmStatementCount = prepare.mock.calls.length;
+
+      prepare.mockClear();
+      client.readLog(ids.cubeA, null, 1);
+      const singleEntryStatementCount = prepare.mock.calls.length;
+
+      expect(JSON.stringify(batchPage)).toBe(JSON.stringify(legacyCold.page));
+      expect({ batchColdStatementCount, batchWarmStatementCount, singleEntryStatementCount })
+        .toEqual({ batchColdStatementCount: 8, batchWarmStatementCount: 8, singleEntryStatementCount: 8 });
+      expect(legacyCold.statementCount).toBe(1_505);
+      expect(legacyWarm.statementCount).toBe(1_505);
+      expect([
+        legacyCold.elapsed,
+        legacyWarm.elapsed,
+        legacyCold.claimsElapsed,
+        legacyWarm.claimsElapsed,
+        batchCold,
+        batchWarm,
+      ].every((elapsed) => Number.isFinite(elapsed) && elapsed >= 0)).toBe(true);
+    } finally {
+      prepare.mockRestore();
+      database.close();
+    }
+  });
 });
+
+function measureLegacyReadPage(database: DatabaseSync, cubeId: string, limit: number): {
+  readonly page: Record<string, unknown>;
+  readonly elapsed: number;
+  readonly claimsElapsed: number;
+  readonly statementCount: number;
+} {
+  const startedAt = performance.now();
+  const rows = database.prepare(`
+    SELECT id FROM activity_log WHERE cube_id = ? ORDER BY created_at, id LIMIT ?
+  `).all(cubeId, limit + 1);
+  const selected = rows.slice(0, limit);
+  const entries = selected.map((selectedRow) => {
+    const entryId = String(selectedRow["id"]);
+    const row = database.prepare(`
+      SELECT l.id, l.cube_id, l.drone_id, l.message, l.visibility, l.created_at,
+             d.label AS drone_label, r.name AS role_name
+      FROM activity_log AS l
+      LEFT JOIN drones AS d ON d.id = l.drone_id AND d.cube_id = l.cube_id
+      LEFT JOIN roles AS r ON r.id = d.role_id AND r.cube_id = d.cube_id
+      WHERE l.cube_id = ? AND l.id = ?
+    `).get(cubeId, entryId)!;
+    const recipients = database.prepare(`
+      SELECT drone_id FROM activity_log_recipients WHERE entry_id = ? ORDER BY drone_id
+    `).all(entryId).map((recipient) => String(recipient["drone_id"]));
+    const documents = database.prepare(`
+      SELECT document.id, document.title, document.size_bytes, document.state
+      FROM activity_log_documents AS citation
+      JOIN documents AS document ON document.id = citation.document_id
+        AND document.cube_id = citation.cube_id
+      WHERE citation.entry_id = ? ORDER BY citation.ordinal
+    `).all(entryId).map((document) => ({
+      id: document["id"],
+      title: document["title"],
+      size_bytes: Number(document["size_bytes"]),
+      state: document["state"],
+    }));
+    return {
+      id: row["id"],
+      cube_id: row["cube_id"],
+      drone_id: row["drone_id"],
+      message: row["message"],
+      visibility: row["visibility"],
+      created_at: row["created_at"],
+      drone_label: row["drone_label"],
+      role_name: row["role_name"],
+      recipient_drone_ids: recipients,
+      ...(documents.length === 0 ? {} : { documents }),
+    };
+  });
+  const cursor: { id: string; created_at: string } | null = entries.length === 0
+    ? null
+    : {
+        id: String(entries.at(-1)!["id"]),
+        created_at: String(entries.at(-1)!["created_at"]),
+      };
+  const behind = cursor === null
+    ? Number(database.prepare(
+      "SELECT COUNT(*) AS count FROM activity_log WHERE cube_id = ?",
+    ).get(cubeId)!["count"])
+    : Number(database.prepare(`
+      SELECT COUNT(*) AS count FROM activity_log
+      WHERE cube_id = ? AND (created_at > ? OR (created_at = ? AND id > ?))
+    `).get(cubeId, cursor.created_at, cursor.created_at, cursor.id)!["count"]);
+  const claimsStartedAt = performance.now();
+  const claims = database.prepare(`
+    SELECT acknowledgement.entry_id AS log_entry_id,
+           acknowledgement.claimant_drone_id,
+           drone.label AS claimant_label,
+           role.name AS claimant_role,
+           acknowledgement.created_at AS claimed_at
+    FROM activity_acks AS acknowledgement
+    JOIN activity_log AS entry ON entry.id = acknowledgement.entry_id
+    LEFT JOIN drones AS drone ON drone.id = acknowledgement.claimant_drone_id
+      AND drone.cube_id = entry.cube_id
+    LEFT JOIN roles AS role ON role.id = drone.role_id AND role.cube_id = drone.cube_id
+    WHERE entry.cube_id = ? AND acknowledgement.kind = 'claim'
+      AND acknowledgement.claimant_drone_id IS NOT NULL
+      AND (1 = 1)
+    ORDER BY acknowledgement.created_at, acknowledgement.entry_id,
+             acknowledgement.claimant_drone_id
+  `).all(cubeId).map((claim) => ({
+    log_entry_id: claim["log_entry_id"],
+    claimant_drone_id: claim["claimant_drone_id"],
+    claimant_label: claim["claimant_label"],
+    claimant_role: claim["claimant_role"],
+    claimed_at: claim["claimed_at"],
+    stale: false,
+  }));
+  const claimsElapsed = performance.now() - claimsStartedAt;
+  return {
+    page: { entries, cursor, behind_by: behind, has_more: behind > 0, claims },
+    elapsed: performance.now() - startedAt,
+    claimsElapsed,
+    statementCount: 5 + (entries.length * 3),
+  };
+}
 
 function measureCappedPrune(
   database: DatabaseSync,

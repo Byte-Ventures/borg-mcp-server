@@ -72,8 +72,18 @@ use. Authenticated-request, liveness, and activity-store timing records go to th
 server-owned `~/.borg/server/logs/runtime.log`. The server rotates that file at
 10 MiB and retains three files total (`runtime.log`, `.1`, and `.2`), enough for
 more than one day at the expected tens of thousands of records per day. Startup
-and crash output remain in managed stderr. `borg-mcp-server status` reports
-whether the service is active, inactive,
+and crash output remain in managed stderr.
+
+Runtime telemetry is optional and never falls back to per-request stderr. If a
+runtime log path is a symbolic link, has multiple hard links, belongs to another
+user, or permits group/other access, startup emits one `RUNTIME_LOG_UNSAFE`
+warning, disables telemetry, and continues serving. Stop the server, repair or
+remove the unsafe `runtime.log*` files, and restart to restore telemetry. A full,
+slow, or temporarily unavailable disk emits one bounded warning, drops newest
+records when the in-memory queue reaches 1,024 records or 1 MiB, and retries the
+owned sink; the next successful record reports the dropped and failed counts.
+
+`borg-mcp-server status` reports whether the service is active, inactive,
 or absent and identifies its adapter. Use the platform service manager for
 temporary stop and restart operations:
 

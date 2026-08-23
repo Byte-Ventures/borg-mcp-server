@@ -33,7 +33,12 @@ import {
   SLOW_RUNTIME_OPERATION_MS,
   type RuntimeLogger,
 } from "./runtime-log.js";
-import { openRuntimeLogSink, type RuntimeLogSink } from "./runtime-log-sink.js";
+import {
+  openRuntimeLogSink,
+  RUNTIME_LOG_STARTUP_FAILURE_MESSAGE,
+  RUNTIME_LOG_UNSAFE_MESSAGE,
+  type RuntimeLogSink,
+} from "./runtime-log-sink.js";
 import { MigrationCompatibilityError } from "./migrations.js";
 import { createEnrollmentExchange } from "./enrollment.js";
 import {
@@ -422,10 +427,24 @@ export function createNodeServerService(dependencies: ServiceDependencies): Serv
             );
         await dependencies.onStartupPhase?.("post-lock");
         throwIfShutdown(shutdown?.signal);
-        runtimeLogSink = dataDirectory === undefined
-          ? undefined
-          : await openRuntimeLogSink(dataDirectory);
-        runtimeLogger = createRuntimeLogger(runtimeLogSink?.write ?? dependencies.operatorOutput);
+        if (dataDirectory === undefined) {
+          runtimeLogger = createRuntimeLogger(dependencies.operatorOutput);
+        } else {
+          try {
+            runtimeLogSink = await openRuntimeLogSink(dataDirectory, {
+              ...(dependencies.operatorOutput === undefined
+                ? {}
+                : { reportFailure: dependencies.operatorOutput }),
+            });
+            runtimeLogger = createRuntimeLogger(runtimeLogSink.write);
+          } catch (error) {
+            dependencies.operatorOutput?.(
+              error === operatorErrors.RUNTIME_LOG_UNSAFE
+                ? RUNTIME_LOG_UNSAFE_MESSAGE
+                : RUNTIME_LOG_STARTUP_FAILURE_MESSAGE,
+            );
+          }
+        }
       } catch (error) {
         await runtimeLogSink?.close();
         await runtimeLock?.release().catch(() => undefined);

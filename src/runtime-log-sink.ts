@@ -209,7 +209,7 @@ export async function openRuntimeLogSink(
   };
 
   const drain = async (): Promise<void> => {
-    while (!abandoned && queue.length > 0) {
+    while (!abandoned && (queue.length > 0 || repairOffset !== undefined)) {
       if (handle === undefined) {
         try {
           await reopen();
@@ -224,6 +224,7 @@ export async function openRuntimeLogSink(
         }
       }
       if (abandoned || handle === undefined) return;
+      if (queue.length === 0) continue;
       const queued = queue.shift()!;
       queuedBytes -= queued.bytes;
       if (!queued.slow) {
@@ -254,13 +255,23 @@ export async function openRuntimeLogSink(
       } catch (error) {
         const failedHandle = handle;
         handle = undefined;
-        void failedHandle?.close().catch(() => undefined);
         if (error === operatorErrors.RUNTIME_LOG_UNSAFE) {
+          void failedHandle?.close().catch(() => undefined);
           disableUnsafeSink();
           return;
         }
-        if (writeAttempted) repairOffset = safeOffset;
-        retryAt = clock() + retryBackoffMs;
+        if (writeAttempted && failedHandle !== undefined) {
+          repairOffset = safeOffset;
+          try {
+            await failedHandle.truncate(safeOffset);
+            size = safeOffset;
+            repairOffset = undefined;
+          } catch {
+            // A validated reopen retries the pending repair before any later append.
+          }
+        }
+        void failedHandle?.close().catch(() => undefined);
+        retryAt = repairOffset === undefined ? clock() + retryBackoffMs : clock();
         recordFailure(true);
       } finally {
         activeBytes = 0;
@@ -270,11 +281,12 @@ export async function openRuntimeLogSink(
   };
 
   const startDrain = (): void => {
-    if (drainPromise !== undefined || abandoned || queue.length === 0) return;
+    if (drainPromise !== undefined || abandoned ||
+        (queue.length === 0 && repairOffset === undefined)) return;
     const running = drain();
     drainPromise = running.finally(() => {
       drainPromise = undefined;
-      if (!abandoned && queue.length > 0) startDrain();
+      if (!abandoned && (queue.length > 0 || repairOffset !== undefined)) startDrain();
     });
   };
 
@@ -324,7 +336,7 @@ export async function openRuntimeLogSink(
       if (closePromise !== undefined) return closePromise;
       accepting = false;
       const closing = (async () => {
-        while (queue.length > 0 || drainPromise !== undefined) {
+        while (queue.length > 0 || repairOffset !== undefined || drainPromise !== undefined) {
           startDrain();
           await drainPromise;
         }

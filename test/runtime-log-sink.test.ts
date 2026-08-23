@@ -181,6 +181,36 @@ describe("runtime log sink", () => {
     expect(reports).toEqual([RUNTIME_LOG_FAILURE_MESSAGE]);
   });
 
+  it("repairs a final partial write before close so the next process appends valid JSONL", async () => {
+    directory = await realpath(await mkdtemp(join(tmpdir(), "borg-runtime-close-repair-")));
+    const reports: string[] = [];
+    let writeCount = 0;
+    let sink = await openRuntimeLogSink(directory, {
+      reportFailure: (line) => reports.push(line),
+      writeRecord: async (handle, record) => {
+        writeCount += 1;
+        if (writeCount === 2) {
+          await handle.writeFile(record.subarray(0, 6));
+          throw new Error("injected final partial write failure");
+        }
+        await handle.writeFile(record);
+      },
+    });
+    sink.write(JSON.stringify({ event: "before" }));
+    sink.write(JSON.stringify({ event: "failed-final" }));
+    await vi.waitFor(() => expect(writeCount).toBe(2));
+    await sink.close();
+
+    sink = await openRuntimeLogSink(directory);
+    sink.write(JSON.stringify({ event: "after-restart" }));
+    await sink.close();
+
+    const records = (await readFile(join(directory, "logs", RUNTIME_LOG_FILE_NAME), "utf8"))
+      .trim().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(records).toEqual([{ event: "before" }, { event: "after-restart" }]);
+    expect(reports).toEqual([RUNTIME_LOG_FAILURE_MESSAGE]);
+  });
+
   it("keeps slow request and liveness evidence when ordinary records saturate the queue", async () => {
     directory = await realpath(await mkdtemp(join(tmpdir(), "borg-runtime-slow-priority-")));
     let releaseWrite: (() => void) | undefined;

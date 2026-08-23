@@ -35,6 +35,7 @@ import {
   setupNodeServerInstallation,
 } from "../src/service.js";
 import { createRuntimeBuildIdentity } from "../src/runtime-identity.js";
+import { RUNTIME_LOG_FILE_NAME } from "../src/runtime-log-sink.js";
 import {
   portableCredentialAccount,
   readPortableServerCredential,
@@ -513,6 +514,46 @@ describe("node server service", () => {
         `LIVENESS_SCAN_FAILED: ${operatorErrors.LIVENESS_SCAN_FAILED.message}`,
       );
       expect(stop).toHaveBeenCalledOnce();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("writes runtime telemetry to the bounded file while startup output stays on stderr", async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-runtime-log-service-")));
+    try {
+      await bootstrapServer(directory);
+      const operatorOutput = vi.fn();
+      const service = createNodeServerService({
+        environment: { BORG_SERVER_DATA_DIR: directory },
+        readFile: vi.fn().mockResolvedValue(Buffer.from("certificate")),
+        readPrivateKey: vi.fn().mockResolvedValue(Buffer.from("private-key")),
+        startServer: vi.fn(async (options: HttpsServerOptions): Promise<RunningServer> => {
+          if (options.runtimeLogger === undefined) throw new Error("Runtime logger is unavailable.");
+          options.runtimeLogger.emit({
+            event: "slow_request",
+            method: "GET",
+            path: "/api/cubes",
+            status: 200,
+            elapsedMs: 1_500,
+          });
+          return {
+            origin: "https://127.0.0.1:7091",
+            limits: {} as never,
+            close: vi.fn().mockResolvedValue(undefined),
+          };
+        }),
+        onStarted: vi.fn(() => operatorOutput("SERVER_LISTENING")),
+        waitForShutdown: vi.fn().mockResolvedValue(undefined),
+        operatorOutput,
+      });
+
+      await service.start([]);
+
+      expect(operatorOutput).toHaveBeenCalledExactlyOnceWith("SERVER_LISTENING");
+      const records = (await readFile(join(directory, "logs", RUNTIME_LOG_FILE_NAME), "utf8"))
+        .trim().split("\n").map((line) => JSON.parse(line) as { event: string });
+      expect(records.map((record) => record.event)).toEqual(["slow_request"]);
     } finally {
       await rm(directory, { recursive: true, force: true });
     }

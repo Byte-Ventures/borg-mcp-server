@@ -2380,7 +2380,10 @@ class SqliteScopedStore implements ScopedStore {
       LIMIT ?
     `).all(cubeId, ...cursorSql.parameters, limit + 1);
     const selected = rows.slice(0, limit);
-    const entries = selected.map((row) => this.#enrichedEntry(cubeId, requiredText(row, "id")));
+    const entries = this.#enrichedEntries(
+      cubeId,
+      selected.map((row) => requiredText(row, "id")),
+    );
     const nextCursor = entries.length === 0
       ? resolvedCursor
       : { id: entries.at(-1)!.id, created_at: entries.at(-1)!.created_at };
@@ -3140,24 +3143,59 @@ class SqliteScopedStore implements ScopedStore {
   }
 
   #enrichedEntry(cubeId: string, entryId: string): EnrichedActivityRecord {
-    const row = this.#database.prepare(`
+    const entry = this.#enrichedEntries(cubeId, [entryId])[0];
+    if (entry === undefined) throw new ScopedStoreError();
+    return entry;
+  }
+
+  #enrichedEntries(cubeId: string, entryIds: readonly string[]): EnrichedActivityRecord[] {
+    const entryIdsJson = JSON.stringify(entryIds);
+    const rows = this.#database.prepare(`
       SELECT l.id, l.cube_id, l.drone_id, l.message, l.visibility, l.created_at,
              d.label AS drone_label, r.name AS role_name
       FROM activity_log AS l
       LEFT JOIN drones AS d ON d.id = l.drone_id AND d.cube_id = l.cube_id
       LEFT JOIN roles AS r ON r.id = d.role_id AND r.cube_id = d.cube_id
-      WHERE l.cube_id = ? AND l.id = ?
-    `).get(cubeId, entryId);
-    if (row === undefined) throw new ScopedStoreError();
+      WHERE l.cube_id = ? AND l.id IN (SELECT value FROM json_each(?))
+    `).all(cubeId, entryIdsJson);
+    const rowsById = new Map(rows.map((row) => [requiredText(row, "id"), row]));
     const recipientRows = this.#database.prepare(`
-      SELECT drone_id FROM activity_log_recipients WHERE entry_id = ? ORDER BY drone_id
-    `).all(entryId);
-    return enrichedActivityRecord(
-      row,
-      recipientRows.map((recipient) => requiredText(recipient, "drone_id")),
-      undefined,
-      documentCitations(this.#database, entryId),
-    );
+      SELECT entry_id, drone_id FROM activity_log_recipients
+      WHERE entry_id IN (SELECT value FROM json_each(?))
+      ORDER BY entry_id, drone_id
+    `).all(entryIdsJson);
+    const recipientsByEntry = new Map<string, string[]>();
+    for (const recipient of recipientRows) {
+      const entryId = requiredText(recipient, "entry_id");
+      const recipients = recipientsByEntry.get(entryId) ?? [];
+      recipients.push(requiredText(recipient, "drone_id"));
+      recipientsByEntry.set(entryId, recipients);
+    }
+    const citationRows = this.#database.prepare(`
+      SELECT citation.entry_id, document.id, document.title, document.size_bytes, document.state
+      FROM activity_log_documents AS citation
+      JOIN documents AS document ON document.id = citation.document_id
+        AND document.cube_id = citation.cube_id
+      WHERE citation.entry_id IN (SELECT value FROM json_each(?))
+      ORDER BY citation.entry_id, citation.ordinal
+    `).all(entryIdsJson);
+    const citationsByEntry = new Map<string, DocumentCitation[]>();
+    for (const citation of citationRows) {
+      const entryId = requiredText(citation, "entry_id");
+      const citations = citationsByEntry.get(entryId) ?? [];
+      citations.push(documentCitationRecord(citation));
+      citationsByEntry.set(entryId, citations);
+    }
+    return entryIds.map((entryId) => {
+      const row = rowsById.get(entryId);
+      if (row === undefined) throw new ScopedStoreError();
+      return enrichedActivityRecord(
+        row,
+        recipientsByEntry.get(entryId) ?? [],
+        undefined,
+        citationsByEntry.get(entryId) ?? [],
+      );
+    });
   }
 
   #claims(cubeId: string, broadcastOnly: boolean): ClaimRecord[] {
@@ -4815,16 +4853,6 @@ function claimRecord(row: Record<string, unknown>): ClaimRecord {
     claimed_at: requiredText(row, "claimed_at"),
     stale: false,
   };
-}
-
-function documentCitations(database: DatabaseSync, entryId: string): DocumentCitation[] {
-  return database.prepare(`
-    SELECT document.id, document.title, document.size_bytes, document.state
-    FROM activity_log_documents AS citation
-    JOIN documents AS document ON document.id = citation.document_id
-      AND document.cube_id = citation.cube_id
-    WHERE citation.entry_id = ? ORDER BY citation.ordinal
-  `).all(entryId).map(documentCitationRecord);
 }
 
 function documentCitationRecord(row: Record<string, unknown>): DocumentCitation {

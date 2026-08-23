@@ -33,6 +33,12 @@ import {
   SLOW_RUNTIME_OPERATION_MS,
   type RuntimeLogger,
 } from "./runtime-log.js";
+import {
+  openRuntimeLogSink,
+  RUNTIME_LOG_STARTUP_FAILURE_MESSAGE,
+  RUNTIME_LOG_UNSAFE_MESSAGE,
+  type RuntimeLogSink,
+} from "./runtime-log-sink.js";
 import { MigrationCompatibilityError } from "./migrations.js";
 import { createEnrollmentExchange } from "./enrollment.js";
 import {
@@ -295,6 +301,7 @@ interface RuntimeResources {
   readonly runtimeLock: RuntimeLock | undefined;
   readonly livenessScheduler: { readonly stop: () => void } | undefined;
   readonly dashboard: ForegroundDashboard | undefined;
+  readonly runtimeLogSink: RuntimeLogSink | undefined;
 }
 
 export type RuntimeLockStatus =
@@ -332,7 +339,8 @@ export function createNodeServerService(dependencies: ServiceDependencies): Serv
       const shutdown = dependencies.installShutdownHandlers?.();
       let bind: ReturnType<typeof parseStartOptions>["bind"];
       let debugLogger = disabledDebugLogger;
-      let runtimeLogger: RuntimeLogger;
+      let runtimeLogger: RuntimeLogger = disabledRuntimeLogger;
+      let runtimeLogSink: RuntimeLogSink | undefined;
       let dataDirectory: string | undefined;
       let storageLimits: StorageLimits;
       let asciiRequested = false;
@@ -350,7 +358,6 @@ export function createNodeServerService(dependencies: ServiceDependencies): Serv
         asciiRequested = parsed.ascii;
         noMotion = parsed.noMotion;
         debugLogger = createDebugLogger(parsed.logLevel === "debug" ? dependencies.debugOutput : undefined);
-        runtimeLogger = createRuntimeLogger(dependencies.operatorOutput);
         const resolvedBind = resolveBindOptions(bind);
         bindMode = resolvedBind.mode;
         dataDirectory = dependencies.environment.BORG_SERVER_DATA_DIR;
@@ -420,7 +427,26 @@ export function createNodeServerService(dependencies: ServiceDependencies): Serv
             );
         await dependencies.onStartupPhase?.("post-lock");
         throwIfShutdown(shutdown?.signal);
+        if (dataDirectory === undefined) {
+          runtimeLogger = createRuntimeLogger(dependencies.operatorOutput);
+        } else {
+          try {
+            runtimeLogSink = await openRuntimeLogSink(dataDirectory, {
+              ...(dependencies.operatorOutput === undefined
+                ? {}
+                : { reportFailure: dependencies.operatorOutput }),
+            });
+            runtimeLogger = createRuntimeLogger(runtimeLogSink.write);
+          } catch (error) {
+            dependencies.operatorOutput?.(
+              error === operatorErrors.RUNTIME_LOG_UNSAFE
+                ? RUNTIME_LOG_UNSAFE_MESSAGE
+                : RUNTIME_LOG_STARTUP_FAILURE_MESSAGE,
+            );
+          }
+        }
       } catch (error) {
+        await runtimeLogSink?.close();
         await runtimeLock?.release().catch(() => undefined);
         shutdown?.dispose();
         if (error instanceof ShutdownRequestedError) return;
@@ -436,6 +462,7 @@ export function createNodeServerService(dependencies: ServiceDependencies): Serv
         throwIfShutdown(shutdown?.signal);
       } catch (error) {
         key?.fill(0);
+        await runtimeLogSink?.close();
         await runtimeLock?.release().catch(() => undefined);
         shutdown?.dispose();
         if (error instanceof ShutdownRequestedError) return;
@@ -541,6 +568,7 @@ export function createNodeServerService(dependencies: ServiceDependencies): Serv
             runtimeLock,
             livenessScheduler,
             dashboard,
+            runtimeLogSink,
           });
         } catch (cleanupError) {
           shutdown?.dispose();
@@ -595,6 +623,7 @@ export function createNodeServerService(dependencies: ServiceDependencies): Serv
           runtimeLock,
           livenessScheduler,
           dashboard,
+          runtimeLogSink,
         });
         debugLogger.emit({ event: "lifecycle", action: "stopped" });
       } catch (cleanupError) {
@@ -1704,6 +1733,7 @@ async function teardownRuntime(resources: RuntimeResources): Promise<void> {
     guardedRuntimeFailures.add(Object.freeze({ ...resources, running: undefined }));
     throw error;
   }
+  await resources.runtimeLogSink?.close();
   await resources.runtimeLock?.release();
   if (dashboardFailure !== undefined) throw dashboardFailure;
 }

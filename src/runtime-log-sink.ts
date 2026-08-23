@@ -1,0 +1,533 @@
+import { constants, type Stats } from "node:fs";
+import { chmod, lstat, mkdir, open, realpath, rename, unlink, type FileHandle } from "node:fs/promises";
+import { join, resolve } from "node:path";
+
+import { operatorErrors } from "./operator-error.js";
+
+const runtimeLogAbandoned = Symbol("runtime-log-abandoned");
+
+export const RUNTIME_LOG_MAX_BYTES = 10 * 1024 * 1024;
+export const RUNTIME_LOG_GENERATIONS = 3;
+export const RUNTIME_LOG_FILE_NAME = "runtime.log";
+export const RUNTIME_LOG_MAX_QUEUED_RECORDS = 1_024;
+export const RUNTIME_LOG_MAX_QUEUED_BYTES = 1024 * 1024;
+export const RUNTIME_LOG_RESERVED_SLOW_RECORDS = 2;
+export const RUNTIME_LOG_RESERVED_SLOW_BYTES = 4 * 1024;
+export const RUNTIME_LOG_CLOSE_TIMEOUT_MS = 1_000;
+export const RUNTIME_LOG_RETRY_BACKOFF_MS = 1_000;
+export const RUNTIME_LOG_OVERFLOW_MESSAGE =
+  "RUNTIME_LOG_OVERFLOW: runtime telemetry records were dropped.";
+export const RUNTIME_LOG_FAILURE_MESSAGE =
+  "RUNTIME_LOG_WRITE_FAILED: runtime telemetry is unavailable; retrying.";
+export const RUNTIME_LOG_STARTUP_FAILURE_MESSAGE =
+  "RUNTIME_LOG_START_FAILED: runtime telemetry is disabled; repair the private log directory and restart.";
+export const RUNTIME_LOG_CLOSE_TIMEOUT_MESSAGE =
+  "RUNTIME_LOG_CLOSE_TIMEOUT: pending runtime telemetry was abandoned.";
+export const RUNTIME_LOG_UNSAFE_MESSAGE =
+  "RUNTIME_LOG_UNSAFE: runtime telemetry is disabled; repair the private log files and restart.";
+
+export interface RuntimeLogSinkState {
+  readonly queuedRecords: number;
+  readonly queuedBytes: number;
+  readonly droppedRecords: number;
+}
+
+export interface RuntimeLogSink {
+  readonly write: (line: string) => void;
+  readonly close: () => Promise<void>;
+  readonly inspect: () => RuntimeLogSinkState;
+}
+
+export async function openRuntimeLogSink(
+  dataDirectory: string,
+  options: {
+    readonly maxBytes?: number;
+    readonly uid?: number;
+    readonly uidProvider?: () => number | undefined;
+    readonly maxQueuedRecords?: number;
+    readonly maxQueuedBytes?: number;
+    readonly reservedSlowRecords?: number;
+    readonly reservedSlowBytes?: number;
+    readonly closeTimeoutMs?: number;
+    readonly retryBackoffMs?: number;
+    readonly reportFailure?: (line: string) => void;
+    readonly writeRecord?: (handle: FileHandle, record: Buffer) => Promise<void>;
+    readonly truncateFile?: (handle: FileHandle, size: number) => Promise<void>;
+    readonly renamePath?: (from: string, to: string) => Promise<void>;
+    readonly clock?: () => number;
+    readonly delay?: (milliseconds: number) => Promise<void>;
+  } = {},
+): Promise<RuntimeLogSink> {
+  const maxBytes = options.maxBytes ?? RUNTIME_LOG_MAX_BYTES;
+  const maxQueuedRecords = options.maxQueuedRecords ?? RUNTIME_LOG_MAX_QUEUED_RECORDS;
+  const maxQueuedBytes = options.maxQueuedBytes ?? RUNTIME_LOG_MAX_QUEUED_BYTES;
+  const closeTimeoutMs = options.closeTimeoutMs ?? RUNTIME_LOG_CLOSE_TIMEOUT_MS;
+  const retryBackoffMs = options.retryBackoffMs ?? RUNTIME_LOG_RETRY_BACKOFF_MS;
+  const configuredReservedSlowRecords = options.reservedSlowRecords ?? RUNTIME_LOG_RESERVED_SLOW_RECORDS;
+  const configuredReservedSlowBytes = options.reservedSlowBytes ?? RUNTIME_LOG_RESERVED_SLOW_BYTES;
+  for (const [name, value, minimum] of [
+    ["byte limit", maxBytes, 1],
+    ["record queue limit", maxQueuedRecords, 1],
+    ["byte queue limit", maxQueuedBytes, 1],
+    ["reserved slow record count", configuredReservedSlowRecords, 0],
+    ["reserved slow byte count", configuredReservedSlowBytes, 0],
+    ["close timeout", closeTimeoutMs, 0],
+    ["retry backoff", retryBackoffMs, 0],
+  ] as const) {
+    if (!Number.isSafeInteger(value) || value < minimum) {
+      throw new Error(`Runtime log ${name} is invalid.`);
+    }
+  }
+  const writeRecord = options.writeRecord ?? ((handle: FileHandle, record: Buffer) => handle.writeFile(record));
+  const truncateFile = options.truncateFile ?? ((handle: FileHandle, size: number) => handle.truncate(size));
+  const renamePath = options.renamePath ?? rename;
+  const reservedSlowRecords = Math.min(configuredReservedSlowRecords, maxQueuedRecords - 1);
+  const reservedSlowBytes = Math.min(configuredReservedSlowBytes, maxQueuedBytes - 1);
+  const clock = options.clock ?? Date.now;
+  const delay = options.delay ?? ((milliseconds: number) => (
+    new Promise<void>((resolveDelay) => setTimeout(resolveDelay, milliseconds))
+  ));
+  const uid = options.uid ?? process.getuid?.();
+  const expectedUid = options.uidProvider ?? (() => uid);
+  const logDirectory = join(dataDirectory, "logs");
+  await mkdir(logDirectory, { recursive: true, mode: 0o700 });
+  const directoryMetadata = await lstat(logDirectory);
+  const startupUid = expectedUid();
+  if (await realpath(logDirectory) !== resolve(logDirectory) ||
+      !directoryMetadata.isDirectory() || directoryMetadata.isSymbolicLink() ||
+      (startupUid !== undefined && directoryMetadata.uid !== startupUid)) {
+    throw operatorErrors.RUNTIME_LOG_UNSAFE;
+  }
+  await chmod(logDirectory, 0o700);
+
+  const paths = Array.from({ length: RUNTIME_LOG_GENERATIONS }, (_, index) => (
+    join(logDirectory, index === 0 ? RUNTIME_LOG_FILE_NAME : `${RUNTIME_LOG_FILE_NAME}.${index}`)
+  ));
+  for (const path of paths) await assertSafeExistingLog(path, expectedUid());
+
+  let handle: FileHandle | undefined = await openCurrentLog(
+    paths[0]!,
+    expectedUid(),
+    maxBytes,
+    truncateFile,
+  );
+  let size = (await handle.stat()).size;
+  let accepting = true;
+  let abandoned = false;
+  let activeBytes = 0;
+  let activeIsSlow = false;
+  let queuedBytes = 0;
+  let queuedOrdinaryRecords = 0;
+  let queuedOrdinaryBytes = 0;
+  let totalDroppedRecords = 0;
+  let droppedSinceSuccess = 0;
+  let failuresSinceSuccess = 0;
+  let overflowReported = false;
+  let failureReported = false;
+  let unsafeReported = false;
+  let retryAt = 0;
+  let repairOffset: number | undefined;
+  let drainPromise: Promise<void> | undefined;
+  let closePromise: Promise<void> | undefined;
+  const queue: Array<{ readonly line: string; readonly bytes: number; readonly slow: boolean }> = [];
+
+  const clearQueue = (): void => {
+    queue.length = 0;
+    queuedBytes = 0;
+    queuedOrdinaryRecords = 0;
+    queuedOrdinaryBytes = 0;
+  };
+
+  const report = (line: string): void => {
+    try {
+      options.reportFailure?.(line);
+    } catch {
+      // Runtime diagnostics cannot alter server behavior.
+    }
+  };
+
+  const recordOverflow = (): void => {
+    totalDroppedRecords = incrementCounter(totalDroppedRecords);
+    droppedSinceSuccess = incrementCounter(droppedSinceSuccess);
+    if (!overflowReported) {
+      overflowReported = true;
+      report(RUNTIME_LOG_OVERFLOW_MESSAGE);
+    }
+  };
+
+  const recordFailure = (droppedRecord: boolean): void => {
+    if (droppedRecord) {
+      totalDroppedRecords = incrementCounter(totalDroppedRecords);
+      droppedSinceSuccess = incrementCounter(droppedSinceSuccess);
+    }
+    failuresSinceSuccess = incrementCounter(failuresSinceSuccess);
+    if (!failureReported) {
+      failureReported = true;
+      report(RUNTIME_LOG_FAILURE_MESSAGE);
+    }
+  };
+
+  const disableUnsafeSink = (): void => {
+    abandoned = true;
+    accepting = false;
+    repairOffset = undefined;
+    clearQueue();
+    if (!unsafeReported) {
+      unsafeReported = true;
+      report(RUNTIME_LOG_UNSAFE_MESSAGE);
+    }
+    const currentHandle = handle;
+    handle = undefined;
+    void currentHandle?.close().catch(() => undefined);
+  };
+
+  const rotate = async (): Promise<void> => {
+    for (const path of paths) {
+      await assertSafeExistingLog(path, expectedUid());
+      if (abandoned) throw runtimeLogAbandoned;
+    }
+    const currentHandle = handle;
+    if (currentHandle === undefined) throw new Error("Runtime log is unavailable.");
+    handle = undefined;
+    await currentHandle.close();
+    if (abandoned) throw runtimeLogAbandoned;
+    const oldest = paths.at(-1)!;
+    await unlink(oldest).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== "ENOENT") throw error;
+    });
+    if (abandoned) throw runtimeLogAbandoned;
+    for (let index = paths.length - 1; index > 0; index -= 1) {
+      await renamePath(paths[index - 1]!, paths[index]!).catch((error: NodeJS.ErrnoException) => {
+        if (error.code !== "ENOENT") throw error;
+      });
+      if (abandoned) throw runtimeLogAbandoned;
+    }
+    const rotatedHandle = await openCurrentLog(paths[0]!, expectedUid(), maxBytes, truncateFile);
+    if (abandoned) {
+      await rotatedHandle.close().catch(() => undefined);
+      throw runtimeLogAbandoned;
+    }
+    handle = rotatedHandle;
+    size = 0;
+  };
+
+  const reopen = async (): Promise<void> => {
+    const wait = Math.max(0, retryAt - clock());
+    if (wait > 0) await delay(wait);
+    if (abandoned) return;
+    for (const path of paths) {
+      await assertSafeExistingLog(path, expectedUid());
+      if (abandoned) return;
+    }
+    const reopened = await openCurrentLog(paths[0]!, expectedUid(), maxBytes, truncateFile);
+    if (abandoned) {
+      await reopened.close().catch(() => undefined);
+      return;
+    }
+    try {
+      const reopenedSize = (await reopened.stat()).size;
+      if (repairOffset !== undefined) {
+        if (reopenedSize < repairOffset) throw operatorErrors.RUNTIME_LOG_UNSAFE;
+        await truncateFile(reopened, repairOffset);
+        size = repairOffset;
+        repairOffset = undefined;
+      } else {
+        size = reopenedSize;
+      }
+      handle = reopened;
+    } catch (error) {
+      await reopened.close().catch(() => undefined);
+      throw error;
+    }
+  };
+
+  const drain = async (): Promise<void> => {
+    while (!abandoned && (queue.length > 0 || repairOffset !== undefined)) {
+      if (handle === undefined) {
+        try {
+          await reopen();
+        } catch (error) {
+          if (error === runtimeLogAbandoned) return;
+          if (error === operatorErrors.RUNTIME_LOG_UNSAFE) {
+            disableUnsafeSink();
+            return;
+          }
+          retryAt = clock() + retryBackoffMs;
+          recordFailure(false);
+          continue;
+        }
+      }
+      if (abandoned || handle === undefined) return;
+      if (queue.length === 0) continue;
+      const queued = queue.shift()!;
+      queuedBytes -= queued.bytes;
+      if (!queued.slow) {
+        queuedOrdinaryRecords -= 1;
+        queuedOrdinaryBytes -= queued.bytes;
+      }
+      activeBytes = queued.bytes;
+      activeIsSlow = queued.slow;
+      let projected = projectSinkCounters(queued.line, droppedSinceSuccess, failuresSinceSuccess);
+      let record = Buffer.from(`${projected.line}\n`, "utf8");
+      if (record.byteLength > maxBytes) {
+        projected = { line: queued.line, droppedRecords: 0, writeFailures: 0 };
+        record = Buffer.from(`${queued.line}\n`, "utf8");
+      }
+      let writeAttempted = false;
+      let safeOffset = size;
+      try {
+        if (size + record.byteLength > maxBytes) await rotate();
+        if (handle === undefined) throw new Error("Runtime log is unavailable.");
+        safeOffset = size;
+        writeAttempted = true;
+        await writeRecord(handle, record);
+        if (abandoned) throw runtimeLogAbandoned;
+        size += record.byteLength;
+        droppedSinceSuccess -= projected.droppedRecords;
+        failuresSinceSuccess -= projected.writeFailures;
+        if (droppedSinceSuccess === 0) overflowReported = false;
+        if (failuresSinceSuccess === 0) failureReported = false;
+      } catch (error) {
+        const failedHandle = handle;
+        handle = undefined;
+        if (error === operatorErrors.RUNTIME_LOG_UNSAFE) {
+          void failedHandle?.close().catch(() => undefined);
+          disableUnsafeSink();
+          return;
+        }
+        if (error === runtimeLogAbandoned) {
+          void failedHandle?.close().catch(() => undefined);
+          return;
+        }
+        if (writeAttempted && failedHandle !== undefined) {
+          repairOffset = safeOffset;
+          try {
+            await truncateFile(failedHandle, safeOffset);
+            if (abandoned) {
+              void failedHandle.close().catch(() => undefined);
+              return;
+            }
+            size = safeOffset;
+            repairOffset = undefined;
+          } catch {
+            // A validated reopen retries the pending repair before any later append.
+          }
+        }
+        void failedHandle?.close().catch(() => undefined);
+        retryAt = repairOffset === undefined ? clock() + retryBackoffMs : clock();
+        recordFailure(true);
+      } finally {
+        activeBytes = 0;
+        activeIsSlow = false;
+      }
+    }
+  };
+
+  const startDrain = (): void => {
+    if (drainPromise !== undefined || abandoned ||
+        (queue.length === 0 && repairOffset === undefined)) return;
+    const running = drain();
+    drainPromise = running.finally(() => {
+      drainPromise = undefined;
+      if (!abandoned && (queue.length > 0 || repairOffset !== undefined)) startDrain();
+    });
+  };
+
+  return Object.freeze({
+    write(line: string): void {
+      if (!accepting) return;
+      const bytes = Buffer.byteLength(line, "utf8") + 1;
+      const slow = slowRuntimeRecord(line);
+      const queuedRecords = queue.length + (activeBytes === 0 ? 0 : 1);
+      if (bytes > maxBytes || bytes > maxQueuedBytes) {
+        recordOverflow();
+        return;
+      }
+      if (slow) {
+        while (queue.length + (activeBytes === 0 ? 0 : 1) >= maxQueuedRecords ||
+            queuedBytes + activeBytes + bytes > maxQueuedBytes) {
+          const ordinaryIndex = queue.findLastIndex((record) => !record.slow);
+          if (ordinaryIndex < 0) {
+            recordOverflow();
+            return;
+          }
+          const [evicted] = queue.splice(ordinaryIndex, 1);
+          queuedBytes -= evicted!.bytes;
+          queuedOrdinaryRecords -= 1;
+          queuedOrdinaryBytes -= evicted!.bytes;
+          recordOverflow();
+        }
+      } else {
+        const activeOrdinaryRecords = activeBytes > 0 && !activeIsSlow ? 1 : 0;
+        const activeOrdinaryBytes = activeBytes > 0 && !activeIsSlow ? activeBytes : 0;
+        if (queuedRecords >= maxQueuedRecords || queuedBytes + activeBytes + bytes > maxQueuedBytes ||
+            queuedOrdinaryRecords + activeOrdinaryRecords >= maxQueuedRecords - reservedSlowRecords ||
+            queuedOrdinaryBytes + activeOrdinaryBytes + bytes > maxQueuedBytes - reservedSlowBytes) {
+          recordOverflow();
+          return;
+        }
+      }
+      queue.push({ line, bytes, slow });
+      queuedBytes += bytes;
+      if (!slow) {
+        queuedOrdinaryRecords += 1;
+        queuedOrdinaryBytes += bytes;
+      }
+      startDrain();
+    },
+    async close(): Promise<void> {
+      if (closePromise !== undefined) return closePromise;
+      accepting = false;
+      const closing = (async () => {
+        while (!abandoned &&
+            (queue.length > 0 || repairOffset !== undefined || drainPromise !== undefined)) {
+          startDrain();
+          await drainPromise;
+        }
+        const currentHandle = handle;
+        handle = undefined;
+        await currentHandle?.close().catch(() => undefined);
+      })();
+      closePromise = (async () => {
+        if (await settlesWithin(closing, closeTimeoutMs)) return;
+        abandoned = true;
+        repairOffset = undefined;
+        clearQueue();
+        report(RUNTIME_LOG_CLOSE_TIMEOUT_MESSAGE);
+        const currentHandle = handle;
+        handle = undefined;
+        void currentHandle?.close().catch(() => undefined);
+      })();
+      return closePromise;
+    },
+    inspect(): RuntimeLogSinkState {
+      return Object.freeze({
+        queuedRecords: queue.length + (activeBytes === 0 ? 0 : 1),
+        queuedBytes: queuedBytes + activeBytes,
+        droppedRecords: totalDroppedRecords,
+      });
+    },
+  });
+}
+
+function projectSinkCounters(
+  line: string,
+  droppedRecords: number,
+  writeFailures: number,
+): { readonly line: string; readonly droppedRecords: number; readonly writeFailures: number } {
+  if (droppedRecords === 0 && writeFailures === 0) return { line, droppedRecords: 0, writeFailures: 0 };
+  try {
+    const record = JSON.parse(line) as unknown;
+    if (record === null || typeof record !== "object" || Array.isArray(record)) {
+      return { line, droppedRecords: 0, writeFailures: 0 };
+    }
+    return {
+      line: JSON.stringify({
+        ...record,
+        runtime_log_dropped_records: droppedRecords,
+        runtime_log_write_failures: writeFailures,
+      }),
+      droppedRecords,
+      writeFailures,
+    };
+  } catch {
+    return { line, droppedRecords: 0, writeFailures: 0 };
+  }
+}
+
+function slowRuntimeRecord(line: string): boolean {
+  try {
+    const record = JSON.parse(line) as { readonly event?: unknown };
+    return typeof record.event === "string" && record.event.startsWith("slow_");
+  } catch {
+    return false;
+  }
+}
+
+function incrementCounter(value: number): number {
+  return Math.min(Number.MAX_SAFE_INTEGER, value + 1);
+}
+
+async function settlesWithin(promise: Promise<void>, timeoutMs: number): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<false>((resolveTimeout) => {
+    timer = setTimeout(() => resolveTimeout(false), timeoutMs);
+  });
+  const settled = promise.then(() => true, () => true);
+  const result = await Promise.race([settled, timeout]);
+  if (timer !== undefined) clearTimeout(timer);
+  return result;
+}
+
+async function openCurrentLog(
+  path: string,
+  uid: number | undefined,
+  maxBytes: number,
+  truncateFile: (handle: FileHandle, size: number) => Promise<void>,
+): Promise<FileHandle> {
+  const handle = await open(
+    path,
+    constants.O_APPEND | constants.O_CREAT | constants.O_RDWR | constants.O_NOFOLLOW,
+    0o600,
+  );
+  try {
+    const metadata = await handle.stat();
+    if (!safeLogMetadata(metadata, uid)) throw operatorErrors.RUNTIME_LOG_UNSAFE;
+    await handle.chmod(0o600);
+    await repairRuntimeLogTail(handle, metadata.size, maxBytes, truncateFile);
+    return handle;
+  } catch (error) {
+    await handle.close().catch(() => undefined);
+    throw error;
+  }
+}
+
+async function repairRuntimeLogTail(
+  handle: FileHandle,
+  size: number,
+  maxBytes: number,
+  truncateFile: (handle: FileHandle, size: number) => Promise<void>,
+): Promise<void> {
+  if (size === 0) return;
+  const length = Math.min(size, maxBytes);
+  const start = size - length;
+  const content = Buffer.alloc(length);
+  let readBytes = 0;
+  while (readBytes < length) {
+    const result = await handle.read(content, readBytes, length - readBytes, start + readBytes);
+    if (result.bytesRead === 0) throw new Error("Runtime log tail could not be read.");
+    readBytes += result.bytesRead;
+  }
+  let boundary = content.at(-1) === 0x0a ? length : content.lastIndexOf(0x0a) + 1;
+  while (boundary > 0) {
+    const previousBoundary = content.lastIndexOf(0x0a, boundary - 2) + 1;
+    let validRecord = false;
+    try {
+      const record = JSON.parse(content.subarray(previousBoundary, boundary - 1).toString("utf8")) as unknown;
+      validRecord = record !== null && typeof record === "object" && !Array.isArray(record);
+    } catch {
+      // Continue backward to the preceding complete record.
+    }
+    if (validRecord) {
+      const safeSize = start + boundary;
+      if (safeSize < size) await truncateFile(handle, safeSize);
+      return;
+    }
+    boundary = previousBoundary;
+  }
+  if (start > 0) throw operatorErrors.RUNTIME_LOG_UNSAFE;
+  await truncateFile(handle, 0);
+}
+
+async function assertSafeExistingLog(path: string, uid: number | undefined): Promise<void> {
+  try {
+    if (!safeLogMetadata(await lstat(path), uid)) throw operatorErrors.RUNTIME_LOG_UNSAFE;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+}
+
+function safeLogMetadata(metadata: Stats, uid: number | undefined): boolean {
+  return metadata.isFile() && !metadata.isSymbolicLink() && metadata.nlink === 1 &&
+    (metadata.mode & 0o077) === 0 && (uid === undefined || metadata.uid === uid);
+}

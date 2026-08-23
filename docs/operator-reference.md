@@ -59,7 +59,7 @@ prints the platform removal commands without changing it. Uninstall removes only
 the same owner-private, single-link, Borg-owned regular-file shapes accepted by
 the installer; foreign, linked, permissively readable, or otherwise unsafe
 definitions remain untouched. Data, server identity, credentials, verified
-runtime artifacts, and managed stdout/stderr logs are preserved. If controller
+runtime artifacts, and managed and runtime logs are preserved. If controller
 or filesystem removal fails, human and `--json` output report the independently
 observed definition state, service state, exact platform recovery command when
 one is available, and whether a previously running stable identity returned.
@@ -68,7 +68,25 @@ The definition and its stdout/stderr sinks are owner-private, and the managed
 process uses umask `077`. Logs are written under
 `~/.borg/server/logs/managed.stdout.log` and
 `~/.borg/server/logs/managed.stderr.log` when the default data directory is in
-use. `borg-mcp-server status` reports whether the service is active, inactive,
+use. Authenticated-request, liveness, and activity-store timing records go to the
+server-owned `~/.borg/server/logs/runtime.log`. The server rotates that file at
+10 MiB and retains three files total (`runtime.log`, `.1`, and `.2`), enough for
+more than one day at the expected tens of thousands of records per day. Startup
+and crash output remain in managed stderr.
+
+Runtime telemetry is optional and never falls back to per-request stderr. If a
+runtime log path is a symbolic link, has multiple hard links, belongs to another
+user, or permits group/other access, startup emits one `RUNTIME_LOG_UNSAFE`
+warning, disables telemetry, and continues serving. Stop the server, repair or
+remove the unsafe `runtime.log*` files, and restart to restore telemetry. A full,
+slow, or temporarily unavailable disk emits one bounded warning, drops newest
+ordinary records when the in-memory queue reaches 1,024 records or 1 MiB, reserves
+two records and 4 KiB for `slow_*` evidence, and retries the owned sink. The next
+successful record reports the dropped and failed counts. On startup, the server
+validates the current file's final JSON line and truncates an incomplete or
+invalid tail to the last complete record before appending.
+
+`borg-mcp-server status` reports whether the service is active, inactive,
 or absent and identifies its adapter. Use the platform service manager for
 temporary stop and restart operations:
 

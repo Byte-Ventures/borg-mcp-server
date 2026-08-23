@@ -1,6 +1,6 @@
 import { randomUUID, X509Certificate } from "node:crypto";
 import { rmSync, writeFileSync } from "node:fs";
-import { access, mkdtemp, readFile, readdir, realpath, rm, unlink, writeFile } from "node:fs/promises";
+import { access, mkdtemp, readFile, readdir, realpath, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -35,6 +35,11 @@ import {
   setupNodeServerInstallation,
 } from "../src/service.js";
 import { createRuntimeBuildIdentity } from "../src/runtime-identity.js";
+import {
+  openRuntimeLogSink,
+  RUNTIME_LOG_FILE_NAME,
+  RUNTIME_LOG_UNSAFE_MESSAGE,
+} from "../src/runtime-log-sink.js";
 import {
   portableCredentialAccount,
   readPortableServerCredential,
@@ -513,6 +518,92 @@ describe("node server service", () => {
         `LIVENESS_SCAN_FAILED: ${operatorErrors.LIVENESS_SCAN_FAILED.message}`,
       );
       expect(stop).toHaveBeenCalledOnce();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("writes runtime telemetry to the bounded file while startup output stays on stderr", async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-runtime-log-service-")));
+    try {
+      await bootstrapServer(directory);
+      const operatorOutput = vi.fn();
+      const service = createNodeServerService({
+        environment: { BORG_SERVER_DATA_DIR: directory },
+        readFile: vi.fn().mockResolvedValue(Buffer.from("certificate")),
+        readPrivateKey: vi.fn().mockResolvedValue(Buffer.from("private-key")),
+        startServer: vi.fn(async (options: HttpsServerOptions): Promise<RunningServer> => {
+          if (options.runtimeLogger === undefined) throw new Error("Runtime logger is unavailable.");
+          options.runtimeLogger.emit({
+            event: "slow_request",
+            method: "GET",
+            path: "/api/cubes",
+            status: 200,
+            elapsedMs: 1_500,
+          });
+          return {
+            origin: "https://127.0.0.1:7091",
+            limits: {} as never,
+            close: vi.fn().mockResolvedValue(undefined),
+          };
+        }),
+        onStarted: vi.fn(() => operatorOutput("SERVER_LISTENING")),
+        waitForShutdown: vi.fn().mockResolvedValue(undefined),
+        operatorOutput,
+      });
+
+      await service.start([]);
+
+      expect(operatorOutput).toHaveBeenCalledExactlyOnceWith("SERVER_LISTENING");
+      const records = (await readFile(join(directory, "logs", RUNTIME_LOG_FILE_NAME), "utf8"))
+        .trim().split("\n").map((line) => JSON.parse(line) as { event: string });
+      expect(records.map((record) => record.event)).toEqual(["slow_request"]);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("continues serving without telemetry when an existing runtime log is unsafe", async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-runtime-log-unsafe-service-")));
+    try {
+      await bootstrapServer(directory);
+      const sink = await openRuntimeLogSink(directory);
+      await sink.close();
+      const logs = join(directory, "logs");
+      await symlink(
+        join(logs, RUNTIME_LOG_FILE_NAME),
+        join(logs, `${RUNTIME_LOG_FILE_NAME}.1`),
+      );
+      const operatorOutput = vi.fn();
+      const startServer = vi.fn(async (options: HttpsServerOptions): Promise<RunningServer> => {
+        options.runtimeLogger?.emit({
+          event: "slow_request",
+          method: "GET",
+          path: "/api/cubes",
+          status: 200,
+          elapsedMs: 1_500,
+        });
+        return {
+          origin: "https://127.0.0.1:7091",
+          limits: {} as never,
+          close: vi.fn().mockResolvedValue(undefined),
+        };
+      });
+      const service = createNodeServerService({
+        environment: { BORG_SERVER_DATA_DIR: directory },
+        readFile: vi.fn().mockResolvedValue(Buffer.from("certificate")),
+        readPrivateKey: vi.fn().mockResolvedValue(Buffer.from("private-key")),
+        startServer,
+        onStarted: vi.fn(),
+        waitForShutdown: vi.fn().mockResolvedValue(undefined),
+        operatorOutput,
+      });
+
+      await service.start([]);
+
+      expect(startServer).toHaveBeenCalledOnce();
+      expect(operatorOutput).toHaveBeenCalledExactlyOnceWith(RUNTIME_LOG_UNSAFE_MESSAGE);
+      expect(await readFile(join(logs, RUNTIME_LOG_FILE_NAME), "utf8")).toBe("");
     } finally {
       await rm(directory, { recursive: true, force: true });
     }

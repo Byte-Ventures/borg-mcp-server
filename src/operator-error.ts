@@ -31,6 +31,7 @@ export type OperatorErrorCode =
   | "RUNTIME_LOCK_STALE"
   | "RUNTIME_LOCK_NOT_STALE"
   | "RUNTIME_LOCK_RECOVERY_CONCURRENT"
+  | "RUNTIME_LOG_UNSAFE"
   | "MANAGED_SERVICE_DEFINITION_UNSAFE"
   | "MANAGED_SERVICE_DEFINITION_FOREIGN"
   | "MANAGED_SERVICE_REGISTRATION_LEFTOVER"
@@ -100,6 +101,7 @@ const publicMessages: Readonly<Record<OperatorErrorCode, string>> = Object.freez
   RUNTIME_LOCK_STALE: "Confirm the recorded server process is stopped, then remove runtime.lock.",
   RUNTIME_LOCK_NOT_STALE: "No safely recoverable stale runtime lock was found.",
   RUNTIME_LOCK_RECOVERY_CONCURRENT: "Another recovery already preserved runtime.lock. Rerun status.",
+  RUNTIME_LOG_UNSAFE: "Ensure runtime log files are owner-owned regular files, then retry.",
   MANAGED_SERVICE_DEFINITION_UNSAFE: "Ensure the managed service definition is an owner-private regular file, then retry.",
   MANAGED_SERVICE_DEFINITION_FOREIGN: "The existing service definition is not recognized as Borg-owned. Preserve or remove it manually before retrying.",
   MANAGED_SERVICE_REGISTRATION_LEFTOVER: "No Borg service definition is present, but the service manager still reports ai.borgmcp.server. Remove the leftover registration, then retry:\n  macOS: launchctl bootout gui/$(id -u)/ai.borgmcp.server\n  Linux: systemctl --user disable --now ai.borgmcp.server",

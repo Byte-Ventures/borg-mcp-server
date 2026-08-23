@@ -4,6 +4,8 @@ import { join, resolve } from "node:path";
 
 import { operatorErrors } from "./operator-error.js";
 
+const runtimeLogAbandoned = Symbol("runtime-log-abandoned");
+
 export const RUNTIME_LOG_MAX_BYTES = 10 * 1024 * 1024;
 export const RUNTIME_LOG_GENERATIONS = 3;
 export const RUNTIME_LOG_FILE_NAME = "runtime.log";
@@ -41,6 +43,7 @@ export async function openRuntimeLogSink(
   options: {
     readonly maxBytes?: number;
     readonly uid?: number;
+    readonly uidProvider?: () => number | undefined;
     readonly maxQueuedRecords?: number;
     readonly maxQueuedBytes?: number;
     readonly reservedSlowRecords?: number;
@@ -49,6 +52,8 @@ export async function openRuntimeLogSink(
     readonly retryBackoffMs?: number;
     readonly reportFailure?: (line: string) => void;
     readonly writeRecord?: (handle: FileHandle, record: Buffer) => Promise<void>;
+    readonly truncateFile?: (handle: FileHandle, size: number) => Promise<void>;
+    readonly renamePath?: (from: string, to: string) => Promise<void>;
     readonly clock?: () => number;
     readonly delay?: (milliseconds: number) => Promise<void>;
   } = {},
@@ -74,6 +79,8 @@ export async function openRuntimeLogSink(
     }
   }
   const writeRecord = options.writeRecord ?? ((handle: FileHandle, record: Buffer) => handle.writeFile(record));
+  const truncateFile = options.truncateFile ?? ((handle: FileHandle, size: number) => handle.truncate(size));
+  const renamePath = options.renamePath ?? rename;
   const reservedSlowRecords = Math.min(configuredReservedSlowRecords, maxQueuedRecords - 1);
   const reservedSlowBytes = Math.min(configuredReservedSlowBytes, maxQueuedBytes - 1);
   const clock = options.clock ?? Date.now;
@@ -81,12 +88,14 @@ export async function openRuntimeLogSink(
     new Promise<void>((resolveDelay) => setTimeout(resolveDelay, milliseconds))
   ));
   const uid = options.uid ?? process.getuid?.();
+  const expectedUid = options.uidProvider ?? (() => uid);
   const logDirectory = join(dataDirectory, "logs");
   await mkdir(logDirectory, { recursive: true, mode: 0o700 });
   const directoryMetadata = await lstat(logDirectory);
+  const startupUid = expectedUid();
   if (await realpath(logDirectory) !== resolve(logDirectory) ||
       !directoryMetadata.isDirectory() || directoryMetadata.isSymbolicLink() ||
-      (uid !== undefined && directoryMetadata.uid !== uid)) {
+      (startupUid !== undefined && directoryMetadata.uid !== startupUid)) {
     throw operatorErrors.RUNTIME_LOG_UNSAFE;
   }
   await chmod(logDirectory, 0o700);
@@ -94,9 +103,14 @@ export async function openRuntimeLogSink(
   const paths = Array.from({ length: RUNTIME_LOG_GENERATIONS }, (_, index) => (
     join(logDirectory, index === 0 ? RUNTIME_LOG_FILE_NAME : `${RUNTIME_LOG_FILE_NAME}.${index}`)
   ));
-  for (const path of paths) await assertSafeExistingLog(path, uid);
+  for (const path of paths) await assertSafeExistingLog(path, expectedUid());
 
-  let handle: FileHandle | undefined = await openCurrentLog(paths[0]!, uid);
+  let handle: FileHandle | undefined = await openCurrentLog(
+    paths[0]!,
+    expectedUid(),
+    maxBytes,
+    truncateFile,
+  );
   let size = (await handle.stat()).size;
   let accepting = true;
   let abandoned = false;
@@ -156,6 +170,7 @@ export async function openRuntimeLogSink(
   const disableUnsafeSink = (): void => {
     abandoned = true;
     accepting = false;
+    repairOffset = undefined;
     clearQueue();
     if (!unsafeReported) {
       unsafeReported = true;
@@ -167,21 +182,32 @@ export async function openRuntimeLogSink(
   };
 
   const rotate = async (): Promise<void> => {
-    for (const path of paths) await assertSafeExistingLog(path, uid);
+    for (const path of paths) {
+      await assertSafeExistingLog(path, expectedUid());
+      if (abandoned) throw runtimeLogAbandoned;
+    }
     const currentHandle = handle;
     if (currentHandle === undefined) throw new Error("Runtime log is unavailable.");
     handle = undefined;
     await currentHandle.close();
+    if (abandoned) throw runtimeLogAbandoned;
     const oldest = paths.at(-1)!;
     await unlink(oldest).catch((error: NodeJS.ErrnoException) => {
       if (error.code !== "ENOENT") throw error;
     });
+    if (abandoned) throw runtimeLogAbandoned;
     for (let index = paths.length - 1; index > 0; index -= 1) {
-      await rename(paths[index - 1]!, paths[index]!).catch((error: NodeJS.ErrnoException) => {
+      await renamePath(paths[index - 1]!, paths[index]!).catch((error: NodeJS.ErrnoException) => {
         if (error.code !== "ENOENT") throw error;
       });
+      if (abandoned) throw runtimeLogAbandoned;
     }
-    handle = await openCurrentLog(paths[0]!, uid);
+    const rotatedHandle = await openCurrentLog(paths[0]!, expectedUid(), maxBytes, truncateFile);
+    if (abandoned) {
+      await rotatedHandle.close().catch(() => undefined);
+      throw runtimeLogAbandoned;
+    }
+    handle = rotatedHandle;
     size = 0;
   };
 
@@ -189,13 +215,20 @@ export async function openRuntimeLogSink(
     const wait = Math.max(0, retryAt - clock());
     if (wait > 0) await delay(wait);
     if (abandoned) return;
-    for (const path of paths) await assertSafeExistingLog(path, uid);
-    const reopened = await openCurrentLog(paths[0]!, uid);
+    for (const path of paths) {
+      await assertSafeExistingLog(path, expectedUid());
+      if (abandoned) return;
+    }
+    const reopened = await openCurrentLog(paths[0]!, expectedUid(), maxBytes, truncateFile);
+    if (abandoned) {
+      await reopened.close().catch(() => undefined);
+      return;
+    }
     try {
       const reopenedSize = (await reopened.stat()).size;
       if (repairOffset !== undefined) {
         if (reopenedSize < repairOffset) throw operatorErrors.RUNTIME_LOG_UNSAFE;
-        await reopened.truncate(repairOffset);
+        await truncateFile(reopened, repairOffset);
         size = repairOffset;
         repairOffset = undefined;
       } else {
@@ -214,6 +247,7 @@ export async function openRuntimeLogSink(
         try {
           await reopen();
         } catch (error) {
+          if (error === runtimeLogAbandoned) return;
           if (error === operatorErrors.RUNTIME_LOG_UNSAFE) {
             disableUnsafeSink();
             return;
@@ -247,6 +281,7 @@ export async function openRuntimeLogSink(
         safeOffset = size;
         writeAttempted = true;
         await writeRecord(handle, record);
+        if (abandoned) throw runtimeLogAbandoned;
         size += record.byteLength;
         droppedSinceSuccess -= projected.droppedRecords;
         failuresSinceSuccess -= projected.writeFailures;
@@ -260,10 +295,18 @@ export async function openRuntimeLogSink(
           disableUnsafeSink();
           return;
         }
+        if (error === runtimeLogAbandoned) {
+          void failedHandle?.close().catch(() => undefined);
+          return;
+        }
         if (writeAttempted && failedHandle !== undefined) {
           repairOffset = safeOffset;
           try {
-            await failedHandle.truncate(safeOffset);
+            await truncateFile(failedHandle, safeOffset);
+            if (abandoned) {
+              void failedHandle.close().catch(() => undefined);
+              return;
+            }
             size = safeOffset;
             repairOffset = undefined;
           } catch {
@@ -336,7 +379,8 @@ export async function openRuntimeLogSink(
       if (closePromise !== undefined) return closePromise;
       accepting = false;
       const closing = (async () => {
-        while (queue.length > 0 || repairOffset !== undefined || drainPromise !== undefined) {
+        while (!abandoned &&
+            (queue.length > 0 || repairOffset !== undefined || drainPromise !== undefined)) {
           startDrain();
           await drainPromise;
         }
@@ -347,6 +391,7 @@ export async function openRuntimeLogSink(
       closePromise = (async () => {
         if (await settlesWithin(closing, closeTimeoutMs)) return;
         abandoned = true;
+        repairOffset = undefined;
         clearQueue();
         report(RUNTIME_LOG_CLOSE_TIMEOUT_MESSAGE);
         const currentHandle = handle;
@@ -414,21 +459,64 @@ async function settlesWithin(promise: Promise<void>, timeoutMs: number): Promise
   return result;
 }
 
-async function openCurrentLog(path: string, uid: number | undefined): Promise<FileHandle> {
+async function openCurrentLog(
+  path: string,
+  uid: number | undefined,
+  maxBytes: number,
+  truncateFile: (handle: FileHandle, size: number) => Promise<void>,
+): Promise<FileHandle> {
   const handle = await open(
     path,
-    constants.O_APPEND | constants.O_CREAT | constants.O_WRONLY | constants.O_NOFOLLOW,
+    constants.O_APPEND | constants.O_CREAT | constants.O_RDWR | constants.O_NOFOLLOW,
     0o600,
   );
   try {
     const metadata = await handle.stat();
     if (!safeLogMetadata(metadata, uid)) throw operatorErrors.RUNTIME_LOG_UNSAFE;
     await handle.chmod(0o600);
+    await repairRuntimeLogTail(handle, metadata.size, maxBytes, truncateFile);
     return handle;
   } catch (error) {
     await handle.close().catch(() => undefined);
     throw error;
   }
+}
+
+async function repairRuntimeLogTail(
+  handle: FileHandle,
+  size: number,
+  maxBytes: number,
+  truncateFile: (handle: FileHandle, size: number) => Promise<void>,
+): Promise<void> {
+  if (size === 0) return;
+  const length = Math.min(size, maxBytes);
+  const start = size - length;
+  const content = Buffer.alloc(length);
+  let readBytes = 0;
+  while (readBytes < length) {
+    const result = await handle.read(content, readBytes, length - readBytes, start + readBytes);
+    if (result.bytesRead === 0) throw new Error("Runtime log tail could not be read.");
+    readBytes += result.bytesRead;
+  }
+  let boundary = content.at(-1) === 0x0a ? length : content.lastIndexOf(0x0a) + 1;
+  while (boundary > 0) {
+    const previousBoundary = content.lastIndexOf(0x0a, boundary - 2) + 1;
+    let validRecord = false;
+    try {
+      const record = JSON.parse(content.subarray(previousBoundary, boundary - 1).toString("utf8")) as unknown;
+      validRecord = record !== null && typeof record === "object" && !Array.isArray(record);
+    } catch {
+      // Continue backward to the preceding complete record.
+    }
+    if (validRecord) {
+      const safeSize = start + boundary;
+      if (safeSize < size) await truncateFile(handle, safeSize);
+      return;
+    }
+    boundary = previousBoundary;
+  }
+  if (start > 0) throw operatorErrors.RUNTIME_LOG_UNSAFE;
+  await truncateFile(handle, 0);
 }
 
 async function assertSafeExistingLog(path: string, uid: number | undefined): Promise<void> {

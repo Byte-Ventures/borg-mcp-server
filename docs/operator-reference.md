@@ -82,7 +82,9 @@ remove the unsafe `runtime.log*` files, and restart to restore telemetry. A full
 slow, or temporarily unavailable disk emits one bounded warning, drops newest
 ordinary records when the in-memory queue reaches 1,024 records or 1 MiB, reserves
 two records and 4 KiB for `slow_*` evidence, and retries the owned sink. The next
-successful record reports the dropped and failed counts.
+successful record reports the dropped and failed counts. On startup, the server
+validates the current file's final JSON line and truncates an incomplete or
+invalid tail to the last complete record before appending.
 
 `borg-mcp-server status` reports whether the service is active, inactive,
 or absent and identifies its adapter. Use the platform service manager for

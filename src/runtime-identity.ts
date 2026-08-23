@@ -1,7 +1,7 @@
 import { PROTOCOL_VERSION } from "borgmcp-shared/protocol";
 import { lstat, readFile } from "node:fs/promises";
 
-export const SERVER_PACKAGE_VERSION = "3.2.2";
+export const SERVER_PACKAGE_VERSION = "3.2.3";
 export const RUNTIME_INFO_PATH = "/api/runtime";
 
 export interface RuntimeBuildIdentity {

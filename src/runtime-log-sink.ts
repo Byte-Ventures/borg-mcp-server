@@ -9,6 +9,8 @@ export const RUNTIME_LOG_GENERATIONS = 3;
 export const RUNTIME_LOG_FILE_NAME = "runtime.log";
 export const RUNTIME_LOG_MAX_QUEUED_RECORDS = 1_024;
 export const RUNTIME_LOG_MAX_QUEUED_BYTES = 1024 * 1024;
+export const RUNTIME_LOG_RESERVED_SLOW_RECORDS = 2;
+export const RUNTIME_LOG_RESERVED_SLOW_BYTES = 4 * 1024;
 export const RUNTIME_LOG_CLOSE_TIMEOUT_MS = 1_000;
 export const RUNTIME_LOG_RETRY_BACKOFF_MS = 1_000;
 export const RUNTIME_LOG_OVERFLOW_MESSAGE =
@@ -41,6 +43,8 @@ export async function openRuntimeLogSink(
     readonly uid?: number;
     readonly maxQueuedRecords?: number;
     readonly maxQueuedBytes?: number;
+    readonly reservedSlowRecords?: number;
+    readonly reservedSlowBytes?: number;
     readonly closeTimeoutMs?: number;
     readonly retryBackoffMs?: number;
     readonly reportFailure?: (line: string) => void;
@@ -54,10 +58,14 @@ export async function openRuntimeLogSink(
   const maxQueuedBytes = options.maxQueuedBytes ?? RUNTIME_LOG_MAX_QUEUED_BYTES;
   const closeTimeoutMs = options.closeTimeoutMs ?? RUNTIME_LOG_CLOSE_TIMEOUT_MS;
   const retryBackoffMs = options.retryBackoffMs ?? RUNTIME_LOG_RETRY_BACKOFF_MS;
+  const configuredReservedSlowRecords = options.reservedSlowRecords ?? RUNTIME_LOG_RESERVED_SLOW_RECORDS;
+  const configuredReservedSlowBytes = options.reservedSlowBytes ?? RUNTIME_LOG_RESERVED_SLOW_BYTES;
   for (const [name, value, minimum] of [
     ["byte limit", maxBytes, 1],
     ["record queue limit", maxQueuedRecords, 1],
     ["byte queue limit", maxQueuedBytes, 1],
+    ["reserved slow record count", configuredReservedSlowRecords, 0],
+    ["reserved slow byte count", configuredReservedSlowBytes, 0],
     ["close timeout", closeTimeoutMs, 0],
     ["retry backoff", retryBackoffMs, 0],
   ] as const) {
@@ -66,6 +74,8 @@ export async function openRuntimeLogSink(
     }
   }
   const writeRecord = options.writeRecord ?? ((handle: FileHandle, record: Buffer) => handle.writeFile(record));
+  const reservedSlowRecords = Math.min(configuredReservedSlowRecords, maxQueuedRecords - 1);
+  const reservedSlowBytes = Math.min(configuredReservedSlowBytes, maxQueuedBytes - 1);
   const clock = options.clock ?? Date.now;
   const delay = options.delay ?? ((milliseconds: number) => (
     new Promise<void>((resolveDelay) => setTimeout(resolveDelay, milliseconds))
@@ -91,7 +101,10 @@ export async function openRuntimeLogSink(
   let accepting = true;
   let abandoned = false;
   let activeBytes = 0;
+  let activeIsSlow = false;
   let queuedBytes = 0;
+  let queuedOrdinaryRecords = 0;
+  let queuedOrdinaryBytes = 0;
   let totalDroppedRecords = 0;
   let droppedSinceSuccess = 0;
   let failuresSinceSuccess = 0;
@@ -99,9 +112,17 @@ export async function openRuntimeLogSink(
   let failureReported = false;
   let unsafeReported = false;
   let retryAt = 0;
+  let repairOffset: number | undefined;
   let drainPromise: Promise<void> | undefined;
   let closePromise: Promise<void> | undefined;
-  const queue: Array<{ readonly line: string; readonly bytes: number }> = [];
+  const queue: Array<{ readonly line: string; readonly bytes: number; readonly slow: boolean }> = [];
+
+  const clearQueue = (): void => {
+    queue.length = 0;
+    queuedBytes = 0;
+    queuedOrdinaryRecords = 0;
+    queuedOrdinaryBytes = 0;
+  };
 
   const report = (line: string): void => {
     try {
@@ -135,8 +156,7 @@ export async function openRuntimeLogSink(
   const disableUnsafeSink = (): void => {
     abandoned = true;
     accepting = false;
-    queue.length = 0;
-    queuedBytes = 0;
+    clearQueue();
     if (!unsafeReported) {
       unsafeReported = true;
       report(RUNTIME_LOG_UNSAFE_MESSAGE);
@@ -170,8 +190,22 @@ export async function openRuntimeLogSink(
     if (wait > 0) await delay(wait);
     if (abandoned) return;
     for (const path of paths) await assertSafeExistingLog(path, uid);
-    handle = await openCurrentLog(paths[0]!, uid);
-    size = (await handle.stat()).size;
+    const reopened = await openCurrentLog(paths[0]!, uid);
+    try {
+      const reopenedSize = (await reopened.stat()).size;
+      if (repairOffset !== undefined) {
+        if (reopenedSize < repairOffset) throw operatorErrors.RUNTIME_LOG_UNSAFE;
+        await reopened.truncate(repairOffset);
+        size = repairOffset;
+        repairOffset = undefined;
+      } else {
+        size = reopenedSize;
+      }
+      handle = reopened;
+    } catch (error) {
+      await reopened.close().catch(() => undefined);
+      throw error;
+    }
   };
 
   const drain = async (): Promise<void> => {
@@ -192,16 +226,25 @@ export async function openRuntimeLogSink(
       if (abandoned || handle === undefined) return;
       const queued = queue.shift()!;
       queuedBytes -= queued.bytes;
+      if (!queued.slow) {
+        queuedOrdinaryRecords -= 1;
+        queuedOrdinaryBytes -= queued.bytes;
+      }
       activeBytes = queued.bytes;
+      activeIsSlow = queued.slow;
       let projected = projectSinkCounters(queued.line, droppedSinceSuccess, failuresSinceSuccess);
       let record = Buffer.from(`${projected.line}\n`, "utf8");
       if (record.byteLength > maxBytes) {
         projected = { line: queued.line, droppedRecords: 0, writeFailures: 0 };
         record = Buffer.from(`${queued.line}\n`, "utf8");
       }
+      let writeAttempted = false;
+      let safeOffset = size;
       try {
         if (size + record.byteLength > maxBytes) await rotate();
         if (handle === undefined) throw new Error("Runtime log is unavailable.");
+        safeOffset = size;
+        writeAttempted = true;
         await writeRecord(handle, record);
         size += record.byteLength;
         droppedSinceSuccess -= projected.droppedRecords;
@@ -216,10 +259,12 @@ export async function openRuntimeLogSink(
           disableUnsafeSink();
           return;
         }
+        if (writeAttempted) repairOffset = safeOffset;
         retryAt = clock() + retryBackoffMs;
         recordFailure(true);
       } finally {
         activeBytes = 0;
+        activeIsSlow = false;
       }
     }
   };
@@ -237,15 +282,42 @@ export async function openRuntimeLogSink(
     write(line: string): void {
       if (!accepting) return;
       const bytes = Buffer.byteLength(line, "utf8") + 1;
+      const slow = slowRuntimeRecord(line);
       const queuedRecords = queue.length + (activeBytes === 0 ? 0 : 1);
-      if (bytes > maxBytes || bytes > maxQueuedBytes || queuedRecords >= maxQueuedRecords ||
-          queuedBytes + activeBytes + bytes > maxQueuedBytes) {
-        // Preserve accepted-record ordering and drop the newest record at either queue bound.
+      if (bytes > maxBytes || bytes > maxQueuedBytes) {
         recordOverflow();
         return;
       }
-      queue.push({ line, bytes });
+      if (slow) {
+        while (queue.length + (activeBytes === 0 ? 0 : 1) >= maxQueuedRecords ||
+            queuedBytes + activeBytes + bytes > maxQueuedBytes) {
+          const ordinaryIndex = queue.findLastIndex((record) => !record.slow);
+          if (ordinaryIndex < 0) {
+            recordOverflow();
+            return;
+          }
+          const [evicted] = queue.splice(ordinaryIndex, 1);
+          queuedBytes -= evicted!.bytes;
+          queuedOrdinaryRecords -= 1;
+          queuedOrdinaryBytes -= evicted!.bytes;
+          recordOverflow();
+        }
+      } else {
+        const activeOrdinaryRecords = activeBytes > 0 && !activeIsSlow ? 1 : 0;
+        const activeOrdinaryBytes = activeBytes > 0 && !activeIsSlow ? activeBytes : 0;
+        if (queuedRecords >= maxQueuedRecords || queuedBytes + activeBytes + bytes > maxQueuedBytes ||
+            queuedOrdinaryRecords + activeOrdinaryRecords >= maxQueuedRecords - reservedSlowRecords ||
+            queuedOrdinaryBytes + activeOrdinaryBytes + bytes > maxQueuedBytes - reservedSlowBytes) {
+          recordOverflow();
+          return;
+        }
+      }
+      queue.push({ line, bytes, slow });
       queuedBytes += bytes;
+      if (!slow) {
+        queuedOrdinaryRecords += 1;
+        queuedOrdinaryBytes += bytes;
+      }
       startDrain();
     },
     async close(): Promise<void> {
@@ -263,8 +335,7 @@ export async function openRuntimeLogSink(
       closePromise = (async () => {
         if (await settlesWithin(closing, closeTimeoutMs)) return;
         abandoned = true;
-        queue.length = 0;
-        queuedBytes = 0;
+        clearQueue();
         report(RUNTIME_LOG_CLOSE_TIMEOUT_MESSAGE);
         const currentHandle = handle;
         handle = undefined;
@@ -304,6 +375,15 @@ function projectSinkCounters(
     };
   } catch {
     return { line, droppedRecords: 0, writeFailures: 0 };
+  }
+}
+
+function slowRuntimeRecord(line: string): boolean {
+  try {
+    const record = JSON.parse(line) as { readonly event?: unknown };
+    return typeof record.event === "string" && record.event.startsWith("slow_");
+  } catch {
+    return false;
   }
 }
 

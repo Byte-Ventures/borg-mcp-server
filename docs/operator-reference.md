@@ -80,8 +80,9 @@ user, or permits group/other access, startup emits one `RUNTIME_LOG_UNSAFE`
 warning, disables telemetry, and continues serving. Stop the server, repair or
 remove the unsafe `runtime.log*` files, and restart to restore telemetry. A full,
 slow, or temporarily unavailable disk emits one bounded warning, drops newest
-records when the in-memory queue reaches 1,024 records or 1 MiB, and retries the
-owned sink; the next successful record reports the dropped and failed counts.
+ordinary records when the in-memory queue reaches 1,024 records or 1 MiB, reserves
+two records and 4 KiB for `slow_*` evidence, and retries the owned sink. The next
+successful record reports the dropped and failed counts.
 
 `borg-mcp-server status` reports whether the service is active, inactive,
 or absent and identifies its adapter. Use the platform service manager for

@@ -88,6 +88,8 @@ describe("runtime log sink", () => {
     const sink = await openRuntimeLogSink(directory, {
       maxQueuedRecords: 3,
       maxQueuedBytes: 96,
+      reservedSlowRecords: 0,
+      reservedSlowBytes: 0,
       closeTimeoutMs: 20,
       reportFailure: (line) => reports.push(line),
       writeRecord: () => blockedWrite,
@@ -119,6 +121,8 @@ describe("runtime log sink", () => {
     const reports: string[] = [];
     const sink = await openRuntimeLogSink(directory, {
       maxQueuedRecords: 2,
+      reservedSlowRecords: 0,
+      reservedSlowBytes: 0,
       reportFailure: (line) => reports.push(line),
       writeRecord: async (handle, record) => {
         writeCount += 1;
@@ -142,7 +146,7 @@ describe("runtime log sink", () => {
     expect(reports).toEqual([RUNTIME_LOG_OVERFLOW_MESSAGE]);
   });
 
-  it("reports a write failure once, reopens, and carries failed and dropped counts", async () => {
+  it("repairs a partial write, reopens, and carries failed and dropped counts", async () => {
     directory = await realpath(await mkdtemp(join(tmpdir(), "borg-runtime-retry-log-")));
     const reports: string[] = [];
     let writeCount = 0;
@@ -151,23 +155,79 @@ describe("runtime log sink", () => {
       reportFailure: (line) => reports.push(line),
       writeRecord: async (handle, record) => {
         writeCount += 1;
-        if (writeCount === 1) throw new Error("injected write failure");
+        if (writeCount === 2) {
+          await handle.writeFile(record.subarray(0, 6));
+          throw new Error("injected partial write failure");
+        }
         await handle.writeFile(record);
       },
     });
+    sink.write(JSON.stringify({ event: "before" }));
     sink.write(JSON.stringify({ event: "failed" }));
-    await vi.waitFor(() => expect(writeCount).toBe(1));
+    await vi.waitFor(() => expect(writeCount).toBe(2));
     sink.write(JSON.stringify({ event: "recovered" }));
     await sink.close();
 
     const records = (await readFile(join(directory, "logs", RUNTIME_LOG_FILE_NAME), "utf8"))
       .trim().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>);
-    expect(records).toEqual([{
-      event: "recovered",
-      runtime_log_dropped_records: 1,
-      runtime_log_write_failures: 1,
-    }]);
+    expect(records).toEqual([
+      { event: "before" },
+      {
+        event: "recovered",
+        runtime_log_dropped_records: 1,
+        runtime_log_write_failures: 1,
+      },
+    ]);
     expect(reports).toEqual([RUNTIME_LOG_FAILURE_MESSAGE]);
+  });
+
+  it("keeps slow request and liveness evidence when ordinary records saturate the queue", async () => {
+    directory = await realpath(await mkdtemp(join(tmpdir(), "borg-runtime-slow-priority-")));
+    let releaseWrite: (() => void) | undefined;
+    const firstWrite = new Promise<void>((resolveWrite) => {
+      releaseWrite = resolveWrite;
+    });
+    let writeCount = 0;
+    const reports: string[] = [];
+    const sink = await openRuntimeLogSink(directory, {
+      maxQueuedRecords: 3,
+      maxQueuedBytes: 1_024,
+      reservedSlowBytes: 0,
+      reportFailure: (line) => reports.push(line),
+      writeRecord: async (handle, record) => {
+        writeCount += 1;
+        if (writeCount === 1) await firstWrite;
+        await handle.writeFile(record);
+      },
+    });
+    const logger = createRuntimeLogger(sink.write, () => new Date("2026-08-23T12:00:00.000Z"));
+    logger.emit({ event: "request", method: "GET", path: "/api/cubes", status: 200, elapsedMs: 10 });
+    logger.emit({ event: "request", method: "GET", path: "/api/cubes", status: 200, elapsedMs: 11 });
+    logger.emit({
+      event: "slow_request",
+      method: "GET",
+      path: "/api/cubes",
+      status: 200,
+      elapsedMs: 1_500,
+    });
+    logger.emit({
+      event: "slow_liveness_scan",
+      elapsedMs: 1_200,
+      candidateCount: 12,
+      outcome: "success",
+    });
+    expect(sink.inspect()).toMatchObject({ queuedRecords: 3, droppedRecords: 1 });
+    releaseWrite?.();
+    await sink.close();
+
+    const records = (await readFile(join(directory, "logs", RUNTIME_LOG_FILE_NAME), "utf8"))
+      .trim().split("\n").map((line) => JSON.parse(line) as { event: string });
+    expect(records.map((record) => record.event)).toEqual([
+      "request",
+      "slow_request",
+      "slow_liveness_scan",
+    ]);
+    expect(reports).toEqual([RUNTIME_LOG_OVERFLOW_MESSAGE]);
   });
 
   it("disables telemetry before rotating through an unsafe generation", async () => {

@@ -245,6 +245,21 @@ describe("managed service uninstallation", () => {
     }
   });
 
+  it("preserves an incomplete live runtime-lock refusal before controller or file mutation", async () => {
+    const fixture = await uninstallFixture("systemd");
+    const run = vi.fn();
+
+    await expect(uninstallManagedService({
+      ...fixture.input,
+      inspectRuntime: async () => { throw operatorErrors.RUNTIME_LOCK_LIVE_UNRECOGNIZED; },
+      inspectService: vi.fn(),
+      run,
+    })).rejects.toBe(operatorErrors.RUNTIME_LOCK_LIVE_UNRECOGNIZED);
+    expect(run).not.toHaveBeenCalled();
+    expect(await readFile(fixture.definition.definitionPath, "utf8"))
+      .toBe(fixture.definition.content);
+  });
+
   it("retains the definition and reports observed state when controller removal fails", async () => {
     const fixture = await uninstallFixture("launchd");
     const input = {

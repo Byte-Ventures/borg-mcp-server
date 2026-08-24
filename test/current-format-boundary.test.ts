@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { access, chmod, mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { access, chmod, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -17,6 +17,20 @@ afterEach(async () => {
 });
 
 describe("current lifecycle format boundary", () => {
+  it("documents distinct recovery commands for install and uninstall refusals", async () => {
+    const reference = await readFile(
+      new URL("../docs/operator-reference.md", import.meta.url),
+      "utf8",
+    );
+    expect(reference).toContain(
+      "If install refuses a historical definition, stop the service with the platform",
+    );
+    expect(reference).toContain("then rerun\n`borg-mcp-server service install`");
+    expect(reference).toContain("If uninstall refuses that definition, perform\nthe same manual cleanup");
+    expect(reference).toContain("then rerun `borg-mcp-server service uninstall`");
+    expect(reference).toContain("use the leftover\nregistration commands reported by uninstall");
+  });
+
   it("refuses update through an incomplete historical runtime lock before external work", async () => {
     const root = await mkdtemp(join(tmpdir(), "borg-current-format-update-"));
     directories.push(root);

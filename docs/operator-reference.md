@@ -41,9 +41,12 @@ definition is replaced only when it is an owner-private regular file carrying
 Borg's current ownership marker. Markerless historical definitions and other
 unmarked definitions are left untouched.
 
-If install or uninstall refuses a historical definition, stop the service with
-the platform command below, preserve or remove the old definition manually,
-then rerun `borg-mcp-server service install`. The default definition is
+If install refuses a historical definition, stop the service with the platform
+command below, preserve or remove the old definition manually, then rerun
+`borg-mcp-server service install`. If uninstall refuses that definition, perform
+the same manual cleanup, then rerun `borg-mcp-server service uninstall`. If the
+definition is already absent but its registration remains, use the leftover
+registration commands reported by uninstall. The default definition is
 `~/Library/LaunchAgents/ai.borgmcp.server.plist` on macOS and
 `~/.config/systemd/user/ai.borgmcp.server.service` on Linux.
 

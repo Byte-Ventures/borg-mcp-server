@@ -69,7 +69,7 @@ export async function uninstallManagedService(
   );
   try {
     const definitionState = await inspectManagedServiceDefinition(input.definition, input.uid);
-    const runtime = await input.inspectRuntime().catch(() => ({ running: false } as const));
+    const runtime = await input.inspectRuntime();
     let service: ManagedServiceProbeState;
     try {
       service = await input.inspectService();

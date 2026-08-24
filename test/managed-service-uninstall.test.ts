@@ -231,6 +231,20 @@ describe("managed service uninstallation", () => {
     expect(run).not.toHaveBeenCalled();
   });
 
+  it("refuses markerless definitions published by v0.18.1 without controller mutation", async () => {
+    for (const platform of ["launchd", "systemd"] as const) {
+      const fixture = await uninstallFixture(platform);
+      const legacy = legacyDefinition(fixture.directory, platform);
+      await writeFile(fixture.definition.definitionPath, legacy, { mode: 0o600 });
+      const run = vi.fn();
+
+      await expect(uninstallManagedService({ ...fixture.input, run }))
+        .rejects.toThrow("not recognized as Borg-owned");
+      expect(run).not.toHaveBeenCalled();
+      expect(await readFile(fixture.definition.definitionPath, "utf8")).toBe(legacy);
+    }
+  });
+
   it("retains the definition and reports observed state when controller removal fails", async () => {
     const fixture = await uninstallFixture("launchd");
     const input = {
@@ -384,6 +398,37 @@ describe("managed service uninstallation", () => {
     expect(await readFile(fixture.definition.definitionPath, "utf8")).toBe(replacement);
   });
 });
+
+function legacyDefinition(directory: string, platform: "launchd" | "systemd"): string {
+  if (platform === "launchd") {
+    return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>ai.borgmcp.server</string>
+  <key>ProgramArguments</key><array><string>/usr/bin/node</string><string>/old-runtime/current/package/dist/main.js</string><string>start</string></array>
+  <key>EnvironmentVariables</key><dict><key>BORG_SERVER_DATA_DIR</key><string>${directory}/data</string><key>BORG_SERVER_PROCESS_MODE</key><string>managed</string></dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+  <key>ProcessType</key><string>Background</string>
+</dict></plist>
+`;
+  }
+  return `[Unit]
+Description=Borg MCP server (ai.borgmcp.server)
+
+[Service]
+Type=simple
+ExecStart="/usr/bin/node" "/old-runtime/current/package/dist/main.js" start
+Environment="BORG_SERVER_DATA_DIR=${directory}/data"
+Environment="BORG_SERVER_PROCESS_MODE=managed"
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=15
+
+[Install]
+WantedBy=default.target
+`;
+}
 
 async function uninstallFixture(platform: "launchd" | "systemd") {
   const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-service-uninstall-")));

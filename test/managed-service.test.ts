@@ -352,6 +352,47 @@ describe("managed service adapters", () => {
     }
   });
 
+  it("refuses every launchd mutation when an absent job has a symlinked definition", async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), "borg-launchd-absent-symlink-")));
+    const expectedPath = join(root, "ai.borgmcp.server.plist");
+    const foreignPath = join(root, "foreign-definition");
+    const foreignContent = "foreign definition must remain unchanged";
+    await writeFile(foreignPath, foreignContent, { mode: 0o600 });
+    await symlink(foreignPath, expectedPath);
+    const definition = createManagedServiceDefinition({
+      platform: "launchd",
+      nodeExecutable: "/usr/bin/node",
+      runtimeRoot: "/isolated/runtime",
+      dataDirectory: "/isolated/data",
+      definitionPath: expectedPath,
+      launchdDomain: "gui/501",
+    });
+    const commands: (readonly string[])[] = [];
+    const run = async (command: readonly [string, ...string[]]) => {
+      commands.push(command);
+      if (command === definition.status) {
+        throw Object.assign(new Error("not loaded"), { code: 113 });
+      }
+      throw new Error("Controller mutation escaped the absent-job symlink guard.");
+    };
+    const bound = createBoundManagedServiceRunner(definition, run);
+
+    for (const command of [
+      definition.install,
+      definition.restart,
+      definition.recoverLoaded,
+      definition.unload,
+      definition.rollbackRemove,
+    ]) {
+      commands.length = 0;
+      await expect(bound(command, new AbortController().signal))
+        .rejects.toBe(operatorErrors.MANAGED_SERVICE_DEFINITION_UNSAFE);
+      expect(commands).toEqual([definition.status]);
+    }
+    expect(await readFile(foreignPath, "utf8")).toBe(foreignContent);
+    await rm(root, { recursive: true, force: true });
+  });
+
   it("allows only the guarded systemd reload after removing its verified definition", async () => {
     const root = await realpath(await mkdtemp(join(tmpdir(), "borg-systemd-removal-")));
     const definitionPath = join(root, "ai.borgmcp.server.service");

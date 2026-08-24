@@ -172,16 +172,19 @@ async function assertManagedServiceControllerBindingInternal(
   signal: AbortSignal,
   allowMissingDefinition: boolean,
 ): Promise<void> {
-  let result: Awaited<ReturnType<ManagedServiceCommandRunner>>;
+  let loadedPath: string | null;
   try {
-    result = await run(definition.status, signal);
+    const result = await run(definition.status, signal);
+    loadedPath = controllerDefinitionPath(definition, result.stdout);
   } catch (error) {
     if (definition.platform === "launchd" &&
         typeof error === "object" && error !== null &&
-        (error as { readonly code?: unknown }).code === 113) return;
-    throw error;
+        (error as { readonly code?: unknown }).code === 113) {
+      loadedPath = null;
+    } else {
+      throw error;
+    }
   }
-  const loadedPath = controllerDefinitionPath(definition, result.stdout);
   if (loadedPath !== null && loadedPath !== definition.definitionPath) {
     throw managedServiceControllerMismatch(definition.definitionPath, loadedPath);
   }

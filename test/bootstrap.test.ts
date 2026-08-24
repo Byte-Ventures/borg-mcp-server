@@ -2,7 +2,7 @@ import { chmod, copyFile, mkdtemp, readFile, readdir, realpath, rm, stat, symlin
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { X509Certificate } from "node:crypto";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   bootstrapServer,
@@ -10,6 +10,7 @@ import {
   loadTlsPrivateKey,
   reissueServerCertificate,
 } from "../src/bootstrap.js";
+import { CredentialAuthority } from "../src/credentials.js";
 import type { PortableServerCredential } from "../src/portable-credential-store.js";
 import { openStore } from "../src/store.js";
 
@@ -51,11 +52,21 @@ describe("offline bootstrap", () => {
     await expect(readdir(directory)).resolves.toEqual([]);
   });
 
-  it("creates private trust, identity, digest, and one-time bootstrap material", async () => {
+  it("creates private trust, identity, digest, and owner enrollment", async () => {
     const parent = await temporaryDirectory();
-    const result = await bootstrapServer(join(parent, "server"));
+    let invitation = "";
+    const createBootstrapInvitation = CredentialAuthority.prototype.createBootstrapInvitation;
+    const captureInvitation = vi.spyOn(CredentialAuthority.prototype, "createBootstrapInvitation")
+      .mockImplementation(function (this: CredentialAuthority, ttlMs) {
+        invitation = createBootstrapInvitation.call(this, ttlMs);
+        return invitation;
+      });
+    const result = await bootstrapServer(join(parent, "server")).finally(() => {
+      captureInvitation.mockRestore();
+    });
 
-    expect(result.initialInvitation).toMatch(/^[A-Za-z0-9_-]{43}$/u);
+    expect(result).not.toHaveProperty("initialInvitation");
+    expect(invitation).toMatch(/^[A-Za-z0-9_-]{43}$/u);
     expect((await stat(join(parent, "server"))).mode & 0o777).toBe(0o700);
     for (const path of Object.values(result.paths)) {
       expect((await stat(path)).mode & 0o777).toBe(0o600);
@@ -81,7 +92,7 @@ describe("offline bootstrap", () => {
     ];
     for (const path of generatedFiles) {
       const bytes = await readFile(path).catch(() => Buffer.alloc(0));
-      expect(bytes.includes(Buffer.from(result.initialInvitation)), path).toBe(false);
+      expect(bytes.includes(Buffer.from(invitation)), path).toBe(false);
     }
     const runtime = await openStore({ path: result.paths.database });
     expect(runtime.maintenance.observeAuthorityState()).toMatchObject({
@@ -89,6 +100,8 @@ describe("offline bootstrap", () => {
       roles: 0,
       grants: 0,
       enrolled_clients: 1,
+      enrollment_claims: 1,
+      server_capabilities: 1,
     });
     runtime.close();
   });

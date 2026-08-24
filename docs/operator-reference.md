@@ -50,6 +50,22 @@ registration commands reported by uninstall. The default definition is
 `~/Library/LaunchAgents/ai.borgmcp.server.plist` on macOS and
 `~/.config/systemd/user/ai.borgmcp.server.service` on Linux.
 
+Lifecycle refusals emit these exact recovery messages:
+
+```text
+A live process owns an obsolete or invalid runtime.lock. Stop that process through its original terminal or service manager. After it exits, remove runtime.lock and retry.
+```
+
+```text
+The existing service definition is not recognized as Borg-owned. Preserve or remove it manually before retrying.
+```
+
+```text
+No Borg service definition is present, but the service manager still reports ai.borgmcp.server. Remove the leftover registration, then retry:
+  macOS: launchctl bootout gui/$(id -u)/ai.borgmcp.server
+  Linux: systemctl --user disable --now ai.borgmcp.server
+```
+
 Remove the managed definition, stopping the service first when it is active,
 with:
 

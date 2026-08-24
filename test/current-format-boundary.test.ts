@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { operatorErrors } from "../src/operator-error.js";
+
 const directories: string[] = [];
 
 afterEach(async () => {
@@ -22,13 +24,17 @@ describe("current lifecycle format boundary", () => {
       new URL("../docs/operator-reference.md", import.meta.url),
       "utf8",
     );
+    expect(reference).toContain(operatorErrors.RUNTIME_LOCK_LIVE_UNRECOGNIZED.message);
+    expect(reference).toContain(operatorErrors.MANAGED_SERVICE_DEFINITION_FOREIGN.message);
+    expect(reference).toContain(operatorErrors.MANAGED_SERVICE_REGISTRATION_LEFTOVER.message);
     expect(reference).toContain(
-      "If install refuses a historical definition, stop the service with the platform",
+      "If install refuses a historical definition, stop the service with the platform\n" +
+      "command below, preserve or remove the old definition manually, then rerun\n" +
+      "`borg-mcp-server service install`. If uninstall refuses that definition, perform\n" +
+      "the same manual cleanup, then rerun `borg-mcp-server service uninstall`. If the\n" +
+      "definition is already absent but its registration remains, use the leftover\n" +
+      "registration commands reported by uninstall.",
     );
-    expect(reference).toContain("then rerun\n`borg-mcp-server service install`");
-    expect(reference).toContain("If uninstall refuses that definition, perform\nthe same manual cleanup");
-    expect(reference).toContain("then rerun `borg-mcp-server service uninstall`");
-    expect(reference).toContain("use the leftover\nregistration commands reported by uninstall");
   });
 
   it("refuses update through an incomplete historical runtime lock before external work", async () => {

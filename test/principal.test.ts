@@ -6,14 +6,12 @@ import { describe, expect, it, vi } from "vitest";
 import {
   clientPrincipal,
   droneSessionPrincipal,
-  operatorPrincipal,
   assertServerDerivedPrincipal,
 } from "../src/principal.js";
 import { openStore } from "../src/store.js";
 
 describe("Principal", () => {
   it("creates immutable server-derived identity shapes without product roles", () => {
-    const operator = operatorPrincipal("00000000-0000-4000-8000-000000000001");
     const client = clientPrincipal("00000000-0000-4000-8000-000000000002");
     const drone = droneSessionPrincipal({
       id: "00000000-0000-4000-8000-000000000003",
@@ -22,10 +20,8 @@ describe("Principal", () => {
       droneId: "00000000-0000-4000-8000-000000000005",
     });
 
-    expect(Object.isFrozen(operator)).toBe(true);
     expect(Object.isFrozen(client)).toBe(true);
     expect(Object.isFrozen(drone)).toBe(true);
-    expect("role" in operator).toBe(false);
     expect("role" in client).toBe(false);
     expect("role" in drone).toBe(false);
   });
@@ -51,9 +47,8 @@ describe("Principal", () => {
     }
   });
 
-  it("accepts only exact factory principals across all kinds", () => {
+  it("accepts exact client and drone-session factory principals", () => {
     const principals = [
-      operatorPrincipal("00000000-0000-4000-8000-000000000011"),
       clientPrincipal("00000000-0000-4000-8000-000000000012"),
       droneSessionPrincipal({
         id: "00000000-0000-4000-8000-000000000013",

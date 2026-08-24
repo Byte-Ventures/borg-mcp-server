@@ -8,7 +8,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   clientPrincipal,
   droneSessionPrincipal,
-  operatorPrincipal,
 } from "../src/principal.js";
 import { CredentialAuthority, CredentialDigester, generateSecret } from "../src/credentials.js";
 import {
@@ -202,16 +201,6 @@ describe("Principal to ScopedStore isolation", () => {
     );
   });
 
-  it("gives the offline operator authority independently of product role labels", () => {
-    const operator = runtime.forPrincipal(operatorPrincipal(
-      "00000000-0000-4000-8000-000000000009",
-    ));
-
-    expect(operator.listCubes().map((cube) => cube.id)).toEqual([ids.cubeA, ids.cubeB]);
-    operator.updateDirective(ids.cubeB, "operator maintenance");
-    expect(operator.getCube(ids.cubeB)?.directive).toBe("operator maintenance");
-  });
-
   it("limits clients to database grants and returns no unauthorized cube oracle", () => {
     const clientA = runtime.forPrincipal(clientPrincipal(ids.clientA));
     const clientB = runtime.forPrincipal(clientPrincipal(ids.clientB));
@@ -330,8 +319,6 @@ describe("Principal to ScopedStore isolation", () => {
     expect(deletionSignals).toBe(1);
     expect(manager.listCubes().map((cube) => cube.id)).toEqual([ids.cubeB]);
     expect(() => manager.getCube(ids.cubeA)).toThrow(CubeDeletedError);
-    expect(() => runtime.forPrincipal(operatorPrincipal(outsiderId)).getCube(ids.cubeA))
-      .toThrow(CubeDeletedError);
     expect(runtime.forPrincipal(clientPrincipal(outsiderId)).getCube(ids.cubeA)).toBeNull();
     expect(runtime.maintenance.observeAuthorityState()).toMatchObject({
       cubes: 1,

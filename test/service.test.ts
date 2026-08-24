@@ -42,8 +42,8 @@ import {
 } from "../src/runtime-log-sink.js";
 import {
   portableCredentialAccount,
-  readPortableServerCredential,
   writePortableServerCredential,
+  type PortableServerCredential,
 } from "../src/portable-credential-store.js";
 import type { ForegroundDashboard } from "../src/dashboard.js";
 import { createManagedServiceDefinition } from "../src/managed-service.js";
@@ -56,6 +56,19 @@ function requireFreshSetup(
 ): BootstrapResult {
   if ("existing" in result) throw new Error("Expected a fresh server installation.");
   return result;
+}
+
+async function readPortableCredentialAccount(
+  path: string,
+  origin: string,
+  trustIdentity: string,
+): Promise<PortableServerCredential> {
+  const document = JSON.parse(await readFile(path, "utf8")) as {
+    accounts: Record<string, string>;
+  };
+  const value = document.accounts[portableCredentialAccount(origin, trustIdentity)];
+  if (value === undefined) throw new Error("Local owner credential is unavailable.");
+  return JSON.parse(value) as PortableServerCredential;
 }
 
 function serviceProbeError(code: string | number): Error {
@@ -266,7 +279,7 @@ describe("node server service", () => {
         await bindPortableOwnerCredentialPort(directory, credentials, 7_391);
 
         for (const port of [7_391, 7_091]) {
-          await expect(readPortableServerCredential(
+          await expect(readPortableCredentialAccount(
             credentials,
             `https://${displayHost}:${port}`,
             `spki-sha256:${installation.caFingerprint}`,
@@ -278,13 +291,13 @@ describe("node server service", () => {
         await expect(createOfflineCredentialService(directory, credentials).invite())
           .resolves.toMatchObject({ invitation: expect.stringMatching(/^[A-Za-z0-9_-]{43,1024}$/u) });
         await bindPortableOwnerCredentialPort(directory, credentials, 7_392);
-        await expect(readPortableServerCredential(
+        await expect(readPortableCredentialAccount(
           credentials,
           `https://${displayHost}:7391`,
           `spki-sha256:${installation.caFingerprint}`,
         )).rejects.toThrow("Local owner credential is unavailable.");
         for (const port of [7_392, 7_091]) {
-          await expect(readPortableServerCredential(
+          await expect(readPortableCredentialAccount(
             credentials,
             `https://${displayHost}:${port}`,
             `spki-sha256:${installation.caFingerprint}`,
@@ -344,7 +357,7 @@ describe("node server service", () => {
         expect(JSON.parse(await readFile(installation.paths.config, "utf8"))).toMatchObject({
           bind_host: bindHost,
         });
-        await expect(readPortableServerCredential(
+        await expect(readPortableCredentialAccount(
           credentials,
           `https://[${bindHost}]:7091`,
           `spki-sha256:${installation.caFingerprint}`,
@@ -359,7 +372,7 @@ describe("node server service", () => {
           credentials,
         )).resolves.toEqual({ existing: true, bindHost });
         await bindPortableOwnerCredentialPort(directory, credentials, 7_391);
-        await expect(readPortableServerCredential(
+        await expect(readPortableCredentialAccount(
           credentials,
           `https://[${bindHost}]:7391`,
           `spki-sha256:${installation.caFingerprint}`,
@@ -425,7 +438,7 @@ describe("node server service", () => {
       ));
       expect(await readFile(recovered.paths.caKey)).toEqual(caKey);
       expect(await readFile(recovered.paths.caCertificate)).toEqual(caCertificate);
-      await expect(readPortableServerCredential(
+      await expect(readPortableCredentialAccount(
         join(parent, "credentials"),
         "https://[fd00::1]:7091",
         `spki-sha256:${recovered.caFingerprint}`,

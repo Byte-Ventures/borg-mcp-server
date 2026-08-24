@@ -5,7 +5,6 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import {
   portableCredentialAccount,
-  readPortableServerCredential,
   readPortableServerCredentialForTrustIdentity,
   rebindPortableServerCredential,
   writePortableServerCredential,
@@ -46,7 +45,7 @@ describe("portable parent credential store", () => {
     await writePortableServerCredential(target, second);
     const updated = JSON.parse(await readFile(target, "utf8")) as typeof document;
     expect(updated.accounts["unrelated-account"]).toBe("opaque unrelated value");
-    await expect(readPortableServerCredential(target, record.origin, record.trustIdentity))
+    await expect(readPortableServerCredentialForTrustIdentity(target, record.trustIdentity))
       .resolves.toEqual(second);
   });
 
@@ -147,17 +146,17 @@ describe("portable parent credential store", () => {
     await writePortableServerCredential(actual, record);
     const link = join(parent, "link");
     await symlink(actual, link);
-    await expect(readPortableServerCredential(link, record.origin, record.trustIdentity))
+    await expect(readPortableServerCredentialForTrustIdentity(link, record.trustIdentity))
       .rejects.toThrow("unsafe");
     await chmod(actual, 0o644);
-    await expect(readPortableServerCredential(actual, record.origin, record.trustIdentity))
+    await expect(readPortableServerCredentialForTrustIdentity(actual, record.trustIdentity))
       .rejects.toThrow("unsafe");
   });
 
   it("does not create state while reading a missing store", async () => {
     const parent = await temporaryDirectory();
     const missing = join(parent, "missing");
-    await expect(readPortableServerCredential(missing, record.origin, record.trustIdentity))
+    await expect(readPortableServerCredentialForTrustIdentity(missing, record.trustIdentity))
       .rejects.toMatchObject({ code: "ENOENT" });
     await expect(access(missing)).rejects.toMatchObject({ code: "ENOENT" });
   });
@@ -196,7 +195,7 @@ describe("portable parent credential store", () => {
       .rejects.toThrow("Borg seat store is busy");
     release();
     await holdingWrite;
-    await expect(readPortableServerCredential(target, record.origin, record.trustIdentity))
+    await expect(readPortableServerCredentialForTrustIdentity(target, record.trustIdentity))
       .resolves.toEqual(record);
   });
 

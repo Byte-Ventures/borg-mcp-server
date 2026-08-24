@@ -94,24 +94,6 @@ export async function rebindPortableServerCredential(
   });
 }
 
-export async function readPortableServerCredential(
-  path: string,
-  origin: string,
-  trustIdentity: string,
-): Promise<PortableServerCredential> {
-  const target = await credentialPath(path);
-  await assertPrivateFile(target);
-  const document = parseDocument(await readPrivateBytes(target));
-  const value = document.accounts[portableCredentialAccount(origin, trustIdentity)];
-  if (value === undefined) throw new Error("Local owner credential is unavailable.");
-  const parsed: unknown = JSON.parse(value);
-  validateRecord(parsed);
-  if (parsed.origin !== origin || parsed.trustIdentity !== trustIdentity) {
-    throw new Error("Local owner credential binding is invalid.");
-  }
-  return Object.freeze(parsed);
-}
-
 export async function readPortableServerCredentialForTrustIdentity(
   path: string,
   trustIdentity: string,

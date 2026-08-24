@@ -33,11 +33,6 @@ export interface DroneSessionPrincipalInput {
 
 export type Principal = OperatorPrincipal | ClientPrincipal | DroneSessionPrincipal;
 
-export function operatorPrincipal(id: string): OperatorPrincipal {
-  assertCanonicalUuid(id, "Principal id");
-  return branded({ kind: "operator", id });
-}
-
 export function clientPrincipal(id: string): ClientPrincipal {
   assertCanonicalUuid(id, "Principal id");
   return branded({ kind: "client", id });

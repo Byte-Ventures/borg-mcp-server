@@ -23,7 +23,7 @@ import { CoordinationApi } from "../src/coordination-api.js";
 import { CredentialAuthority, CredentialDigester, generateSecret } from "../src/credentials.js";
 import { createEnrollmentExchange } from "../src/enrollment.js";
 import { startHttpsServer, type RunningServer } from "../src/https-server.js";
-import { operatorPrincipal } from "../src/principal.js";
+import { clientPrincipal } from "../src/principal.js";
 import { openStore, type StoreRuntime } from "../src/store.js";
 
 const directories: string[] = [];
@@ -146,9 +146,10 @@ async function conformanceEnvironment(): Promise<{
         if (clientId !== undefined) runtime.maintenance.removeClientCubeGrant(clientId, cube.id);
       },
       createRole: async (cube, input) => {
-        const role = runtime.forPrincipal(operatorPrincipal(
-          "00000000-0000-4000-8000-000000000399",
-        )).createRole(cube.id, {
+        const roleAdminId = randomUUID();
+        runtime.maintenance.createClient({ id: roleAdminId, name: "Conformance role admin" });
+        runtime.maintenance.grantClientCube({ clientId: roleAdminId, cubeId: cube.id, access: "manage" });
+        const role = runtime.forPrincipal(clientPrincipal(roleAdminId)).createRole(cube.id, {
           name: input.name ?? `Conformance ${randomUUID().slice(-8)}`,
           roleClass: input.roleClass,
           isHumanSeat: input.isHumanSeat,

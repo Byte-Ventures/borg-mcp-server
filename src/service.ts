@@ -152,7 +152,7 @@ export interface InvitationResult {
 }
 
 export type ServerSetupResult =
-  | (Omit<BootstrapResult, "initialInvitation"> & {
+  | (BootstrapResult & {
       readonly artifact?: { readonly version: string; readonly integrity: string; readonly sourceSha: string | null };
     })
   | {
@@ -313,8 +313,6 @@ export type RuntimeLockStatus =
       readonly endpoint: string | null;
       readonly mode: "foreground" | "managed" | "legacy";
     };
-
-const guardedRuntimeFailures = new Set<RuntimeResources>();
 
 export interface NodeServerTestHooks {
   readonly onStartupPhase?: (phase: "pre-lock" | "post-lock" | "pre-listen") => Promise<void>;
@@ -866,9 +864,8 @@ export const nodeServerService: ServerService = {
       credentialFile,
     );
     if (!("existing" in result)) {
-      const { initialInvitation: _invitation, ...publicResult } = result;
       return {
-        ...publicResult,
+        ...result,
         artifact: {
           version: artifact.version,
           integrity: artifact.integrity,
@@ -1720,19 +1717,9 @@ async function teardownRuntime(resources: RuntimeResources): Promise<void> {
     dashboardFailure = error;
   }
   resources.livenessScheduler?.stop();
-  try {
-    await resources.running?.close();
-  } catch (error) {
-    guardedRuntimeFailures.add(Object.freeze({ ...resources }));
-    throw error;
-  }
-  try {
-    resources.authRuntime?.close();
-    resources.digester?.destroy();
-  } catch (error) {
-    guardedRuntimeFailures.add(Object.freeze({ ...resources, running: undefined }));
-    throw error;
-  }
+  await resources.running?.close();
+  resources.authRuntime?.close();
+  resources.digester?.destroy();
   await resources.runtimeLogSink?.close();
   await resources.runtimeLock?.release();
   if (dashboardFailure !== undefined) throw dashboardFailure;

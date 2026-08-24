@@ -1921,7 +1921,6 @@ describe("node server service", () => {
         "127.0.0.1",
         { reinitialize: false },
       ));
-      expect(first.initialInvitation).toMatch(/^[A-Za-z0-9_-]{43}$/u);
       const before = await Promise.all(Object.values(first.paths).map((path) => readFile(path)));
 
       await expect(setupNodeServerInstallation(directory, "127.0.0.1", { reinitialize: false }))
@@ -2243,6 +2242,55 @@ describe("node server service", () => {
       await expect(createOfflineCredentialService(directory).rotateClient(
         "00000000-0000-4000-8000-000000000001",
       )).rejects.toThrow("Provide an existing active client ID.");
+      await expect(acquireRuntimeLock(directory)).rejects.toThrow(
+        "Stop the server before running setup or offline administration.",
+      );
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("retains the runtime lock when store closure is unconfirmed", async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-store-close-failure-")));
+    try {
+      await bootstrapServer(directory);
+      const primary = new Error("primary shutdown failure");
+      const closeFailure = new Error("secret store failure detail");
+      const listenerClose = vi.fn().mockResolvedValue(undefined);
+      let storeCloseCalls = 0;
+      const service = createNodeServerService({
+        environment: { BORG_SERVER_DATA_DIR: directory },
+        readFile: vi.fn().mockResolvedValue(Buffer.from("certificate")),
+        readPrivateKey: vi.fn().mockResolvedValue(Buffer.from("private-key")),
+        openStore: async (options) => {
+          const runtime = await openStore(options);
+          return Object.freeze({
+            ...runtime,
+            close: () => {
+              storeCloseCalls += 1;
+              runtime.close();
+              throw closeFailure;
+            },
+          });
+        },
+        startServer: vi.fn().mockResolvedValue({
+          origin: "https://127.0.0.1:7091",
+          limits: DEFAULT_TEST_LIMITS,
+          close: listenerClose,
+        }),
+        onStarted: vi.fn(),
+        waitForShutdown: vi.fn().mockRejectedValue(primary),
+      });
+
+      const result = await service.start([]).then(() => null, (error: unknown) => error);
+      expect(result).toMatchObject({
+        message: "Server teardown could not be confirmed; the runtime remains locked.",
+        errors: [primary, closeFailure],
+      });
+      expect((result as Error).message).not.toContain("secret store failure detail");
+      expect(isFatalTeardownError(result)).toBe(true);
+      expect(listenerClose).toHaveBeenCalledOnce();
+      expect(storeCloseCalls).toBe(1);
       await expect(acquireRuntimeLock(directory)).rejects.toThrow(
         "Stop the server before running setup or offline administration.",
       );

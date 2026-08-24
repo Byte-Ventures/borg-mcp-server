@@ -71,7 +71,6 @@ refer to each installed package for its complete license text.
 | `ws` | 8.21.2 | MIT |
 | `yoga-layout` | 3.2.1 | MIT |
 
-Deterministic CycloneDX SBOM tooling and tests validate the locked dependency
-graph independently of publication. The Trusted Publishing workflow neither
-generates nor ships an SBOM. Development-only packages are recorded in the
-source shrinkwrap but are not installed for package users.
+The Trusted Publishing workflow neither generates nor ships an SBOM.
+Development-only packages are recorded in the source shrinkwrap but are not
+installed for package users.

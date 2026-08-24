@@ -1,10 +1,8 @@
 {
   "versionPins": [
-    "scripts/verify-release-sbom.mjs",
     "test/cli.test.ts",
     "test/dashboard.test.ts",
     "test/https-server.test.ts",
-    "test/release-sbom.test.ts",
     "test/service.test.ts",
     "test/threat-model.test.ts"
   ]

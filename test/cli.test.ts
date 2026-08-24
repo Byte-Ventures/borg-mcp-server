@@ -31,7 +31,6 @@ describe("runCli", () => {
       start: vi.fn(),
       setup: vi.fn().mockResolvedValue({
         bindHost: "192.168.1.20",
-        initialInvitation: "b".repeat(43),
       }),
     };
     const io = createIo();
@@ -97,7 +96,6 @@ describe("runCli", () => {
       start: vi.fn(),
       setup: vi.fn().mockResolvedValue({
         bindHost: "127.0.0.1",
-        initialInvitation: "b".repeat(43),
       }),
     };
     const io = createIo();
@@ -200,9 +198,7 @@ describe("runCli", () => {
   });
 
   it("requires an explicit unambiguous setup reinitialization flag", async () => {
-    const setup = vi.fn().mockResolvedValue({
-      initialInvitation: "b".repeat(43),
-    });
+    const setup = vi.fn().mockResolvedValue({});
     const service: ServerService = { start: vi.fn(), setup };
 
     expect(await runCli(["setup", "--reinitialize"], service, createIo())).toBe(0);

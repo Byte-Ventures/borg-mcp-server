@@ -24,6 +24,7 @@ describe("server release lane", () => {
   it("uses one package authority and one protected publish with no post-publish readback", async () => {
     const workflow = await readFile(".github/workflows/release.yml", "utf8");
     const notices = await readFile("THIRD_PARTY_NOTICES.md", "utf8");
+    const notice = await readFile("NOTICE", "utf8");
     const [verification = "", afterVerify = ""] = workflow.split("\n  publish:\n");
     const publication = afterVerify;
 
@@ -89,12 +90,11 @@ describe("server release lane", () => {
     expect(workflow).not.toContain("secrets.NPM_TOKEN");
     expect(workflow).not.toContain("registry-url:");
     expect(notices).toContain(
-      "Deterministic CycloneDX SBOM tooling and tests validate the locked dependency\ngraph independently of publication.",
-    );
-    expect(notices).toContain(
-      "The Trusted Publishing workflow neither\ngenerates nor ships an SBOM.",
+      "The Trusted Publishing workflow neither generates nor ships an SBOM.",
     );
     expect(notices).not.toContain("The release workflow generates a CycloneDX SBOM");
+    expect(notice).toContain("This product includes third-party software. See THIRD_PARTY_NOTICES.md.");
+    expect(notice).not.toContain("CycloneDX SBOM");
 
     for (const line of workflow.split("\n").filter((value) => value.trim().startsWith("uses:"))) {
       expect(line).toMatch(/@[0-9a-f]{40}(?:\s+#.*)?$/u);

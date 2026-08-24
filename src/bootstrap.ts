@@ -11,8 +11,6 @@ export interface BootstrapResult {
   readonly serverId: string;
   readonly caFingerprint: string;
   readonly bindHost: string;
-  /** @deprecated The already-consumed bootstrap invitation; never rendered by setup. */
-  readonly initialInvitation: string;
   readonly ownerAccess: {
     readonly clientId: string;
     readonly serverCapabilities: readonly ["create_cube"];
@@ -123,7 +121,6 @@ export async function bootstrapServer(
         serverId,
         caFingerprint,
         bindHost,
-        initialInvitation: invitation,
         ownerAccess: {
           clientId: enrollment.clientId,
           serverCapabilities: ["create_cube"] as const,

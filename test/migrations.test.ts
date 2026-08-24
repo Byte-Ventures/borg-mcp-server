@@ -124,7 +124,7 @@ describe("SQLite migrations", () => {
     expect(first.diagnostics()).toEqual({
       journalMode: "wal",
       foreignKeys: true,
-      schemaVersions: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27],
+      schemaVersions: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28],
     });
     expect((await stat(join(directory, "data"))).mode & 0o777).toBe(0o700);
     expect((await stat(databasePath)).mode & 0o777).toBe(0o600);
@@ -134,7 +134,7 @@ describe("SQLite migrations", () => {
 
     const second = await openStore({ path: databasePath });
     expect(second.diagnostics().schemaVersions)
-      .toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27]);
+      .toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28]);
     second.close();
     await expect(access(databasePath)).resolves.toBeUndefined();
   });
@@ -172,6 +172,68 @@ describe("SQLite migrations", () => {
       sql: "CREATE INDEX expired_activity_cursors_order_idx\n" +
         "      ON expired_activity_cursors (cube_id, created_at, entry_id)",
     });
+    database.close();
+  });
+
+  it("names both persisted legacy cube template carriers when upgrading a v27 database", () => {
+    const database = new DatabaseSync(":memory:");
+    applyMigrations(database, STORE_MIGRATIONS.slice(0, 27));
+    const now = "2026-08-24T00:00:00.000Z";
+    const clientId = "00000000-0000-4000-8000-000000000101";
+    const cubeId = "00000000-0000-4000-8000-000000000102";
+    const humanRoleId = "00000000-0000-4000-8000-000000000103";
+    const workerRoleId = "00000000-0000-4000-8000-000000000104";
+    database.prepare(
+      "INSERT INTO clients (id, name, created_at) VALUES (?, 'Legacy client', ?)",
+    ).run(clientId, now);
+    database.prepare(`
+      INSERT INTO cubes (id, owner_id, name, directive, selected_template, created_at, updated_at)
+      VALUES (?, ?, 'Legacy cube', 'legacy', 'default', ?, ?)
+    `).run(cubeId, clientId, now, now);
+    database.prepare(`
+      INSERT INTO roles (id, cube_id, name, is_human_seat, role_class, created_at)
+      VALUES (?, ?, 'Coordinator', 1, 'worker', ?)
+    `).run(humanRoleId, cubeId, now);
+    database.prepare(`
+      INSERT INTO roles (id, cube_id, name, is_default, role_class, created_at)
+      VALUES (?, ?, 'Builder', 1, 'worker', ?)
+    `).run(workerRoleId, cubeId, now);
+    database.prepare(`
+      INSERT INTO cube_create_bindings (
+        client_id, retry_key, name, template, cube_id,
+        human_seat_role_id, default_worker_role_id, created_at,
+        working_repo_name, repository_kind, repository_value
+      ) VALUES (?, ?, 'Legacy cube', 'default', ?, ?, ?, ?, 'legacy', 'local', ?)
+    `).run(
+      clientId,
+      "00000000-0000-4000-8000-000000000105",
+      cubeId,
+      humanRoleId,
+      workerRoleId,
+      now,
+      "00000000-0000-4000-8000-000000000106",
+    );
+
+    applyMigrations(database);
+
+    expect(database.prepare(
+      "SELECT selected_template FROM cubes WHERE id = ?",
+    ).get(cubeId)).toEqual({ selected_template: "starter" });
+    expect(database.prepare(`
+      SELECT template, retry_key, human_seat_role_id, default_worker_role_id
+      FROM cube_create_bindings WHERE cube_id = ?
+    `).get(cubeId)).toEqual({
+      template: "starter",
+      retry_key: "00000000-0000-4000-8000-000000000105",
+      human_seat_role_id: humanRoleId,
+      default_worker_role_id: workerRoleId,
+    });
+    expect(database.prepare(
+      "SELECT id, name, is_human_seat, is_default FROM roles WHERE cube_id = ? ORDER BY id",
+    ).all(cubeId)).toEqual([
+      { id: humanRoleId, name: "Coordinator", is_human_seat: 1, is_default: 0 },
+      { id: workerRoleId, name: "Builder", is_human_seat: 0, is_default: 1 },
+    ]);
     database.close();
   });
 
@@ -530,7 +592,7 @@ describe("SQLite migrations", () => {
     database.close();
   });
 
-  it("adds repository associations and selected templates without fabricating legacy identity", () => {
+  it("adds repository associations and named templates without fabricating repository identity", () => {
     const database = new DatabaseSync(":memory:");
     applyMigrations(database, STORE_MIGRATIONS.slice(0, 14));
     const clientId = "00000000-0000-4000-8000-000000000051";
@@ -581,11 +643,12 @@ describe("SQLite migrations", () => {
 
     expect(database.prepare(`
       SELECT selected_template FROM cubes WHERE id = ?
-    `).get(cubeId)).toEqual({ selected_template: "default" });
+    `).get(cubeId)).toEqual({ selected_template: "starter" });
     expect(database.prepare(`
-      SELECT working_repo_name, repository_kind, repository_value
+      SELECT template, working_repo_name, repository_kind, repository_value
       FROM cube_create_bindings WHERE cube_id = ?
     `).get(cubeId)).toEqual({
+      template: "starter",
       working_repo_name: null,
       repository_kind: null,
       repository_value: null,
@@ -796,7 +859,7 @@ describe("SQLite migrations", () => {
     ).get()).toBeUndefined();
     expect(database.prepare(
       "SELECT version, name FROM schema_migrations ORDER BY version DESC LIMIT 1",
-    ).get()).toEqual({ version: 27, name: "ordered_expired_activity_cursors" });
+    ).get()).toEqual({ version: 28, name: "name_legacy_cube_templates" });
     database.close();
   });
 
@@ -991,7 +1054,7 @@ Structured message routing:
     }).toEqual(historyBefore);
     expect(database.prepare(
       "SELECT version, name FROM schema_migrations ORDER BY version DESC LIMIT 1",
-    ).get()).toEqual({ version: 27, name: "ordered_expired_activity_cursors" });
+    ).get()).toEqual({ version: 28, name: "name_legacy_cube_templates" });
     database.close();
   });
 

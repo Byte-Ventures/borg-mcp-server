@@ -2,10 +2,15 @@ import { randomUUID } from "node:crypto";
 import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import {
+  CUBES_PATH,
   PROTOCOL_VERSION,
   REPOSITORY_CUBE_ASSOCIATION_PATH,
   REPOSITORY_CUBE_RESOLVE_PATH,
+  decodeAssociateRepositoryCubeResponseEnvelope,
+  decodeCreateCubeResponseEnvelope,
+  decodeResolveRepositoryCubeResponseEnvelope,
 } from "borgmcp-shared/protocol";
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -16,6 +21,7 @@ import {
   generateSecret,
 } from "../src/credentials.js";
 import { clientPrincipal, type Principal } from "../src/principal.js";
+import { applyMigrations, STORE_MIGRATIONS } from "../src/migrations.js";
 import {
   openStore,
   type OpenStoreOptions,
@@ -36,7 +42,7 @@ afterEach(async () => {
 });
 
 describe("repository cube API", () => {
-  it("adopts and resolves a worker-class legacy human seat through the API", async () => {
+  it("adopts and resolves a repository cube through the API", async () => {
     const fixture = await apiFixture();
     const repository = {
       kind: "origin",
@@ -79,7 +85,7 @@ describe("repository cube API", () => {
           name: "borg-mcp",
           working_repo_name: "borg-mcp",
           repository,
-          template: "default",
+          template: "starter",
           human_seat_role_id: fixture.humanRoleId,
           default_worker_role_id: fixture.workerRoleId,
           access: "manage",
@@ -113,6 +119,75 @@ describe("repository cube API", () => {
       cubes: 1,
       cube_create_bindings: 0,
       repository_associations: 1,
+    });
+  });
+
+  it("returns decodable tag-13 responses after upgrading real schema-27 legacy state", async () => {
+    const fixture = await legacySchema27Fixture();
+    const associatedRepository = { kind: "local", value: randomUUID() } as const;
+    const rolesBefore = fixture.runtime.forPrincipal(fixture.principal).listRoles(fixture.cubeId);
+
+    const associated = await request(
+      fixture,
+      "PUT",
+      REPOSITORY_CUBE_ASSOCIATION_PATH,
+      "associate-legacy",
+      {
+        cube_id: fixture.cubeId,
+        working_repo_name: "legacy-cube",
+        repository: associatedRepository,
+      },
+    );
+    const associatedEnvelope = decodeAssociateRepositoryCubeResponseEnvelope(associated.body);
+    expect(associatedEnvelope.payload).toMatchObject({
+      cube_id: fixture.cubeId,
+      template: "starter",
+      human_seat_role_id: fixture.humanRoleId,
+      default_worker_role_id: fixture.workerRoleId,
+    });
+
+    const resolved = await request(
+      fixture,
+      "POST",
+      REPOSITORY_CUBE_RESOLVE_PATH,
+      "resolve-legacy",
+      {
+        working_repo_name: "legacy-cube",
+        repository: associatedRepository,
+      },
+    );
+    const resolvedEnvelope = decodeResolveRepositoryCubeResponseEnvelope(resolved.body);
+    expect(resolvedEnvelope.payload).toMatchObject({
+      result: "resolved",
+      cube_id: fixture.cubeId,
+      template: "starter",
+    });
+
+    const retried = await request(fixture, "POST", CUBES_PATH, "retry-legacy", {
+      retry_key: fixture.retryKey,
+      name: "Legacy cube",
+      working_repo_name: "legacy-cube",
+      repository: fixture.createdRepository,
+      template: "starter",
+    });
+    const retriedEnvelope = decodeCreateCubeResponseEnvelope(retried.body);
+    expect(retriedEnvelope.payload).toMatchObject({
+      result: "resolved",
+      cube_id: fixture.cubeId,
+      template: "starter",
+      human_seat_role_id: fixture.humanRoleId,
+      default_worker_role_id: fixture.workerRoleId,
+    });
+    expect(JSON.stringify([associated.body, resolved.body, retried.body]))
+      .not.toContain('"template":"default"');
+    expect(fixture.runtime.forPrincipal(fixture.principal).listRoles(fixture.cubeId))
+      .toEqual(rolesBefore);
+    expect(fixture.runtime.maintenance.observeAuthorityState()).toMatchObject({
+      cubes: 1,
+      roles: 2,
+      grants: 1,
+      cube_create_bindings: 1,
+      repository_associations: 2,
     });
   });
 
@@ -324,7 +399,11 @@ async function apiFixture(options: Omit<OpenStoreOptions, "path"> = {}) {
     cubeId,
     access: "manage",
   });
-  const roles = addRequiredRoles(runtime, enrollment.principal.id, cubeId);
+  const prepared = runtime.maintenance.prepareRepositoryCube({
+    cubeId,
+    name: "borg-mcp",
+    template: "starter",
+  });
   return {
     runtime,
     authority,
@@ -332,7 +411,85 @@ async function apiFixture(options: Omit<OpenStoreOptions, "path"> = {}) {
     principal: enrollment.principal,
     ownerCredential: enrollment.credential,
     cubeId,
-    ...roles,
+    humanRoleId: prepared.humanSeatRoleId,
+    workerRoleId: prepared.defaultWorkerRoleId,
+  };
+}
+
+async function legacySchema27Fixture() {
+  const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-repository-api-v27-")));
+  directories.push(directory);
+  const path = join(directory, "borg.db");
+  const database = new DatabaseSync(path, { enableForeignKeyConstraints: true });
+  applyMigrations(database, STORE_MIGRATIONS.slice(0, 27));
+  const now = "2026-08-24T00:00:00.000Z";
+  const clientId = randomUUID();
+  const cubeId = randomUUID();
+  const humanRoleId = randomUUID();
+  const workerRoleId = randomUUID();
+  const retryKey = randomUUID();
+  const createdRepository = { kind: "local", value: randomUUID() } as const;
+  database.prepare(
+    "INSERT INTO clients (id, name, created_at) VALUES (?, 'Legacy client', ?)",
+  ).run(clientId, now);
+  database.prepare(`
+    INSERT INTO client_server_capabilities (client_id, capability, created_at)
+    VALUES (?, 'create_cube', ?)
+  `).run(clientId, now);
+  database.prepare(`
+    INSERT INTO cubes (id, owner_id, name, directive, selected_template, created_at, updated_at)
+    VALUES (?, ?, 'Legacy cube', 'legacy', 'default', ?, ?)
+  `).run(cubeId, clientId, now, now);
+  database.prepare(`
+    INSERT INTO client_cube_grants (client_id, cube_id, access, created_at)
+    VALUES (?, ?, 'manage', ?)
+  `).run(clientId, cubeId, now);
+  database.prepare(`
+    INSERT INTO roles (id, cube_id, name, is_human_seat, role_class, created_at)
+    VALUES (?, ?, 'Coordinator', 1, 'worker', ?)
+  `).run(humanRoleId, cubeId, now);
+  database.prepare(`
+    INSERT INTO roles (id, cube_id, name, is_default, role_class, created_at)
+    VALUES (?, ?, 'Builder', 1, 'worker', ?)
+  `).run(workerRoleId, cubeId, now);
+  database.prepare(`
+    INSERT INTO cube_create_bindings (
+      client_id, retry_key, name, template, cube_id,
+      human_seat_role_id, default_worker_role_id, created_at,
+      working_repo_name, repository_kind, repository_value
+    ) VALUES (?, ?, 'Legacy cube', 'default', ?, ?, ?, ?, 'legacy-cube', ?, ?)
+  `).run(
+    clientId,
+    retryKey,
+    cubeId,
+    humanRoleId,
+    workerRoleId,
+    now,
+    createdRepository.kind,
+    createdRepository.value,
+  );
+  database.prepare(`
+    INSERT INTO repository_associations (
+      client_id, repository_kind, repository_value, cube_id, working_repo_name, created_at
+    ) VALUES (?, ?, ?, ?, 'legacy-cube', ?)
+  `).run(clientId, createdRepository.kind, createdRepository.value, cubeId, now);
+  database.close();
+
+  const runtime = await openStore({ path });
+  runtimes.push(runtime);
+  const digester = new CredentialDigester(Buffer.alloc(32, 31));
+  digesters.push(digester);
+  const authority = new CredentialAuthority(runtime.credentials, digester);
+  return {
+    runtime,
+    authority,
+    api: new CoordinationApi(runtime, authority),
+    principal: clientPrincipal(clientId),
+    cubeId,
+    humanRoleId,
+    workerRoleId,
+    retryKey,
+    createdRepository,
   };
 }
 

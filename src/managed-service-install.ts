@@ -24,6 +24,7 @@ export interface ManagedServiceInstallInput {
   readonly artifact: VerifiedRuntimeArtifact;
   readonly dataDirectory: string;
   readonly assertInstallation: () => Promise<void>;
+  readonly assertControllerBinding: () => Promise<void>;
   readonly inspectRuntime: () => Promise<ManagedServiceRuntimeState>;
   readonly inspectService: () => Promise<ManagedServiceProbeState>;
   readonly run: (
@@ -72,6 +73,7 @@ export async function installManagedService(
   await input.assertInstallation();
   const installLock = await acquireManagedServiceLock(input.dataDirectory);
   try {
+    await input.assertControllerBinding();
     const [definitionState, runtime, service] = await Promise.all([
       inspectManagedServiceDefinition(input.definition, input.uid),
       input.inspectRuntime(),

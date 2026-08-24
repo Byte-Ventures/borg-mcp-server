@@ -80,6 +80,8 @@ import {
 import { createRegistryArtifactSource } from "./registry-artifact.js";
 import { createRuntimeOperator, type RuntimeUpdateResult } from "./runtime-operator.js";
 import {
+  assertManagedServiceControllerBinding,
+  createBoundManagedServiceRunner,
   createManagedServiceDefinition,
   type ManagedServiceDefinition,
   type ManagedServicePlatform,
@@ -998,10 +1000,11 @@ function createNodeRuntimeOperator(managedRuntimeDirectory: string, runtimeDataD
       encoding: "utf8",
     });
   };
+  const runController = createBoundManagedServiceRunner(definition, run);
   const lifecycle = createRuntimeLifecycle({
     unpack: createUnixNpmArtifactUnpacker(),
-    restart: async (signal) => { await run(definition.restart, signal); },
-    stop: async (signal) => { await run(definition.unload, signal); },
+    restart: async (signal) => { await runController(definition.restart, signal); },
+    stop: async (signal) => { await runController(definition.unload, signal); },
     probe: (signal) => waitForRuntimeIdentity(runtimeDataDirectory, signal),
   });
   const inspectManagedService = (): Promise<ManagedServiceStatus> =>
@@ -1016,6 +1019,13 @@ function createNodeRuntimeOperator(managedRuntimeDirectory: string, runtimeDataD
       if (status.running && status.mode !== "managed") {
         throw new Error("Foreground runtime must be stopped before artifact activation.");
       }
+      if (status.running) {
+        await assertManagedServiceControllerBinding(
+          definition,
+          run,
+          new AbortController().signal,
+        );
+      }
       return status.running;
     },
   });
@@ -1025,7 +1035,7 @@ function createNodeRuntimeOperator(managedRuntimeDirectory: string, runtimeDataD
     stopRuntime: (timeoutMs: number) => stopServerRuntime({
       runtimeDataDirectory,
       timeoutMs,
-      stopManaged: async (signal) => { await run(definition.unload, signal); },
+      stopManaged: async (signal) => { await runController(definition.unload, signal); },
     }),
     installService: async (timeoutMs: number) => {
       if (process.platform !== "darwin" && process.platform !== "linux") {
@@ -1044,6 +1054,11 @@ function createNodeRuntimeOperator(managedRuntimeDirectory: string, runtimeDataD
         artifact,
         dataDirectory: runtimeDataDirectory,
         assertInstallation: () => assertManagedServiceInstallation(runtimeDataDirectory),
+        assertControllerBinding: () => assertManagedServiceControllerBinding(
+          definition,
+          run,
+          new AbortController().signal,
+        ),
         inspectRuntime: async () => {
           const status = await inspectRuntimeLock(runtimeDataDirectory);
           return status.running
@@ -1051,7 +1066,7 @@ function createNodeRuntimeOperator(managedRuntimeDirectory: string, runtimeDataD
             : { running: false, stale: status.stale !== undefined };
         },
         inspectService: () => inspectManagedService(),
-        run,
+        run: runController,
         probe: (signal) => waitForRuntimeIdentity(runtimeDataDirectory, signal),
         timeoutMs,
       });
@@ -1063,6 +1078,11 @@ function createNodeRuntimeOperator(managedRuntimeDirectory: string, runtimeDataD
       return uninstallManagedService({
         definition,
         dataDirectory: runtimeDataDirectory,
+        assertControllerBinding: () => assertManagedServiceControllerBinding(
+          definition,
+          run,
+          new AbortController().signal,
+        ),
         inspectRuntime: async () => {
           const status = await inspectRuntimeLock(runtimeDataDirectory);
           return status.running
@@ -1070,7 +1090,7 @@ function createNodeRuntimeOperator(managedRuntimeDirectory: string, runtimeDataD
             : { running: false, stale: status.stale !== undefined };
         },
         inspectService: () => inspectManagedService(),
-        run,
+        run: runController,
         probe: (signal) => waitForRuntimeIdentity(runtimeDataDirectory, signal),
         timeoutMs,
       });
@@ -2119,12 +2139,21 @@ function decodeRuntimeLockIdentity(value: unknown): RuntimeBuildIdentity | null 
   if (value === undefined) return null;
   if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error();
   const identity = value as Record<string, unknown>;
+  const identityKeys = Object.keys(identity);
   const packageVersion = identity["package_version"];
   const sourceSha = identity["source_sha"];
   const artifactIntegrity = identity["artifact_integrity"];
   const protocolVersion = identity["protocol_version"];
   const startedAt = identity["started_at"];
-  if (typeof packageVersion !== "string" ||
+  if (identityKeys.length !== 5 ||
+      !identityKeys.every((key) => [
+        "package_version",
+        "source_sha",
+        "artifact_integrity",
+        "protocol_version",
+        "started_at",
+      ].includes(key)) ||
+      typeof packageVersion !== "string" ||
       !/^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$/u.test(packageVersion) ||
       (sourceSha !== null &&
         (typeof sourceSha !== "string" || !/^[0-9a-f]{40}$/u.test(sourceSha))) ||

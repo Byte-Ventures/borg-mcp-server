@@ -1160,6 +1160,28 @@ describe("node server service", () => {
     }
   });
 
+  it("rejects unknown runtime identity fields", async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-unknown-runtime-identity-")));
+    try {
+      await writeFile(join(directory, "runtime.lock"), JSON.stringify({
+        pid: process.pid,
+        nonce: randomUUID(),
+        purpose: "server",
+        mode: "managed",
+        runtime_identity: {
+          ...createRuntimeBuildIdentity(),
+          unexpected_identity_field: "refuse",
+        },
+      }), { mode: 0o600 });
+
+      await expect(inspectRuntimeLock(directory)).rejects.toBe(
+        operatorErrors.RUNTIME_LOCK_LIVE_UNRECOGNIZED,
+      );
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("returns bounded stale-lock evidence when a valid server lock has no live owner", async () => {
     const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-stale-runtime-lock-")));
     const identity = createRuntimeBuildIdentity({

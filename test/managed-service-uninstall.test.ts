@@ -260,6 +260,21 @@ describe("managed service uninstallation", () => {
       .toBe(fixture.definition.content);
   });
 
+  it("refuses an unbound controller before controller or file mutation", async () => {
+    const fixture = await uninstallFixture("systemd");
+    const failure = new Error("controller definition mismatch");
+    const run = vi.fn();
+
+    await expect(uninstallManagedService({
+      ...fixture.input,
+      assertControllerBinding: async () => { throw failure; },
+      run,
+    })).rejects.toBe(failure);
+    expect(run).not.toHaveBeenCalled();
+    expect(await readFile(fixture.definition.definitionPath, "utf8"))
+      .toBe(fixture.definition.content);
+  });
+
   it("retains the definition and reports observed state when controller removal fails", async () => {
     const fixture = await uninstallFixture("launchd");
     const input = {
@@ -479,6 +494,7 @@ async function uninstallFixture(platform: "launchd" | "systemd") {
   const input = {
     definition,
     dataDirectory,
+    assertControllerBinding: async () => undefined,
     inspectRuntime: async () => ({ running: false }),
     inspectService: async () => ({ state: "absent" as const, recoveryCommand: null }),
     run: async () => ({ stdout: "", stderr: "" }),

@@ -1,4 +1,6 @@
-import { isAbsolute, join, resolve } from "node:path";
+import { constants } from "node:fs";
+import { lstat, open, realpath } from "node:fs/promises";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 
 import { managedServiceControllerMismatch, operatorErrors } from "./operator-error.js";
 
@@ -137,11 +139,22 @@ export function createBoundManagedServiceRunner(
   definition: ManagedServiceDefinition,
   run: ManagedServiceCommandRunner,
 ): ManagedServiceCommandRunner {
+  let guardedRemovalCompleted = false;
   return async (command, signal) => {
     if (!commandsEqual(command, definition.status)) {
-      await assertManagedServiceControllerBinding(definition, run, signal);
+      const allowMissingDefinition = guardedRemovalCompleted && definition.reload !== null &&
+        commandsEqual(command, definition.reload);
+      guardedRemovalCompleted = false;
+      await assertManagedServiceControllerBindingInternal(
+        definition,
+        run,
+        signal,
+        allowMissingDefinition,
+      );
     }
-    return run(command, signal);
+    const result = await run(command, signal);
+    guardedRemovalCompleted = commandsEqual(command, definition.rollbackRemove);
+    return result;
   };
 }
 
@@ -149,6 +162,15 @@ export async function assertManagedServiceControllerBinding(
   definition: ManagedServiceDefinition,
   run: ManagedServiceCommandRunner,
   signal: AbortSignal,
+): Promise<void> {
+  await assertManagedServiceControllerBindingInternal(definition, run, signal, false);
+}
+
+async function assertManagedServiceControllerBindingInternal(
+  definition: ManagedServiceDefinition,
+  run: ManagedServiceCommandRunner,
+  signal: AbortSignal,
+  allowMissingDefinition: boolean,
 ): Promise<void> {
   let result: Awaited<ReturnType<ManagedServiceCommandRunner>>;
   try {
@@ -160,9 +182,51 @@ export async function assertManagedServiceControllerBinding(
     throw error;
   }
   const loadedPath = controllerDefinitionPath(definition, result.stdout);
-  if (loadedPath !== null && resolve(loadedPath) !== resolve(definition.definitionPath)) {
+  if (loadedPath !== null && loadedPath !== definition.definitionPath) {
     throw managedServiceControllerMismatch(definition.definitionPath, loadedPath);
   }
+  const definitionExists = await assertSecureManagedServiceDefinition(
+    definition.definitionPath,
+  );
+  if (loadedPath !== null && !definitionExists && !allowMissingDefinition) {
+    throw operatorErrors.MANAGED_SERVICE_DEFINITION_UNSAFE;
+  }
+}
+
+async function assertSecureManagedServiceDefinition(path: string): Promise<boolean> {
+  let before;
+  try {
+    before = await lstat(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+  const uid = process.getuid?.();
+  if (path !== resolve(path) || !before.isFile() || before.isSymbolicLink() || before.nlink !== 1 ||
+      before.size > 64 * 1024 || (uid !== undefined && before.uid !== uid) ||
+      (before.mode & 0o077) !== 0) {
+    throw operatorErrors.MANAGED_SERVICE_DEFINITION_UNSAFE;
+  }
+  try {
+    if (await realpath(dirname(path)) !== dirname(path) || await realpath(path) !== path) {
+      throw operatorErrors.MANAGED_SERVICE_DEFINITION_UNSAFE;
+    }
+    const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    try {
+      const opened = await handle.stat();
+      if (!opened.isFile() || opened.dev !== before.dev || opened.ino !== before.ino ||
+          opened.nlink !== 1 || opened.size > 64 * 1024 ||
+          (uid !== undefined && opened.uid !== uid) || (opened.mode & 0o077) !== 0) {
+        throw operatorErrors.MANAGED_SERVICE_DEFINITION_UNSAFE;
+      }
+    } finally {
+      await handle.close();
+    }
+  } catch (error) {
+    if (error === operatorErrors.MANAGED_SERVICE_DEFINITION_UNSAFE) throw error;
+    throw operatorErrors.MANAGED_SERVICE_DEFINITION_UNSAFE;
+  }
+  return true;
 }
 
 function controllerDefinitionPath(

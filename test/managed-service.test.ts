@@ -1,3 +1,6 @@
+import { mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -232,14 +235,17 @@ describe("managed service adapters", () => {
 
   it("allows controller mutation only for the requested definition or an absent job", async () => {
     for (const platform of ["launchd", "systemd"] as const) {
+      const root = await realpath(await mkdtemp(join(tmpdir(), "borg-managed-service-binding-")));
+      const definitionPath = join(root, platform === "launchd"
+        ? "ai.borgmcp.server.plist"
+        : "ai.borgmcp.server.service");
+      await writeFile(definitionPath, "fixture definition", { mode: 0o600 });
       const definition = createManagedServiceDefinition({
         platform,
         nodeExecutable: "/usr/bin/node",
         runtimeRoot: "/isolated/runtime",
         dataDirectory: "/isolated/data",
-        definitionPath: platform === "launchd"
-          ? "/isolated/Library/LaunchAgents/ai.borgmcp.server.plist"
-          : "/isolated/.config/systemd/user/ai.borgmcp.server.service",
+        definitionPath,
         ...(platform === "launchd" ? { launchdDomain: "gui/501" } : {}),
       });
       const commands: (readonly string[])[] = [];
@@ -292,6 +298,93 @@ describe("managed service adapters", () => {
         new AbortController().signal,
       )).rejects.toBe(operatorErrors.MANAGED_SERVICE_CONTROLLER_FOREIGN);
       expect(commands).toEqual([definition.status]);
+      await rm(root, { recursive: true, force: true });
     }
+  });
+
+  it("refuses a lexical controller match through a symlinked definition", async () => {
+    for (const platform of ["launchd", "systemd"] as const) {
+      const root = await realpath(await mkdtemp(join(tmpdir(), "borg-managed-service-symlink-")));
+      const expectedPath = join(root, platform === "launchd"
+        ? "ai.borgmcp.server.plist"
+        : "ai.borgmcp.server.service");
+      const foreignPath = join(root, "foreign-definition");
+      const foreignContent = "foreign definition must remain unchanged";
+      await writeFile(foreignPath, foreignContent, { mode: 0o600 });
+      await symlink(foreignPath, expectedPath);
+      const definition = createManagedServiceDefinition({
+        platform,
+        nodeExecutable: "/usr/bin/node",
+        runtimeRoot: "/isolated/runtime",
+        dataDirectory: "/isolated/data",
+        definitionPath: expectedPath,
+        ...(platform === "launchd" ? { launchdDomain: "gui/501" } : {}),
+      });
+      const commands: (readonly string[])[] = [];
+      const run = async (command: readonly [string, ...string[]]) => {
+        commands.push(command);
+        if (command !== definition.status) throw new Error("Controller mutation escaped the symlink guard.");
+        return {
+          stdout: platform === "launchd"
+            ? `path = ${expectedPath}\nstate = running\n`
+            : `LoadState=loaded\nActiveState=active\nFragmentPath=${expectedPath}\n`,
+          stderr: "",
+        };
+      };
+
+      const bound = createBoundManagedServiceRunner(definition, run);
+      const mutations = [
+        definition.install,
+        definition.restart,
+        definition.recoverLoaded,
+        definition.unload,
+        definition.rollbackRemove,
+        ...(definition.reload === null ? [] : [definition.reload]),
+      ];
+      for (const command of mutations) {
+        commands.length = 0;
+        await expect(bound(command, new AbortController().signal))
+          .rejects.toBe(operatorErrors.MANAGED_SERVICE_DEFINITION_UNSAFE);
+        expect(commands).toEqual([definition.status]);
+      }
+      expect(await readFile(foreignPath, "utf8")).toBe(foreignContent);
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("allows only the guarded systemd reload after removing its verified definition", async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), "borg-systemd-removal-")));
+    const definitionPath = join(root, "ai.borgmcp.server.service");
+    await writeFile(definitionPath, "fixture definition", { mode: 0o600 });
+    const definition = createManagedServiceDefinition({
+      platform: "systemd",
+      nodeExecutable: "/usr/bin/node",
+      runtimeRoot: "/isolated/runtime",
+      dataDirectory: "/isolated/data",
+      definitionPath,
+    });
+    const commands: (readonly string[])[] = [];
+    const run = async (command: readonly [string, ...string[]]) => {
+      commands.push(command);
+      return command === definition.status
+        ? {
+            stdout: `LoadState=loaded\nActiveState=inactive\nFragmentPath=${definitionPath}\n`,
+            stderr: "",
+          }
+        : { stdout: "", stderr: "" };
+    };
+    const bound = createBoundManagedServiceRunner(definition, run);
+
+    await bound(definition.rollbackRemove, new AbortController().signal);
+    await rm(definitionPath);
+    await expect(bound(definition.reload!, new AbortController().signal))
+      .resolves.toEqual({ stdout: "", stderr: "" });
+    expect(commands).toEqual([
+      definition.status,
+      definition.rollbackRemove,
+      definition.status,
+      definition.reload,
+    ]);
+    await rm(root, { recursive: true, force: true });
   });
 });

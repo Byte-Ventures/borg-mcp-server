@@ -1134,7 +1134,7 @@ describe("node server service", () => {
     }
   });
 
-  it("recognizes a live 0.1.8 runtime lock without inventing its process mode", async () => {
+  it("rejects live runtime locks that omit current server identity fields", async () => {
     const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-legacy-runtime-lock-")));
     try {
       await writeFile(join(directory, "runtime.lock"), JSON.stringify({
@@ -1143,20 +1143,17 @@ describe("node server service", () => {
         purpose: "server",
         endpoint: "https://127.0.0.1:7091",
       }), { mode: 0o600 });
-      await expect(inspectRuntimeLock(directory)).resolves.toEqual({
-        running: true,
-        pid: process.pid,
-        identity: null,
-        endpoint: "https://127.0.0.1:7091",
-        mode: "legacy",
-      });
+      await expect(inspectRuntimeLock(directory)).rejects.toThrow(
+        "A live process owns an obsolete or invalid runtime.lock. Stop that process through its original terminal or service manager. After it exits, remove runtime.lock and retry.",
+      );
       await writeFile(join(directory, "runtime.lock"), JSON.stringify({
         pid: process.pid,
+        nonce: randomUUID(),
         purpose: "server",
-        mode: "unknown",
+        mode: "managed",
       }), { mode: 0o600 });
       await expect(inspectRuntimeLock(directory)).rejects.toThrow(
-        "A live process owns runtime.lock. Stop the server through a supported command; do not remove the lock.",
+        "A live process owns an obsolete or invalid runtime.lock. Stop that process through its original terminal or service manager. After it exits, remove runtime.lock and retry.",
       );
     } finally {
       await rm(directory, { recursive: true, force: true });
@@ -1661,7 +1658,7 @@ describe("node server service", () => {
   it("refuses stale-lock recovery for live, invalid, and unsafe lock evidence", async () => {
     const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-stale-refusal-")));
     try {
-      const live = await acquireRuntimeLock(directory, "server");
+      const live = await acquireRuntimeLock(directory, "server", createRuntimeBuildIdentity());
       await expect(recoverStaleRuntimeLock(directory)).rejects.toThrow(
         "No safely recoverable stale runtime lock was found.",
       );
@@ -1698,7 +1695,7 @@ describe("node server service", () => {
     const managed = {
       running: true as const,
       pid: 123,
-      identity: null,
+      identity: createRuntimeBuildIdentity(),
       endpoint: "https://127.0.0.1:7091",
       mode: "managed" as const,
     };
@@ -1710,7 +1707,6 @@ describe("node server service", () => {
     await expect(stopServerRuntime({
       runtimeDataDirectory: "/owned/server",
       timeoutMs: 1_000,
-      isManagedServiceActive: vi.fn().mockResolvedValue(true),
       stopManaged,
       inspect,
     })).resolves.toEqual({ outcome: "stopped" });
@@ -1719,37 +1715,22 @@ describe("node server service", () => {
     await expect(stopServerRuntime({
       runtimeDataDirectory: "/owned/server",
       timeoutMs: 1_000,
-      isManagedServiceActive: vi.fn().mockResolvedValue(false),
       stopManaged,
       inspect: vi.fn().mockResolvedValue({ running: false }),
     })).resolves.toEqual({ outcome: "already-stopped" });
     expect(stopManaged).toHaveBeenCalledOnce();
 
-    const legacyInspector = vi.fn()
-      .mockResolvedValueOnce({ ...managed, mode: "legacy" })
-      .mockResolvedValueOnce({ running: false });
     await expect(stopServerRuntime({
       runtimeDataDirectory: "/owned/server",
       timeoutMs: 1_000,
-      isManagedServiceActive: vi.fn().mockResolvedValue(true),
-      stopManaged,
-      inspect: legacyInspector,
-    })).resolves.toEqual({ outcome: "stopped" });
-    expect(stopManaged).toHaveBeenCalledTimes(2);
-
-    await expect(stopServerRuntime({
-      runtimeDataDirectory: "/owned/server",
-      timeoutMs: 1_000,
-      isManagedServiceActive: vi.fn().mockResolvedValue(false),
       stopManaged,
       inspect: vi.fn().mockResolvedValue({ ...managed, mode: "foreground" }),
     })).resolves.toEqual({ outcome: "foreground-action-required" });
-    expect(stopManaged).toHaveBeenCalledTimes(2);
+    expect(stopManaged).toHaveBeenCalledOnce();
 
     await expect(stopServerRuntime({
       runtimeDataDirectory: "/owned/server",
       timeoutMs: 100,
-      isManagedServiceActive: vi.fn().mockResolvedValue(true),
       stopManaged,
       inspect: vi.fn().mockResolvedValue(managed),
     })).rejects.toThrow("Managed server stop timed out.");
@@ -1758,10 +1739,35 @@ describe("node server service", () => {
     await expect(stopServerRuntime({
       runtimeDataDirectory: "/owned/server",
       timeoutMs: 1_000,
-      isManagedServiceActive: vi.fn().mockResolvedValue(true),
       stopManaged: vi.fn().mockRejectedValue(failure),
       inspect: vi.fn().mockResolvedValue(managed),
     })).rejects.toBe(failure);
+  });
+
+  it("refuses to stop a managed runtime through an incomplete historical lock", async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "borg-legacy-runtime-stop-")));
+    const stopManaged = vi.fn(async () => {
+      await unlink(join(directory, "runtime.lock"));
+    });
+    try {
+      await writeFile(join(directory, "runtime.lock"), JSON.stringify({
+        pid: process.pid,
+        nonce: randomUUID(),
+        purpose: "server",
+        endpoint: "https://127.0.0.1:7091",
+      }), { mode: 0o600 });
+
+      await expect(stopServerRuntime({
+        runtimeDataDirectory: directory,
+        timeoutMs: 1_000,
+        stopManaged,
+      })).rejects.toThrow(
+        "A live process owns an obsolete or invalid runtime.lock. Stop that process through its original terminal or service manager. After it exits, remove runtime.lock and retry.",
+      );
+      expect(stopManaged).not.toHaveBeenCalled();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
   it("mints client invitations beside a live server after direct owner provisioning", async () => {
@@ -1794,7 +1800,7 @@ describe("node server service", () => {
       expect(client).not.toBeNull();
       const cubeId = "00000000-0000-4000-8000-000000000081";
       runtime.maintenance.createCube({ id: cubeId, name: "Live grant", directive: "" });
-      running = await acquireRuntimeLock(directory, "server");
+      running = await acquireRuntimeLock(directory, "server", createRuntimeBuildIdentity());
 
       expect(client).toMatchObject({ purpose: "client", serverCapabilities: [] });
       const beforeList = runtime.maintenance.observeAuthorityState();
@@ -1842,7 +1848,7 @@ describe("node server service", () => {
       const exclusive = await acquireRuntimeLock(directory);
       await expect(administration.invite())
         .rejects.toThrow(
-          "A live process owns runtime.lock. Stop the server through a supported command; do not remove the lock.",
+          "A live process owns an obsolete or invalid runtime.lock. Stop that process through its original terminal or service manager. After it exits, remove runtime.lock and retry.",
         );
       await exclusive.release();
       const recovered = await acquireRuntimeLock(directory);
@@ -1901,7 +1907,7 @@ describe("node server service", () => {
       `).all();
       prior.close();
 
-      running = await acquireRuntimeLock(directory, "server");
+      running = await acquireRuntimeLock(directory, "server", createRuntimeBuildIdentity());
       const administration = createOfflineCredentialService(directory);
       await expect(administration.invite())
         .rejects.toThrow(

@@ -168,7 +168,7 @@ export interface ServerRuntimeStatus {
   readonly runningArtifact: { readonly version: string; readonly integrity: string | null } | null;
   readonly buildIdentity: string | null;
   readonly endpoint: string | null;
-  readonly mode: "foreground" | "managed" | "legacy" | "stopped";
+  readonly mode: "foreground" | "managed" | "stopped";
   readonly serviceAdapter: "launchd" | "systemd" | null;
   readonly serviceState: "active" | "inactive" | "absent";
   readonly serviceRecoveryCommand: readonly [string, ...string[]] | null;
@@ -210,7 +210,7 @@ export interface StaleRuntimeLockEvidence {
   readonly pid: number;
   readonly identity: RuntimeBuildIdentity;
   readonly endpoint: string | null;
-  readonly mode: "foreground" | "managed" | "legacy";
+  readonly mode: "foreground" | "managed";
 }
 
 export type ServerRuntimeLockDiagnostic =
@@ -221,7 +221,7 @@ export type ServerRuntimeLockDiagnostic =
       readonly processState: "absent";
       readonly identity: RuntimeBuildIdentity;
       readonly endpoint: string | null;
-      readonly mode: "foreground" | "managed" | "legacy";
+      readonly mode: "foreground" | "managed";
       readonly recoveryAction: "borg-mcp-server recover-stale-lock";
     };
 
@@ -309,9 +309,9 @@ export type RuntimeLockStatus =
   | {
       readonly running: true;
       readonly pid: number;
-      readonly identity: RuntimeBuildIdentity | null;
+      readonly identity: RuntimeBuildIdentity;
       readonly endpoint: string | null;
-      readonly mode: "foreground" | "managed" | "legacy";
+      readonly mode: "foreground" | "managed";
     };
 
 export interface NodeServerTestHooks {
@@ -908,7 +908,7 @@ async function runNodeDashboardViewer(
   assertReadonlyDashboardInstallation(runtimeDataDirectory);
   const runtime = await inspectRuntimeLock(runtimeDataDirectory);
   if (!runtime.running) throw operatorErrors.DASHBOARD_SERVER_STOPPED;
-  if (runtime.identity === null || runtime.endpoint === null) {
+  if (runtime.endpoint === null) {
     throw operatorErrors.DASHBOARD_DATA_UNAVAILABLE;
   }
   const expectedRuntime = runtime;
@@ -1006,8 +1006,6 @@ function createNodeRuntimeOperator(managedRuntimeDirectory: string, runtimeDataD
   });
   const inspectManagedService = (): Promise<ManagedServiceStatus> =>
     inspectManagedServiceState(definition, run);
-  const isManagedServiceActive = async (): Promise<boolean> =>
-    (await inspectManagedService()).state === "active";
   const operator = createRuntimeOperator({
     runtimeRoot: managedRuntimeDirectory,
     artifacts: createRegistryArtifactSource(),
@@ -1015,9 +1013,6 @@ function createNodeRuntimeOperator(managedRuntimeDirectory: string, runtimeDataD
     isRunning: async () => {
       const status = await inspectRuntimeLock(runtimeDataDirectory);
       if (!status.running && status.stale !== undefined) throw operatorErrors.RUNTIME_LOCK_STALE;
-      if (status.running && status.mode === "legacy" && await isManagedServiceActive()) {
-        return true;
-      }
       if (status.running && status.mode !== "managed") {
         throw new Error("Foreground runtime must be stopped before artifact activation.");
       }
@@ -1030,7 +1025,6 @@ function createNodeRuntimeOperator(managedRuntimeDirectory: string, runtimeDataD
     stopRuntime: (timeoutMs: number) => stopServerRuntime({
       runtimeDataDirectory,
       timeoutMs,
-      isManagedServiceActive,
       stopManaged: async (signal) => { await run(definition.unload, signal); },
     }),
     installService: async (timeoutMs: number) => {
@@ -1167,7 +1161,7 @@ async function waitForRuntimeIdentity(
   while (!signal.aborted) {
     try {
       const status = await inspectRuntimeLock(runtimeDataDirectory);
-      if (status.running && status.identity !== null) return status.identity;
+      if (status.running) return status.identity;
     } catch (error) {
       if (error !== operatorErrors.RUNTIME_LOCK_STALE &&
           error !== operatorErrors.RUNTIME_LOCK_INVALID) throw error;
@@ -1237,7 +1231,6 @@ export async function inspectNodeRuntime(
 export async function stopServerRuntime(input: {
   readonly runtimeDataDirectory: string;
   readonly timeoutMs: number;
-  readonly isManagedServiceActive: () => Promise<boolean>;
   readonly stopManaged: (signal: AbortSignal) => Promise<void>;
   readonly inspect?: typeof inspectRuntimeLock;
 }): Promise<ServerStopResult> {
@@ -1248,9 +1241,7 @@ export async function stopServerRuntime(input: {
   const initial = await inspect(input.runtimeDataDirectory);
   if (!initial.running && initial.stale !== undefined) throw operatorErrors.RUNTIME_LOCK_STALE;
   if (!initial.running) return Object.freeze({ outcome: "already-stopped" });
-  const managed = initial.mode === "managed" ||
-    (initial.mode === "legacy" && await input.isManagedServiceActive());
-  if (!managed) return Object.freeze({ outcome: "foreground-action-required" });
+  if (initial.mode !== "managed") return Object.freeze({ outcome: "foreground-action-required" });
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), input.timeoutMs);
@@ -1887,6 +1878,9 @@ export async function acquireRuntimeLock(
   identity?: RuntimeBuildIdentity,
   mode: "foreground" | "managed" = "foreground",
 ): Promise<RuntimeLock> {
+  if (purpose === "server" && identity === undefined) {
+    throw new Error("Server runtime identity is required.");
+  }
   const path = join(runtimeDataDirectory, "runtime.lock");
   const nonce = randomUUID();
   try {
@@ -2012,14 +2006,14 @@ async function inspectRuntimeLockFile(
         value.purpose !== "server" ||
         (value.endpoint !== undefined &&
           (typeof value.endpoint !== "string" || !isRuntimeEndpoint(value.endpoint))) ||
-        (value.mode !== undefined && value.mode !== "foreground" && value.mode !== "managed")) {
+        (value.mode !== "foreground" && value.mode !== "managed")) {
       throw new Error();
     }
     const identity = decodeRuntimeLockIdentity(value.runtime_identity);
+    if (identity === null) throw new Error();
     const endpoint = value.endpoint ?? null;
-    const mode = value.mode ?? "legacy";
+    const mode = value.mode;
     if (!liveOwner) {
-      if (identity === null) throw new Error();
       return Object.freeze({
         status: Object.freeze({
           running: false,

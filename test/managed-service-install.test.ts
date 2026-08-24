@@ -107,52 +107,19 @@ describe("managed service installation", () => {
       .toBe(fixture.definition.content);
   });
 
-  it("replaces exact published v0.18.1 definitions and refuses unmarked near misses", async () => {
+  it("refuses markerless definitions published by v0.18.1 without controller mutation", async () => {
     for (const platform of ["launchd", "systemd"] as const) {
       const fixture = await installationFixture(platform);
       const legacy = legacyDefinition(fixture.directory, platform);
       await mkdir(join(fixture.directory, platform), { recursive: true });
       await writeFile(fixture.definition.definitionPath, legacy, { mode: 0o600 });
+      const run = vi.fn();
 
-      await expect(installManagedService(fixture.input)).resolves.toMatchObject({
-        outcome: "installed",
-        adapter: platform,
-      });
-
-      const nearMiss = legacy.replace(
-        platform === "launchd"
-          ? "<key>BORG_SERVER_PROCESS_MODE</key><string>managed</string>"
-          : 'Environment="BORG_SERVER_PROCESS_MODE=managed"',
-        platform === "launchd"
-          ? "<key>BORG_SERVER_PROCESS_MODE</key><string>foreground</string>"
-          : 'Environment="BORG_SERVER_PROCESS_MODE=foreground"',
-      );
-      await writeFile(fixture.definition.definitionPath, nearMiss, { mode: 0o600 });
-      await expect(installManagedService(fixture.input))
+      await expect(installManagedService({ ...fixture.input, run }))
         .rejects.toThrow("not recognized as Borg-owned");
+      expect(run).not.toHaveBeenCalled();
+      expect(await readFile(fixture.definition.definitionPath, "utf8")).toBe(legacy);
     }
-
-    const entityFixture = await installationFixture("launchd");
-    const entityLegacy = legacyDefinition(
-      entityFixture.directory,
-      "launchd",
-      "/opt/&amp;lt;/node",
-      "/old/&amp;quot;/runtime",
-    );
-    await mkdir(join(entityFixture.directory, "launchd"), { recursive: true });
-    await writeFile(entityFixture.definition.definitionPath, entityLegacy, { mode: 0o600 });
-    await expect(installManagedService(entityFixture.input)).resolves.toMatchObject({
-      outcome: "installed",
-      adapter: "launchd",
-    });
-
-    await writeFile(
-      entityFixture.definition.definitionPath,
-      entityLegacy.replace("<key>RunAtLoad</key><true/>", "<key>RunAtLoad</key><false/>"),
-      { mode: 0o600 },
-    );
-    await expect(installManagedService(entityFixture.input))
-      .rejects.toThrow("not recognized as Borg-owned");
   });
 
   it("enables an existing inactive systemd user definition instead of only restarting it", async () => {

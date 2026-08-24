@@ -38,12 +38,33 @@ The command requires a complete initialized data directory, a verified prepared
 runtime, and no foreground server process. It installs a launchd agent on macOS
 or a systemd user service on Linux. Repeating the command is idempotent. A stale
 definition is replaced only when it is an owner-private regular file carrying
-Borg's ownership marker, or when it exactly matches the markerless launchd or
-systemd definition family published by `borgmcp-server@0.18.1`: the expected
-label, data directory, managed process mode, absolute Node executable, runtime
-target ending in `/current/package/dist/main.js`, and platform start/restart
-controls must all match that generated shape. Other unmarked definitions are
-left untouched.
+Borg's current ownership marker. Markerless historical definitions and other
+unmarked definitions are left untouched.
+
+If install refuses a historical definition, stop the service with the platform
+command below, preserve or remove the old definition manually, then rerun
+`borg-mcp-server service install`. If uninstall refuses that definition, perform
+the same manual cleanup, then rerun `borg-mcp-server service uninstall`. If the
+definition is already absent but its registration remains, use the leftover
+registration commands reported by uninstall. The default definition is
+`~/Library/LaunchAgents/ai.borgmcp.server.plist` on macOS and
+`~/.config/systemd/user/ai.borgmcp.server.service` on Linux.
+
+Lifecycle refusals emit these exact recovery messages:
+
+```text
+A live process owns an obsolete or invalid runtime.lock. Stop that process through its original terminal or service manager. After it exits, remove runtime.lock and retry.
+```
+
+```text
+The existing service definition is not recognized as Borg-owned. Preserve or remove it manually before retrying.
+```
+
+```text
+No Borg service definition is present, but the service manager still reports ai.borgmcp.server. Remove the leftover registration, then retry:
+  macOS: launchctl bootout gui/$(id -u)/ai.borgmcp.server
+  Linux: systemctl --user disable --now ai.borgmcp.server
+```
 
 Remove the managed definition, stopping the service first when it is active,
 with:
@@ -102,6 +123,11 @@ systemctl --user stop ai.borgmcp.server
 
 The server has no public `stop` command; a foreground process remains owned by
 its terminal and stops with Ctrl-C.
+
+Current server runtime locks include the process mode and verified runtime
+identity. If a live server owns an older or incomplete `runtime.lock`, stop it
+through its original terminal or the platform service manager. Only after that
+process exits, remove `runtime.lock` from the server data directory and retry.
 
 ## Dashboard
 

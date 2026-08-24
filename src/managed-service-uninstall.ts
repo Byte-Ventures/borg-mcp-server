@@ -69,7 +69,7 @@ export async function uninstallManagedService(
   );
   try {
     const definitionState = await inspectManagedServiceDefinition(input.definition, input.uid);
-    const runtime = await input.inspectRuntime().catch(() => ({ running: false } as const));
+    const runtime = await input.inspectRuntime();
     let service: ManagedServiceProbeState;
     try {
       service = await input.inspectService();
@@ -87,8 +87,7 @@ export async function uninstallManagedService(
     }
 
     const previousActive = service.state === "active";
-    const previousIdentity = previousActive && runtime.running &&
-        (runtime.mode === "managed" || runtime.mode === "legacy")
+    const previousIdentity = previousActive && runtime.running && runtime.mode === "managed"
       ? runtime.identity ?? null
       : null;
     try {
@@ -97,8 +96,7 @@ export async function uninstallManagedService(
           input.timeoutMs,
           (signal) => input.run(input.definition.rollbackRemove, signal),
         );
-        if (previousActive && runtime.running &&
-            (runtime.mode === "managed" || runtime.mode === "legacy")) {
+        if (previousActive && runtime.running && runtime.mode === "managed") {
           await waitForRuntimeStopped(input);
         }
       }

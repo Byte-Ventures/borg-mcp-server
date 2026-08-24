@@ -14,6 +14,7 @@ import { createEnrollmentExchange } from "../src/enrollment.js";
 import { startHttpsServer } from "../src/https-server.js";
 import { runCli } from "../src/cli.js";
 import { acquireRuntimeLock, createOfflineCredentialService } from "../src/service.js";
+import { createRuntimeBuildIdentity } from "../src/runtime-identity.js";
 import { openStore } from "../src/store.js";
 import type { Principal } from "../src/principal.js";
 import { DEFAULT_SERVICE_LIMITS } from "../src/https-server.js";
@@ -423,7 +424,7 @@ describe("offline operator flow", () => {
     expect(enrolled).not.toBeNull();
     const service = createOfflineCredentialService(dataDirectory);
 
-    const running = await acquireRuntimeLock(dataDirectory, "server");
+    const running = await acquireRuntimeLock(dataDirectory, "server", createRuntimeBuildIdentity());
     const rotated = await service.rotateClient(enrolled!.clientId);
     await running.release();
 

@@ -97,7 +97,7 @@ const publicMessages: Readonly<Record<OperatorErrorCode, string>> = Object.freez
   RUNTIME_ACTIVE: "Stop the server before running setup or offline administration.",
   RUNTIME_LOCK_UNSAFE: "Ensure runtime.lock is a private regular file before retrying.",
   RUNTIME_LOCK_INVALID: "Confirm the server is stopped, then remove the invalid runtime.lock.",
-  RUNTIME_LOCK_LIVE_UNRECOGNIZED: "A live process owns runtime.lock. Stop the server through a supported command; do not remove the lock.",
+  RUNTIME_LOCK_LIVE_UNRECOGNIZED: "A live process owns an obsolete or invalid runtime.lock. Stop that process through its original terminal or service manager. After it exits, remove runtime.lock and retry.",
   RUNTIME_LOCK_STALE: "Confirm the recorded server process is stopped, then remove runtime.lock.",
   RUNTIME_LOCK_NOT_STALE: "No safely recoverable stale runtime lock was found.",
   RUNTIME_LOCK_RECOVERY_CONCURRENT: "Another recovery already preserved runtime.lock. Rerun status.",

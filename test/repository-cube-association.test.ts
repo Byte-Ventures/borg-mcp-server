@@ -125,7 +125,7 @@ describe("repository cube association", () => {
       name: "Multi-repository cube",
       workingRepoName: "primary",
       repository: primaryRepository,
-      template: "default",
+      template: "starter",
     });
     const secondaryRepository = { kind: "local" as const, value: randomUUID() };
     store.associateRepositoryCube({

@@ -22,7 +22,11 @@ import { afterEach, describe, expect, it } from "vitest";
 import { CoordinationApi } from "../src/coordination-api.js";
 import { CredentialAuthority, CredentialDigester, generateSecret } from "../src/credentials.js";
 import { createEnrollmentExchange } from "../src/enrollment.js";
-import { startHttpsServer, type RunningServer } from "../src/https-server.js";
+import {
+  DEFAULT_SERVICE_LIMITS,
+  startHttpsServer,
+  type RunningServer,
+} from "../src/https-server.js";
 import { clientPrincipal } from "../src/principal.js";
 import { openStore, type StoreRuntime } from "../src/store.js";
 
@@ -93,13 +97,16 @@ async function conformanceEnvironment(): Promise<{
       { name: "subjectAltName", altNames: [{ type: 7, ip: "127.0.0.1" }] },
     ],
   });
-  const server = await startHttpsServer({
+  const startFixtureServer = () => startHttpsServer({
     bind: { port: 0 },
+    // Shared 1.1.0 peaks at 156 requests per credential in one reset epoch, above the default 120.
+    limits: { ...DEFAULT_SERVICE_LIMITS, maxRequestsPerWindow: 192 },
     tls: { key: material.private, cert: material.cert },
     authorizeCoordination: async (authorization) => authority.authenticateStatus(authorization),
     exchangeEnrollment: (request) => exchangeEnrollment(request),
     handleCoordination: (request) => api.handle(request),
   });
+  let server = await startFixtureServer();
   const transport = new HttpsConformanceTransport(
     server.origin,
     material.cert,
@@ -108,6 +115,7 @@ async function conformanceEnvironment(): Promise<{
   const environment: ConformanceEnvironment = {
     admin: {
       reset: async () => {
+        await server.close();
         runtime.maintenance.resetAuthorityState();
         principalCubes.clear();
         invitations.clear();
@@ -117,13 +125,11 @@ async function conformanceEnvironment(): Promise<{
         pendingCreateCapability.clear();
         managedSessions.clear();
         sessionCredentialPrincipals.clear();
-      },
-      restartAuthority: async () => {
-        runtime.close();
-        runtime = await openStore({ path: databasePath, migrationMode: "require-current" });
         authority = new CredentialAuthority(runtime.credentials, digester);
         api = new CoordinationApi(runtime, authority);
         exchangeEnrollment = createEnrollmentExchange(authority);
+        server = await startFixtureServer();
+        transport.setOrigin(server.origin);
       },
       createPrincipal: async () => ({ id: randomUUID() }),
       createCube: async (name) => {
@@ -161,8 +167,10 @@ async function conformanceEnvironment(): Promise<{
         });
         return { id: role.id };
       },
-      replaceLogEntryId: async (cube, currentId, replacementId) => {
-        runtime.maintenance.replaceLogEntryId(cube.id, currentId, replacementId);
+      seedEntryQueryIds: async (cube, entries) => {
+        for (const entry of entries) {
+          runtime.maintenance.replaceLogEntryId(cube.id, entry.current_id, entry.query_id);
+        }
       },
       createDrone: async (principal, cube, role) => {
         const credential = principalCredentials.get(principal.id);
@@ -191,11 +199,6 @@ async function conformanceEnvironment(): Promise<{
         if (session === undefined) throw new Error("Managed drone session is unavailable.");
         runtime.maintenance.revokeDroneSession(session.sessionId);
       },
-      inspectManagedDrone: async (drone) => runtime.maintenance.inspectManagedDrone(drone.id),
-      inspectDroneRuntimeState: async (drone) =>
-        runtime.maintenance.inspectDroneRuntimeState(drone.id),
-      inspectCubeManagementState: async (cube) =>
-        runtime.maintenance.inspectCubeManagementState(cube.id),
       grantCreateCubeCapability: async (principal) => {
         const clientId = enrolledClients.get(principal.id);
         if (clientId === undefined) pendingCreateCapability.add(principal.id);
@@ -247,23 +250,6 @@ async function conformanceEnvironment(): Promise<{
         invitations.set(invitation, principal.id);
         return invitation;
       },
-      observeAuthorityState: async () => runtime.maintenance.observeAuthorityState(),
-      inspectCreatedCube: async (creator, response) => {
-        const clientId = enrolledClients.get(creator.id);
-        if (clientId === undefined) throw new Error("Creator is not enrolled.");
-        return runtime.maintenance.inspectCreatedCube(clientId, {
-          cubeId: response.cube_id,
-          result: response.result,
-          name: response.name,
-          workingRepoName: response.working_repo_name,
-          repository: response.repository,
-          template: response.template,
-          humanSeatRoleId: response.human_seat_role_id,
-          defaultWorkerRoleId: response.default_worker_role_id,
-          access: response.access,
-        });
-      },
-      inspectDeletedCube: async (cube) => runtime.maintenance.inspectDeletedCube(cube.id),
       prepareRepositoryCube: async (cube, input) => {
         const prepared = runtime.maintenance.prepareRepositoryCube({
           cubeId: cube.id,
@@ -277,19 +263,6 @@ async function conformanceEnvironment(): Promise<{
           human_seat_role_id: prepared.humanSeatRoleId,
           default_worker_role_id: prepared.defaultWorkerRoleId,
           access: prepared.access,
-        };
-      },
-      inspectEnrollmentPrincipal: async (principal, responseClientId) => {
-        const credential = principalCredentials.get(principal.id);
-        const authenticated = credential === undefined
-          ? null
-          : authority.authenticateStatus(`Bearer ${credential}`);
-        return {
-          response_client_matches: enrolledClients.get(principal.id) === responseClientId,
-          ...runtime.maintenance.inspectEnrollmentPrincipal(responseClientId),
-          bound_credential_matches_enrollment: authenticated !== null &&
-            typeof authenticated === "object" &&
-            authenticated.kind === "client" && authenticated.id === responseClientId,
         };
       },
       revokePrincipal: async (principal) => {
@@ -477,7 +450,11 @@ async function conformanceEnvironment(): Promise<{
     environment,
     get runtime() { return runtime; },
     digester,
-    server,
+    server: {
+      get origin() { return server.origin; },
+      get limits() { return server.limits; },
+      close: () => server.close(),
+    },
   };
 }
 
@@ -522,12 +499,16 @@ function opaqueCursor(cursor: LogCursor): string {
 }
 
 class HttpsConformanceTransport {
-  readonly #origin: string;
+  #origin: string;
   readonly #ca: string;
 
   constructor(origin: string, ca: string) {
     this.#origin = origin;
     this.#ca = ca;
+  }
+
+  setOrigin(origin: string): void {
+    this.#origin = origin;
   }
 
   request(

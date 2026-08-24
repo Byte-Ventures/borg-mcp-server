@@ -44,10 +44,6 @@ import {
   type RoleSectionPatchOp,
 } from "./role-section.js";
 import { validateMessageTaxonomy } from "./message-taxonomy.js";
-import {
-  PLATFORM_QUEEN_DETAILED_DESCRIPTION,
-  PLATFORM_QUEEN_SHORT_DESCRIPTION,
-} from "./platform-queen.js";
 import type { DashboardSnapshotSource } from "./dashboard.js";
 import { createDashboardSnapshotReader } from "./dashboard-source.js";
 import {
@@ -1193,28 +1189,13 @@ class SqliteScopedStore implements ScopedStore {
         throw new StorageCapacityError();
       }
 
-      const selectedTemplate = request.template === "default"
-        ? null
-        : getTemplate(request.template);
-      if (request.template !== "default" && selectedTemplate === null) {
+      const selectedTemplate = getTemplate(request.template);
+      if (selectedTemplate === null) {
         throw new Error("Unsupported cube template.");
       }
-      const directive = selectedTemplate?.cube_directive ?? "";
-      const messageTaxonomy = validateMessageTaxonomy(selectedTemplate?.message_taxonomy ?? null);
-      const roles: readonly TemplateRole[] = selectedTemplate?.roles ?? [
-        {
-          name: "Coordinator",
-          short_description: PLATFORM_QUEEN_SHORT_DESCRIPTION,
-          detailed_description: PLATFORM_QUEEN_DETAILED_DESCRIPTION,
-          is_human_seat: true,
-        },
-        {
-          name: "Builder",
-          short_description: "Default implementation worker",
-          detailed_description: "",
-          is_default: true,
-        },
-      ];
+      const directive = selectedTemplate.cube_directive ?? "";
+      const messageTaxonomy = validateMessageTaxonomy(selectedTemplate.message_taxonomy ?? null);
+      const roles: readonly TemplateRole[] = selectedTemplate.roles;
       const humanSeatRoles = roles.filter(isRepositoryHumanSeatRole);
       const defaultWorkerRoles = roles.filter(isRepositoryDefaultWorkerRole);
       if (humanSeatRoles.length !== 1 || defaultWorkerRoles.length !== 1) {

@@ -852,6 +852,14 @@ Structured message routing:
     sql: `CREATE INDEX expired_activity_cursors_order_idx
       ON expired_activity_cursors (cube_id, created_at, entry_id);`,
   },
+  {
+    version: 28,
+    name: "name_legacy_cube_templates",
+    sql: `
+      UPDATE cubes SET selected_template = 'starter' WHERE selected_template = 'default';
+      UPDATE cube_create_bindings SET template = 'starter' WHERE template = 'default';
+    `,
+  },
 ]);
 
 interface AppliedMigrationRow {

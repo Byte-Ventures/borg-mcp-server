@@ -1,4 +1,6 @@
-import { isAbsolute, join } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
+
+import { managedServiceControllerMismatch, operatorErrors } from "./operator-error.js";
 
 export type ManagedServicePlatform = "launchd" | "systemd";
 
@@ -29,6 +31,13 @@ export interface ManagedServiceDefinition {
   readonly rollbackRemove: readonly [string, ...string[]];
   readonly reload: readonly [string, ...string[]] | null;
   readonly status: readonly [string, ...string[]];
+}
+
+export interface ManagedServiceCommandRunner {
+  (
+    command: readonly [string, ...string[]],
+    signal: AbortSignal,
+  ): Promise<{ readonly stdout: string; readonly stderr: string }>;
 }
 
 const serviceLabel = "ai.borgmcp.server" as const;
@@ -119,9 +128,70 @@ export function createManagedServiceDefinition(input: ManagedServiceInput): Mana
       "--user",
       "show",
       label,
-      "--property=LoadState,ActiveState,SubState,MainPID",
+      "--property=LoadState,ActiveState,SubState,MainPID,FragmentPath",
     ] as const,
   });
+}
+
+export function createBoundManagedServiceRunner(
+  definition: ManagedServiceDefinition,
+  run: ManagedServiceCommandRunner,
+): ManagedServiceCommandRunner {
+  return async (command, signal) => {
+    if (!commandsEqual(command, definition.status)) {
+      await assertManagedServiceControllerBinding(definition, run, signal);
+    }
+    return run(command, signal);
+  };
+}
+
+export async function assertManagedServiceControllerBinding(
+  definition: ManagedServiceDefinition,
+  run: ManagedServiceCommandRunner,
+  signal: AbortSignal,
+): Promise<void> {
+  let result: Awaited<ReturnType<ManagedServiceCommandRunner>>;
+  try {
+    result = await run(definition.status, signal);
+  } catch (error) {
+    if (definition.platform === "launchd" &&
+        typeof error === "object" && error !== null &&
+        (error as { readonly code?: unknown }).code === 113) return;
+    throw error;
+  }
+  const loadedPath = controllerDefinitionPath(definition, result.stdout);
+  if (loadedPath !== null && resolve(loadedPath) !== resolve(definition.definitionPath)) {
+    throw managedServiceControllerMismatch(definition.definitionPath, loadedPath);
+  }
+}
+
+function controllerDefinitionPath(
+  definition: ManagedServiceDefinition,
+  output: string,
+): string | null {
+  if (definition.platform === "launchd") {
+    const path = /(?:^|\n)\s*path = (.*)(?:\n|$)/u.exec(output)?.[1];
+    if (path === undefined || !validControllerPath(path)) {
+      throw operatorErrors.MANAGED_SERVICE_CONTROLLER_FOREIGN;
+    }
+    return path;
+  }
+  const loadState = /(?:^|\n)LoadState=([^\n]*)(?:\n|$)/u.exec(output)?.[1];
+  if (loadState === "not-found") return null;
+  const path = /(?:^|\n)FragmentPath=([^\n]*)(?:\n|$)/u.exec(output)?.[1];
+  if (loadState === undefined || path === undefined || !validControllerPath(path)) {
+    throw operatorErrors.MANAGED_SERVICE_CONTROLLER_FOREIGN;
+  }
+  return path;
+}
+
+function validControllerPath(path: string): boolean {
+  return path.length > 0 && path.length <= 4_096 && isAbsolute(path) &&
+    !/[\u0000-\u001f\u007f]/u.test(path);
+}
+
+function commandsEqual(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
 function launchdDefinition(

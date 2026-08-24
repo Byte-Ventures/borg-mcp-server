@@ -185,6 +185,22 @@ describe("managed service installation", () => {
     expect(run).not.toHaveBeenCalled();
   });
 
+  it("refuses an unbound controller before creating service files", async () => {
+    const fixture = await installationFixture();
+    const failure = new Error("controller definition mismatch");
+    const run = vi.fn();
+
+    await expect(installManagedService({
+      ...fixture.input,
+      assertControllerBinding: async () => { throw failure; },
+      run,
+    })).rejects.toBe(failure);
+    expect(run).not.toHaveBeenCalled();
+    await expect(lstat(fixture.definition.definitionPath)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(lstat(fixture.definition.stdoutPath)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(lstat(fixture.definition.stderrPath)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("requires canonical ownership markers and refuses hardlinked definitions and logs", async () => {
     for (const platform of ["launchd", "systemd"] as const) {
       const fixture = await installationFixture(platform);
@@ -376,6 +392,7 @@ async function installationFixture(platform: "launchd" | "systemd" = "systemd") 
     artifact,
     dataDirectory,
     assertInstallation: async () => undefined,
+    assertControllerBinding: async () => undefined,
     inspectRuntime: async () => ({ running: false }),
     inspectService: async () => ({ state: "absent" as const, recoveryCommand: null }),
     run: async () => ({ stdout: "", stderr: "" }),

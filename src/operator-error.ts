@@ -1,3 +1,5 @@
+import { isAbsolute } from "node:path";
+
 import { assertCanonicalUuid } from "./principal.js";
 
 export type OperatorErrorCode =
@@ -34,6 +36,7 @@ export type OperatorErrorCode =
   | "RUNTIME_LOG_UNSAFE"
   | "MANAGED_SERVICE_DEFINITION_UNSAFE"
   | "MANAGED_SERVICE_DEFINITION_FOREIGN"
+  | "MANAGED_SERVICE_CONTROLLER_FOREIGN"
   | "MANAGED_SERVICE_REGISTRATION_LEFTOVER"
   | "MANAGED_SERVICE_LOG_UNSAFE"
   | "MANAGED_SERVICE_DATA_UNINITIALIZED"
@@ -104,6 +107,7 @@ const publicMessages: Readonly<Record<OperatorErrorCode, string>> = Object.freez
   RUNTIME_LOG_UNSAFE: "Ensure runtime log files are owner-owned regular files, then retry.",
   MANAGED_SERVICE_DEFINITION_UNSAFE: "Ensure the managed service definition is an owner-private regular file, then retry.",
   MANAGED_SERVICE_DEFINITION_FOREIGN: "The existing service definition is not recognized as Borg-owned. Preserve or remove it manually before retrying.",
+  MANAGED_SERVICE_CONTROLLER_FOREIGN: "The loaded managed service belongs to a different definition. Use the installation that owns the loaded service or unload it manually before retrying.",
   MANAGED_SERVICE_REGISTRATION_LEFTOVER: "No Borg service definition is present, but the service manager still reports ai.borgmcp.server. Remove the leftover registration, then retry:\n  macOS: launchctl bootout gui/$(id -u)/ai.borgmcp.server\n  Linux: systemctl --user disable --now ai.borgmcp.server",
   MANAGED_SERVICE_LOG_UNSAFE: "Ensure managed service log sinks are owner-owned regular files, then retry.",
   MANAGED_SERVICE_DATA_UNINITIALIZED: "Run borg-mcp-server setup before installing the managed service.",
@@ -197,6 +201,23 @@ export function ambiguousClientSelector(
         ? `Client handle now matches more than one client. Use one of these selectors: ${choices}.`
         : `Client selector matches more than one client. Use one of these selectors: ${choices}.`,
   );
+}
+
+export function managedServiceControllerMismatch(expectedPath: string, loadedPath: string): Error {
+  if (!safeOperatorPath(expectedPath) || !safeOperatorPath(loadedPath) || expectedPath === loadedPath) {
+    throw new Error("Managed service controller paths are invalid.");
+  }
+  return new OperatorError(
+    operatorErrorCapability,
+    "MANAGED_SERVICE_CONTROLLER_FOREIGN",
+    `The loaded managed service definition ${loadedPath} does not match the requested definition ${expectedPath}. ` +
+    "Use the installation that owns the loaded definition or unload it manually before retrying.",
+  );
+}
+
+function safeOperatorPath(path: string): boolean {
+  return path.length > 0 && path.length <= 4_096 && isAbsolute(path) &&
+    !/[\u0000-\u001f\u007f]/u.test(path);
 }
 
 function isSafeClientDisambiguator(selector: string): boolean {

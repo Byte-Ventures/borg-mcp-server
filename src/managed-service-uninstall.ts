@@ -17,6 +17,7 @@ import type { RuntimeBuildIdentity } from "./runtime-identity.js";
 export interface ManagedServiceUninstallInput {
   readonly definition: ManagedServiceDefinition;
   readonly dataDirectory: string;
+  readonly assertControllerBinding: () => Promise<void>;
   readonly inspectRuntime: () => Promise<ManagedServiceRuntimeState>;
   readonly inspectService: () => Promise<ManagedServiceProbeState>;
   readonly run: (
@@ -68,6 +69,7 @@ export async function uninstallManagedService(
     operatorErrors.MANAGED_SERVICE_UNINSTALL_BUSY,
   );
   try {
+    await input.assertControllerBinding();
     const definitionState = await inspectManagedServiceDefinition(input.definition, input.uid);
     const runtime = await input.inspectRuntime();
     let service: ManagedServiceProbeState;

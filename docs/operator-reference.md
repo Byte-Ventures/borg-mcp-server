@@ -66,6 +66,20 @@ No Borg service definition is present, but the service manager still reports ai.
   Linux: systemctl --user disable --now ai.borgmcp.server
 ```
 
+Before it changes a launchd or systemd service, the server resolves the loaded
+job's definition and requires it to match the definition requested by the
+current installation. A mismatch is refused before controller or definition
+mutation and names both paths. For example:
+
+```text
+The loaded managed service definition /foreign/Library/LaunchAgents/ai.borgmcp.server.plist does not match the requested definition /isolated/Library/LaunchAgents/ai.borgmcp.server.plist. Use the installation that owns the loaded definition or unload it manually before retrying.
+```
+
+Automated lifecycle exercises must use a fixture controller for every
+`launchctl` and `systemctl` call. Isolating `HOME`, the data directory, and the
+runtime root is not sufficient because controller labels are user-global. Any
+exercise that requires the real controller is operator-run.
+
 Remove the managed definition, stopping the service first when it is active,
 with:
 

@@ -279,7 +279,7 @@ describe("SQLite migrations", () => {
     const now = "2026-08-25T00:00:00.000Z";
     const firstOwnerId = randomUUID();
     const secondOwnerId = randomUUID();
-    for (const [id, name] of [[firstOwnerId, "First"], [secondOwnerId, "Second"]]) {
+    for (const [id, name] of [[firstOwnerId, "First"], [secondOwnerId, "Second"]] as const) {
       database.prepare("INSERT INTO clients (id, name, created_at) VALUES (?, ?, ?)")
         .run(id, name, now);
     }

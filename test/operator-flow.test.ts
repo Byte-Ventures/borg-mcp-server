@@ -319,10 +319,14 @@ describe("offline operator flow", () => {
     runtime.maintenance.createClient({ id: secondId, name: "Local client" });
     runtime.maintenance.createCube({
       id: cubeId,
-      name: "Handle\u001b[31m grant",
+      name: "Handle grant",
       directive: "",
     });
     runtime.close();
+    const mutationDatabase = new DatabaseSync(bootstrap.paths.database);
+    mutationDatabase.prepare("UPDATE cubes SET name = ? WHERE id = ?")
+      .run("Handle\u001b[31m grant", cubeId);
+    mutationDatabase.close();
 
     const service = createOfflineCredentialService(dataDirectory);
     await service.grantClient("aaaaaaaa1", cubeId, "read");

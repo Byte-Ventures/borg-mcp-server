@@ -40,7 +40,7 @@ afterEach(async () => {
 });
 
 describe("borgmcp-shared server adapter", () => {
-  it("passes forward conformance apart from retired probes and shared 0.8.0 pre-widening", async () => {
+  it("passes shared adapter conformance", async () => {
     const fixture = await conformanceEnvironment();
     try {
       const report = await runAdapterConformance(fixture.environment, {
@@ -48,14 +48,7 @@ describe("borgmcp-shared server adapter", () => {
         pendingProbeMs: 10,
       });
 
-      expect(report.results.filter((result) => !result.ok)).toEqual([
-        {
-          id: "repository.explicit-association",
-          ok: false,
-          error: "Cube-to-other-repository conflict returned HTTP 200; expected 409.",
-          observations: {},
-        },
-      ]);
+      expect(report.results.filter((result) => !result.ok)).toEqual([]);
       expect(report.results).toHaveLength(35);
     } finally {
       await fixture.server.close();
@@ -80,6 +73,7 @@ async function conformanceEnvironment(): Promise<{
   let api = new CoordinationApi(runtime, authority);
   let exchangeEnrollment = createEnrollmentExchange(authority);
   const principalCubes = new Map<string, Map<string, "read" | "write" | "manage">>();
+  const principalCubeOrder = new Map<string, string[]>();
   const invitations = new Map<string, string>();
   const enrolledClients = new Map<string, string>();
   const principalCredentials = new Map<string, string>();
@@ -118,6 +112,7 @@ async function conformanceEnvironment(): Promise<{
         await server.close();
         runtime.maintenance.resetAuthorityState();
         principalCubes.clear();
+        principalCubeOrder.clear();
         invitations.clear();
         enrolledClients.clear();
         principalCredentials.clear();
@@ -141,6 +136,9 @@ async function conformanceEnvironment(): Promise<{
         const grants = principalCubes.get(principal.id) ?? new Map();
         grants.set(cube.id, access);
         principalCubes.set(principal.id, grants);
+        const order = principalCubeOrder.get(principal.id) ?? [];
+        if (!order.includes(cube.id)) order.push(cube.id);
+        principalCubeOrder.set(principal.id, order);
         const clientId = enrolledClients.get(principal.id);
         if (clientId !== undefined) {
           runtime.maintenance.grantClientCube({ clientId, cubeId: cube.id, access });
@@ -223,7 +221,9 @@ async function conformanceEnvironment(): Promise<{
             runtime.maintenance.grantClientCube({ clientId: resolvedClientId, cubeId: grantedCubeId, access });
           }
         }
-        const grantedCubeId = principalCubes.get(principal.id)?.keys().next().value as string | undefined;
+        const grants = principalCubes.get(principal.id);
+        const grantedCubeId = principalCubeOrder.get(principal.id)
+          ?.find((cubeId) => grants?.has(cubeId));
         const cubeId = grantedCubeId ?? randomUUID();
         const roleId = randomUUID();
         if (grantedCubeId === undefined) {

@@ -2259,15 +2259,28 @@ describe("coordination stream setup", () => {
         error: { code: "ROLE_SECTION_NOT_FOUND" },
       },
     });
-    runtime.forPrincipal(clientPrincipal(managerId)).createRole(cubeId, {
-      name: "builder",
-      detailedDescription: "Workflow rationale:\nAmbiguous role.\n",
+    expect(await api.handle({
+      method: "POST",
+      path: `/api/cubes/${cubeId}/roles`,
+      principal: clientPrincipal(managerId),
+      body: {
+        protocol_version: "13",
+        request_id: "role-create-case-duplicate",
+        payload: { name: "builder" },
+      },
+      signal: new AbortController().signal,
+    })).toMatchObject({
+      status: 409,
+      body: {
+        request_id: "role-create-case-duplicate",
+        error: { code: "INVALID_INPUT" },
+      },
     });
-    expect(await request("role-rationale-ambiguous", {
+    expect(await request("role-rationale-uppercase", {
       role: "BUILDER", section: "Workflow rationale",
     }, clientPrincipal(readerId))).toMatchObject({
-      status: 400,
-      body: { request_id: "role-rationale-ambiguous", error: { code: "INVALID_INPUT" } },
+      status: 200,
+      body: { request_id: "role-rationale-uppercase", payload: { role_id: role.id } },
     });
     expect(await request("role-rationale-id-exact", {
       role: role.id, section: "Workflow rationale",

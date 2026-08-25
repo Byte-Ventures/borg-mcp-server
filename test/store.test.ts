@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { getTemplate, NEW_CUBE_TEMPLATE_PRESENTATIONS } from "borgmcp-shared/templates";
 
 import {
   clientPrincipal,
@@ -530,7 +531,7 @@ describe("Principal to ScopedStore isolation", () => {
     const client = runtime.forPrincipal(clientPrincipal(ids.clientA));
     const defaultRole = client.createRole(ids.cubeA, { name: "Default", isDefault: true });
 
-    expect(() => client.createRole(ids.cubeA, { name: "Queen", isDefault: true }))
+    expect(() => client.createRole(ids.cubeA, { name: "queen", isDefault: true }))
       .toThrow(RoleConflictError);
     expect(() => client.createRole(ids.cubeA, {
       name: "Oversized",
@@ -544,6 +545,39 @@ describe("Principal to ScopedStore isolation", () => {
     expect(roles.find((role) => role.id === defaultRole.id)?.is_default).toBe(true);
     expect(roles.filter((role) => role.is_default)).toHaveLength(1);
     expect(roles.some((role) => role.name === "Oversized")).toBe(false);
+  });
+
+  it("validates role names by byte length and the shared template character set", () => {
+    const client = runtime.forPrincipal(clientPrincipal(ids.clientA));
+    for (const name of ["Bü", "a/b", " leading", "a".repeat(65)]) {
+      expect(() => client.createRole(ids.cubeA, { name })).toThrow(/Role name/u);
+    }
+    expect(() => runtime.maintenance.createRole({
+      id: randomUUID(),
+      cubeId: ids.cubeA,
+      name: "invalid/role",
+    })).toThrow(/Role name/u);
+    expect(() => runtime.maintenance.createCube({
+      id: randomUUID(),
+      ownerId: ids.clientA,
+      name: "invalid/cube",
+      directive: "",
+    })).toThrow(/Presentation name/u);
+    for (const presentation of NEW_CUBE_TEMPLATE_PRESENTATIONS) {
+      const template = getTemplate(presentation.name);
+      if (template === null) throw new Error("Shared template is unavailable.");
+      const cubeId = randomUUID();
+      runtime.maintenance.createCube({
+        id: cubeId,
+        ownerId: ids.clientA,
+        name: `Template ${presentation.name}`,
+        directive: "",
+      });
+      runtime.maintenance.grantClientCube({ clientId: ids.clientA, cubeId, access: "manage" });
+      for (const role of template.roles) {
+        expect(() => client.createRole(cubeId, { name: role.name })).not.toThrow();
+      }
+    }
   });
 
   it("updates role fields and promotes a new default atomically", () => {
@@ -596,8 +630,9 @@ describe("Principal to ScopedStore isolation", () => {
 
     expect(() => manager.updateRole(ids.cubeA, first.id, { isDefault: false }))
       .toThrow(DefaultRoleRequiredError);
-    expect(() => manager.updateRole(ids.cubeA, second.id, { name: first.name, isDefault: true }))
+    expect(() => manager.updateRole(ids.cubeA, second.id, { name: first.name.toUpperCase(), isDefault: true }))
       .toThrow(RoleConflictError);
+    expect(manager.updateRole(ids.cubeA, second.id, { name: "SECOND" }).name).toBe("SECOND");
     expect(() => manager.updateRole(ids.cubeA, second.id, {})).toThrow(TypeError);
     expect(() => manager.updateRole(ids.cubeA, second.id, {
       detailedDescription: "x".repeat(51_201),
@@ -609,7 +644,7 @@ describe("Principal to ScopedStore isolation", () => {
     expect(() => manager.updateRole(ids.cubeB, second.id, { name: "Wrong cube" }))
       .toThrow(AccessDeniedError);
     expect(manager.listRoles(ids.cubeA).find((role) => role.id === first.id)?.is_default).toBe(true);
-    expect(manager.listRoles(ids.cubeA).find((role) => role.id === second.id)?.name).toBe("Second");
+    expect(manager.listRoles(ids.cubeA).find((role) => role.id === second.id)?.name).toBe("SECOND");
   });
 
   it("patches one role section transactionally and preserves all other role fields", () => {

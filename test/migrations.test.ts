@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import {
   access,
   mkdir,
@@ -124,7 +125,7 @@ describe("SQLite migrations", () => {
     expect(first.diagnostics()).toEqual({
       journalMode: "wal",
       foreignKeys: true,
-      schemaVersions: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28],
+      schemaVersions: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29],
     });
     expect((await stat(join(directory, "data"))).mode & 0o777).toBe(0o700);
     expect((await stat(databasePath)).mode & 0o777).toBe(0o600);
@@ -134,7 +135,7 @@ describe("SQLite migrations", () => {
 
     const second = await openStore({ path: databasePath });
     expect(second.diagnostics().schemaVersions)
-      .toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28]);
+      .toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29]);
     second.close();
     await expect(access(databasePath)).resolves.toBeUndefined();
   });
@@ -234,6 +235,76 @@ describe("SQLite migrations", () => {
       { id: humanRoleId, name: "Coordinator", is_human_seat: 1, is_default: 0 },
       { id: workerRoleId, name: "Builder", is_human_seat: 0, is_default: 1 },
     ]);
+    database.close();
+  });
+
+  it("refuses case-colliding roles without changing a v28 database", () => {
+    const database = new DatabaseSync(":memory:");
+    applyMigrations(database, STORE_MIGRATIONS.slice(0, 28));
+    const now = "2026-08-25T00:00:00.000Z";
+    const clientId = randomUUID();
+    const cubeId = randomUUID();
+    database.prepare("INSERT INTO clients (id, name, created_at) VALUES (?, 'Owner', ?)")
+      .run(clientId, now);
+    database.prepare(`
+      INSERT INTO cubes (id, owner_id, name, directive, created_at, updated_at)
+      VALUES (?, ?, 'Project', '', ?, ?)
+    `).run(cubeId, clientId, now, now);
+    database.prepare(`
+      INSERT INTO roles (id, cube_id, name, role_class, created_at)
+      VALUES (?, ?, ?, 'worker', ?)
+    `).run(randomUUID(), cubeId, "Builder", now);
+    database.prepare(`
+      INSERT INTO roles (id, cube_id, name, role_class, created_at)
+      VALUES (?, ?, ?, 'worker', ?)
+    `).run(randomUUID(), cubeId, "builder", now);
+    const schemaBefore = database.prepare(
+      "SELECT type, name, tbl_name, sql FROM sqlite_schema ORDER BY type, name",
+    ).all();
+
+    expect(() => applyMigrations(database)).toThrow(/UNIQUE constraint failed/u);
+
+    expect(database.prepare(
+      "SELECT type, name, tbl_name, sql FROM sqlite_schema ORDER BY type, name",
+    ).all()).toEqual(schemaBefore);
+    expect(database.prepare("SELECT COUNT(*) AS count FROM roles").get()).toEqual({ count: 2 });
+    expect(database.prepare("SELECT version FROM schema_migrations WHERE version = 29").get())
+      .toBeUndefined();
+    database.close();
+  });
+
+  it("scopes case-insensitive cube uniqueness to one owner during migration", () => {
+    const database = new DatabaseSync(":memory:");
+    applyMigrations(database, STORE_MIGRATIONS.slice(0, 28));
+    const now = "2026-08-25T00:00:00.000Z";
+    const firstOwnerId = randomUUID();
+    const secondOwnerId = randomUUID();
+    for (const [id, name] of [[firstOwnerId, "First"], [secondOwnerId, "Second"]]) {
+      database.prepare("INSERT INTO clients (id, name, created_at) VALUES (?, ?, ?)")
+        .run(id, name, now);
+    }
+    const insertCube = database.prepare(`
+      INSERT INTO cubes (id, owner_id, name, directive, created_at, updated_at)
+      VALUES (?, ?, ?, '', ?, ?)
+    `);
+    insertCube.run(randomUUID(), firstOwnerId, "My Project", now, now);
+    insertCube.run(randomUUID(), firstOwnerId, "my project", now, now);
+    insertCube.run(randomUUID(), secondOwnerId, "MY PROJECT", now, now);
+    const schemaBefore = database.prepare(
+      "SELECT type, name, tbl_name, sql FROM sqlite_schema ORDER BY type, name",
+    ).all();
+
+    expect(() => applyMigrations(database)).toThrow(/UNIQUE constraint failed/u);
+
+    expect(database.prepare(
+      "SELECT type, name, tbl_name, sql FROM sqlite_schema ORDER BY type, name",
+    ).all()).toEqual(schemaBefore);
+    expect(database.prepare("SELECT COUNT(*) AS count FROM cubes").get()).toEqual({ count: 3 });
+    database.prepare("DELETE FROM cubes WHERE owner_id = ? AND name = 'my project'")
+      .run(firstOwnerId);
+    expect(() => applyMigrations(database)).not.toThrow();
+    expect(database.prepare("SELECT version FROM schema_migrations WHERE version = 29").get())
+      .toEqual({ version: 29 });
     database.close();
   });
 
@@ -859,7 +930,7 @@ describe("SQLite migrations", () => {
     ).get()).toBeUndefined();
     expect(database.prepare(
       "SELECT version, name FROM schema_migrations ORDER BY version DESC LIMIT 1",
-    ).get()).toEqual({ version: 28, name: "name_legacy_cube_templates" });
+    ).get()).toEqual({ version: 29, name: "case_insensitive_cube_role_names" });
     database.close();
   });
 
@@ -1054,7 +1125,7 @@ Structured message routing:
     }).toEqual(historyBefore);
     expect(database.prepare(
       "SELECT version, name FROM schema_migrations ORDER BY version DESC LIMIT 1",
-    ).get()).toEqual({ version: 28, name: "name_legacy_cube_templates" });
+    ).get()).toEqual({ version: 29, name: "case_insensitive_cube_role_names" });
     database.close();
   });
 

@@ -1057,7 +1057,8 @@ function requiredString(record: Record<string, unknown>, key: string, maxBytes: 
 
 function requiredRoleName(record: Record<string, unknown>, key: string): string {
   const value = record[key];
-  if (typeof value !== "string" || value.length < 1 || value.length > 64) throw new InputError();
+  if (typeof value !== "string" || Buffer.byteLength(value) < 1 || Buffer.byteLength(value) > 64 ||
+      !/^[A-Za-z0-9][A-Za-z0-9 ._-]*$/u.test(value)) throw new InputError();
   return value;
 }
 

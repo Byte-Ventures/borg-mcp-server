@@ -9,7 +9,12 @@ import { getTemplate, NEW_CUBE_TEMPLATE_PRESENTATIONS } from "borgmcp-shared/tem
 
 import { CredentialAuthority, CredentialDigester, generateSecret } from "../src/credentials.js";
 import { clientPrincipal } from "../src/principal.js";
-import { StorageCapacityError, openStore, type StoreRuntime } from "../src/store.js";
+import {
+  CreateCubeConflictError,
+  StorageCapacityError,
+  openStore,
+  type StoreRuntime,
+} from "../src/store.js";
 
 const directories: string[] = [];
 const enrollmentPhases = [
@@ -224,6 +229,61 @@ describe("owner enrollment and multi-cube creation", () => {
       cube_create_bindings: 2,
       repository_associations: 2,
     });
+    fixture.runtime.close();
+    fixture.digester.destroy();
+  });
+
+  it("refuses case-variant cube names for one owner but permits them across owners", async () => {
+    const fixture = await authorityFixture();
+    const credential = generateSecret();
+    const enrolled = fixture.authority.exchangeInvitation({
+      invitation: fixture.authority.createBootstrapInvitation(60_000),
+      retryKey: randomUUID(),
+      clientCredential: credential,
+    });
+    if (enrolled === null) throw new Error("Owner enrollment failed.");
+    const principal = fixture.authority.authenticate(`Bearer ${credential}`);
+    if (principal === null || principal.kind !== "client") throw new Error("Owner authentication failed.");
+    const store = fixture.runtime.forPrincipal(principal);
+    const create = (name: string) => store.createCube({
+      retryKey: randomUUID(),
+      name,
+      workingRepoName: name.toLowerCase().replaceAll(" ", "-"),
+      repository: { kind: "local" as const, value: randomUUID() },
+      template: "starter" as const,
+    });
+    create("My Project");
+    expect(() => create("my project")).toThrow(CreateCubeConflictError);
+
+    const candidateId = randomUUID();
+    fixture.runtime.maintenance.createCube({
+      id: candidateId,
+      ownerId: principal.id,
+      name: "Candidate",
+      directive: "",
+    });
+    fixture.runtime.maintenance.grantClientCube({
+      clientId: principal.id,
+      cubeId: candidateId,
+      access: "manage",
+    });
+    expect(() => fixture.runtime.maintenance.prepareRepositoryCube({
+      cubeId: candidateId,
+      name: "MY PROJECT",
+      template: "starter",
+    })).toThrow(CreateCubeConflictError);
+    expect(store.getCube(candidateId)?.name).toBe("Candidate");
+
+    const otherClientId = randomUUID();
+    fixture.runtime.maintenance.createClient({ id: otherClientId, name: "Other" });
+    fixture.runtime.maintenance.grantCreateCubeCapability(otherClientId);
+    expect(fixture.runtime.forPrincipal(clientPrincipal(otherClientId)).createCube({
+      retryKey: randomUUID(),
+      name: "my project",
+      workingRepoName: "other-project",
+      repository: { kind: "local", value: randomUUID() },
+      template: "starter",
+    }).result).toBe("created");
     fixture.runtime.close();
     fixture.digester.destroy();
   });

@@ -860,6 +860,16 @@ Structured message routing:
       UPDATE cube_create_bindings SET template = 'starter' WHERE template = 'default';
     `,
   },
+  {
+    version: 29,
+    name: "case_insensitive_cube_role_names",
+    sql: `
+      CREATE UNIQUE INDEX cubes_owner_name_nocase_idx
+        ON cubes (owner_id, name COLLATE NOCASE);
+      CREATE UNIQUE INDEX roles_cube_name_nocase_idx
+        ON roles (cube_id, name COLLATE NOCASE);
+    `,
+  },
 ]);
 
 interface AppliedMigrationRow {

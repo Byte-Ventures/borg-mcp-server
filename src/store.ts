@@ -694,11 +694,12 @@ export class CubeDeletedError extends Error {
 }
 
 export class RoleConflictError extends Error {
-  readonly code = "ROLE_ALREADY_EXISTS";
+  readonly code: "ROLE_ALREADY_EXISTS" | "INVALID_INPUT";
 
-  constructor() {
+  constructor(code: "ROLE_ALREADY_EXISTS" | "INVALID_INPUT" = "ROLE_ALREADY_EXISTS") {
     super("A role with that name already exists.");
     this.name = "RoleConflictError";
+    this.code = code;
   }
 }
 
@@ -1179,6 +1180,12 @@ class SqliteScopedStore implements ScopedStore {
         return { result: "resolved", ...result };
       }
 
+      const duplicateName = this.#database.prepare(`
+        SELECT 1 AS present FROM cubes
+        WHERE owner_id = ? AND name = ? COLLATE NOCASE
+      `).get(this.#principal.id, request.name);
+      if (duplicateName !== undefined) throw new CreateCubeConflictError();
+
       const clientCount = requiredInteger(this.#database.prepare(
         "SELECT COUNT(*) AS count FROM cubes WHERE owner_id = ?",
       ).get(this.#principal.id)!, "count");
@@ -1585,9 +1592,13 @@ class SqliteScopedStore implements ScopedStore {
     try {
       this.#requireCube(cubeId, "manage");
       const duplicate = this.#database.prepare(
-        "SELECT 1 AS present FROM roles WHERE cube_id = ? AND name = ?",
+        "SELECT name FROM roles WHERE cube_id = ? AND name = ? COLLATE NOCASE",
       ).get(cubeId, input.name);
-      if (duplicate !== undefined) throw new RoleConflictError();
+      if (duplicate !== undefined) {
+        throw new RoleConflictError(requiredText(duplicate, "name") === input.name
+          ? "ROLE_ALREADY_EXISTS"
+          : "INVALID_INPUT");
+      }
       if (isDefault) {
         this.#database.prepare("UPDATE roles SET is_default = 0 WHERE cube_id = ? AND is_default = 1")
           .run(cubeId);
@@ -1664,9 +1675,9 @@ class SqliteScopedStore implements ScopedStore {
       if (input.isDefault === false && existing.is_default) {
         throw new DefaultRoleRequiredError();
       }
-      if (input.name !== undefined && input.name !== existing.name) {
+      if (input.name !== undefined && input.name.toLowerCase() !== existing.name.toLowerCase()) {
         const duplicate = this.#database.prepare(
-          "SELECT 1 AS present FROM roles WHERE cube_id = ? AND name = ? AND id <> ?",
+          "SELECT 1 AS present FROM roles WHERE cube_id = ? AND name = ? COLLATE NOCASE AND id <> ?",
         ).get(cubeId, input.name, roleId);
         if (duplicate !== undefined) throw new RoleConflictError();
       }
@@ -3388,7 +3399,7 @@ class SqliteMaintenanceStore implements MaintenanceStore {
   }): void {
     assertCanonicalUuid(input.id, "Cube id");
     if (input.ownerId !== undefined) assertCanonicalUuid(input.ownerId, "Cube owner id");
-    validateName(input.name);
+    validatePresentationName(input.name);
     validateDirective(input.directive);
     const now = this.#now();
     this.#database.prepare(`
@@ -3618,7 +3629,7 @@ class SqliteMaintenanceStore implements MaintenanceStore {
   }): void {
     assertCanonicalUuid(input.id, "Role id");
     assertCanonicalUuid(input.cubeId, "Cube id");
-    validateName(input.name);
+    validateRoleName(input.name);
     const roleClass = input.roleClass ?? "worker";
     if (roleClass !== "queen" && roleClass !== "worker") throw new Error("Unknown role class.");
     this.#database.prepare(`
@@ -3653,6 +3664,14 @@ class SqliteMaintenanceStore implements MaintenanceStore {
     const defaultWorkerRoleId = randomUUID();
     this.#database.exec("BEGIN IMMEDIATE");
     try {
+      const duplicateName = this.#database.prepare(`
+        SELECT 1 AS present
+        FROM cubes AS target
+        JOIN cubes AS existing ON existing.owner_id = target.owner_id
+        WHERE target.id = ? AND existing.id <> target.id
+          AND existing.name = ? COLLATE NOCASE
+      `).get(input.cubeId, input.name);
+      if (duplicateName !== undefined) throw new CreateCubeConflictError();
       const updated = this.#database.prepare(`
         UPDATE cubes SET name = ?, selected_template = ?, updated_at = ? WHERE id = ?
       `).run(input.name, input.template, this.#now(), input.cubeId);
@@ -5456,8 +5475,9 @@ function validatePresentationName(value: string): void {
 }
 
 function validateRoleName(value: string): void {
-  if (typeof value !== "string" || value.length < 1 || value.length > 64) {
-    throw new Error("Role name must contain 1 to 64 characters.");
+  if (typeof value !== "string" || Buffer.byteLength(value) < 1 || Buffer.byteLength(value) > 64 ||
+      !/^[A-Za-z0-9][A-Za-z0-9 ._-]*$/u.test(value)) {
+    throw new Error("Role name must contain 1 to 64 bytes using letters, numbers, spaces, periods, underscores, or hyphens, and start with a letter or number.");
   }
 }
 

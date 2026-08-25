@@ -33,4 +33,5 @@ export const MIGRATION_CHECKSUM_MANIFEST = Object.freeze([
   { version: 26, name: "bounded_liveness_scan", checksum: "010895aba3aaa6f0694d3d3474d56441a07765e6244816c2fa5cb9bda77c30a7" },
   { version: 27, name: "ordered_expired_activity_cursors", checksum: "16853dd7f9daf91a5ab9ca35fde3f250139af8eae17caaac8672802c7c87610c" },
   { version: 28, name: "name_legacy_cube_templates", checksum: "29e4bc6a9b117ff3533024e7484158a22eda51265a3ee62e5a72754f23e12310" },
+  { version: 29, name: "case_insensitive_cube_role_names", checksum: "660f93d3b741f3e3e2aa7eabccd044ac2d7fdf7d24152d1c8361565285739b1e" },
 ] satisfies readonly MigrationChecksumEntry[]);

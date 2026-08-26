@@ -2,7 +2,11 @@ import { constants } from "node:fs";
 import { lstat, open, realpath } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 
-import { managedServiceControllerMismatch, operatorErrors } from "./operator-error.js";
+import {
+  managedServiceControllerMismatch,
+  operatorErrors,
+  unsafeManagedServiceDefinition,
+} from "./operator-error.js";
 
 export type ManagedServicePlatform = "launchd" | "systemd";
 
@@ -197,6 +201,7 @@ async function assertManagedServiceControllerBindingInternal(
 }
 
 async function assertSecureManagedServiceDefinition(path: string): Promise<boolean> {
+  const unsafe = () => unsafeManagedServiceDefinition(path);
   let before;
   try {
     before = await lstat(path);
@@ -207,27 +212,40 @@ async function assertSecureManagedServiceDefinition(path: string): Promise<boole
   const uid = process.getuid?.();
   if (path !== resolve(path) || !before.isFile() || before.isSymbolicLink() || before.nlink !== 1 ||
       before.size > 64 * 1024 || (uid !== undefined && before.uid !== uid) ||
-      (before.mode & 0o077) !== 0) {
-    throw operatorErrors.MANAGED_SERVICE_DEFINITION_UNSAFE;
+      (before.mode & 0o022) !== 0) {
+    throw unsafe();
   }
   try {
     if (await realpath(dirname(path)) !== dirname(path) || await realpath(path) !== path) {
-      throw operatorErrors.MANAGED_SERVICE_DEFINITION_UNSAFE;
+      throw unsafe();
     }
     const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
     try {
-      const opened = await handle.stat();
+      let opened = await handle.stat();
       if (!opened.isFile() || opened.dev !== before.dev || opened.ino !== before.ino ||
           opened.nlink !== 1 || opened.size > 64 * 1024 ||
-          (uid !== undefined && opened.uid !== uid) || (opened.mode & 0o077) !== 0) {
-        throw operatorErrors.MANAGED_SERVICE_DEFINITION_UNSAFE;
+          (uid !== undefined && opened.uid !== uid) || (opened.mode & 0o022) !== 0) {
+        throw unsafe();
+      }
+      if ((opened.mode & 0o777) !== 0o600) {
+        await handle.chmod(0o600);
+        opened = await handle.stat();
+      }
+      const repaired = await lstat(path);
+      if (!opened.isFile() || opened.dev !== before.dev || opened.ino !== before.ino ||
+          opened.nlink !== 1 || opened.size > 64 * 1024 ||
+          (uid !== undefined && opened.uid !== uid) || (opened.mode & 0o777) !== 0o600 ||
+          repaired.isSymbolicLink() || repaired.dev !== opened.dev || repaired.ino !== opened.ino ||
+          repaired.nlink !== 1 || repaired.size > 64 * 1024 ||
+          (uid !== undefined && repaired.uid !== uid) || (repaired.mode & 0o777) !== 0o600) {
+        throw unsafe();
       }
     } finally {
       await handle.close();
     }
   } catch (error) {
-    if (error === operatorErrors.MANAGED_SERVICE_DEFINITION_UNSAFE) throw error;
-    throw operatorErrors.MANAGED_SERVICE_DEFINITION_UNSAFE;
+    if ((error as { readonly code?: unknown }).code === "MANAGED_SERVICE_DEFINITION_UNSAFE") throw error;
+    throw unsafe();
   }
   return true;
 }

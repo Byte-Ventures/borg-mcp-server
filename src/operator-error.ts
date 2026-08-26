@@ -215,6 +215,16 @@ export function managedServiceControllerMismatch(expectedPath: string, loadedPat
   );
 }
 
+export function unsafeManagedServiceDefinition(path: string): Error {
+  if (!safeOperatorPath(path)) throw new Error("Managed service definition path is invalid.");
+  return new OperatorError(
+    operatorErrorCapability,
+    "MANAGED_SERVICE_DEFINITION_UNSAFE",
+    `The managed service definition ${path} is unsafe. Replace it with an owner-owned, ` +
+    "single-link regular file no larger than 65536 bytes and mode 0600, then retry.",
+  );
+}
+
 function safeOperatorPath(path: string): boolean {
   return path.length > 0 && path.length <= 4_096 && isAbsolute(path) &&
     !/[\u0000-\u001f\u007f]/u.test(path);

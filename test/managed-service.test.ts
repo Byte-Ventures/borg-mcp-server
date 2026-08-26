@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { lstat, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -239,7 +239,7 @@ describe("managed service adapters", () => {
       const definitionPath = join(root, platform === "launchd"
         ? "ai.borgmcp.server.plist"
         : "ai.borgmcp.server.service");
-      await writeFile(definitionPath, "fixture definition", { mode: 0o600 });
+      await writeFile(definitionPath, "fixture definition", { mode: 0o644 });
       const definition = createManagedServiceDefinition({
         platform,
         nodeExecutable: "/usr/bin/node",
@@ -267,6 +267,7 @@ describe("managed service adapters", () => {
         new AbortController().signal,
       )).resolves.toEqual({ stdout: "", stderr: "" });
       expect(commands).toEqual([definition.status, definition.restart]);
+      expect((await lstat(definitionPath)).mode & 0o777).toBe(0o600);
 
       commands.length = 0;
       const absentRun = async (command: readonly [string, ...string[]]) => {
@@ -344,7 +345,10 @@ describe("managed service adapters", () => {
       for (const command of mutations) {
         commands.length = 0;
         await expect(bound(command, new AbortController().signal))
-          .rejects.toBe(operatorErrors.MANAGED_SERVICE_DEFINITION_UNSAFE);
+          .rejects.toMatchObject({
+            code: "MANAGED_SERVICE_DEFINITION_UNSAFE",
+            message: expect.stringContaining(expectedPath),
+          });
         expect(commands).toEqual([definition.status]);
       }
       expect(await readFile(foreignPath, "utf8")).toBe(foreignContent);
@@ -386,7 +390,10 @@ describe("managed service adapters", () => {
     ]) {
       commands.length = 0;
       await expect(bound(command, new AbortController().signal))
-        .rejects.toBe(operatorErrors.MANAGED_SERVICE_DEFINITION_UNSAFE);
+        .rejects.toMatchObject({
+          code: "MANAGED_SERVICE_DEFINITION_UNSAFE",
+          message: expect.stringContaining(expectedPath),
+        });
       expect(commands).toEqual([definition.status]);
     }
     expect(await readFile(foreignPath, "utf8")).toBe(foreignContent);

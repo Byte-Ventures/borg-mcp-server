@@ -196,7 +196,7 @@ async function assertManagedServiceControllerBindingInternal(
     definition.definitionPath,
   );
   if (loadedPath !== null && !definitionExists && !allowMissingDefinition) {
-    throw operatorErrors.MANAGED_SERVICE_DEFINITION_UNSAFE;
+    throw unsafeManagedServiceDefinition(definition.definitionPath);
   }
 }
 

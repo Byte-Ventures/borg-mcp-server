@@ -270,6 +270,17 @@ describe("managed service adapters", () => {
       expect((await lstat(definitionPath)).mode & 0o777).toBe(0o600);
 
       commands.length = 0;
+      await rm(definitionPath);
+      await expect(createBoundManagedServiceRunner(definition, run)(
+        definition.restart,
+        new AbortController().signal,
+      )).rejects.toThrow(
+        `The managed service definition ${definitionPath} is unsafe. Replace it with an owner-owned, ` +
+        "single-link regular file no larger than 65536 bytes and mode 0600, then retry.",
+      );
+      expect(commands).toEqual([definition.status]);
+
+      commands.length = 0;
       const absentRun = async (command: readonly [string, ...string[]]) => {
         commands.push(command);
         if (command === definition.status) {

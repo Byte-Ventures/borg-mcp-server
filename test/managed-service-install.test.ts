@@ -187,7 +187,7 @@ describe("managed service installation", () => {
     expect(run).not.toHaveBeenCalled();
   });
 
-  it("refuses foreign-owned, symlinked, and group-writable definitions with exact remediation", async () => {
+  it("refuses unsafe definition metadata with its path and exact remediation", async () => {
     const fixture = await installationFixture();
     await mkdir(dirname(fixture.definition.definitionPath), { recursive: true });
     await writeFile(fixture.definition.definitionPath, fixture.definition.content, { mode: 0o600 });
@@ -208,6 +208,16 @@ describe("managed service installation", () => {
     await symlink(target, fixture.definition.definitionPath);
     await expect(inspectManagedServiceDefinition(fixture.definition))
       .rejects.toThrow(fixture.definition.definitionPath);
+
+    await rm(fixture.definition.definitionPath);
+    await writeFile(fixture.definition.definitionPath, "x".repeat(64 * 1024 + 1), { mode: 0o600 });
+    await expect(inspectManagedServiceDefinition(fixture.definition))
+      .rejects.toThrow(fixture.definition.definitionPath);
+
+    await rm(fixture.definition.definitionPath);
+    await mkdir(fixture.definition.definitionPath);
+    await expect(inspectManagedServiceDefinition(fixture.definition))
+      .rejects.toThrow(remediation);
   });
 
   it("refuses an unbound controller before creating service files", async () => {

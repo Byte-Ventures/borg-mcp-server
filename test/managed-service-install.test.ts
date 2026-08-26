@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  inspectManagedServiceDefinition,
   installManagedService,
   ManagedServiceInstallError,
   type ManagedServiceInstallInput,
@@ -85,7 +86,7 @@ describe("managed service installation", () => {
       .replace(/^Standard(?:Output|Error)=.*\n/gmu, "")
       .replace(`${fixture.directory}/runtime/current/`, "/old-runtime/current/");
     await mkdir(join(fixture.directory, "systemd"), { recursive: true });
-    await writeFile(fixture.definition.definitionPath, stale, { mode: 0o600 });
+    await writeFile(fixture.definition.definitionPath, stale, { mode: 0o644 });
     let running = true;
     const commands: string[][] = [];
 
@@ -105,6 +106,7 @@ describe("managed service installation", () => {
     expect(commands[0]).toEqual(["systemctl", "--user", "stop", "ai.borgmcp.server"]);
     expect(await readFile(fixture.definition.definitionPath, "utf8"))
       .toBe(fixture.definition.content);
+    expect((await lstat(fixture.definition.definitionPath)).mode & 0o777).toBe(0o600);
   });
 
   it("refuses markerless definitions published by v0.18.1 without controller mutation", async () => {
@@ -157,9 +159,9 @@ describe("managed service installation", () => {
     expect(run).not.toHaveBeenCalled();
 
     await writeFile(fixture.definition.definitionPath, fixture.definition.content);
-    await chmod(fixture.definition.definitionPath, 0o644);
+    await chmod(fixture.definition.definitionPath, 0o620);
     await expect(installManagedService({ ...fixture.input, run }))
-      .rejects.toThrow("owner-private regular file");
+      .rejects.toThrow(fixture.definition.definitionPath);
     expect(run).not.toHaveBeenCalled();
 
     await chmod(fixture.definition.definitionPath, 0o600);
@@ -181,8 +183,41 @@ describe("managed service installation", () => {
       ...fixture.input,
       definition: { ...fixture.definition, definitionPath: join(linked, "ai.borgmcp.server.service") },
       run,
-    })).rejects.toThrow("owner-private regular file");
+    })).rejects.toThrow(join(linked, "ai.borgmcp.server.service"));
     expect(run).not.toHaveBeenCalled();
+  });
+
+  it("refuses unsafe definition metadata with its path and exact remediation", async () => {
+    const fixture = await installationFixture();
+    await mkdir(dirname(fixture.definition.definitionPath), { recursive: true });
+    await writeFile(fixture.definition.definitionPath, fixture.definition.content, { mode: 0o600 });
+    const remediation = "owner-owned, single-link regular file no larger than 65536 bytes and mode 0600";
+
+    await expect(inspectManagedServiceDefinition(
+      fixture.definition,
+      (process.getuid?.() ?? 0) + 1,
+    )).rejects.toThrow(fixture.definition.definitionPath);
+
+    await chmod(fixture.definition.definitionPath, 0o620);
+    await expect(inspectManagedServiceDefinition(fixture.definition))
+      .rejects.toThrow(remediation);
+
+    await rm(fixture.definition.definitionPath);
+    const target = join(fixture.directory, "foreign-definition");
+    await writeFile(target, fixture.definition.content, { mode: 0o600 });
+    await symlink(target, fixture.definition.definitionPath);
+    await expect(inspectManagedServiceDefinition(fixture.definition))
+      .rejects.toThrow(fixture.definition.definitionPath);
+
+    await rm(fixture.definition.definitionPath);
+    await writeFile(fixture.definition.definitionPath, "x".repeat(64 * 1024 + 1), { mode: 0o600 });
+    await expect(inspectManagedServiceDefinition(fixture.definition))
+      .rejects.toThrow(fixture.definition.definitionPath);
+
+    await rm(fixture.definition.definitionPath);
+    await mkdir(fixture.definition.definitionPath);
+    await expect(inspectManagedServiceDefinition(fixture.definition))
+      .rejects.toThrow(remediation);
   });
 
   it("refuses an unbound controller before creating service files", async () => {
@@ -222,7 +257,7 @@ describe("managed service installation", () => {
     await link(definitionFixture.definition.definitionPath, definitionAlias);
     const definitionRun = vi.fn();
     await expect(installManagedService({ ...definitionFixture.input, run: definitionRun }))
-      .rejects.toThrow("owner-private regular file");
+      .rejects.toThrow(definitionFixture.definition.definitionPath);
     expect(definitionRun).not.toHaveBeenCalled();
     expect(await readFile(definitionAlias, "utf8")).toBe(definitionFixture.definition.content);
     expect((await lstat(definitionAlias)).mode & 0o777).toBe(0o600);

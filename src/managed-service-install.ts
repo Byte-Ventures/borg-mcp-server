@@ -1,11 +1,11 @@
+import { constants, type Stats } from "node:fs";
 import { chmod, lstat, mkdir, open, readFile, realpath, rename, unlink } from "node:fs/promises";
-import type { Stats } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 
 import type { ManagedServiceDefinition } from "./managed-service.js";
 import type { RuntimeBuildIdentity } from "./runtime-identity.js";
 import type { VerifiedRuntimeArtifact } from "./runtime-lifecycle.js";
-import { operatorErrors } from "./operator-error.js";
+import { operatorErrors, unsafeManagedServiceDefinition } from "./operator-error.js";
 
 export interface ManagedServiceRuntimeState {
   readonly running: boolean;
@@ -193,20 +193,57 @@ export async function inspectManagedServiceDefinition(
   uid = process.getuid?.(),
 ): Promise<ManagedServiceDefinitionState> {
   try {
-    const metadata = await lstat(definition.definitionPath);
-    await assertCanonicalDirectory(dirname(definition.definitionPath), uid);
+    const path = definition.definitionPath;
+    const unsafe = () => unsafeManagedServiceDefinition(path);
+    const metadata = await lstat(path);
+    try {
+      await assertCanonicalDirectory(dirname(path), uid);
+    } catch (error) {
+      if (error === operatorErrors.MANAGED_SERVICE_DEFINITION_UNSAFE) throw unsafe();
+      throw error;
+    }
     if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.nlink !== 1 ||
         metadata.size > 64 * 1024 || (uid !== undefined && metadata.uid !== uid) ||
-        (metadata.mode & 0o077) !== 0) {
-      throw operatorErrors.MANAGED_SERVICE_DEFINITION_UNSAFE;
+        (metadata.mode & 0o022) !== 0) {
+      throw unsafe();
     }
-    const content = await readFile(definition.definitionPath, "utf8");
-    const identity = { device: metadata.dev, inode: metadata.ino };
+    const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    let opened;
+    let content: string;
+    try {
+      opened = await handle.stat();
+      if (!opened.isFile() || opened.dev !== metadata.dev || opened.ino !== metadata.ino ||
+          opened.nlink !== 1 || opened.size > 64 * 1024 ||
+          (uid !== undefined && opened.uid !== uid) || (opened.mode & 0o022) !== 0) {
+        throw unsafe();
+      }
+      if ((opened.mode & 0o777) !== 0o600) {
+        await handle.chmod(0o600);
+        opened = await handle.stat();
+      }
+      const repaired = await lstat(path);
+      if (!opened.isFile() || opened.dev !== metadata.dev || opened.ino !== metadata.ino ||
+          opened.nlink !== 1 || opened.size > 64 * 1024 ||
+          (uid !== undefined && opened.uid !== uid) || (opened.mode & 0o777) !== 0o600 ||
+          repaired.isSymbolicLink() || repaired.dev !== opened.dev || repaired.ino !== opened.ino ||
+          repaired.nlink !== 1 || repaired.size > 64 * 1024 ||
+          (uid !== undefined && repaired.uid !== uid) || (repaired.mode & 0o777) !== 0o600) {
+        throw unsafe();
+      }
+      content = await handle.readFile("utf8");
+    } finally {
+      await handle.close();
+    }
+    const identity = { device: opened.dev, inode: opened.ino };
     if (content === definition.content) return { kind: "current", content, ...identity };
     if (hasCanonicalOwnershipMarker(definition, content)) return { kind: "stale", content, ...identity };
     throw operatorErrors.MANAGED_SERVICE_DEFINITION_FOREIGN;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return { kind: "absent" };
+    if ((error as { readonly code?: unknown }).code === "MANAGED_SERVICE_DEFINITION_UNSAFE") throw error;
+    if ((error as NodeJS.ErrnoException).code === "ELOOP") {
+      throw unsafeManagedServiceDefinition(definition.definitionPath);
+    }
     throw error;
   }
 }

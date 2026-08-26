@@ -221,13 +221,17 @@ describe("managed service uninstallation", () => {
     await writeFile(fixture.definition.definitionPath, fixture.definition.content, { mode: 0o600 });
     await chmod(fixture.definition.definitionPath, 0o644);
     await expect(uninstallManagedService({ ...fixture.input, run }))
-      .rejects.toThrow("owner-private regular file");
-    expect(run).not.toHaveBeenCalled();
+      .resolves.toMatchObject({ outcome: "removed-inactive" });
+    run.mockClear();
+    await writeFile(fixture.definition.definitionPath, fixture.definition.content, { mode: 0o620 });
+    await chmod(fixture.definition.definitionPath, 0o620);
+    await expect(uninstallManagedService({ ...fixture.input, run }))
+      .rejects.toThrow(fixture.definition.definitionPath);
 
     await chmod(fixture.definition.definitionPath, 0o600);
     await link(fixture.definition.definitionPath, join(fixture.directory, "definition-alias"));
     await expect(uninstallManagedService({ ...fixture.input, run }))
-      .rejects.toThrow("owner-private regular file");
+      .rejects.toThrow(fixture.definition.definitionPath);
     expect(run).not.toHaveBeenCalled();
   });
 

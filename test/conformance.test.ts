@@ -49,7 +49,7 @@ describe("borgmcp-shared server adapter", () => {
       });
 
       expect(report.results.filter((result) => !result.ok)).toEqual([]);
-      expect(report.results).toHaveLength(35);
+      expect(report.results).toHaveLength(34);
     } finally {
       await fixture.server.close();
       fixture.digester.destroy();

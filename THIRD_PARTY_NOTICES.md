@@ -27,7 +27,7 @@ refer to each installed package for its complete license text.
 | `ansi-styles` | 6.2.3 | MIT |
 | `asn1js` | 3.0.10 | BSD-3-Clause |
 | `auto-bind` | 5.0.1 | MIT |
-| `borgmcp-shared` | 1.2.0 | Apache-2.0 |
+| `borgmcp-shared` | 2.0.0 | Apache-2.0 |
 | `bytestreamjs` | 2.0.1 | BSD-3-Clause |
 | `chalk` | 5.6.2 | MIT |
 | `cli-boxes` | 4.0.1 | MIT |

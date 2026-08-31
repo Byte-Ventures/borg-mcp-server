@@ -124,21 +124,11 @@ export type ActivityNotificationRecord = EnrichedActivityRecord & (
 
 export type ActivityStreamRecord = EnrichedActivityRecord | ActivityNotificationRecord;
 
-export interface ClaimRecord {
-  readonly log_entry_id: string;
-  readonly claimant_drone_id: string;
-  readonly claimant_label: string | null;
-  readonly claimant_role: string | null;
-  readonly claimed_at: string;
-  readonly stale: false;
-}
-
 export interface ActivityPage {
   readonly entries: EnrichedActivityRecord[];
   readonly cursor: LogCursor | null;
   readonly behind_by: number;
   readonly has_more: boolean;
-  readonly claims: ClaimRecord[];
 }
 
 export interface DecisionRecord {
@@ -2387,7 +2377,6 @@ class SqliteScopedStore implements ScopedStore {
       cursor: nextCursor,
       behind_by: behind,
       has_more: behind > 0,
-      claims: this.#claims(cubeId, broadcastOnly),
     };
     this.#runtimeLogger.emit({
       event: "activity_read",
@@ -3188,26 +3177,6 @@ class SqliteScopedStore implements ScopedStore {
         citationsByEntry.get(entryId) ?? [],
       );
     });
-  }
-
-  #claims(cubeId: string, broadcastOnly: boolean): ClaimRecord[] {
-    return this.#database.prepare(`
-      SELECT acknowledgement.entry_id AS log_entry_id,
-             acknowledgement.claimant_drone_id,
-             drone.label AS claimant_label,
-             role.name AS claimant_role,
-             acknowledgement.created_at AS claimed_at
-      FROM activity_acks AS acknowledgement
-      JOIN activity_log AS entry ON entry.id = acknowledgement.entry_id
-      LEFT JOIN drones AS drone ON drone.id = acknowledgement.claimant_drone_id
-        AND drone.cube_id = entry.cube_id
-      LEFT JOIN roles AS role ON role.id = drone.role_id AND role.cube_id = drone.cube_id
-      WHERE entry.cube_id = ? AND acknowledgement.kind = 'claim'
-        AND acknowledgement.claimant_drone_id IS NOT NULL
-        AND (${broadcastOnly ? "entry.visibility = 'broadcast'" : "1 = 1"})
-      ORDER BY acknowledgement.created_at, acknowledgement.entry_id,
-               acknowledgement.claimant_drone_id
-    `).all(cubeId).map(claimRecord);
   }
 
   #decision(id: string): DecisionRecord {
@@ -4842,17 +4811,6 @@ function appendLogRecord(entry: EnrichedActivityRecord, deduplicated: boolean): 
   const result = { ...entry } as EnrichedActivityRecord & { deduplicated?: boolean };
   Object.defineProperty(result, "deduplicated", { value: deduplicated, enumerable: false });
   return result as AppendLogRecord;
-}
-
-function claimRecord(row: Record<string, unknown>): ClaimRecord {
-  return {
-    log_entry_id: requiredText(row, "log_entry_id"),
-    claimant_drone_id: requiredText(row, "claimant_drone_id"),
-    claimant_label: nullableText(row, "claimant_label"),
-    claimant_role: nullableText(row, "claimant_role"),
-    claimed_at: requiredText(row, "claimed_at"),
-    stale: false,
-  };
 }
 
 function documentCitationRecord(row: Record<string, unknown>): DocumentCitation {

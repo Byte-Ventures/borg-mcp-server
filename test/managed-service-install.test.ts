@@ -26,7 +26,7 @@ const identity = Object.freeze({
   package_version: artifact.version,
   artifact_integrity: artifact.integrity,
   source_sha: sourceSha,
-  protocol_version: "13",
+  protocol_version: "14",
   started_at: "2026-08-14T12:00:00.000Z",
 });
 

@@ -1029,7 +1029,7 @@ describe("Principal to ScopedStore isolation", () => {
     expect(runtime.liveness.scan()).toEqual([]);
   });
 
-  it("paginates monotonic tuple cursors and keeps claims outside the log cursor", () => {
+  it("paginates monotonic tuple cursors without returning claims", () => {
     const client = runtime.forPrincipal(clientPrincipal(ids.clientA));
     const alpha = client.appendLog(ids.cubeA, { visibility: "broadcast", message: "alpha" });
     const beta = client.appendLog(ids.cubeA, { visibility: "broadcast", message: "beta" });
@@ -1050,10 +1050,7 @@ describe("Principal to ScopedStore isolation", () => {
     const after = client.readLog(ids.cubeA, { id: gamma.id, created_at: gamma.created_at }, 10);
     expect(after.entries).toEqual([]);
     expect(after.cursor).toEqual({ id: gamma.id, created_at: gamma.created_at });
-    expect(after.claims).toEqual([expect.objectContaining({
-      log_entry_id: beta.id,
-      claimant_drone_id: ids.clientA,
-    })]);
+    expect(after).not.toHaveProperty("claims");
   });
 
   it("logs append transaction and prune timing plus read-log page size without entry content", async () => {
@@ -1130,7 +1127,6 @@ describe("Principal to ScopedStore isolation", () => {
     expect(retained.entries.map((entry) => entry.created_at)).toEqual(
       [...retained.entries.map((entry) => entry.created_at)].sort(),
     );
-    expect(retained.claims).toEqual([]);
     const recentlyPruned = appended[39]!;
     expect(() => client.readLog(
       ids.cubeA,
@@ -1496,7 +1492,7 @@ describe("Principal to ScopedStore isolation", () => {
     for (const mutation of denied) expect(mutation).toThrow(StorageCapacityError);
 
     expect(client.getCube(ids.cubeA)?.directive).toBe("A");
-    expect(client.readLog(ids.cubeA, null, 10)).toMatchObject({ entries: [baseline], claims: [] });
+    expect(client.readLog(ids.cubeA, null, 10)).toMatchObject({ entries: [baseline] });
     expect(client.listDecisions(ids.cubeA)).toEqual([]);
     expect(client.listDrones(ids.cubeA)).toEqual(beforeDrones);
     expect(client.listRoles(ids.cubeA).find((role) => role.id === mutableRole.id)?.detailed_description)
@@ -2278,7 +2274,7 @@ describe("Principal to ScopedStore isolation", () => {
     }
   });
 
-  it("batches realistic read enrichment without changing entries, citations, recipients, or claims", () => {
+  it("batches realistic read enrichment without changing entries, citations, or recipients", () => {
     const client = runtime.forPrincipal(clientPrincipal(ids.clientA));
     const document = client.putDocument(ids.cubeA, {
       title: "Read evidence",
@@ -2299,11 +2295,6 @@ describe("Principal to ScopedStore isolation", () => {
       INSERT INTO activity_log_documents (entry_id, document_id, cube_id, ordinal)
       VALUES (?, ?, ?, 0)
     `);
-    const insertClaim = database.prepare(`
-      INSERT INTO activity_acks (
-        entry_id, principal_kind, principal_id, kind, created_at, claimant_drone_id
-      ) VALUES (?, 'client', ?, 'claim', ?, ?)
-    `);
     try {
       for (let index = 0; index < 10_000; index += 1) {
         const entryId = `read-${index.toString().padStart(5, "0")}`;
@@ -2322,7 +2313,6 @@ describe("Principal to ScopedStore isolation", () => {
           insertRecipient.run(entryId, ids.droneA);
           insertCitation.run(entryId, document.id, ids.cubeA);
         }
-        insertClaim.run(entryId, ids.clientA, createdAt, ids.clientA);
       }
       database.exec("COMMIT");
     } catch (error) {
@@ -2353,14 +2343,12 @@ describe("Principal to ScopedStore isolation", () => {
 
       expect(JSON.stringify(batchPage)).toBe(JSON.stringify(legacyCold.page));
       expect({ batchColdStatementCount, batchWarmStatementCount, singleEntryStatementCount })
-        .toEqual({ batchColdStatementCount: 8, batchWarmStatementCount: 8, singleEntryStatementCount: 8 });
-      expect(legacyCold.statementCount).toBe(1_505);
-      expect(legacyWarm.statementCount).toBe(1_505);
+        .toEqual({ batchColdStatementCount: 7, batchWarmStatementCount: 7, singleEntryStatementCount: 7 });
+      expect(legacyCold.statementCount).toBe(1_504);
+      expect(legacyWarm.statementCount).toBe(1_504);
       expect([
         legacyCold.elapsed,
         legacyWarm.elapsed,
-        legacyCold.claimsElapsed,
-        legacyWarm.claimsElapsed,
         batchCold,
         batchWarm,
       ].every((elapsed) => Number.isFinite(elapsed) && elapsed >= 0)).toBe(true);
@@ -2374,7 +2362,6 @@ describe("Principal to ScopedStore isolation", () => {
 function measureLegacyReadPage(database: DatabaseSync, cubeId: string, limit: number): {
   readonly page: Record<string, unknown>;
   readonly elapsed: number;
-  readonly claimsElapsed: number;
   readonly statementCount: number;
 } {
   const startedAt = performance.now();
@@ -2434,37 +2421,10 @@ function measureLegacyReadPage(database: DatabaseSync, cubeId: string, limit: nu
       SELECT COUNT(*) AS count FROM activity_log
       WHERE cube_id = ? AND (created_at > ? OR (created_at = ? AND id > ?))
     `).get(cubeId, cursor.created_at, cursor.created_at, cursor.id)!["count"]);
-  const claimsStartedAt = performance.now();
-  const claims = database.prepare(`
-    SELECT acknowledgement.entry_id AS log_entry_id,
-           acknowledgement.claimant_drone_id,
-           drone.label AS claimant_label,
-           role.name AS claimant_role,
-           acknowledgement.created_at AS claimed_at
-    FROM activity_acks AS acknowledgement
-    JOIN activity_log AS entry ON entry.id = acknowledgement.entry_id
-    LEFT JOIN drones AS drone ON drone.id = acknowledgement.claimant_drone_id
-      AND drone.cube_id = entry.cube_id
-    LEFT JOIN roles AS role ON role.id = drone.role_id AND role.cube_id = drone.cube_id
-    WHERE entry.cube_id = ? AND acknowledgement.kind = 'claim'
-      AND acknowledgement.claimant_drone_id IS NOT NULL
-      AND (1 = 1)
-    ORDER BY acknowledgement.created_at, acknowledgement.entry_id,
-             acknowledgement.claimant_drone_id
-  `).all(cubeId).map((claim) => ({
-    log_entry_id: claim["log_entry_id"],
-    claimant_drone_id: claim["claimant_drone_id"],
-    claimant_label: claim["claimant_label"],
-    claimant_role: claim["claimant_role"],
-    claimed_at: claim["claimed_at"],
-    stale: false,
-  }));
-  const claimsElapsed = performance.now() - claimsStartedAt;
   return {
-    page: { entries, cursor, behind_by: behind, has_more: behind > 0, claims },
+    page: { entries, cursor, behind_by: behind, has_more: behind > 0 },
     elapsed: performance.now() - startedAt,
-    claimsElapsed,
-    statementCount: 5 + (entries.length * 3),
+    statementCount: 4 + (entries.length * 3),
   };
 }
 

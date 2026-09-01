@@ -46,6 +46,34 @@ import {
 import { validateMessageTaxonomy } from "./message-taxonomy.js";
 import type { DashboardSnapshotSource } from "./dashboard.js";
 import { createDashboardSnapshotReader } from "./dashboard-source.js";
+import { ActivityHub } from "./store-activity-hub.js";
+import {
+  EMPTY_RUNTIME_METADATA,
+  activityRecord,
+  activityRow,
+  appendLogRecord,
+  cubeRecord,
+  cubeRow,
+  decisionRecord,
+  documentCitationRecord,
+  documentMetadataRecord,
+  documentRecord,
+  droneRecord,
+  enrichedActivityRecord,
+  nullableText,
+  optionalText,
+  requiredBuffer,
+  requiredDroneWakeState,
+  requiredInteger,
+  requiredText,
+  roleRecord,
+  runtimeMetadataState,
+  storedDigest,
+  storedDeletedCubeSessionDigest,
+  storedDroneSessionDigest,
+  storedInvitationDigest,
+} from "./store-row-decoders.js";
+import { withImmediateTransaction } from "./sqlite-transaction.js";
 import {
   WAKE_MAX_ATTEMPTS,
   WAKE_RETRY_INTERVAL_MS,
@@ -918,26 +946,6 @@ function repositoryAssociationConflictMessage(reason: RepositoryAssociationConfl
   }
 }
 
-interface CubeRow {
-  readonly id: string;
-  readonly owner_id: string;
-  readonly name: string;
-  readonly directive: string;
-  readonly message_taxonomy: string | null;
-  readonly created_at: string;
-  readonly updated_at: string;
-}
-
-interface ActivityRow {
-  readonly id: string;
-  readonly cube_id: string;
-  readonly drone_id: string | null;
-  readonly actor_kind: Principal["kind"];
-  readonly actor_id: string;
-  readonly message: string;
-  readonly created_at: string;
-}
-
 interface ScopePredicate {
   readonly sql: string;
   readonly parameters: readonly (string | number)[];
@@ -1122,8 +1130,7 @@ class SqliteScopedStore implements ScopedStore {
       repository: input.repository,
       template: input.template,
     });
-    this.#database.exec("BEGIN IMMEDIATE");
-    try {
+    return withImmediateTransaction(this.#database, () => {
       const authorized = this.#database.prepare(`
         SELECT 1 FROM clients AS client
         JOIN client_server_capabilities AS capability ON capability.client_id = client.id
@@ -1302,10 +1309,7 @@ class SqliteScopedStore implements ScopedStore {
         defaultWorkerRoleId,
         access: "manage",
       };
-    } catch (error) {
-      try { this.#database.exec("ROLLBACK"); } catch { /* Preserve the original failure. */ }
-      throw error;
-    }
+    });
   }
 
   resolveRepositoryCube(input: ResolveRepositoryCubeInput): RepositoryCubeRecord | null {
@@ -1321,8 +1325,7 @@ class SqliteScopedStore implements ScopedStore {
     if (this.#principal.kind !== "client") throw new AccessDeniedError();
     assertCanonicalUuid(input.cubeId, "Cube id");
     const validated = validateRepositoryAssociationInput(input);
-    this.#database.exec("BEGIN IMMEDIATE");
-    try {
+    return withImmediateTransaction(this.#database, () => {
       const manageScope = this.#scope("manage");
       const target = this.#database.prepare(`
         SELECT 1 AS present
@@ -1394,10 +1397,7 @@ class SqliteScopedStore implements ScopedStore {
       if (associated === null) throw new AccessDeniedError();
       this.#database.exec("COMMIT");
       return associated;
-    } catch (error) {
-      try { this.#database.exec("ROLLBACK"); } catch { /* Preserve the original failure. */ }
-      throw error;
-    }
+    });
   }
 
   listCubes(): CubeRecord[] {
@@ -1432,8 +1432,7 @@ class SqliteScopedStore implements ScopedStore {
   deleteCube(cubeId: string): void {
     assertCanonicalUuid(cubeId, "Cube id");
     this.#requireCube(cubeId, "manage");
-    this.#database.exec("BEGIN IMMEDIATE");
-    try {
+    withImmediateTransaction(this.#database, () => {
       this.#requireCube(cubeId, "manage");
       const deletedAt = this.#now();
       this.#database.prepare(
@@ -1462,10 +1461,7 @@ class SqliteScopedStore implements ScopedStore {
       const deleted = this.#database.prepare("DELETE FROM cubes WHERE id = ?").run(cubeId);
       if (deleted.changes !== 1) throw new ScopedStoreError();
       this.#database.exec("COMMIT");
-    } catch (error) {
-      try { this.#database.exec("ROLLBACK"); } catch { /* Preserve the original failure. */ }
-      throw error;
-    }
+    });
     this.#activityHub.publishCubeDeletion(cubeId);
   }
 
@@ -1578,8 +1574,7 @@ class SqliteScopedStore implements ScopedStore {
       Buffer.byteLength(detailedDescription) + 8_192,
     );
 
-    this.#database.exec("BEGIN IMMEDIATE");
-    try {
+    return withImmediateTransaction(this.#database, () => {
       this.#requireCube(cubeId, "manage");
       const duplicate = this.#database.prepare(
         "SELECT name FROM roles WHERE cube_id = ? AND name = ? COLLATE NOCASE",
@@ -1618,10 +1613,7 @@ class SqliteScopedStore implements ScopedStore {
       this.#database.exec("COMMIT");
       this.#mutationHook?.("role.after-commit");
       return roleRecord(row);
-    } catch (error) {
-      try { this.#database.exec("ROLLBACK"); } catch { /* Preserve the original failure. */ }
-      throw error;
-    }
+    });
   }
 
   updateRole(cubeId: string, roleId: string, input: UpdateRoleInput): RoleRecord {
@@ -1651,8 +1643,7 @@ class SqliteScopedStore implements ScopedStore {
       Buffer.byteLength(input.detailedDescription ?? "") + 8_192,
     );
 
-    this.#database.exec("BEGIN IMMEDIATE");
-    try {
+    return withImmediateTransaction(this.#database, () => {
       this.#requireCube(cubeId, "manage");
       const existingRow = this.#database.prepare(`
         SELECT id, cube_id, name, short_description, detailed_description,
@@ -1707,10 +1698,7 @@ class SqliteScopedStore implements ScopedStore {
       this.#database.exec("COMMIT");
       this.#mutationHook?.("role.after-commit");
       return roleRecord(row);
-    } catch (error) {
-      try { this.#database.exec("ROLLBACK"); } catch { /* Preserve the original failure. */ }
-      throw error;
-    }
+    });
   }
 
   patchRoleSection(cubeId: string, roleId: string, input: RoleSectionPatchOp): RoleRecord {
@@ -1722,8 +1710,7 @@ class SqliteScopedStore implements ScopedStore {
       ("body" in input ? Buffer.byteLength(input.body) : 0) + 8_192,
     );
 
-    this.#database.exec("BEGIN IMMEDIATE");
-    try {
+    return withImmediateTransaction(this.#database, () => {
       this.#requireCube(cubeId, "manage");
       const existingRow = this.#database.prepare(`
         SELECT id, cube_id, name, short_description, detailed_description,
@@ -1756,18 +1743,14 @@ class SqliteScopedStore implements ScopedStore {
       this.#database.exec("COMMIT");
       this.#mutationHook?.("role.after-commit");
       return roleRecord(row);
-    } catch (error) {
-      try { this.#database.exec("ROLLBACK"); } catch { /* Preserve the original failure. */ }
-      throw error;
-    }
+    });
   }
 
   deleteRole(cubeId: string, roleId: string): void {
     assertCanonicalUuid(cubeId, "Cube id");
     assertCanonicalUuid(roleId, "Role id");
     this.#requireCube(cubeId, "manage");
-    this.#database.exec("BEGIN IMMEDIATE");
-    try {
+    withImmediateTransaction(this.#database, () => {
       this.#requireCube(cubeId, "manage");
       const roleRow = this.#database.prepare(`
         SELECT id, name, is_default, is_mandatory, is_human_seat
@@ -1804,10 +1787,7 @@ class SqliteScopedStore implements ScopedStore {
       this.#mutationHook?.("role.delete");
       this.#database.exec("COMMIT");
       this.#mutationHook?.("role.after-commit");
-    } catch (error) {
-      try { this.#database.exec("ROLLBACK"); } catch { /* Preserve the original failure. */ }
-      throw error;
-    }
+    });
   }
 
   readRoleRationale(
@@ -1950,8 +1930,7 @@ class SqliteScopedStore implements ScopedStore {
     assertCanonicalUuid(droneId, "Drone id");
     assertCanonicalUuid(roleId, "Role id");
     this.#requireCube(cubeId, "manage");
-    this.#database.exec("BEGIN IMMEDIATE");
-    try {
+    return withImmediateTransaction(this.#database, () => {
       this.#requireCube(cubeId, "manage");
       const droneRow = this.#database.prepare(`
         SELECT id, cube_id, role_id, label FROM drones
@@ -1995,18 +1974,14 @@ class SqliteScopedStore implements ScopedStore {
       if (row === undefined) throw new ScopedStoreError();
       this.#database.exec("COMMIT");
       return droneRecord(row);
-    } catch (error) {
-      try { this.#database.exec("ROLLBACK"); } catch { /* Preserve the original failure. */ }
-      throw error;
-    }
+    });
   }
 
   evictDrone(cubeId: string, droneId: string): void {
     assertCanonicalUuid(cubeId, "Cube id");
     assertCanonicalUuid(droneId, "Drone id");
     this.#requireCube(cubeId, "manage");
-    this.#database.exec("BEGIN IMMEDIATE");
-    try {
+    withImmediateTransaction(this.#database, () => {
       this.#requireCube(cubeId, "manage");
       const active = this.#database.prepare(`
         SELECT 1 AS present FROM drones WHERE id = ? AND cube_id = ? AND evicted_at IS NULL
@@ -2020,10 +1995,7 @@ class SqliteScopedStore implements ScopedStore {
         WHERE drone_id = ? AND cube_id = ? AND revoked_at IS NULL
       `).run(now, droneId, cubeId);
       this.#database.exec("COMMIT");
-    } catch (error) {
-      try { this.#database.exec("ROLLBACK"); } catch { /* Preserve the original failure. */ }
-      throw error;
-    }
+    });
   }
 
   putDocument(cubeId: string, input: {
@@ -2052,8 +2024,7 @@ class SqliteScopedStore implements ScopedStore {
     );
     const id = randomUUID();
     const createdAt = this.#now();
-    this.#database.exec("BEGIN IMMEDIATE");
-    try {
+    return withImmediateTransaction(this.#database, () => {
       this.#requireDocumentWrite(cubeId);
       const active = this.#database.prepare(`
         SELECT COALESCE(SUM(size_bytes), 0) AS total, COUNT(*) AS count
@@ -2102,10 +2073,7 @@ class SqliteScopedStore implements ScopedStore {
       const document = this.#document(cubeId, id);
       this.#database.exec("COMMIT");
       return document;
-    } catch (error) {
-      try { this.#database.exec("ROLLBACK"); } catch { /* Preserve the original failure. */ }
-      throw error;
-    }
+    });
   }
 
   getDocument(cubeId: string, documentId: string): CubeDocument {
@@ -2126,8 +2094,7 @@ class SqliteScopedStore implements ScopedStore {
   removeDocument(cubeId: string, documentId: string): CubeDocumentMetadata {
     this.#requireCube(cubeId, "read");
     validateDocumentId(documentId);
-    this.#database.exec("BEGIN IMMEDIATE");
-    try {
+    return withImmediateTransaction(this.#database, () => {
       this.#requireCube(cubeId, "read");
       const row = this.#database.prepare(
         "SELECT * FROM documents WHERE id = ? AND cube_id = ?",
@@ -2163,10 +2130,7 @@ class SqliteScopedStore implements ScopedStore {
       const document = this.#documentMetadata(cubeId, documentId);
       this.#database.exec("COMMIT");
       return document;
-    } catch (error) {
-      try { this.#database.exec("ROLLBACK"); } catch { /* Preserve the original failure. */ }
-      throw error;
-    }
+    });
   }
 
   appendLog(cubeId: string, input: {
@@ -2216,8 +2180,7 @@ class SqliteScopedStore implements ScopedStore {
     });
     const transactionStartedAt = this.#elapsedClock();
     let pruneElapsedMs = 0;
-    this.#database.exec("BEGIN IMMEDIATE");
-    try {
+    return withImmediateTransaction(this.#database, () => {
       if (input.postId !== undefined) {
         const prior = this.#database.prepare(`
           SELECT tuple_json, entry_json FROM activity_post_bindings
@@ -2319,10 +2282,7 @@ class SqliteScopedStore implements ScopedStore {
       });
       this.#activityHub.publish(cubeId, entry);
       return appendLogRecord(entry, false);
-    } catch (error) {
-      try { this.#database.exec("ROLLBACK"); } catch { /* Preserve the original failure. */ }
-      throw error;
-    }
+    });
   }
 
   hasLogPost(cubeId: string, postId: string): boolean {
@@ -2538,8 +2498,7 @@ class SqliteScopedStore implements ScopedStore {
     );
     const id = randomUUID();
     const now = this.#now();
-    this.#database.exec("BEGIN IMMEDIATE");
-    try {
+    withImmediateTransaction(this.#database, () => {
       const previous = this.#database.prepare(`
         SELECT id, topic, decision, rationale FROM decisions
         WHERE cube_id = ? AND topic = ? AND status = 'active'
@@ -2584,10 +2543,7 @@ class SqliteScopedStore implements ScopedStore {
         supersedes, now,
       );
       this.#database.exec("COMMIT");
-    } catch (error) {
-      try { this.#database.exec("ROLLBACK"); } catch { /* Preserve the original failure. */ }
-      throw error;
-    }
+    });
     return this.#decision(id);
   }
 
@@ -2602,8 +2558,7 @@ class SqliteScopedStore implements ScopedStore {
     if (hasId) assertCanonicalUuid(selector.decisionId!, "Decision id");
     else validateBoundedText(selector.topic!, "Decision topic", 120);
 
-    this.#database.exec("BEGIN IMMEDIATE");
-    try {
+    return withImmediateTransaction(this.#database, () => {
       const activeId = hasId
         ? selector.decisionId!
         : (() => {
@@ -2626,10 +2581,7 @@ class SqliteScopedStore implements ScopedStore {
       if (row === undefined) throw new ScopedStoreError();
       this.#database.exec("COMMIT");
       return decisionRecord(row);
-    } catch (error) {
-      try { this.#database.exec("ROLLBACK"); } catch { /* Preserve the original failure. */ }
-      throw error;
-    }
+    });
   }
 
   listDecisions(cubeId: string): DecisionRecord[] {
@@ -2657,8 +2609,7 @@ class SqliteScopedStore implements ScopedStore {
     if (authorizedRole === undefined) throw new ScopedStoreError();
     this.#capacityGuard.assertCanGrow(4_096);
     const now = this.#now();
-    this.#database.exec("BEGIN IMMEDIATE");
-    try {
+    return withImmediateTransaction(this.#database, () => {
       const roleRow = this.#database.prepare(`
         SELECT c.id AS cube_id, c.name AS cube_name, role.id AS role_id,
                role.name AS role_name, role.role_class, role.is_human_seat
@@ -2868,10 +2819,7 @@ class SqliteScopedStore implements ScopedStore {
         initialLogCursor,
         result: "created",
       };
-    } catch (error) {
-      try { this.#database.exec("ROLLBACK"); } catch { /* Preserve the original failure. */ }
-      throw error;
-    }
+    });
   }
 
   #cubeHeadCursor(cubeId: string): LogCursor | null {
@@ -3341,15 +3289,11 @@ class SqliteMaintenanceStore implements MaintenanceStore {
 
   listClients(): ClientAdministrationRecord[] {
     this.#database.exec("PRAGMA busy_timeout = 0");
-    this.#database.exec("BEGIN IMMEDIATE");
-    try {
+    return withImmediateTransaction(this.#database, () => {
       const clients = listClientAdministrationRecords(this.#database);
       this.#database.exec("ROLLBACK");
       return clients;
-    } catch (error) {
-      try { this.#database.exec("ROLLBACK"); } catch { /* Preserve the query error. */ }
-      throw error;
-    }
+    });
   }
 
   createClient(input: { readonly id: string; readonly name: string }): void {
@@ -3411,16 +3355,12 @@ class SqliteMaintenanceStore implements MaintenanceStore {
     if (!(["read", "write", "manage"] as const).includes(input.access)) {
       throw new Error("Unknown cube access grant.");
     }
-    this.#database.exec("BEGIN IMMEDIATE");
-    try {
+    withImmediateTransaction(this.#database, () => {
       const client = resolveClientSelector(this.#database, input.selector);
       if (client.revokedAt !== null) throw operatorErrors.CLIENT_REVOKED;
       this.#grantClientCube(client.id, input.cubeId, input.access);
       this.#database.exec("COMMIT");
-    } catch (error) {
-      try { this.#database.exec("ROLLBACK"); } catch { /* Preserve the original failure. */ }
-      throw error;
-    }
+    });
   }
 
   removeClientCubeGrant(clientId: string, cubeId: string): boolean {
@@ -3432,17 +3372,13 @@ class SqliteMaintenanceStore implements MaintenanceStore {
   removeClientCubeGrantBySelector(selector: string, cubeId: string): boolean {
     validateClientSelector(selector);
     assertCanonicalUuid(cubeId, "Cube id");
-    this.#database.exec("BEGIN IMMEDIATE");
-    try {
+    return withImmediateTransaction(this.#database, () => {
       const client = resolveClientSelector(this.#database, selector);
       if (client.revokedAt !== null) throw operatorErrors.CLIENT_REVOKED;
       const removed = this.#removeClientCubeGrant(client.id, cubeId);
       this.#database.exec("COMMIT");
       return removed;
-    } catch (error) {
-      try { this.#database.exec("ROLLBACK"); } catch { /* Preserve the original failure. */ }
-      throw error;
-    }
+    });
   }
 
   grantCreateCubeCapability(clientId: string): void {
@@ -3454,8 +3390,7 @@ class SqliteMaintenanceStore implements MaintenanceStore {
   }
 
   resetAuthorityState(): void {
-    this.#database.exec("BEGIN IMMEDIATE");
-    try {
+    withImmediateTransaction(this.#database, () => {
       for (const table of [
         "deleted_cube_session_credentials", "deleted_cube_client_grants", "deleted_cubes",
         "repository_associations", "cube_create_bindings",
@@ -3466,10 +3401,7 @@ class SqliteMaintenanceStore implements MaintenanceStore {
         "enrollment_invitations",
       ]) this.#database.exec(`DELETE FROM ${table}`);
       this.#database.exec("COMMIT");
-    } catch (error) {
-      try { this.#database.exec("ROLLBACK"); } catch { /* Preserve the original failure. */ }
-      throw error;
-    }
+    });
   }
 
   observeAuthorityState() {
@@ -3631,8 +3563,7 @@ class SqliteMaintenanceStore implements MaintenanceStore {
     }
     const humanSeatRoleId = randomUUID();
     const defaultWorkerRoleId = randomUUID();
-    this.#database.exec("BEGIN IMMEDIATE");
-    try {
+    withImmediateTransaction(this.#database, () => {
       const duplicateName = this.#database.prepare(`
         SELECT 1 AS present
         FROM cubes AS target
@@ -3648,10 +3579,7 @@ class SqliteMaintenanceStore implements MaintenanceStore {
       this.#insertPreparedRole(input.cubeId, humanSeatRoleId, humanRole);
       this.#insertPreparedRole(input.cubeId, defaultWorkerRoleId, defaultWorkerRole);
       this.#database.exec("COMMIT");
-    } catch (error) {
-      try { this.#database.exec("ROLLBACK"); } catch { /* Preserve the original failure. */ }
-      throw error;
-    }
+    });
     return {
       cubeId: input.cubeId,
       name: input.name,
@@ -3882,8 +3810,7 @@ class SqliteMaintenanceStore implements MaintenanceStore {
     ).get(replacementId) !== undefined) {
       throw new ScopedStoreError();
     }
-    this.#database.exec("BEGIN IMMEDIATE");
-    try {
+    withImmediateTransaction(this.#database, () => {
       this.#database.exec("PRAGMA defer_foreign_keys = ON");
       this.#database.prepare(
         "UPDATE activity_log SET id = ? WHERE cube_id = ? AND id = ?",
@@ -3909,10 +3836,7 @@ class SqliteMaintenanceStore implements MaintenanceStore {
         WHERE cube_id = ? AND json_extract(entry_json, '$.id') = ?
       `).run(replacementId, cubeId, currentId);
       this.#database.exec("COMMIT");
-    } catch (error) {
-      try { this.#database.exec("ROLLBACK"); } catch { /* Preserve the original failure. */ }
-      throw error;
-    }
+    });
   }
 
   expireActivityCursor(cubeId: string, cursor: LogCursor): void {
@@ -3931,96 +3855,6 @@ class SqliteMaintenanceStore implements MaintenanceStore {
 
   #now(): string {
     return this.#clock().toISOString();
-  }
-}
-
-class ActivityHub {
-  readonly #listeners = new Map<string, Set<(entry: ActivityStreamRecord) => void>>();
-  readonly #wakeListeners = new Map<string, Map<string, number>>();
-  readonly #cubeDeletionListeners = new Map<string, Set<() => void>>();
-  readonly #allListeners = new Set<() => void>();
-
-  subscribe(
-    cubeId: string,
-    listener: (entry: ActivityStreamRecord) => void,
-    onCubeDeleted: () => void,
-    droneId?: string,
-  ): () => void {
-    const listeners = this.#listeners.get(cubeId) ?? new Set();
-    listeners.add(listener);
-    this.#listeners.set(cubeId, listeners);
-    const deletionListeners = this.#cubeDeletionListeners.get(cubeId) ?? new Set();
-    deletionListeners.add(onCubeDeleted);
-    this.#cubeDeletionListeners.set(cubeId, deletionListeners);
-    if (droneId !== undefined) {
-      const wakeListeners = this.#wakeListeners.get(cubeId) ?? new Map<string, number>();
-      wakeListeners.set(droneId, (wakeListeners.get(droneId) ?? 0) + 1);
-      this.#wakeListeners.set(cubeId, wakeListeners);
-    }
-    return () => {
-      listeners.delete(listener);
-      if (listeners.size === 0) this.#listeners.delete(cubeId);
-      deletionListeners.delete(onCubeDeleted);
-      if (deletionListeners.size === 0) this.#cubeDeletionListeners.delete(cubeId);
-      if (droneId !== undefined) {
-        const wakeListeners = this.#wakeListeners.get(cubeId);
-        const count = wakeListeners?.get(droneId) ?? 0;
-        if (count <= 1) wakeListeners?.delete(droneId);
-        else wakeListeners?.set(droneId, count - 1);
-        if (wakeListeners?.size === 0) this.#wakeListeners.delete(cubeId);
-      }
-    };
-  }
-
-  publishCubeDeletion(cubeId: string): void {
-    for (const listener of this.#cubeDeletionListeners.get(cubeId) ?? []) {
-      try {
-        listener();
-      } catch {
-        // A subscriber cannot roll back or alter a committed cube deletion.
-      }
-    }
-    this.#notifyAll();
-  }
-
-  listenerCount(cubeId: string): number {
-    return this.#listeners.get(cubeId)?.size ?? 0;
-  }
-
-  publish(cubeId: string, entry: ActivityStreamRecord): void {
-    for (const listener of this.#listeners.get(cubeId) ?? []) {
-      try {
-        listener(entry);
-      } catch {
-        // A live subscriber cannot roll back or alter a committed append.
-      }
-    }
-    this.#notifyAll();
-  }
-
-  #notifyAll(): void {
-    for (const listener of this.#allListeners) {
-      try {
-        listener();
-      } catch {
-        // A dashboard subscriber cannot roll back or alter a committed append.
-      }
-    }
-  }
-
-  subscribeAll(listener: () => void): () => void {
-    this.#allListeners.add(listener);
-    return () => this.#allListeners.delete(listener);
-  }
-
-  publishDashboardChange(): void {
-    this.#notifyAll();
-  }
-
-  wakeTargets(): readonly { readonly cubeId: string; readonly droneId: string }[] {
-    return [...this.#wakeListeners.entries()].flatMap(([cubeId, drones]) =>
-      [...drones.keys()].map((droneId) => ({ cubeId, droneId })),
-    );
   }
 }
 
@@ -4088,8 +3922,7 @@ class SqliteLivenessStore implements LivenessStore {
       }
       let candidateCount = 0;
       const publications: LivenessPublication[] = [];
-      this.#database.exec("BEGIN IMMEDIATE");
-      try {
+      withImmediateTransaction(this.#database, () => {
         for (const [cubeId, droneIds] of targetsByCube) {
           let cursor = { createdAt: "", entryId: "", droneId: "" };
           const targetJson = JSON.stringify(droneIds);
@@ -4122,10 +3955,7 @@ class SqliteLivenessStore implements LivenessStore {
           }
         }
         this.#database.exec("COMMIT");
-      } catch (error) {
-        this.#database.exec("ROLLBACK");
-        throw error;
-      }
+      });
       for (const publication of publications) {
         this.#activityHub.publish(publication.cubeId, publication.entry);
       }
@@ -4233,8 +4063,7 @@ class SqliteCredentialStore implements CredentialStore {
       ? input.clientName ?? defaultInvitationClientName(input.id)
       : null;
     if (clientName !== null) validatePresentationName(clientName);
-    this.#database.exec("BEGIN IMMEDIATE");
-    try {
+    withImmediateTransaction(this.#database, () => {
       if (input.purpose === "client" && input.clientName !== null) {
         // Revoked client names and expired invitation labels are intentionally reusable.
         if (this.#database.prepare(`
@@ -4283,10 +4112,7 @@ class SqliteCredentialStore implements CredentialStore {
         this.#now(), input.purpose, ownerEpoch, clientName,
       );
       this.#database.exec("COMMIT");
-    } catch (error) {
-      try { this.#database.exec("ROLLBACK"); } catch { /* Preserve the original failure. */ }
-      throw error;
-    }
+    });
   }
 
   findInvitation(lookup: Buffer): StoredInvitationDigest | null {
@@ -4322,8 +4148,7 @@ class SqliteCredentialStore implements CredentialStore {
     assertCanonicalUuid(input.retryKey, "Enrollment retry key");
     if (input.requestedClientName !== null) validatePresentationName(input.requestedClientName);
     validateDigest(input.credentialDigest);
-    this.#database.exec("BEGIN IMMEDIATE");
-    try {
+    return withImmediateTransaction(this.#database, () => {
       const now = this.#now();
       const invitation = this.#database.prepare(`
         SELECT invitation.id IS NOT NULL AS found,
@@ -4446,14 +4271,7 @@ class SqliteCredentialStore implements CredentialStore {
       this.#database.exec("COMMIT");
       this.#mutationHook?.("enrollment.after-commit");
       return enrollmentClaimResult(purpose, input.clientId);
-    } catch (error) {
-      try {
-        this.#database.exec("ROLLBACK");
-      } catch {
-        // Preserve the originating storage failure.
-      }
-      throw error;
-    }
+    });
   }
 
   findClientCredential(lookup: Buffer): StoredSecretDigest | null {
@@ -4523,8 +4341,7 @@ class SqliteCredentialStore implements CredentialStore {
     assertCanonicalUuid(input.clientId, "Client id");
     assertCanonicalUuid(input.credentialId, "Credential id");
     validateDigest(input.credentialDigest);
-    this.#database.exec("BEGIN IMMEDIATE");
-    try {
+    return withImmediateTransaction(this.#database, () => {
       const active = this.#database.prepare(
         "SELECT 1 FROM clients WHERE id = ? AND revoked_at IS NULL",
       ).get(input.clientId);
@@ -4560,45 +4377,26 @@ class SqliteCredentialStore implements CredentialStore {
       );
       this.#database.exec("COMMIT");
       return true;
-    } catch (error) {
-      try {
-        this.#database.exec("ROLLBACK");
-      } catch {
-        // Preserve the originating storage failure.
-      }
-      throw error;
-    }
+    });
   }
 
   revokeClientCredentials(clientId: string): void {
     assertCanonicalUuid(clientId, "Client id");
-    this.#database.exec("BEGIN IMMEDIATE");
-    try {
+    withImmediateTransaction(this.#database, () => {
       this.#revokeClientCredentials(clientId);
       this.#database.exec("COMMIT");
-    } catch (error) {
-      try {
-        this.#database.exec("ROLLBACK");
-      } catch {
-        // Preserve the originating storage failure.
-      }
-      throw error;
-    }
+    });
   }
 
   revokeClientCredentialsBySelector(selector: string): string {
     validateClientSelector(selector);
-    this.#database.exec("BEGIN IMMEDIATE");
-    try {
+    return withImmediateTransaction(this.#database, () => {
       const client = resolveClientSelector(this.#database, selector);
       if (client.revokedAt !== null) throw operatorErrors.CLIENT_REVOKED;
       this.#revokeClientCredentials(client.id);
       this.#database.exec("COMMIT");
       return client.id;
-    } catch (error) {
-      try { this.#database.exec("ROLLBACK"); } catch { /* Preserve the original failure. */ }
-      throw error;
-    }
+    });
   }
 
   #revokeClientCredentials(clientId: string): void {
@@ -4724,185 +4522,6 @@ function diagnostics(database: DatabaseSync): StoreDiagnostics {
 function readPragma(database: DatabaseSync, name: "journal_mode" | "foreign_keys"): unknown {
   const row = database.prepare(`PRAGMA ${name}`).get();
   return row?.[name];
-}
-
-function cubeRecord(row: CubeRow): CubeRecord {
-  return {
-    id: row.id,
-    ownerId: row.owner_id,
-    name: row.name,
-    directive: row.directive,
-    messageTaxonomy: parseTaxonomy(row.message_taxonomy),
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-  };
-}
-
-function activityRecord(row: ActivityRow): ActivityRecord {
-  return {
-    id: row.id,
-    cubeId: row.cube_id,
-    droneId: row.drone_id,
-    actorKind: row.actor_kind,
-    actorId: row.actor_id,
-    message: row.message,
-    createdAt: row.created_at,
-  };
-}
-
-function cubeRow(row: Record<string, unknown>): CubeRow {
-  return {
-    id: requiredText(row, "id"),
-    owner_id: requiredText(row, "owner_id"),
-    name: requiredText(row, "name"),
-    directive: requiredText(row, "directive"),
-    message_taxonomy: nullableText(row, "message_taxonomy"),
-    created_at: requiredText(row, "created_at"),
-    updated_at: requiredText(row, "updated_at"),
-  };
-}
-
-function activityRow(row: Record<string, unknown>): ActivityRow {
-  const actorKind = requiredText(row, "actor_kind");
-  if (actorKind !== "operator" && actorKind !== "client" && actorKind !== "drone-session") {
-    throw new Error("Database contains an invalid activity actor kind.");
-  }
-  const droneId = row["drone_id"];
-  if (droneId !== null && typeof droneId !== "string") {
-    throw new Error("Database contains an invalid activity drone id.");
-  }
-  return {
-    id: requiredText(row, "id"),
-    cube_id: requiredText(row, "cube_id"),
-    drone_id: droneId,
-    actor_kind: actorKind,
-    actor_id: requiredText(row, "actor_id"),
-    message: requiredText(row, "message"),
-    created_at: requiredText(row, "created_at"),
-  };
-}
-
-function enrichedActivityRecord(
-  row: Record<string, unknown>,
-  recipientDroneIds: string[],
-  wakeNonce?: string,
-  documents: DocumentCitation[] = [],
-): EnrichedActivityRecord {
-  const visibility = requiredText(row, "visibility");
-  if (visibility !== "broadcast" && visibility !== "direct") {
-    throw new Error("Database contains invalid activity visibility.");
-  }
-  return {
-    id: requiredText(row, "id"),
-    cube_id: requiredText(row, "cube_id"),
-    drone_id: nullableText(row, "drone_id"),
-    message: requiredText(row, "message"),
-    visibility,
-    created_at: requiredText(row, "created_at"),
-    drone_label: nullableText(row, "drone_label"),
-    role_name: nullableText(row, "role_name"),
-    recipient_drone_ids: recipientDroneIds,
-    ...(documents.length === 0 ? {} : { documents }),
-    ...(wakeNonce === undefined ? {} : { wake_nonce: wakeNonce }),
-  };
-}
-
-function appendLogRecord(entry: EnrichedActivityRecord, deduplicated: boolean): AppendLogRecord {
-  const result = { ...entry } as EnrichedActivityRecord & { deduplicated?: boolean };
-  Object.defineProperty(result, "deduplicated", { value: deduplicated, enumerable: false });
-  return result as AppendLogRecord;
-}
-
-function documentCitationRecord(row: Record<string, unknown>): DocumentCitation {
-  return {
-    id: requiredText(row, "id"),
-    title: requiredText(row, "title"),
-    size_bytes: requiredInteger(row, "size_bytes"),
-    state: documentState(row),
-  };
-}
-
-function documentMetadataRecord(row: Record<string, unknown>): CubeDocumentMetadata {
-  const removedAt = nullableText(row, "removed_at");
-  return {
-    ...documentCitationRecord(row),
-    content_type: documentContentType(row),
-    supersedes: nullableText(row, "supersedes"),
-    superseded_by: nullableText(row, "superseded_by"),
-    author: {
-      drone_id: nullableText(row, "author_drone_id"),
-      label: nullableText(row, "author_label"),
-      role: nullableText(row, "author_role"),
-    },
-    created_at: requiredText(row, "created_at"),
-    removed_by: removedAt === null
-      ? null
-      : {
-          drone_id: nullableText(row, "removed_by_drone_id"),
-          label: nullableText(row, "removed_by_label"),
-          role: nullableText(row, "removed_by_role"),
-        },
-    removed_at: removedAt,
-  };
-}
-
-function documentRecord(row: Record<string, unknown>): CubeDocument {
-  return { ...documentMetadataRecord(row), content: requiredText(row, "content") };
-}
-
-function documentState(row: Record<string, unknown>): CubeDocumentMetadata["state"] {
-  const state = requiredText(row, "state");
-  if (state !== "active" && state !== "superseded" && state !== "removed") {
-    throw new Error("Database contains invalid document state.");
-  }
-  return state;
-}
-
-function documentContentType(row: Record<string, unknown>): DocumentContentType {
-  const contentType = requiredText(row, "content_type");
-  if (contentType !== "text/markdown" && contentType !== "text/plain") {
-    throw new Error("Database contains invalid document content type.");
-  }
-  return contentType;
-}
-
-function decisionRecord(row: Record<string, unknown>): DecisionRecord {
-  const status = requiredText(row, "status");
-  if (status !== "active" && status !== "superseded" && status !== "removed") {
-    throw new Error("Database contains invalid decision status.");
-  }
-  return {
-    id: requiredText(row, "id"),
-    cube_id: requiredText(row, "cube_id"),
-    topic: requiredText(row, "topic"),
-    decision: requiredText(row, "decision"),
-    rationale: nullableText(row, "rationale"),
-    ratified_by: nullableText(row, "ratified_by"),
-    status,
-    supersedes: nullableText(row, "supersedes"),
-    created_at: requiredText(row, "created_at"),
-  };
-}
-
-function roleRecord(row: Record<string, unknown>): RoleRecord {
-  const roleClass = requiredText(row, "role_class");
-  if (roleClass !== "queen" && roleClass !== "worker") {
-    throw new Error("Database contains invalid role class.");
-  }
-  return {
-    id: requiredText(row, "id"),
-    cube_id: requiredText(row, "cube_id"),
-    name: requiredText(row, "name"),
-    short_description: requiredText(row, "short_description"),
-    detailed_description: requiredText(row, "detailed_description"),
-    is_default: requiredInteger(row, "is_default") === 1,
-    is_mandatory: requiredInteger(row, "is_mandatory") === 1,
-    is_human_seat: requiredInteger(row, "is_human_seat") === 1,
-    can_broadcast: requiredInteger(row, "can_broadcast") === 1,
-    receives_all_direct: requiredInteger(row, "receives_all_direct") === 1,
-    role_class: roleClass,
-    created_at: requiredText(row, "created_at"),
-  };
 }
 
 function createCubeRecord(
@@ -5040,70 +4659,6 @@ const DRONE_WAKE_STATE_CASE = `
        ELSE 'pending' END AS wake_state
 `;
 
-function droneRecord(row: Record<string, unknown>): DroneRecord {
-  const posture = requiredText(row, "posture");
-  if (posture !== "observer" && posture !== "participant") {
-    throw new Error("Database contains invalid drone posture.");
-  }
-  return {
-    id: requiredText(row, "id"),
-    cube_id: requiredText(row, "cube_id"),
-    role_id: requiredText(row, "role_id"),
-    label: requiredText(row, "label"),
-    last_seen: requiredText(row, "last_seen"),
-    hostname: nullableText(row, "hostname"),
-    posture,
-    ...runtimeMetadataFlat(row),
-    created_at: requiredText(row, "created_at"),
-    wake_state: "idle",
-  };
-}
-
-function requiredDroneWakeState(row: Record<string, unknown>): DroneRecord["wake_state"] {
-  const wakeState = requiredText(row, "wake_state");
-  if (wakeState !== "idle" && wakeState !== "pending" && wakeState !== "awake" && wakeState !== "stale") {
-    throw new Error("Database produced an invalid drone wake state.");
-  }
-  return wakeState;
-}
-
-const EMPTY_RUNTIME_METADATA: DroneRuntimeMetadata = Object.freeze({
-  agent_kind: null,
-  reported_model: null,
-  working_repo_name: null,
-  working_repo_origin: null,
-});
-
-function runtimeMetadataFlat(row: Record<string, unknown>): DroneRuntimeMetadata & {
-  readonly runtime_metadata_reported: boolean;
-} {
-  const agentKind = nullableText(row, "agent_kind");
-  if (agentKind !== null && agentKind !== "claude" &&
-      agentKind !== "codex" && agentKind !== "opencode") {
-    throw new Error("Database contains invalid agent_kind.");
-  }
-  return {
-    agent_kind: agentKind as DroneRuntimeMetadata["agent_kind"],
-    reported_model: nullableText(row, "reported_model"),
-    working_repo_name: nullableText(row, "working_repo_name"),
-    working_repo_origin: nullableText(row, "working_repo_origin"),
-    runtime_metadata_reported: requiredInteger(row, "runtime_metadata_reported") === 1,
-  };
-}
-
-function runtimeMetadataState(row: Record<string, unknown>): RuntimeMetadataState {
-  const flat = runtimeMetadataFlat(row);
-  return {
-    runtime_metadata: {
-      agent_kind: flat.agent_kind,
-      reported_model: flat.reported_model,
-      working_repo_name: flat.working_repo_name,
-      working_repo_origin: flat.working_repo_origin,
-    },
-    runtime_metadata_reported: flat.runtime_metadata_reported,
-  };
-}
-
 function runtimeMetadataGrowthBytes(patch: DroneRuntimeMetadataPatch): number {
   let bytes = 4_096;
   for (const [field, value] of Object.entries(patch)) {
@@ -5111,53 +4666,6 @@ function runtimeMetadataGrowthBytes(patch: DroneRuntimeMetadataPatch): number {
     if (typeof value === "string") bytes += Buffer.byteLength(value);
   }
   return bytes;
-}
-
-function nullableText(row: Record<string, unknown>, key: string): string | null {
-  const value = row[key];
-  if (value === null || typeof value === "string") return value;
-  throw new Error(`Database contains invalid ${key}.`);
-}
-
-function requiredText(row: Record<string, unknown>, key: string): string {
-  const value = row[key];
-  if (typeof value !== "string") throw new Error(`Database contains invalid ${key}.`);
-  return value;
-}
-
-function requiredInteger(row: Record<string, unknown>, key: string): number {
-  const value = row[key];
-  if (!Number.isSafeInteger(value)) throw new Error(`Database contains invalid ${key}.`);
-  return value as number;
-}
-
-function storedDigest(row: Record<string, unknown>): StoredSecretDigest {
-  const lookup = requiredBuffer(row, "lookup_digest");
-  const verifier = requiredBuffer(row, "verifier_digest");
-  const expiresAt = optionalNonNullText(row, "expires_at");
-  const consumedAt = optionalText(row, "consumed_at");
-  const clientId = optionalNonNullText(row, "client_id");
-  const revokedAt = optionalText(row, "revoked_at");
-  return {
-    id: requiredText(row, "id"),
-    lookup,
-    verifier,
-    ...(expiresAt === undefined ? {} : { expiresAt }),
-    ...(consumedAt === undefined ? {} : { consumedAt }),
-    ...(clientId === undefined ? {} : { clientId }),
-    ...(revokedAt === undefined ? {} : { revokedAt }),
-  };
-}
-
-function storedInvitationDigest(row: Record<string, unknown>): StoredInvitationDigest {
-  const digest = storedDigest(row);
-  const purpose = requiredText(row, "purpose");
-  if (purpose !== "owner" && purpose !== "client") {
-    throw new Error("Database contains invalid invitation purpose.");
-  }
-  const epochValue = row["owner_epoch"];
-  const ownerEpoch = epochValue === null ? null : requiredInteger(row, "owner_epoch");
-  return { ...digest, purpose, ownerEpoch, clientName: nullableText(row, "client_name") };
 }
 
 function defaultInvitationClientName(invitationId: string): string {
@@ -5199,55 +4707,6 @@ function matchEnrollmentClaim(
     exact: retryMatches && nameMatches && purposeMatches && lookupMatches && verifierMatches,
     clientId,
   };
-}
-
-function storedDroneSessionDigest(row: Record<string, unknown>): StoredDroneSessionDigest {
-  const digest = storedDigest(row);
-  return {
-    ...digest,
-    sessionId: requiredText(row, "session_id"),
-    clientId: requiredText(row, "client_id"),
-    cubeId: requiredText(row, "cube_id"),
-    droneId: requiredText(row, "drone_id"),
-    evictedAt: nullableText(row, "evicted_at"),
-    takenOver: nullableText(row, "superseded_at") !== null,
-    cubeDeleted: false,
-  };
-}
-
-function storedDeletedCubeSessionDigest(
-  row: Record<string, unknown>,
-): StoredDeletedCubeSessionDigest {
-  const terminalCause = requiredText(row, "terminal_cause");
-  if (terminalCause !== "cube_deleted" && terminalCause !== "drone_evicted") {
-    throw new Error("Database contains invalid deleted credential terminal cause.");
-  }
-  return {
-    lookup: requiredBuffer(row, "lookup_digest"),
-    verifier: requiredBuffer(row, "verifier_digest"),
-    evicted: terminalCause === "drone_evicted",
-    cubeDeleted: true,
-  };
-}
-
-function requiredBuffer(row: Record<string, unknown>, key: string): Buffer {
-  const value = row[key];
-  if (!(value instanceof Uint8Array)) throw new Error(`Database contains invalid ${key}.`);
-  return Buffer.from(value);
-}
-
-function optionalText(row: Record<string, unknown>, key: string): string | null | undefined {
-  const value = row[key];
-  if (value === undefined) return undefined;
-  if (value === null || typeof value === "string") return value;
-  throw new Error(`Database contains invalid ${key}.`);
-}
-
-function optionalNonNullText(row: Record<string, unknown>, key: string): string | undefined {
-  const value = row[key];
-  if (value === undefined) return undefined;
-  if (typeof value === "string") return value;
-  throw new Error(`Database contains invalid ${key}.`);
 }
 
 interface ClientIdentity {
@@ -5515,15 +4974,6 @@ function serializeTaxonomy(value: MessageTaxonomy | null): string | null {
     throw new RangeError("Message taxonomy exceeds 100000 bytes.");
   }
   return serialized;
-}
-
-function parseTaxonomy(value: string | null): MessageTaxonomy | null {
-  if (value === null) return null;
-  try {
-    return validateMessageTaxonomy(JSON.parse(value));
-  } catch {
-    throw new Error("Database contains invalid message taxonomy.");
-  }
 }
 
 function validateDigest(digest: DigestPair): void {

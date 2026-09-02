@@ -61,7 +61,7 @@ function boardSegment(line: string): string {
 
 const server: DashboardServerIdentity = Object.freeze({
   name: "borgmcp-server",
-  version: "4.0.1",
+  version: "4.0.2",
   endpoint: "https://127.0.0.1:7091",
   bind_mode: "loopback",
   state: "online",
@@ -1104,7 +1104,7 @@ describe("dashboard renderer", () => {
     const maliciousServer: DashboardServerIdentity = {
       ...server,
       name: "borg\u001b]52;c;clipboard\u0007\nserver",
-      version: "4.0.1\u001b[2J",
+      version: "4.0.2\u001b[2J",
       endpoint: "https://safe.invalid/\u202Eevil",
     };
     const data = snapshotData(1);

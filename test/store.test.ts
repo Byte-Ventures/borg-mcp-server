@@ -169,21 +169,24 @@ describe("Principal to ScopedStore isolation", () => {
       access: "manage",
     })).toThrow(operatorErrors.CUBE_ID_INVALID);
   });
-  it("keeps delegated Queen follow-up milestone-based and operator-controlled", () => {
+  it("bounds delegated Queen receipt polling and distinguishes activation", () => {
     expect(PLATFORM_QUEEN_DETAILED_DESCRIPTION).toContain(
       "Use START NOW, RESUME NOW, REVIEW NOW, or HOLD",
     );
     expect(PLATFORM_QUEEN_DETAILED_DESCRIPTION).toContain(
-      "ACK and claim are receipt only",
+      "Active read-log polling is allowed only from dispatch until the first receipt signal",
     );
     expect(PLATFORM_QUEEN_DETAILED_DESCRIPTION).toContain(
-      "Follow work through substantive milestones, not elapsed-time deadlines",
+      "borg_ack, CLAIM, STARTING, or substantive PROGRESS",
     );
     expect(PLATFORM_QUEEN_DETAILED_DESCRIPTION).toContain(
-      "send at most one direct status request",
+      "Polling stops immediately when that signal arrives",
     );
     expect(PLATFORM_QUEEN_DETAILED_DESCRIPTION).toContain(
-      "report silence or liveness evidence to the human",
+      "ACK and CLAIM are receipt only; STARTING and substantive PROGRESS prove activation",
+    );
+    expect(PLATFORM_QUEEN_DETAILED_DESCRIPTION).toContain(
+      "After receipt, end the active turn",
     );
     expect(PLATFORM_QUEEN_DETAILED_DESCRIPTION).toContain(
       "never authorizes an ownership change",
@@ -191,14 +194,36 @@ describe("Principal to ScopedStore isolation", () => {
     expect(PLATFORM_QUEEN_DETAILED_DESCRIPTION).toContain(
       "explicit human operator approval for the exact work item and recipient",
     );
+    expect(PLATFORM_QUEEN_DETAILED_DESCRIPTION).toContain("BLOCKED immediately");
+  });
+
+  it("defines one resettable dormant Queen supervision lifecycle", () => {
     expect(PLATFORM_QUEEN_DETAILED_DESCRIPTION).toContain(
+      "exactly one dormant two-minute activation-deadline wake",
+    );
+    expect(PLATFORM_QUEEN_DETAILED_DESCRIPTION).toContain(
+      "exactly one dormant supervision wake for 12 to 15 minutes",
+    );
+    expect(PLATFORM_QUEEN_DETAILED_DESCRIPTION).toContain(
+      "Substantive progress remains expected every ten minutes",
+    );
+    expect(PLATFORM_QUEEN_DETAILED_DESCRIPTION).toContain(
+      "drain unread activity once",
+    );
+    expect(PLATFORM_QUEEN_DETAILED_DESCRIPTION).toContain(
+      "one direct status request and use read-only liveness checks",
+    );
+    expect(PLATFORM_QUEEN_DETAILED_DESCRIPTION).toContain(
+      "The supervision wake is cleared when work is complete, held, blocked on a known policy, harness, approval, or permission condition, awaiting human authority, or otherwise inactive",
+    );
+    expect(PLATFORM_QUEEN_DETAILED_DESCRIPTION).toContain(
+      "No shell sleeps, stacked deadlines, repeated read-log polling, repeated reminders for the same miss, process manipulation, or unauthorized reassignment",
+    );
+    expect(PLATFORM_QUEEN_DETAILED_DESCRIPTION).not.toContain(
+      "Follow work through substantive milestones, not elapsed-time deadlines",
+    );
+    expect(PLATFORM_QUEEN_DETAILED_DESCRIPTION).not.toContain(
       "Do not interrupt slow local work merely to satisfy a cadence",
-    );
-    expect(PLATFORM_QUEEN_DETAILED_DESCRIPTION).toContain(
-      "BLOCKED immediately",
-    );
-    expect(PLATFORM_QUEEN_DETAILED_DESCRIPTION).not.toMatch(
-      /(?:within|further|every) (?:2|5|10) minutes|activation reminder|probe liveness|eligible and authorized reassignment/i,
     );
   });
 

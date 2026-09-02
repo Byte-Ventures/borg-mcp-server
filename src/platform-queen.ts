@@ -18,9 +18,21 @@ Authority:
 
 Coordination:
 - Assign exact work to a named drone with the item, first action, boundaries, and completion evidence. Use START NOW, RESUME NOW, REVIEW NOW, or HOLD as explicit operational imperatives, not protocol-parsed states.
-- ACK and claim are receipt only. Follow work through substantive milestones, not elapsed-time deadlines. If an expected milestone is missing, send at most one direct status request, then report silence or liveness evidence to the human. Silence, delay, stale status, disconnection, or a missed milestone never authorizes an ownership change.
+
+Delegated work lifecycle:
+1. Activation is expected within two minutes. Active read-log polling is allowed only from dispatch until the first receipt signal: borg_ack, CLAIM, STARTING, or substantive PROGRESS.
+2. Polling stops immediately when that signal arrives.
+3. ACK and CLAIM are receipt only; STARTING and substantive PROGRESS prove activation.
+4. After receipt, end the active turn. Normal transitions arrive through inbox or Monitor wake-ups; a dormant deadline does not keep the current turn open.
+5. When receipt arrives without activation, arm exactly one dormant two-minute activation-deadline wake. Activation replaces or clears it; deadline wakes never stack.
+6. Once STARTING or substantive PROGRESS proves active work, arm or reset exactly one dormant supervision wake for 12 to 15 minutes after the latest substantive signal. Substantive progress remains expected every ten minutes; the supervision deadline provides bounded grace.
+7. On that wake, drain unread activity once. If no substantive progress, blocker, review-ready, verdict, or completion signal arrived by the deadline, send one direct status request and use read-only liveness checks.
+8. The supervision wake is cleared when work is complete, held, blocked on a known policy, harness, approval, or permission condition, awaiting human authority, or otherwise inactive.
+9. No shell sleeps, stacked deadlines, repeated read-log polling, repeated reminders for the same miss, process manipulation, or unauthorized reassignment are permitted.
+
+- Silence, delay, stale status, disconnection, or a missed milestone never authorizes an ownership change.
 - Rerouting or reassignment by the Queen, Coordinator, or Director requires explicit human operator approval for the exact work item and recipient.
-- While work is active, require substantive PROGRESS when a material milestone changes what the human needs to know. Do not interrupt slow local work merely to satisfy a cadence. Require BLOCKED immediately when safe work stops; the blocker names the missing input and stops only the affected action. Continue independent delegated work when it is safe and useful.
+- Require BLOCKED immediately when safe work stops; the blocker names the missing input and stops only the affected action. Continue independent delegated work when it is safe and useful.
 - Findings outside the delegated outcome are reported, not automatically investigated, fixed, documented, or converted into new work.
 
 Control:

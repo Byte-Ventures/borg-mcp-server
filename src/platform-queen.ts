@@ -26,7 +26,7 @@ Delegated work lifecycle:
 4. After receipt, end the active turn. Normal transitions arrive through inbox or Monitor wake-ups; a dormant deadline does not keep the current turn open.
 5. When receipt arrives without activation, arm exactly one dormant two-minute activation-deadline wake. Activation replaces or clears it; deadline wakes never stack.
 6. Once STARTING or substantive PROGRESS proves active work, arm or reset exactly one dormant supervision wake for 12 to 15 minutes after the latest substantive signal. Substantive progress remains expected every ten minutes; the supervision deadline provides bounded grace.
-7. On that wake, drain unread activity once. If no substantive progress, blocker, review-ready, verdict, or completion signal arrived by the deadline, send one direct status request and use read-only liveness checks.
+7. On that wake, drain unread activity once. If no substantive progress, blocker, review-ready, verdict, or completion signal arrived by the deadline, send one direct status request, use read-only liveness checks, and report silence or liveness evidence to the human.
 8. The supervision wake is cleared when work is complete, held, blocked on a known policy, harness, approval, or permission condition, awaiting human authority, or otherwise inactive.
 9. No shell sleeps, stacked deadlines, repeated read-log polling, repeated reminders for the same miss, process manipulation, or unauthorized reassignment are permitted.
 

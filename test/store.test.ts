@@ -169,37 +169,61 @@ describe("Principal to ScopedStore isolation", () => {
       access: "manage",
     })).toThrow(operatorErrors.CUBE_ID_INVALID);
   });
-  it("keeps delegated Queen follow-up milestone-based and operator-controlled", () => {
-    expect(PLATFORM_QUEEN_DETAILED_DESCRIPTION).toContain(
-      "Use START NOW, RESUME NOW, REVIEW NOW, or HOLD",
+  function hasCoordinatorLifecycleSemantics(description: string): boolean {
+    const points = new Map(
+      [...description.matchAll(/^(\d)\. (.+)$/gmu)].map((match) => [match[1]!, match[2]!] as const),
     );
-    expect(PLATFORM_QUEEN_DETAILED_DESCRIPTION).toContain(
-      "ACK and claim are receipt only",
+    return points.size === 9 &&
+      /activation.*within two minutes.*polling.*only.*dispatch.*first receipt.*borg_ack.*CLAIM.*STARTING.*PROGRESS/iu.test(points.get("1") ?? "") &&
+      /polling stops immediately.*signal arrives/iu.test(points.get("2") ?? "") &&
+      /ACK.*CLAIM.*receipt only.*STARTING.*PROGRESS.*prove activation/iu.test(points.get("3") ?? "") &&
+      /receipt.*end the active turn.*transitions.*inbox.*Monitor.*wake.*dormant deadline.*does not keep.*turn open/iu.test(points.get("4") ?? "") &&
+      /receipt.*without activation.*arm exactly one.*two-minute.*activation.*replaces or clears.*never stack/iu.test(points.get("5") ?? "") &&
+      /STARTING.*PROGRESS.*active work.*arm or reset exactly one.*12 to 15 minutes.*after the latest substantive signal.*progress.*every ten minutes.*bounded grace/iu.test(points.get("6") ?? "") &&
+      /^On that wake, drain unread activity once\. If no .* arrived by the deadline, send one direct status request, use read-only liveness checks, and report silence or liveness evidence to the human\.$/u.test(points.get("7") ?? "") &&
+      /wake is cleared.*complete.*held.*blocked.*policy.*harness.*approval.*permission.*human authority.*inactive/iu.test(points.get("8") ?? "") &&
+      /No shell sleeps.*stacked deadlines.*repeated read-log polling.*repeated reminders.*process manipulation.*unauthorized reassignment/iu.test(points.get("9") ?? "");
+  }
+
+  it("defines the bounded delegated Queen supervision lifecycle", () => {
+    expect(hasCoordinatorLifecycleSemantics(PLATFORM_QUEEN_DETAILED_DESCRIPTION)).toBe(true);
+    expect(PLATFORM_QUEEN_DETAILED_DESCRIPTION).toMatch(
+      /missed milestone never authorizes an ownership change.*explicit human operator approval/isu,
     );
-    expect(PLATFORM_QUEEN_DETAILED_DESCRIPTION).toContain(
-      "Follow work through substantive milestones, not elapsed-time deadlines",
-    );
-    expect(PLATFORM_QUEEN_DETAILED_DESCRIPTION).toContain(
-      "send at most one direct status request",
-    );
-    expect(PLATFORM_QUEEN_DETAILED_DESCRIPTION).toContain(
-      "report silence or liveness evidence to the human",
-    );
-    expect(PLATFORM_QUEEN_DETAILED_DESCRIPTION).toContain(
-      "never authorizes an ownership change",
-    );
-    expect(PLATFORM_QUEEN_DETAILED_DESCRIPTION).toContain(
-      "explicit human operator approval for the exact work item and recipient",
-    );
-    expect(PLATFORM_QUEEN_DETAILED_DESCRIPTION).toContain(
-      "Do not interrupt slow local work merely to satisfy a cadence",
-    );
-    expect(PLATFORM_QUEEN_DETAILED_DESCRIPTION).toContain(
-      "BLOCKED immediately",
-    );
-    expect(PLATFORM_QUEEN_DETAILED_DESCRIPTION).not.toMatch(
-      /(?:within|further|every) (?:2|5|10) minutes|activation reminder|probe liveness|eligible and authorized reassignment/i,
-    );
+    expect(PLATFORM_QUEEN_DETAILED_DESCRIPTION).toContain("BLOCKED immediately");
+  });
+
+  it.each([
+    {
+      failure: "keeps the turn open and ignores Monitor transitions",
+      mutate: (value: string) => value.replace(
+        "After receipt, end the active turn. Normal transitions arrive through inbox or Monitor wake-ups; a dormant deadline does not keep the current turn open.",
+        "After receipt, keep the active turn open and ignore normal inbox or Monitor wake-ups; the dormant deadline keeps the current turn open.",
+      ),
+    },
+    {
+      failure: "leaves the activation deadline armed and permits stacking",
+      mutate: (value: string) => value.replace(
+        "Activation replaces or clears it; deadline wakes never stack.",
+        "Activation leaves it armed; deadline wakes may stack.",
+      ),
+    },
+    {
+      failure: "keys supervision to the first signal without reset",
+      mutate: (value: string) => value.replace(
+        "arm or reset exactly one dormant supervision wake for 12 to 15 minutes after the latest substantive signal",
+        "arm exactly one dormant supervision wake for 12 to 15 minutes after the first substantive signal without resetting it",
+      ),
+    },
+    {
+      failure: "runs status evaluation when no transition is overdue",
+      mutate: (value: string) => value.replace(
+        "If no substantive progress, blocker, review-ready, verdict, or completion signal arrived by the deadline, send one direct status request",
+        "Whether or not a transition is overdue, send one direct status request",
+      ),
+    },
+  ])("rejects lifecycle text that $failure", ({ mutate }) => {
+    expect(hasCoordinatorLifecycleSemantics(mutate(PLATFORM_QUEEN_DETAILED_DESCRIPTION))).toBe(false);
   });
 
   it("limits clients to database grants and returns no unauthorized cube oracle", () => {

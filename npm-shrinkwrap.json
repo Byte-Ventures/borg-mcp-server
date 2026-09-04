@@ -1,12 +1,12 @@
 {
   "name": "borgmcp-server",
-  "version": "4.0.2",
+  "version": "4.1.0",
   "lockfileVersion": 3,
   "requires": true,
   "packages": {
     "": {
       "name": "borgmcp-server",
-      "version": "4.0.2",
+      "version": "4.1.0",
       "license": "SEE LICENSE IN LICENSE",
       "dependencies": {
         "borgmcp-shared": "2.1.0",

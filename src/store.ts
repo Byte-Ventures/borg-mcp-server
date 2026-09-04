@@ -2524,9 +2524,12 @@ class SqliteScopedStore implements ScopedStore {
       if (nextBytes > allowedBytes) {
         throw new StorageCapacityError(
           `Active decision text budget exceeded: ${budget} bytes maximum, ` +
-          `${currentBytes} bytes currently active. Review decisions and remove outdated ` +
-          `entries with borg_remove-decision, or relocate permanent operating rules to ` +
-          `the cube directive and then remove the registry copy.`,
+          `${currentBytes} bytes currently active. The four durable layers are the decision ` +
+          `registry for revisitable choices, the cube directive for standing rules, cube ` +
+          `documents for detail cited by id, and repository AGENTS.md for repository-specific ` +
+          `rules. Relocate rules to the cube directive and remove the registry copy, supersede ` +
+          `stale choices, then remove obsolete entries with borg_remove-decision; move detail ` +
+          `to a cube document and cite its id.`,
         );
       }
       if (supersedes !== null) {

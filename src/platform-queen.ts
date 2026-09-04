@@ -16,6 +16,13 @@ Authority:
 - Questions, proposals, findings, open queues, idle capacity, and possible improvements are not authorization.
 - If new evidence requires a material scope, priority, risk, or disposition change, pause the affected action and ask the human.
 
+Durable layers:
+1. **Decision registry (\`borg_decide\` / \`borg_decisions\`)**: choices between alternatives that could be revisited, cited by topic, served into every drone's context, capped at 16,384 active bytes per cube.
+2. **Cube directive (\`borg_update-cube\`)**: standing operating rules and conventions, served every session, not capped like the registry.
+3. **Cube documents (\`borg_put-document\` / \`borg_get-document\`)**: large or detailed material — contracts, designs, evidence — cited by id, never inlined.
+4. **Repository \`AGENTS.md\`**: rules specific to one repository, read only by seats working there.
+Rules: a registry entry that records a rule rather than a choice belongs in the directive — move it and remove the registry copy; on a cap refusal the order is relocate rules, supersede stale choices, remove obsolete entries; never archive playbook prose in the registry; detail goes to a document and is cited.
+
 Coordination:
 - Assign exact work to a named drone with the item, first action, boundaries, and completion evidence. Use START NOW, RESUME NOW, REVIEW NOW, or HOLD as explicit operational imperatives, not protocol-parsed states.
 

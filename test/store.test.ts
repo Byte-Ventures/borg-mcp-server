@@ -185,12 +185,44 @@ describe("Principal to ScopedStore isolation", () => {
       /No shell sleeps.*stacked deadlines.*repeated read-log polling.*repeated reminders.*process manipulation.*unauthorized reassignment/iu.test(points.get("9") ?? "");
   }
 
+  function hasDurableLayerSemantics(description: string): boolean {
+    const section = description.match(/Durable layers:\n(?<body>[\s\S]*?)(?:\n\n[^\d-]|$)/u)?.groups?.["body"] ?? "";
+    const layers = new Map(
+      [...section.matchAll(/^(\d)\. \*\*(.+?)\*\*: (.+)$/gmu)]
+        .map((match) => [match[2]!, match[3]!] as const),
+    );
+    const rules = section.match(/^Rules: (.+)$/mu)?.[1] ?? "";
+
+    return layers.size === 4 &&
+      /choices between alternatives.*revisited.*cited by topic.*16,384 active bytes.*per cube/iu
+        .test(layers.get("Decision registry (`borg_decide` / `borg_decisions`)") ?? "") &&
+      /standing operating rules.*served every session.*not capped like the registry/iu
+        .test(layers.get("Cube directive (`borg_update-cube`)") ?? "") &&
+      /large or detailed material.*cited by id.*never inlined/iu
+        .test(layers.get("Cube documents (`borg_put-document` / `borg_get-document`)") ?? "") &&
+      /rules specific to one repository.*only by seats working there/iu
+        .test(layers.get("Repository `AGENTS.md`") ?? "") &&
+      /rule rather than a choice.*directive.*move it.*remove the registry copy/iu.test(rules) &&
+      /relocate rules.*supersede stale choices.*remove obsolete/iu.test(rules) &&
+      /never archive playbook prose.*detail.*document.*cited/iu.test(rules);
+  }
+
   it("defines the bounded delegated Queen supervision lifecycle", () => {
     expect(hasCoordinatorLifecycleSemantics(PLATFORM_QUEEN_DETAILED_DESCRIPTION)).toBe(true);
     expect(PLATFORM_QUEEN_DETAILED_DESCRIPTION).toMatch(
       /missed milestone never authorizes an ownership change.*explicit human operator approval/isu,
     );
     expect(PLATFORM_QUEEN_DETAILED_DESCRIPTION).toContain("BLOCKED immediately");
+  });
+
+  it("teaches the Queen the four durable layers and registry curation order", () => {
+    expect(hasDurableLayerSemantics(PLATFORM_QUEEN_DETAILED_DESCRIPTION)).toBe(true);
+
+    const invertedRelocation = PLATFORM_QUEEN_DETAILED_DESCRIPTION.replace(
+      "a registry entry that records a rule rather than a choice belongs in the directive",
+      "a registry entry that records a rule rather than a choice belongs in the registry",
+    );
+    expect(hasDurableLayerSemantics(invertedRelocation)).toBe(false);
   });
 
   it.each([
@@ -1711,7 +1743,9 @@ describe("Principal to ScopedStore isolation", () => {
           message: expect.stringContaining("10 bytes maximum, 9 bytes currently active"),
         }));
       expect(() => client.recordDecision(ids.cubeA, { topic: "b", decision: "x" }))
-        .toThrow(/remove outdated entries with borg_remove-decision/);
+        .toThrow(
+          /decision registry.*cube directive.*cube documents.*repository AGENTS\.md.*relocate rules.*supersede stale choices.*remove obsolete entries.*detail.*document/isu,
+        );
       expect(snapshot()).toEqual(before);
       expect(client.listDecisions(ids.cubeA)).toEqual([first]);
     } finally {

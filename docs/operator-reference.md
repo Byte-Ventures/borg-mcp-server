@@ -175,9 +175,9 @@ from retained rows for up to the largest supported window of 60 minutes.
 The status words LIVE, RECENT, QUIET, and DARK keep liveness meaningful without
 color. The feed query retains at most the eight newest entries, while the
 interactive layout shows up to four according to the available height. Each
-row contains only a sanitized, terminal-width-truncated head of its message;
-the database query bounds that head to 256 code points. It does not display
-full message bodies, actor or recipient IDs, or document contents.
+row shows a sanitized message preview of up to 256 code points, shortened
+further to fit the terminal width. A message within that bound can appear
+whole. The feed does not display actor or recipient IDs or document contents.
 
 The dashboard refreshes on committed activity, acknowledgements, terminal
 resize, and a bounded five-second age tick. New activity produces a short,
@@ -243,9 +243,10 @@ the ownership and private filesystem permissions on `BORG_SERVER_DATA_DIR`
 user to own the private directory and database, and rejects untrusted writable
 path ancestors. It is not a per-client, per-principal, tenant-scoped, or remote
 dashboard. The command refuses missing, non-private, incompatible, or stopped
-installations. Its feed has the same eight-entry, 256-code-point sanitized
-message-head boundary as the embedded dashboard and never displays a full
-message body.
+installations. Its feed queries the same eight newest entries as the embedded
+dashboard and shows sanitized message previews of up to 256 code points,
+shortened further to fit the terminal width. A message within that bound can
+appear whole; actor or recipient IDs and document contents are not displayed.
 
 ## Network configuration
 

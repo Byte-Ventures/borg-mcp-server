@@ -147,22 +147,39 @@ process exits, remove `runtime.lock` from the server data directory and retry.
 
 `borg-mcp-server start` remains a foreground command. In an interactive
 terminal it opens a read-only dashboard showing the verified server identity,
-the effective endpoint and bind mode, and an attention-first Sensor Grid. The
-layout prioritizes the ATTN band, the focused cube's per-drone status and
-attention cells, one shared cube-level Sensor Scope, a recent activity feed,
-and then a paged cube list ranked by coordination posts in the trailing 15
-minutes. The scope aggregates the existing five-second activity samples across
-the focused cube; it does not draw per-drone activity graphs. Distinct posting
-drones break ranking ties. The scope has a separate dotted baseline and labels
-the start, intermediate thirds, and current end of the selected window. The
-status words LIVE, RECENT, QUIET, and DARK keep liveness meaningful without
+the effective endpoint and bind mode, and an attention-first Command dashboard.
+Its green-black canvas uses lime identity and structural bands, teal status and
+message marks, and amber attention. At roomy sizes a narrow lime rail joins
+the scope and cube list on the left; the wider right column holds the drone
+board above the activity feed. The cube list remains paged and ranked by posts
+in the trailing 15 minutes, with distinct posting drones breaking ties.
+
+The focused cube's scope counts persisted activity messages in the selected
+window, independently of the short feed tail and of viewer refresh frequency.
+Lime volume bars and teal sender traces share exactly the same time buckets.
+A sender cell marks message presence: several messages increase the volume
+count but still occupy one sender cell. Numbered sender labels follow the
+drone board's ordering; additional rows are counted when space is limited.
+These are message counts, not an inference that a drone is working or idle.
+
+The scope labels its count scale, actual bucket duration (`~` denotes a rounded
+duration), selected window, and coverage. Its separate baseline and time axis
+show the start, intermediate thirds, and current end. Quiet dots mean observed
+inactivity; `░` (`/` in ASCII) means unavailable history; `▒` (`:` in ASCII)
+marks a bucket only partly covered. Coverage starts at cube creation or just
+after the newest pruned activity timestamp, whichever is later. History before
+that boundary is not assumed to be empty. A new cube without observed time
+shows observation pending; the roster remains available. Counts are recomputed
+from retained rows for up to the largest supported window of 60 minutes.
+
+The status words LIVE, RECENT, QUIET, and DARK keep liveness meaningful without
 color. The feed query retains at most the eight newest entries, while the
 interactive layout shows up to four according to the available height. Each
 row contains only a sanitized, terminal-width-truncated head of its message;
 the database query bounds that head to 256 code points. It does not display
 full message bodies, actor or recipient IDs, or document contents.
 
-The Sensor Grid refreshes on committed activity, acknowledgements, terminal
+The dashboard refreshes on committed activity, acknowledgements, terminal
 resize, and a bounded five-second age tick. New activity produces a short,
 event-driven cube pulse. By default, one scan column advances inside the shared
 scope at no more than two frames per second without reading the database. A
@@ -178,23 +195,25 @@ activity window without changing it automatically, and Space pages the cube
 list. These keys change presentation only and never mutate server or cube
 state.
 
-At 100 columns and wider, the shared scope and drone board render side by side;
-at narrower widths they stack. Below 12 rows, the endpoint/bind row, feed, and
-cube list yield to a compact deck with an inline scope ramp and the highest
+At 100 columns and wider, with at least 20 rows, the scope/cube-list column and
+drone-board/feed column render side by side, using approximately 30% and 70%
+of the width. At narrower or shorter sizes they stack, and decorative framing
+and sender rows yield before priority drone information. Below 12 rows, the
+endpoint/bind row, feed, and cube list yield to a compact deck with an inline scope ramp and the highest
 priority drone status cells. Stale and then unacknowledged attention targets
 precede liveness ordering, so exact 40-by-10 terminals retain ATTN plus the
 target STATUS/name/age cell. The dashboard uses box-drawing terminal glyphs by
 default. `--ascii` forces a strict 7-bit rendering, and incompatible
 terminal/locale settings select that fallback automatically. `NO_COLOR`
 removes color without removing status labels or layout cues.
-`BORGMCP_DASHBOARD_MOTION=ambient` (the default) moves the in-scope scan column
-every 500 milliseconds and retains event pulses. `calm` advances the scan
+`BORGMCP_DASHBOARD_MOTION=ambient` (the default) moves a subordinate scope-axis
+marker every 500 milliseconds and retains event pulses. `calm` advances the scan
 column once after each successful data refresh, including the five-second idle
 refresh, and retains event pulses. `off` leaves the marker fixed at its
 terminal position with no marker animation or event pulse.
 `--no-motion` selects `off`, fixes the scan column at the scope's terminal
 position, and always wins over the environment setting.
-An interactive `TERM=dumb` terminal keeps the same Sensor Grid hierarchy with
+An interactive `TERM=dumb` terminal keeps the same dashboard hierarchy with
 strict ASCII and no color. Terminals below 40 columns or 10 rows receive a
 bounded plain-text status view; at constrained sizes lower-priority feed and
 cube-list rows yield before ATTN and the focused drone board's status, name,

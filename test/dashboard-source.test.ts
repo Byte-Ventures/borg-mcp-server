@@ -18,6 +18,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { bootstrapServer } from "../src/bootstrap.js";
 import { openReadonlyDashboardSnapshotSource } from "../src/dashboard-source.js";
+import { dashboardScopeBuckets } from "../src/dashboard-ink.js";
 import { operatorErrors } from "../src/operator-error.js";
 import { droneSessionPrincipal } from "../src/principal.js";
 import { openStore, type StoreRuntime } from "../src/store.js";
@@ -42,6 +43,49 @@ afterEach(async () => {
 });
 
 describe("read-only dashboard snapshot source", () => {
+  it("reads sender history beyond the feed and preserves the retention coverage boundary", async () => {
+    directory = await realpath(await mkdtemp(join(tmpdir(), "borg-dashboard-scope-")));
+    await bootstrapServer(directory);
+    let now = new Date("2026-07-25T11:00:00.000Z");
+    writer = await openStore({
+      path: join(directory, "borg.db"), clock: () => now,
+      storageLimits: { maxActivityEntriesPerCube: 10, maxDatabaseBytes: 100_000_000, minFreeDiskBytes: 1 },
+    });
+    seed(writer);
+    const sender = writer.forPrincipal(droneSessionPrincipal({
+      id: ids.session, clientId: ids.client, cubeId: ids.cube, droneId: ids.drone,
+    }));
+    expect(writer.dashboard.read().cubes[0]?.scope).toEqual({
+      observed_from: now.toISOString(), messages: [],
+    });
+    for (let index = 0; index < 30; index += 1) {
+      now = new Date(Date.parse("2026-07-25T11:30:00.000Z") + index * 1_000);
+      sender.appendLog(ids.cube, { message: `scope-${index}`, visibility: "broadcast" });
+    }
+    now = new Date("2026-07-25T12:00:00.000Z");
+    const snapshot = writer.dashboard.read();
+    expect(snapshot.recent_activity).toHaveLength(8);
+    expect(snapshot.cubes[0]?.scope).toEqual({
+      observed_from: "2026-07-25T11:30:19.001Z",
+      messages: Array.from({ length: 10 }, (_, index) => ({
+        created_at: new Date(Date.parse("2026-07-25T11:30:20.000Z") + index * 1_000).toISOString(),
+        drone_id: ids.drone,
+      })),
+    });
+    const reader = await openReadonlyDashboardSnapshotSource({ dataDirectory: directory, clock: () => now });
+    try { expect(reader.read().cubes[0]?.scope).toEqual(snapshot.cubes[0]?.scope); }
+    finally { reader.close(); }
+    const buckets = () => dashboardScopeBuckets(
+      { ...writer!.dashboard.read().cubes[0]!, rank: 1, rank_change: 0 }, now.toISOString(), 900_000, 30,
+    );
+    expect(buckets().every((bucket) => bucket.count === 0 && bucket.senders.size === 0)).toBe(true);
+    sender.appendLog(ids.cube, { message: "controlled-one", visibility: "broadcast" });
+    expect(buckets().at(-1)).toMatchObject({ count: 1, senders: new Set([ids.drone]) });
+    now = new Date(now.getTime() + 1);
+    sender.appendLog(ids.cube, { message: "controlled-two", visibility: "broadcast" });
+    expect(buckets().at(-1)).toMatchObject({ count: 2, senders: new Set([ids.drone]) });
+  });
+
   it("uses the canonical wake-stale boundary and clears attention on recipient acknowledgement", async () => {
     directory = await realpath(await mkdtemp(join(tmpdir(), "borg-dashboard-attention-")));
     await bootstrapServer(directory);

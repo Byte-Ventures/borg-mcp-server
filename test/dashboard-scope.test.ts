@@ -9,7 +9,7 @@ import {
 } from "../src/dashboard.js";
 
 const server: DashboardServerIdentity = {
-  name: "borgmcp-server", version: "4.1.0", endpoint: "https://127.0.0.1:7091",
+  name: "borgmcp-server", version: "4.2.0", endpoint: "https://127.0.0.1:7091",
   bind_mode: "loopback", state: "online", started_at: "2026-09-06T09:00:00.000Z",
 };
 const now = "2026-09-06T12:00:00.000Z";

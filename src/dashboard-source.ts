@@ -36,7 +36,9 @@ export function createDashboardSnapshotReader(
     throw new Error("Dashboard cube limit is invalid.");
   }
   const statement = database.prepare(`
-    SELECT cube.id, cube.name,
+    SELECT cube.id, cube.name, cube.created_at,
+           (SELECT MAX(cursor.created_at) FROM expired_activity_cursors AS cursor
+            WHERE cursor.cube_id = cube.id) AS retention_horizon,
            (SELECT COUNT(*) FROM activity_log AS entry
             WHERE entry.cube_id = cube.id AND entry.created_at >= ?) AS posts_15m,
            (SELECT COUNT(DISTINCT entry.drone_id) FROM activity_log AS entry
@@ -106,46 +108,73 @@ export function createDashboardSnapshotReader(
     ORDER BY entry.created_at DESC, entry.id DESC
     LIMIT ?
   `);
+  const scopeMessages = database.prepare(`
+    SELECT created_at, drone_id FROM activity_log
+    WHERE cube_id = ? AND created_at >= ? AND created_at <= ?
+    ORDER BY created_at, id
+  `);
   return () => {
-    const capturedAt = clock();
-    const cutoff = new Date(
-      capturedAt.getTime() - DASHBOARD_ACTIVITY_WINDOW_MS,
-    ).toISOString();
-    const tickCutoff = new Date(
-      capturedAt.getTime() - DASHBOARD_IDLE_REFRESH_MS,
-    ).toISOString();
-    const staleCutoff = new Date(
-      capturedAt.getTime() - WAKE_STALE_AFTER_MS,
-    ).toISOString();
-    const rows = statement.all(cutoff, cutoff, cutoff, maxCubes);
-    let attention = emptyAttention();
-    const cubes = rows.map((row) => {
-      const cubeId = requiredText(row, "id");
-      const droneRows = drones.all(cutoff, tickCutoff, cutoff, staleCutoff, cubeId, cubeId);
-      const dashboardDrones = droneRows.map((drone) => dashboardDrone(drone, requiredText(row, "name")));
-      const cubeAttention = combineAttention(dashboardDrones.map((drone) => drone.attention));
-      attention = combineAttention([attention, cubeAttention]);
-      return Object.freeze({
-        id: cubeId,
-        name: requiredText(row, "name"),
-        posts_15m: requiredInteger(row, "posts_15m"),
-        distinct_posting_drones_15m: requiredInteger(
-          row,
-          "distinct_posting_drones_15m",
-        ),
-        drones_total: requiredInteger(row, "drones_total"),
-        drones_seen_15m: requiredInteger(row, "drones_seen_15m"),
-        last_post_at: nullableText(row, "last_post_at"),
-        drones: Object.freeze(dashboardDrones),
-        attention: cubeAttention,
+    database.exec("SAVEPOINT dashboard_snapshot");
+    try {
+      const capturedAt = clock();
+      const cutoff = new Date(
+        capturedAt.getTime() - DASHBOARD_ACTIVITY_WINDOW_MS,
+      ).toISOString();
+      const tickCutoff = new Date(
+        capturedAt.getTime() - DASHBOARD_IDLE_REFRESH_MS,
+      ).toISOString();
+      const staleCutoff = new Date(
+        capturedAt.getTime() - WAKE_STALE_AFTER_MS,
+      ).toISOString();
+      const rows = statement.all(cutoff, cutoff, cutoff, maxCubes);
+      let attention = emptyAttention();
+      const cubes = rows.map((row) => {
+        const cubeId = requiredText(row, "id");
+        const droneRows = drones.all(cutoff, tickCutoff, cutoff, staleCutoff, cubeId, cubeId);
+        const dashboardDrones = droneRows.map((drone) => dashboardDrone(drone, requiredText(row, "name")));
+        const cubeAttention = combineAttention(dashboardDrones.map((drone) => drone.attention));
+        attention = combineAttention([attention, cubeAttention]);
+        return Object.freeze({
+          id: cubeId,
+          name: requiredText(row, "name"),
+          posts_15m: requiredInteger(row, "posts_15m"),
+          distinct_posting_drones_15m: requiredInteger(
+            row,
+            "distinct_posting_drones_15m",
+          ),
+          drones_total: requiredInteger(row, "drones_total"),
+          drones_seen_15m: requiredInteger(row, "drones_seen_15m"),
+          last_post_at: nullableText(row, "last_post_at"),
+          drones: Object.freeze(dashboardDrones),
+          attention: cubeAttention,
+          scope: Object.freeze({
+            // Pruning retains the newest expired cursor even when older cursors
+            // are trimmed. Its timestamp is excluded from complete coverage.
+            observed_from: new Date(Math.max(
+              Date.parse(requiredText(row, "created_at")),
+              nullableText(row, "retention_horizon") === null ? 0
+                : Date.parse(requiredText(row, "retention_horizon")) + 1,
+            )).toISOString(),
+            messages: Object.freeze(scopeMessages.all(
+              cubeId,
+              new Date(capturedAt.getTime() - 60 * 60_000).toISOString(),
+              capturedAt.toISOString(),
+            ).map((entry) => Object.freeze({
+              created_at: requiredText(entry, "created_at"),
+              drone_id: nullableText(entry, "drone_id"),
+            }))),
+          }),
+        });
       });
-    });
-    return Object.freeze({
-      captured_at: capturedAt.toISOString(),
-      cubes: Object.freeze(cubes),
-      attention,
-      recent_activity: Object.freeze(recentActivity.all(DASHBOARD_RECENT_ACTIVITY_LIMIT).map(dashboardRecentActivity)),
-    });
+      return Object.freeze({
+        captured_at: capturedAt.toISOString(),
+        cubes: Object.freeze(cubes),
+        attention,
+        recent_activity: Object.freeze(recentActivity.all(DASHBOARD_RECENT_ACTIVITY_LIMIT).map(dashboardRecentActivity)),
+      });
+    } finally {
+      database.exec("RELEASE dashboard_snapshot");
+    }
   };
 }
 

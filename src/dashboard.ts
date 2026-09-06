@@ -1,4 +1,4 @@
-import { createInkDashboardElement, renderInkDashboardFrame } from "./dashboard-ink.js";
+import { createInkDashboardElement, dashboardBodyBudget, renderInkDashboardFrame } from "./dashboard-ink.js";
 import { renderPlainDashboard } from "./dashboard-plain.js";
 import { render as renderInk, type Instance as InkInstance } from "ink";
 import { Writable } from "node:stream";
@@ -61,6 +61,10 @@ export interface DashboardCubeData {
   readonly last_post_at: string | null;
   readonly drones: readonly DashboardDroneData[];
   readonly attention: DashboardAttentionData;
+  readonly scope?: {
+    readonly observed_from: string;
+    readonly messages: readonly { readonly created_at: string; readonly drone_id: string | null }[];
+  };
 }
 
 export interface DashboardDataSnapshot {
@@ -122,18 +126,11 @@ export interface DashboardViewState {
   readonly focusedCubeId: string | null;
   readonly pulseCubeIds: ReadonlySet<string>;
   readonly pulsePhase: number;
-  readonly activity?: ReadonlyMap<string, readonly DashboardActivitySample[]>;
-  readonly observation?: readonly DashboardActivitySample[];
   readonly activityWindowMs?: number;
   readonly page?: number;
   readonly motionMode?: DashboardMotionMode;
   readonly motionAutoDegraded?: boolean;
   readonly ambientPhase?: number;
-}
-
-export interface DashboardActivitySample {
-  readonly capturedAt: string;
-  readonly sentRate: number;
 }
 
 export interface DashboardRenderer {
@@ -248,7 +245,6 @@ export function createDashboardRenderer(options: DashboardRenderOptions): Dashbo
     focusedCubeId: null,
     pulseCubeIds: new Set(),
     pulsePhase: 0,
-    activity: new Map(),
     activityWindowMs: DASHBOARD_ACTIVITY_WINDOW_MS,
     page: 0,
     motionMode: effectiveOptions.motionMode ?? "ambient",
@@ -378,8 +374,6 @@ export function startForegroundDashboard(input: {
   let motionMode = input.renderer.inkOptions?.motionMode ?? "ambient";
   let motionAutoDegraded = false;
   let ambientPhase = 0;
-  const activityHistory = new Map<string, DashboardActivitySample[]>();
-  const observationHistory: DashboardActivitySample[] = [];
   let previousActivity = new Map<string, {
     readonly posts15m: number;
     readonly lastPostAt: string | null;
@@ -485,8 +479,6 @@ export function startForegroundDashboard(input: {
         focusedCubeId,
         pulseCubeIds,
         pulsePhase,
-        activity: activityHistory,
-        observation: observationHistory,
         activityWindowMs,
         page,
         motionMode,
@@ -551,7 +543,6 @@ export function startForegroundDashboard(input: {
       }
       if (motionMode === "calm") ambientPhase += 1;
       priorRanks = new Map(snapshot.cubes.map((cube) => [cube.id, cube.rank]));
-      recordDashboardActivity(snapshot, activityHistory, observationHistory, activityWindowMs);
       lastSnapshot = snapshot;
       paint();
     } catch (error) {
@@ -738,7 +729,7 @@ function createInkStdout(
       const base = `${frameStyle.background}${frameStyle.foreground}`;
       terminal.write(base === ""
         ? value
-        : `${base}${value.replaceAll("\u001b[0m", `\u001b[0m${base}`)}\u001b[0m`);
+        : `${base}${value.replace(/\u001b\[(?:0|39|49)?m/gu, (sequence) => `${sequence}${sequence === "\u001b[39m" ? frameStyle.foreground : base}`)}\u001b[0m`);
     },
     writable: false,
   });
@@ -750,12 +741,12 @@ function dashboardInkFrameStyle(
 ): { readonly background: string; readonly foreground: string } {
   if (!options.color) return { background: "", foreground: "" };
   if (options.colorDepth === "truecolor") {
-    return { background: "\u001b[48;2;9;11;16m", foreground: "\u001b[38;2;230;161;90m" };
+    return { background: "\u001b[48;2;6;12;9m", foreground: "\u001b[38;2;213;229;218m" };
   }
   if (options.colorDepth === "ansi256") {
-    return { background: "\u001b[48;5;232m", foreground: "\u001b[38;5;215m" };
+    return { background: "\u001b[48;5;232m", foreground: "\u001b[38;5;253m" };
   }
-  return { background: "", foreground: "" };
+  return { background: "\u001b[40m", foreground: "\u001b[37m" };
 }
 
 function dashboardBackgroundFill(columns: number, rows: number, background: string): string {
@@ -788,28 +779,15 @@ function dashboardFrameKey(
     : 0;
   const footerRows = lifecycleRows + 1;
   const bodyRows = compact ? Math.max(1, height - 5) : Math.max(0, height - (5 + footerRows));
-  const desiredFeedRows = compact || snapshot.recent_activity.length === 0 ? 0 : Math.min(
-    snapshot.recent_activity.length,
-    bodyRows < 10 ? 1 : height >= 36 ? 4 : 3,
-  );
-  const feedRows = Math.min(desiredFeedRows, Math.max(0, bodyRows - 1));
-  const listSpace = Math.max(1, bodyRows - feedRows);
-  const minimumPanelRows = Math.min(4, Math.max(1, bodyRows - feedRows));
-  const listLimit = Math.max(0, bodyRows - feedRows - minimumPanelRows);
-  const desiredListCap = Math.max(
-    snapshot.cubes.length > 1 && listSpace >= 4 ? 2 : 1,
-    Math.floor(listSpace * 0.42),
-  );
-  const listCap = compact ? 0 : Math.min(listLimit, desiredListCap);
-  const pageCount = listCap === 0 ? 1 : Math.max(1, Math.ceil(snapshot.cubes.length / listCap));
-  const page = Math.max(0, view.page ?? 0) % pageCount;
-  const summaryCubes = snapshot.cubes.slice(page * listCap, page * listCap + Math.min(snapshot.cubes.length, listCap));
   const focus = view.autoFollow || view.focusedCubeId === null
     ? snapshot.cubes[0]
     : snapshot.cubes.find((cube) => cube.id === view.focusedCubeId) ?? snapshot.cubes[0];
-  const focusActivity = [...(view.activity?.entries() ?? [])]
-    .filter(([key]) => focus !== undefined && key.startsWith(`${focus.id}:`))
-    .sort(([left], [right]) => left.localeCompare(right));
+  const budget = dashboardBodyBudget(snapshot, focus, width, height, bodyRows);
+  const feedRows = compact ? 0 : budget.feedRows;
+  const listCap = compact ? 0 : budget.listCap;
+  const pageCount = listCap === 0 ? 1 : Math.max(1, Math.ceil(snapshot.cubes.length / listCap));
+  const page = Math.max(0, view.page ?? 0) % pageCount;
+  const summaryCubes = snapshot.cubes.slice(page * listCap, page * listCap + Math.min(snapshot.cubes.length, listCap));
   const visiblePulseCubeIds = summaryCubes
     .filter((cube) => view.pulseCubeIds.has(cube.id))
     .map((cube) => cube.id)
@@ -835,8 +813,6 @@ function dashboardFrameKey(
       focusedCubeId: view.focusedCubeId,
       pulseCubeIds: visiblePulseCubeIds,
       pulsePhase: visiblePulseCubeIds.length > 0 ? view.pulsePhase : 0,
-      activity: focusActivity,
-      observation: view.observation ?? [],
       activityWindowMs,
       page,
       motionMode: view.motionMode ?? options.motionMode ?? "ambient",
@@ -863,43 +839,4 @@ function dashboardLifecycleFooterRows(value: string, width: number): number {
     }
     return total + rows;
   }, 0);
-}
-
-function recordDashboardActivity(
-  snapshot: DashboardSnapshot,
-  history: Map<string, DashboardActivitySample[]>,
-  observation: DashboardActivitySample[],
-  windowMs: number,
-): void {
-  const capturedAt = Date.parse(snapshot.captured_at);
-  if (!Number.isFinite(capturedAt)) return;
-  recordActivityBucket(observation, { capturedAt: snapshot.captured_at, sentRate: 0 });
-  while (observation.length > 0 && Date.parse(observation[0]!.capturedAt) < capturedAt - Math.max(windowMs, 60 * 60_000)) observation.shift();
-  const activeKeys = new Set<string>();
-  for (const cube of snapshot.cubes) for (const drone of cube.drones) {
-    const key = `${cube.id}:${drone.id}`;
-    activeKeys.add(key);
-    const samples = history.get(key) ?? [];
-    recordActivityBucket(samples, { capturedAt: snapshot.captured_at, sentRate: drone.sent_5s });
-    const oldest = capturedAt - Math.max(windowMs, 60 * 60_000);
-    while (samples.length > 0 && Date.parse(samples[0]!.capturedAt) < oldest) samples.shift();
-    history.set(key, samples);
-  }
-  for (const key of history.keys()) if (!activeKeys.has(key)) history.delete(key);
-}
-
-function recordActivityBucket(
-  samples: DashboardActivitySample[],
-  sample: DashboardActivitySample,
-): void {
-  const timestamp = Date.parse(sample.capturedAt);
-  if (!Number.isFinite(timestamp)) return;
-  const bucket = Math.floor(timestamp / DASHBOARD_IDLE_REFRESH_MS);
-  const existing = samples.findIndex((candidate) =>
-    Math.floor(Date.parse(candidate.capturedAt) / DASHBOARD_IDLE_REFRESH_MS) === bucket);
-  if (existing >= 0) samples[existing] = sample;
-  else {
-    samples.push(sample);
-    samples.sort((left, right) => Date.parse(left.capturedAt) - Date.parse(right.capturedAt));
-  }
 }

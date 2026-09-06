@@ -13,7 +13,6 @@ import {
   EMBEDDED_DASHBOARD_FOOTER,
   EMBEDDED_DASHBOARD_LIFECYCLE_FOOTER,
   sanitizeTerminalText,
-  type DashboardActivitySample,
   type DashboardColorDepth,
   type DashboardCubeSnapshot,
   type DashboardDroneData,
@@ -29,7 +28,13 @@ export interface InkRenderOptions extends DashboardRenderOptions {
 
 type InkTextStyle = { readonly sequence?: string };
 
-interface NightwatchPalette {
+interface CollectivePalette {
+  readonly primary: string;
+  readonly identity: string;
+  readonly statusBand: string;
+  readonly attentionBand: string;
+  readonly panelColor: string;
+  readonly selectionColor: string;
   readonly background: string;
   readonly backgroundColor: string;
   readonly chrome: string;
@@ -44,6 +49,7 @@ interface NightwatchPalette {
 const DASHBOARD_PULSE_PHASES = 4;
 const DASHBOARD_ACTIVITY_PULSE_MARKERS = [" ", "_", "-", "o", "O"] as const;
 const reset = "\u001b[0m";
+const textReset = "\u001b[39m\u001b[22m";
 
 /**
  * The public renderer stays synchronous for the frame oracle. Every visible
@@ -63,8 +69,8 @@ export function renderInkDashboardFrame(
     createInkDashboardElement(snapshot, width, height, view, options),
     { columns: width },
   );
-  const palette = nightwatchPalette(options.color ? options.colorDepth ?? "ansi16" : "none");
-  return normalizeInkFrame(rendered, width, height, palette.background, palette.chrome);
+  const palette = collectivePalette(options.color ? options.colorDepth ?? "ansi16" : "none");
+  return normalizeInkFrame(rendered, width, height, palette.background, palette.primary);
 }
 
 export function createInkDashboardElement(
@@ -77,6 +83,30 @@ export function createInkDashboardElement(
   return h(InkDashboard, { snapshot, width, height, view, options });
 }
 
+// Shared with the live frame projection so paging follows the rendered budget.
+export function dashboardBodyBudget(
+  snapshot: DashboardSnapshot,
+  focus: DashboardCubeSnapshot | undefined,
+  width: number,
+  height: number,
+  bodyRows: number,
+): { feedRows: number; listCap: number; panelRows: number; commandColumns: boolean } {
+  const commandColumns = width >= 100 && height >= 20;
+  const desiredFeedRows = Math.min(snapshot.recent_activity.length, bodyRows < 10 ? 1 : height >= 36 ? 4 : 3);
+  // Reserve the focused board and a readable scope before ancillary rows.
+  const desiredPanelRows = focus === undefined ? 3 : width < 64
+    ? focus.drones.length + 2
+    : 6 + focus.drones.length + 4 + (focus.attention.unacked_directed > 0 ? 1 : 0);
+  const desiredCommandBoardRows = Math.max(6, (focus?.drones.length ?? 0) + 5);
+  const reservedPanelRows = Math.min(bodyRows, commandColumns ? desiredCommandBoardRows : desiredPanelRows);
+  const feedRows = Math.min(desiredFeedRows, Math.max(0, bodyRows - reservedPanelRows - (commandColumns ? 1 : 0)));
+  const listCap = commandColumns
+    ? Math.max(1, Math.floor((bodyRows * 0.4 - 2) / 3))
+    : Math.max(0, bodyRows - reservedPanelRows - feedRows);
+  const panelRows = Math.max(1, bodyRows - Math.min(snapshot.cubes.length, listCap) - feedRows);
+  return { feedRows, listCap, panelRows, commandColumns };
+}
+
 function InkDashboard(input: {
   readonly snapshot: DashboardSnapshot;
   readonly width: number;
@@ -85,7 +115,7 @@ function InkDashboard(input: {
   readonly options: InkRenderOptions;
 }): ReactNode {
   const { snapshot, width, height, view, options } = input;
-  const palette = nightwatchPalette(options.color ? options.colorDepth ?? "ansi16" : "none");
+  const palette = collectivePalette(options.color ? options.colorDepth ?? "ansi16" : "none");
   const focus = view.autoFollow || view.focusedCubeId === null
     ? snapshot.cubes[0]
     : snapshot.cubes.find((cube) => cube.id === view.focusedCubeId) ?? snapshot.cubes[0];
@@ -100,21 +130,10 @@ function InkDashboard(input: {
   const footerRows = lifecycleRows + 1;
   const chromeRows = 5 + footerRows;
   const bodyRows = Math.max(0, height - chromeRows);
-  const desiredFeedRows = snapshot.recent_activity.length === 0 ? 0 : Math.min(
-    snapshot.recent_activity.length,
-    bodyRows < 10 ? 1 : height >= 36 ? 4 : 3,
+  const { feedRows, listCap, panelRows, commandColumns } = dashboardBodyBudget(
+    snapshot, focus, width, height, bodyRows,
   );
-  const feedRows = Math.min(desiredFeedRows, Math.max(0, bodyRows - 1));
-  const listSpace = Math.max(1, bodyRows - feedRows);
-  const minimumPanelRows = Math.min(4, Math.max(1, bodyRows - feedRows));
-  const listLimit = Math.max(0, bodyRows - feedRows - minimumPanelRows);
-  const desiredListCap = Math.max(
-    snapshot.cubes.length > 1 && listSpace >= 4 ? 2 : 1,
-    Math.floor(listSpace * 0.42),
-  );
-  const listCap = Math.min(listLimit, desiredListCap);
   const listRows = Math.min(snapshot.cubes.length, listCap);
-  const panelRows = Math.max(1, bodyRows - listRows - feedRows);
   const pageCount = listCap === 0 ? 1 : Math.max(1, Math.ceil(snapshot.cubes.length / listCap));
   const page = Math.max(0, view.page ?? 0) % pageCount;
   const pageStart = page * listCap;
@@ -124,7 +143,57 @@ function InkDashboard(input: {
     h(InkBindStatus, { key: "bind", snapshot, width, glyphs, palette }),
     h(InkAttention, { key: "attention", snapshot, width, glyphs, palette }),
     h(InkRule, { key: "separator-top", width, glyphs, palette }),
-    focus === undefined
+  ];
+  if (commandColumns && focus !== undefined) {
+    const leftWidth = Math.floor((width - 3) * 0.30);
+    const rightWidth = width - leftWidth - 3;
+    const omittedCubeRow = snapshot.cubes.length > listRows ? 1 : 0;
+    const scopeRows = Math.max(9, bodyRows - Math.min(listRows * 3 + 1 + omittedCubeRow, Math.floor(bodyRows * 0.4)));
+    const cubeRows = Math.max(0, bodyRows - scopeRows - 1 - omittedCubeRow);
+    const visibleCubes = snapshot.cubes.slice(pageStart, pageStart + Math.floor(cubeRows / 3));
+    const boardRows = Math.min(bodyRows, Math.max(6, focus.drones.length + 5));
+    const left: ReactNode[] = [h(InkSensorScope, {
+      key: "scope", snapshot, cube: focus, width: leftWidth, rows: scopeRows, glyphs, view, palette,
+    }), h(InkPanelTitle, { key: "cubes-title", title: ` CUBES ${snapshot.cubes.length} `,
+      width: leftWidth, glyphs, palette })];
+    for (const cube of visibleCubes) {
+      const selected = cube.id === focus.id ? ">" : " ";
+      const pulse = view.pulseCubeIds.has(cube.id) ? activityPulseMarker(view.pulsePhase) : " ";
+      const lines = [
+        `${selected}${cube.rank} ${dashboardText(cube.name, glyphs)} ${pulse} ${rankMarker(cube.rank_change)}`,
+        `${cube.posts_15m}/15m  ${cube.distinct_posting_drones_15m} ${plural(cube.distinct_posting_drones_15m, "poster")}  ${formatAge(snapshot.captured_at, cube.last_post_at)}`,
+        `${cube.drones_seen_15m}/${cube.drones_total} seen`,
+      ];
+      lines.forEach((value, index) => left.push(h(Box, { key: `${cube.id}-${index}`, width: leftWidth, height: 1,
+        ...(selected === ">" && palette.selectionColor !== "" ? { backgroundColor: palette.selectionColor } : {}) },
+        h(Text, null, styledText(truncateCell(value, leftWidth, glyphs.ellipsis),
+          { sequence: index === 0 ? palette.primary : palette.muted })))));
+    }
+    if (visibleCubes.length < snapshot.cubes.length) left.push(h(Text, { key: "cubes-hidden" },
+      `+${snapshot.cubes.length - visibleCubes.length} cubes (Space)`));
+    const right: ReactNode[] = [h(InkDroneBoard, {
+      key: "board", snapshot, cube: focus, width: rightWidth, rows: boardRows,
+      glyphs, palette, twoColumns: false,
+    })];
+    if (bodyRows > boardRows) right.push(h(InkPanelTitle, {
+      key: "feed-title", title: " ACTIVITY FEED ", width: rightWidth, glyphs, palette,
+    }));
+    snapshot.recent_activity.slice(0, feedRows).forEach((activity, index) => right.push(
+      h(InkFeedRow, { key: activity.id, snapshot, activity, width: rightWidth, glyphs, palette,
+        showClass: true, first: index === 0 }),
+    ));
+    children.push(h(Box, { key: "command", width, height: bodyRows, flexDirection: "row", overflow: "hidden" },
+      h(Box, { width: 1, height: bodyRows, flexDirection: "column" },
+        Array.from({ length: bodyRows }, (_, index) => h(Text, { key: index }, styledText(glyphs.rail, { sequence: palette.chrome })))),
+      h(Box, { width: leftWidth, height: bodyRows, flexDirection: "column", overflow: "hidden",
+        ...(palette.panelColor === "" ? {} : { backgroundColor: palette.panelColor }) }, left),
+      h(Box, { width: 2 }),
+      h(Box, { width: rightWidth, height: bodyRows, flexDirection: "column", overflow: "hidden",
+        ...(palette.panelColor === "" ? {} : { backgroundColor: palette.panelColor }) }, right),
+    ));
+    children.push(h(InkRule, { key: "separator-bottom", width, glyphs, palette }));
+  } else {
+    children.push(focus === undefined
       ? h(InkEmptyPanel, { key: "empty-panel", width, glyphs, palette })
       : h(InkFocusPanel, {
           key: "focus-panel",
@@ -137,31 +206,32 @@ function InkDashboard(input: {
           palette,
         }),
     h(InkRule, { key: "separator-bottom", width, glyphs, palette }),
-  ];
+  );
 
-  snapshot.recent_activity.slice(0, feedRows).forEach((activity, index) => {
-    children.push(h(InkFeedRow, {
-      key: `feed-${activity.id}`,
-      snapshot,
-      activity,
-      width,
-      glyphs,
-      palette,
-      showClass: width >= 100,
-      first: index === 0,
-    }));
-  });
-  for (const [index, cube] of snapshot.cubes.slice(pageStart, pageStart + listRows).entries()) {
-    children.push(h(InkSummaryRow, {
-      key: `summary-${index}`,
-      snapshot,
-      cube,
-      width,
-      glyphs,
-      view,
-      maximumPosts,
-      palette,
-    }));
+    snapshot.recent_activity.slice(0, feedRows).forEach((activity, index) => {
+      children.push(h(InkFeedRow, {
+        key: `feed-${activity.id}`,
+        snapshot,
+        activity,
+        width,
+        glyphs,
+        palette,
+        showClass: width >= 100,
+        first: index === 0,
+      }));
+    });
+    for (const [index, cube] of snapshot.cubes.slice(pageStart, pageStart + listRows).entries()) {
+      children.push(h(InkSummaryRow, {
+        key: `summary-${index}`,
+        snapshot,
+        cube,
+        width,
+        glyphs,
+        view,
+        maximumPosts,
+        palette,
+      }));
+    }
   }
   if (lifecycleRows > 0) {
     children.push(h(InkLifecycleFooter, {
@@ -205,7 +275,7 @@ function InkCompactDashboard(input: {
   readonly options: InkRenderOptions;
   readonly glyphs: Glyphs;
 }): ReactNode {
-  const palette = nightwatchPalette(
+  const palette = collectivePalette(
     input.options.color ? input.options.colorDepth ?? "ansi16" : "none",
   );
   const lifecycleRows = input.options.footer === EMBEDDED_DASHBOARD_FOOTER ? 1 : 0;
@@ -272,25 +342,19 @@ function InkCompactDeck(input: {
   readonly rows: number;
   readonly glyphs: Glyphs;
   readonly view: DashboardViewState;
-  readonly palette: NightwatchPalette;
+  readonly palette: CollectivePalette;
 }): ReactNode {
   const windowMs = input.view.activityWindowMs ?? DASHBOARD_ACTIVITY_WINDOW_MS;
   const mode = input.view.autoFollow || input.view.focusedCubeId === null ? "(auto)" : "(pinned)";
   const prefix = `SCOPE ${dashboardText(input.cube.name, input.glyphs)} ${input.glyphs.separator} ${mode} `;
   const suffix = ` ${formatWindow(windowMs)}`;
   const graphWidth = Math.max(1, input.width - terminalCellWidth(prefix) - terminalCellWidth(suffix));
-  const samples = aggregateActivitySamples(input.cube, input.view.activity);
-  const maximum = scopeActivityScale(samples);
-  const phase = scopeSweepPosition(
-    graphWidth,
-    input.view.ambientPhase ?? 0,
-    input.view.motionMode ?? "ambient",
-  );
-  const graph = overlayScopeSweep(
-    graphText(samples, graphWidth, 1, windowMs, input.snapshot.captured_at, input.glyphs, maximum),
-    phase,
-    scopeSweepGlyph(input.glyphs),
-  ).replaceAll(" ", input.glyphs.cube[0]!);
+  const buckets = dashboardScopeBuckets(input.cube, input.snapshot.captured_at, windowMs, graphWidth);
+  const maximum = Math.max(1, ...buckets.map((bucket) => bucket.count));
+  const graph = buckets.map((bucket) => bucket.count > 0
+    ? input.glyphs.cube[Math.min(input.glyphs.cube.length - 1, Math.ceil(bucket.count / maximum * (input.glyphs.cube.length - 1)))]!
+    : bucket.coverage === 0 ? (input.glyphs === ASCII_GLYPHS ? "/" : "░")
+    : bucket.coverage < 1 ? (input.glyphs === ASCII_GLYPHS ? ":" : "▒") : input.glyphs.cube[0]!).join("");
   const available = Math.max(0, input.rows - 1);
   const prioritized = prioritizeDrones(input.snapshot.captured_at, input.cube.drones);
   const visible = prioritized.slice(0, Math.max(1, available - 1));
@@ -321,7 +385,7 @@ function InkAttention(input: {
   readonly snapshot: DashboardSnapshot;
   readonly width: number;
   readonly glyphs: Glyphs;
-  readonly palette: NightwatchPalette;
+  readonly palette: CollectivePalette;
 }): ReactNode {
   const attention = input.snapshot.attention;
   let value = "ATTN 0";
@@ -334,43 +398,30 @@ function InkAttention(input: {
       ? `>> ATTN STALE ${attention.stale_directed}  unacked ${attention.unacked_directed}  oldest ${age}${origin}`
       : `ATTN PENDING ${attention.unacked_directed}  oldest ${age}${origin}`;
   }
-  const active = input.palette.attention !== "" && attention.unacked_directed > 0;
-  const visible = truncateCell(value, input.width, input.glyphs.ellipsis);
-  const rendered = active
-    ? `${attention.stale_directed > 0 ? input.palette.attention : input.palette.liveness}${visible}${reset}`
-    : styledText(visible, { sequence: input.palette.muted });
+  const visible = truncateCell(`! ${value}`, input.width, input.glyphs.ellipsis);
   return h(Box, { width: input.width, height: 1, overflow: "hidden" },
-    h(Text, null, rendered));
+    h(Text, null, styledText(visible.padEnd(input.width), { sequence: input.palette.attentionBand })));
+
 }
 
 function InkRail(input: {
   readonly snapshot: DashboardSnapshot;
   readonly width: number;
   readonly glyphs: Glyphs;
-  readonly palette: NightwatchPalette;
+  readonly palette: CollectivePalette;
 }): ReactNode {
   const { snapshot, width, glyphs, palette } = input;
-  const identity = sanitizeTerminalText(snapshot.server.name).toUpperCase();
-  const version = sanitizeTerminalText(snapshot.server.version);
-  const uptime = formatUptime(snapshot.captured_at, snapshot.server.started_at);
+  const identity = `${sanitizeTerminalText(snapshot.server.name).toUpperCase()} v${sanitizeTerminalText(snapshot.server.version)}`;
+  const brandWidth = Math.min(width - 15, terminalCellWidth(identity) + 2);
+  const brand = truncateCell(` ${identity} `, brandWidth, glyphs.ellipsis);
   const totalPosts = snapshot.cubes.reduce((sum, cube) => sum + cube.posts_15m, 0);
-  const state = snapshot.server.state.toUpperCase();
-  const brand = `${glyphs.rail}${glyphs.rail} ${identity} ${glyphs.rail}${glyphs.rail}`;
-  const body = `${brand} ${state}  ${snapshot.cubes.length} ${plural(snapshot.cubes.length, "cube")}  ` +
-    `${totalPosts}/15m  v${version}`;
-  const uptimeSuffix = `  up ${uptime}`;
-  const bodyWidth = Math.max(0, width - terminalCellWidth(uptimeSuffix));
-  const visibleBody = truncateCell(body, bodyWidth, glyphs.ellipsis);
-  const bodyNode = palette.chrome !== ""
-    ? styledRailText(visibleBody, brand, state, palette)
-    : h(Text, { wrap: "truncate-end" }, visibleBody);
-
+  const status = ` ${snapshot.server.state.toUpperCase()}  ${snapshot.cubes.length} ${plural(snapshot.cubes.length, "cube")}  ${totalPosts}/15m`;
+  const rightWidth = width - brandWidth - 1;
+  const band = truncateCell(status, rightWidth, glyphs.ellipsis);
   return h(Box, { width, height: 1, flexDirection: "row", overflow: "hidden" },
-    h(Box, { width: bodyWidth, flexDirection: "row", overflow: "hidden" },
-      bodyNode,
-      h(Box, { flexGrow: 1 }),
-    ),
-    h(Text, null, uptimeSuffix),
+    h(Text, null, styledText(brand + " ".repeat(brandWidth - terminalCellWidth(brand)), { sequence: palette.identity })),
+    h(Text, null, " "),
+    h(Text, null, styledText(band + " ".repeat(rightWidth - terminalCellWidth(band)), { sequence: palette.statusBand })),
   );
 }
 
@@ -378,10 +429,12 @@ function InkBindStatus(input: {
   readonly snapshot: DashboardSnapshot;
   readonly width: number;
   readonly glyphs: Glyphs;
-  readonly palette: NightwatchPalette;
+  readonly palette: CollectivePalette;
 }): ReactNode {
   const endpoint = sanitizeTerminalText(input.snapshot.server.endpoint);
-  const value = `Endpoint: ${endpoint}  Bind mode: ${input.snapshot.server.bind_mode}`;
+  const uptime = `up ${formatUptime(input.snapshot.captured_at, input.snapshot.server.started_at)}`;
+  const endpointWidth = Math.max(0, input.width - uptime.length - 2);
+  const value = truncateCell(`Endpoint: ${endpoint}  Bind mode: ${input.snapshot.server.bind_mode}`, endpointWidth, input.glyphs.ellipsis).padEnd(endpointWidth) + `  ${uptime}`;
   return h(Box, { width: input.width, height: 1, overflow: "hidden" },
     h(Text, null, styledText(
       truncateCell(value, input.width, input.glyphs.ellipsis),
@@ -390,42 +443,20 @@ function InkBindStatus(input: {
   );
 }
 
-function styledRailText(
-  value: string,
-  brand: string,
-  state: string,
-  palette: NightwatchPalette,
-): ReactNode {
-  return h(
-    Text,
-    { wrap: "truncate-end" },
-    value
-      .replace(brand, `${palette.chrome}${brand}${reset}`)
-      .replace(state, `${palette.liveness}${state}${reset}`),
-  );
-}
-
 function InkRule(input: {
   readonly width: number;
   readonly glyphs: Glyphs;
-  readonly palette: NightwatchPalette;
+  readonly palette: CollectivePalette;
 }): ReactNode {
-  return h(Box, {
-    width: input.width,
-    height: 1,
-    borderStyle: borderStyle(input.glyphs),
-    borderTop: true,
-    borderBottom: false,
-    borderLeft: false,
-    borderRight: false,
-    ...(input.palette.chromeColor === "" ? {} : { borderColor: input.palette.chromeColor }),
-  });
+  return h(Box, { width: input.width, height: 1, overflow: "hidden" },
+    h(Text, null, styledText(input.glyphs.horizontal.repeat(input.width), { sequence: input.palette.chrome })));
+
 }
 
 function InkEmptyPanel(input: {
   readonly width: number;
   readonly glyphs: Glyphs;
-  readonly palette: NightwatchPalette;
+  readonly palette: CollectivePalette;
 }): ReactNode {
   const inner = Math.max(1, input.width - 2);
   return h(
@@ -453,16 +484,15 @@ function InkFocusPanel(input: {
   readonly rows: number;
   readonly glyphs: Glyphs;
   readonly view: DashboardViewState;
-  readonly palette: NightwatchPalette;
+  readonly palette: CollectivePalette;
 }): ReactNode {
   const { snapshot, cube, width, rows, glyphs, view, palette } = input;
   if (rows < 6 || width < 64) {
     return h(InkCompactDeck, { snapshot, cube, width, rows, glyphs, view, palette });
   }
-  if (width >= 144) {
-    return h(InkWideDeck, { snapshot, cube, width, rows, glyphs, view, palette });
-  }
-  const scopeRows = Math.max(3, Math.min(rows - 3, Math.max(5, Math.floor(rows * 0.4))));
+  const desiredBoardRows = cube.drones.length + 4 + (cube.attention.unacked_directed > 0 ? 1 : 0);
+  const scopeRows = Math.max(3, Math.min(rows - 3,
+    Math.max(6, Math.min(Math.floor(rows * 0.5), rows - desiredBoardRows))));
   return h(Box, { width, height: rows, flexDirection: "column", overflow: "hidden" }, [
     h(InkSensorScope, { key: "scope", snapshot, cube, width, rows: scopeRows, glyphs, view, palette }),
     h(InkDroneBoard, {
@@ -478,81 +508,6 @@ function InkFocusPanel(input: {
   ]);
 }
 
-function InkWideDeck(input: {
-  readonly snapshot: DashboardSnapshot;
-  readonly cube: DashboardCubeSnapshot;
-  readonly width: number;
-  readonly rows: number;
-  readonly glyphs: Glyphs;
-  readonly view: DashboardViewState;
-  readonly palette: NightwatchPalette;
-}): ReactNode {
-  const innerWidth = Math.max(3, input.width - 3);
-  const boardWidth = input.width >= 200 ? 99 : 76;
-  const scopeWidth = innerWidth - boardWidth;
-  const contentRows = Math.max(1, input.rows - 2);
-  const windowMs = input.view.activityWindowMs ?? DASHBOARD_ACTIVITY_WINDOW_MS;
-  const mode = input.view.autoFollow || input.view.focusedCubeId === null ? "(auto)" : "(pinned)";
-  const coverage = activityCoverage(input.view.observation ?? [], input.snapshot.captured_at, windowMs);
-  const resolution = formatBucketResolution(windowMs, scopeCanvasWidth(scopeWidth, true) / 2);
-  const scopeTitle = ` SENSOR SCOPE ${dashboardText(input.cube.name, input.glyphs)} ${input.glyphs.separator} ${mode} ` +
-    `${input.glyphs.separator} ${formatWindow(windowMs)} ${input.glyphs.separator} ${resolution} ` +
-    `${input.glyphs.separator} cov ${Math.round(coverage * 100)}% `;
-  const boardTitle = ` DRONES ${input.cube.drones.length} ${input.glyphs.separator} ` +
-    `ATTN ${input.cube.attention.unacked_directed} `;
-  return h(Box, { width: input.width, height: input.rows, flexDirection: "column", overflow: "hidden" }, [
-    h(Text, { key: "title" }, sharedDeckTitle(
-      scopeTitle,
-      boardTitle,
-      scopeWidth,
-      boardWidth,
-      input.glyphs,
-      input.palette,
-    )),
-    h(Box, {
-      key: "body",
-      width: input.width,
-      height: contentRows,
-      flexDirection: "row",
-      borderStyle: borderStyle(input.glyphs),
-      borderTop: false,
-      borderBottom: false,
-      overflow: "hidden",
-      ...(input.palette.chromeColor === "" ? {} : { borderColor: input.palette.chromeColor }),
-    }, [
-      h(InkSensorScope, {
-        key: "scope",
-        ...input,
-        width: scopeWidth,
-        rows: contentRows,
-        unframed: true,
-      }),
-      h(Box, {
-        key: "divider",
-        width: 1,
-        height: contentRows,
-        borderStyle: borderStyle(input.glyphs),
-        borderTop: false,
-        borderBottom: false,
-        borderRight: false,
-        ...(input.palette.chromeColor === "" ? {} : { borderColor: input.palette.chromeColor }),
-      }),
-      h(InkDroneBoard, {
-        key: "board",
-        ...input,
-        width: boardWidth,
-        rows: contentRows,
-        twoColumns: false,
-        unframed: true,
-      }),
-    ]),
-    h(Text, { key: "bottom" }, styledText(
-      sharedDeckBottom(scopeWidth, boardWidth, input.glyphs),
-      { sequence: input.palette.chrome },
-    )),
-  ]);
-}
-
 function InkSensorScope(input: {
   readonly snapshot: DashboardSnapshot;
   readonly cube: DashboardCubeSnapshot;
@@ -560,75 +515,108 @@ function InkSensorScope(input: {
   readonly rows: number;
   readonly glyphs: Glyphs;
   readonly view: DashboardViewState;
-  readonly palette: NightwatchPalette;
+  readonly palette: CollectivePalette;
   readonly unframed?: boolean;
 }): ReactNode {
   const inner = Math.max(1, input.unframed ? input.width : input.width - 2);
+  const contentRows = Math.max(1, input.unframed ? input.rows : input.rows - 2);
   const windowMs = input.view.activityWindowMs ?? DASHBOARD_ACTIVITY_WINDOW_MS;
   const mode = input.view.autoFollow || input.view.focusedCubeId === null ? "(auto)" : "(pinned)";
-  const coverage = activityCoverage(input.view.observation ?? [], input.snapshot.captured_at, windowMs);
-  const contentRows = Math.max(1, input.unframed ? input.rows : input.rows - 2);
-  const graphRows = Math.max(1, contentRows - (contentRows >= 3 ? 2 : 1));
-  const samples = aggregateActivitySamples(input.cube, input.view.activity);
-  const canvasWidth = scopeCanvasWidth(inner, input.unframed === true);
-  const buckets = resolvedScopeBuckets(
-    samples,
-    input.view.observation ?? [],
-    input.snapshot.captured_at,
-    windowMs,
-    canvasWidth / 2,
-  );
-  const maximum = scopeActivityScale(buckets.map((bucket) => ({
-    capturedAt: input.snapshot.captured_at,
-    sentRate: bucket.sentRate,
-  })));
-  const title = ` SENSOR SCOPE ${dashboardText(input.cube.name, input.glyphs)} ${input.glyphs.separator} ${mode} ` +
-    `${input.glyphs.separator} ${formatWindow(windowMs)} ${input.glyphs.separator} ` +
-    `${formatBucketResolution(windowMs, buckets.length)} ${input.glyphs.separator} cov ${Math.round(coverage * 100)}% `;
-  const leftMargin = " ".repeat(Math.max(0, inner - canvasWidth));
-  const sweep = scopeSweepPosition(
-    canvasWidth,
-    input.view.ambientPhase ?? 0,
-    input.view.motionMode ?? "ambient",
-  );
-  const body: ReactNode[] = Array.from({ length: graphRows }, (_unused, row) => {
-    const graph = resolvedGraphRow(buckets, graphRows, maximum, row, input.glyphs);
-    const sweepValue = graph[sweep] === " " ? scopeSweepGlyph(input.glyphs) : graph[sweep]!;
-    return h(Box, { key: `graph-${row}`, width: inner, height: 1, flexDirection: "row", overflow: "hidden" }, [
-      h(Text, { key: "margin" }, leftMargin),
-      h(Text, { key: "before" }, styledText(graph.slice(0, sweep), { sequence: input.palette.data })),
-      h(Text, { key: "sweep" }, styledText(sweepValue, { sequence: input.palette.inactive })),
-      h(Text, { key: "after" }, styledText(graph.slice(sweep + 1), { sequence: input.palette.data })),
-    ]);
+  const labelWidth = Math.min(16, Math.max(5, Math.floor(inner * 0.33)));
+  const bucketCount = Math.max(1, Math.floor((inner - labelWidth) / 2));
+  const canvasWidth = bucketCount * 2;
+  const buckets = dashboardScopeBuckets(input.cube, input.snapshot.captured_at, windowMs, bucketCount);
+  const maximum = Math.max(1, ...buckets.map((bucket) => bucket.count));
+  const coverage = buckets.reduce((sum, bucket) => sum + bucket.coverage, 0) / bucketCount;
+  const ordered = prioritizeDrones(input.snapshot.captured_at, input.cube.drones);
+  const visibleCount = Math.min(ordered.length, Math.max(0, contentRows - 9));
+  const graphRows = Math.max(1, Math.min(5, contentRows - visibleCount - 6));
+  const unknown = input.glyphs === ASCII_GLYPHS ? "/" : "░";
+  const partial = input.glyphs === ASCII_GLYPHS ? ":" : "▒";
+  const presence = input.glyphs === ASCII_GLYPHS ? "#" : "■";
+  const quiet = input.glyphs.cube[0]!;
+  const line = (key: string, label: string, cells: string, sequence = input.palette.muted): ReactNode => {
+    const visibleLabel = truncateCell(label, labelWidth - 1, input.glyphs.ellipsis);
+    return h(Text, { key }, styledText(visibleLabel + " ".repeat(labelWidth - terminalCellWidth(visibleLabel)),
+      { sequence: input.palette.muted }) + styledText(cells, { sequence }));
+  };
+  const body: ReactNode[] = [h(Text, { key: "meta" }, styledText(truncateCell(
+    `${formatWindow(windowMs)} ${formatBucketResolution(windowMs, bucketCount)} cov ${Math.round(coverage * 100)}% ${mode}` +
+      (contentRows < 8 && ordered.length > 0 ? ` +${ordered.length} sender rows` : ""),
+    inner, input.glyphs.ellipsis), { sequence: input.palette.muted }))];
+  for (let row = 0; row < graphRows; row += 1) {
+    const cells = buckets.map((bucket) => {
+      const fill = Math.min(1, Math.max(0, bucket.count / maximum * graphRows - (graphRows - row - 1)));
+      if (fill > 0) {
+        // Fractional cells preserve count-height differences even in a one-row
+        // plot; ASCII uses its ordered magnitude levels instead of full blocks.
+        const level = Math.ceil(fill * (input.glyphs.cube.length - 1));
+        return styledText(input.glyphs.cube[level]!.repeat(2), { sequence: input.palette.chrome });
+      }
+      return bucket.coverage === 0 ? styledText(unknown.repeat(2), { sequence: input.palette.inactive }) : "  ";
+    }).join("");
+    body.push(line(`volume-${row}`, row === 0 ? `${maximum} msgs` : "", cells, input.palette.chrome));
+  }
+  body.push(line("coverage", "0", buckets.map((bucket) =>
+    (bucket.coverage === 0 ? unknown : bucket.coverage < 1 ? partial : quiet).repeat(2)).join("")));
+  const axis = scopeAxis(canvasWidth, windowMs, input.glyphs);
+  const sweep = scopeSweepPosition(canvasWidth, input.view.ambientPhase ?? 0, input.view.motionMode ?? "ambient");
+  body.push(line("axis", "", sweep >= 0 && axis[sweep] === input.glyphs.horizontal
+    ? axis.slice(0, sweep) + scopeSweepGlyph(input.glyphs) + axis.slice(sweep + 1) : axis, input.palette.chrome));
+  body.push(h(Text, { key: "presence-label" }, styledText(truncateCell(
+    coverage === 0 ? "Observation pending" : "MESSAGE PRESENCE", inner, input.glyphs.ellipsis),
+    { sequence: input.palette.data })));
+  ordered.slice(0, visibleCount).forEach((drone, index) => {
+    body.push(line(`sender-${drone.id}`, `${index + 1} ${dashboardText(drone.label, input.glyphs)}`,
+      buckets.map((bucket) => {
+        const marker = bucket.senders.has(drone.id) ? presence
+          : bucket.coverage === 0 ? unknown : bucket.coverage < 1 ? partial : quiet;
+        return styledText(marker.repeat(2), { sequence: marker === presence ? input.palette.data
+          : marker === partial ? input.palette.muted : input.palette.inactive });
+      }).join(""), input.palette.data));
   });
-  if (contentRows >= 3) {
-    body.push(h(Text, { key: "baseline" }, styledText(
-      `${leftMargin}${scopeObservationBaseline(buckets, input.glyphs)}`,
-      { sequence: input.palette.muted },
-    )));
-  }
-  if (contentRows >= 2) {
-    body.push(h(Text, { key: "axis" }, styledText(
-      `${leftMargin}${scopeAxis(canvasWidth, windowMs, input.glyphs)}`,
-      { sequence: input.palette.chrome },
-    )));
-  }
-  if (input.unframed) {
-    return h(Box, { width: input.width, height: input.rows, flexDirection: "column", overflow: "hidden" }, body);
-  }
+  if (visibleCount < ordered.length) body.push(h(Text, { key: "omitted" }, `+${ordered.length - visibleCount} sender rows`));
+  body.push(h(Text, { key: "legend" }, styledText(truncateCell(
+    `${unknown} unknown ${partial} partial ${quiet} quiet`, inner, input.glyphs.ellipsis), { sequence: input.palette.muted })));
+  const fittedBody = body.slice(0, contentRows).map((node, index) => h(Box, {
+    key: index, width: inner, height: 1, minHeight: 1, flexShrink: 0, overflow: "hidden",
+  }, node));
+  if (input.unframed) return h(Box, { width: input.width, height: input.rows, flexDirection: "column", overflow: "hidden" }, fittedBody);
   return h(Box, { width: input.width, height: input.rows, flexDirection: "column", overflow: "hidden" }, [
-    h(InkPanelTitle, { key: "title", title, width: input.width, glyphs: input.glyphs, palette: input.palette }),
-    h(Box, {
-      key: "body",
-      width: input.width,
-      height: input.rows - 1,
-      flexDirection: "column",
-      borderStyle: borderStyle(input.glyphs),
-      borderTop: false,
-      overflow: "hidden",
-      ...(input.palette.chromeColor === "" ? {} : { borderColor: input.palette.chromeColor }),
-    }, body),
+    h(InkPanelTitle, { key: "title", title: ` SENSOR SCOPE ${dashboardText(input.cube.name, input.glyphs)} `,
+      width: input.width, glyphs: input.glyphs, palette: input.palette }),
+    h(Box, { key: "body", width: input.width, height: input.rows - 1, flexDirection: "column",
+      borderStyle: borderStyle(input.glyphs), borderTop: false, overflow: "hidden",
+      ...(input.palette.chromeColor === "" ? {} : { borderColor: input.palette.chromeColor }) }, fittedBody),
   ]);
+}
+
+export function dashboardScopeBuckets(
+  cube: DashboardCubeSnapshot,
+  capturedAt: string,
+  windowMs: number,
+  count: number,
+): readonly { readonly count: number; readonly coverage: number; readonly senders: ReadonlySet<string> }[] {
+  const end = Date.parse(capturedAt);
+  const start = end - windowMs;
+  const observedFrom = cube.scope === undefined ? end : Math.max(start, Date.parse(cube.scope.observed_from));
+  const duration = windowMs / count;
+  const buckets = Array.from({ length: count }, (_, index) => ({
+    count: 0,
+    coverage: observedFrom <= start + index * duration ? 1
+      : observedFrom >= start + (index + 1) * duration ? 0
+      : (start + (index + 1) * duration - observedFrom) / duration,
+    senders: new Set<string>(),
+  }));
+  for (const message of cube.scope?.messages ?? []) {
+    const time = Date.parse(message.created_at);
+    if (time < start || time > end) continue;
+    const index = Math.min(count - 1, Math.floor((time - start) / duration));
+    const bucket = buckets[index]!;
+    bucket.count += 1;
+    if (message.drone_id !== null) bucket.senders.add(message.drone_id);
+  }
+  return buckets;
 }
 
 function InkDroneBoard(input: {
@@ -637,7 +625,7 @@ function InkDroneBoard(input: {
   readonly width: number;
   readonly rows: number;
   readonly glyphs: Glyphs;
-  readonly palette: NightwatchPalette;
+  readonly palette: CollectivePalette;
   readonly twoColumns: boolean;
   readonly unframed?: boolean;
 }): ReactNode {
@@ -685,7 +673,7 @@ function InkDroneBoard(input: {
           })
         : h(InkDroneCell, {
             key: item.key,
-            drone: item.drone,
+            drone: { ...item.drone, label: `${prioritized.indexOf(item.drone) + 1} ${item.drone.label}` },
             capturedAt: input.snapshot.captured_at,
             width: input.twoColumns && cellIndex === 1 ? inner - leftWidth : leftWidth,
             glyphs: input.glyphs,
@@ -728,7 +716,7 @@ function InkDroneCell(input: {
   readonly capturedAt: string;
   readonly width: number;
   readonly glyphs: Glyphs;
-  readonly palette: NightwatchPalette;
+  readonly palette: CollectivePalette;
   readonly detailed: boolean;
 }): ReactNode {
   const status = livenessStatus(input.capturedAt, input.drone.last_seen);
@@ -756,7 +744,7 @@ type DroneTableColumn = "status" | "attention" | "drone" | "role" | "model" | "s
 function InkDroneTableHeader(input: {
   readonly width: number;
   readonly glyphs: Glyphs;
-  readonly palette: NightwatchPalette;
+  readonly palette: CollectivePalette;
 }): ReactNode {
   const columns = droneTableColumns(Math.max(1, input.width - 2));
   const labels: Record<DroneTableColumn, string> = {
@@ -787,7 +775,7 @@ function InkDroneTableRow(input: {
   readonly capturedAt: string;
   readonly width: number;
   readonly glyphs: Glyphs;
-  readonly palette: NightwatchPalette;
+  readonly palette: CollectivePalette;
 }): ReactNode {
   const columns = droneTableColumns(Math.max(1, input.width - 2));
   const status = livenessStatus(input.capturedAt, input.drone.last_seen);
@@ -894,12 +882,12 @@ function InkPanelTitle(input: {
   readonly title: string;
   readonly width: number;
   readonly glyphs: Glyphs;
-  readonly palette: NightwatchPalette;
+  readonly palette: CollectivePalette;
 }): ReactNode {
   const plainLeft = `${input.glyphs.topLeft}${input.title}`;
   const left = input.palette.chrome === ""
     ? plainLeft
-    : `${input.glyphs.topLeft}${input.palette.chrome}${input.title}${reset}`;
+    : `${input.glyphs.topLeft}${input.palette.chrome}${input.title}${textReset}`;
   if (terminalCellWidth(plainLeft) + terminalCellWidth(input.glyphs.topRight) > input.width) {
     const visible = truncateCell(plainLeft, input.width, input.glyphs.ellipsis);
     return h(Text, { wrap: "truncate-end" }, styledText(
@@ -922,95 +910,9 @@ function InkPanelTitle(input: {
   );
 }
 
-function graphText(
-  samples: readonly DashboardActivitySample[],
-  width: number,
-  height: number,
-  windowMs: number,
-  capturedAt: string,
-  glyphs: Glyphs,
-  maximumActivityRate: number,
-  row = 0,
-): string {
-  const slots = activitySlots(samples, capturedAt, windowMs);
-  return Array.from({ length: width }, (_unused, columnIndex) => {
-    const startSlot = Math.floor(columnIndex * slots.total / width);
-    const endSlot = Math.max(startSlot + 1, Math.floor((columnIndex + 1) * slots.total / width));
-    const sample = [...slots.entries()].find(([slot]) => slot >= startSlot && slot < endSlot)?.[1];
-    if (sample === undefined) return " ";
-    if (sample.sentRate <= 0 || maximumActivityRate <= 0) return glyphs.cube[0]!;
-    const level = Math.ceil((sample.sentRate / maximumActivityRate) * (height * 8)) - ((height - row - 1) * 8);
-    if (level <= 0) return " ";
-    return magnitudeGlyph(level, height * 8, glyphs);
-  }).join("");
-}
-
-interface ResolvedScopeBucket {
-  readonly sentRate: number;
-  readonly observed: boolean;
-}
-
-function scopeCanvasWidth(innerWidth: number, allow120: boolean): 60 | 90 | 120 {
-  const usableWidth = Math.max(0, innerWidth - 4);
-  if (allow120 && usableWidth >= 120) return 120;
-  if (usableWidth >= 90) return 90;
-  return 60;
-}
-
-function resolvedScopeBuckets(
-  samples: readonly DashboardActivitySample[],
-  observations: readonly DashboardActivitySample[],
-  capturedAt: string,
-  windowMs: number,
-  bucketCount: number,
-): readonly ResolvedScopeBucket[] {
-  const end = Date.parse(capturedAt);
-  const start = end - windowMs;
-  const rates = Array.from({ length: bucketCount }, () => 0);
-  const observed = Array.from({ length: bucketCount }, () => false);
-  const indexFor = (value: DashboardActivitySample): number | undefined => {
-    const timestamp = Date.parse(value.capturedAt);
-    if (!Number.isFinite(timestamp) || timestamp < start || timestamp > end) return undefined;
-    return Math.min(bucketCount - 1, Math.floor((timestamp - start) * bucketCount / windowMs));
-  };
-  for (const sample of samples) {
-    const index = indexFor(sample);
-    if (index !== undefined) rates[index] = rates[index]! + sample.sentRate;
-  }
-  for (const observation of observations) {
-    const index = indexFor(observation);
-    if (index !== undefined) observed[index] = true;
-  }
-  return rates.map((sentRate, index) => Object.freeze({ sentRate, observed: observed[index]! }));
-}
-
-function resolvedGraphRow(
-  buckets: readonly ResolvedScopeBucket[],
-  graphRows: number,
-  maximum: number,
-  row: number,
-  glyphs: Glyphs,
-): string {
-  const bar = glyphs === ASCII_GLYPHS ? "#" : "█";
-  return buckets.map((bucket) => {
-    const height = bucket.sentRate <= 0 || maximum <= 0
-      ? 0
-      : Math.min(graphRows, Math.max(1, Math.ceil(bucket.sentRate / maximum * graphRows)));
-    return (row >= graphRows - height ? bar : " ").repeat(2);
-  }).join("");
-}
-
-function scopeObservationBaseline(
-  buckets: readonly ResolvedScopeBucket[],
-  glyphs: Glyphs,
-): string {
-  const marker = glyphs === ASCII_GLYPHS ? "." : "·";
-  return buckets.map((bucket) => (bucket.observed ? marker : " ").repeat(2)).join("");
-}
-
 function formatBucketResolution(windowMs: number, bucketCount: number): string {
-  const seconds = Math.max(1, Math.round(windowMs / bucketCount / 1_000));
-  return seconds < 60 ? `${seconds}s/bar` : `${Math.round(seconds / 60)}m/bar`;
+  const seconds = Number((windowMs / bucketCount / 1_000).toFixed(2));
+  return `${seconds * bucketCount * 1_000 === windowMs ? "" : "~"}${seconds}s/b`;
 }
 
 
@@ -1021,7 +923,7 @@ function InkSummaryRow(input: {
   readonly glyphs: Glyphs;
   readonly view: DashboardViewState;
   readonly maximumPosts: number;
-  readonly palette: NightwatchPalette;
+  readonly palette: CollectivePalette;
 }): ReactNode {
   const { snapshot, cube, width, glyphs, view, maximumPosts, palette } = input;
   const style = livenessStyle(snapshot.captured_at, cube.last_post_at, palette);
@@ -1119,7 +1021,7 @@ function InkFooter(input: {
   readonly ellipsis: string;
   readonly motionMode: "ambient" | "calm" | "off";
   readonly motionAutoDegraded: boolean;
-  readonly palette: NightwatchPalette;
+  readonly palette: CollectivePalette;
 }): ReactNode {
   const pageSegment = input.pageCount > 1
     ? `${input.navigation ? "SPACE " : "page "}${input.page + 1}/${input.pageCount}`
@@ -1137,6 +1039,10 @@ function InkFooter(input: {
         ...(input.motionAutoDegraded ? ["motion: calm (auto)"] : []),
         input.baseFooter,
       ];
+  const withMotion = [...segments.slice(0, -1), `motion: ${input.motionMode}`, input.baseFooter];
+  if (!input.motionAutoDegraded && footerSegmentsWidth(withMotion) <= input.width) {
+    segments.splice(segments.length - 1, 0, `motion: ${input.motionMode}`);
+  }
   while (segments.length > 1 && footerSegmentsWidth(segments) > input.width) segments.shift();
   const fixedWidth = segments.slice(0, -1).reduce(
     (total, segment) => total + terminalCellWidth(segment) + 5,
@@ -1174,7 +1080,7 @@ function InkFeedRow(input: {
   readonly glyphs: Glyphs;
   readonly showClass: boolean;
   readonly first: boolean;
-  readonly palette: NightwatchPalette;
+  readonly palette: CollectivePalette;
 }): ReactNode {
   const activity = input.activity;
   const actor = dashboardText(activity.actor_label ?? activity.actor_kind, input.glyphs);
@@ -1201,7 +1107,7 @@ function InkLifecycleFooter(input: {
   readonly value: string;
   readonly width: number;
   readonly rows: number;
-  readonly palette: NightwatchPalette;
+  readonly palette: CollectivePalette;
 }): ReactNode {
   const sentences = lifecycleSentences(input.value);
   return h(Box, { width: input.width, height: input.rows, flexDirection: "column", overflow: "hidden" },
@@ -1221,13 +1127,13 @@ function footerSegmentsWidth(segments: readonly string[]): number {
 
 function styledText(value: string, style: InkTextStyle | undefined): string {
   const opening = style?.sequence ?? "";
-  return opening === "" ? value : `${opening}${value}${reset}`;
+  return opening === "" ? value : `${opening}${value}${/\u001b\[(?:48;|4[0-7]m|10[0-7]m)/u.test(opening) ? reset : textReset}`;
 }
 
 function livenessStyle(
   capturedAt: string,
   lastActivity: string | null,
-  palette: NightwatchPalette,
+  palette: CollectivePalette,
 ): InkTextStyle {
   if (lastActivity === null) return { sequence: palette.inactive };
   const age = Date.parse(capturedAt) - Date.parse(lastActivity);
@@ -1315,29 +1221,6 @@ function borderStyle(glyphs: Glyphs): {
   };
 }
 
-function aggregateActivitySamples(
-  cube: DashboardCubeSnapshot,
-  activity: ReadonlyMap<string, readonly DashboardActivitySample[]> | undefined,
-): readonly DashboardActivitySample[] {
-  const buckets = new Map<number, { capturedAt: string; sentRate: number }>();
-  for (const drone of cube.drones) {
-    for (const sample of activity?.get(`${cube.id}:${drone.id}`) ?? []) {
-      const timestamp = Date.parse(sample.capturedAt);
-      if (!Number.isFinite(timestamp)) continue;
-      const bucket = Math.floor(timestamp / 5_000);
-      const current = buckets.get(bucket);
-      buckets.set(bucket, {
-        capturedAt: current === undefined || Date.parse(sample.capturedAt) > Date.parse(current.capturedAt)
-          ? sample.capturedAt
-          : current.capturedAt,
-        sentRate: (current?.sentRate ?? 0) + sample.sentRate,
-      });
-    }
-  }
-  return [...buckets.values()].sort((left, right) =>
-    Date.parse(left.capturedAt) - Date.parse(right.capturedAt));
-}
-
 function scopeSweepPosition(width: number, phase: number, motionMode: "ambient" | "calm" | "off"): number {
   const boundedWidth = Math.max(1, width);
   return motionMode === "off" ? boundedWidth - 1 : Math.abs(Math.floor(phase)) % boundedWidth;
@@ -1345,36 +1228,6 @@ function scopeSweepPosition(width: number, phase: number, motionMode: "ambient" 
 
 function scopeSweepGlyph(glyphs: Glyphs): string {
   return glyphs === ASCII_GLYPHS ? ":" : "░";
-}
-
-function overlayScopeSweep(value: string, position: number, marker: string): string {
-  if (value.length === 0) return marker;
-  const bounded = Math.max(0, Math.min(value.length - 1, position));
-  return `${value.slice(0, bounded)}${marker}${value.slice(bounded + 1)}`;
-}
-
-function sharedDeckTitle(
-  scopeTitle: string,
-  boardTitle: string,
-  scopeWidth: number,
-  boardWidth: number,
-  glyphs: Glyphs,
-  palette: NightwatchPalette,
-): string {
-  const segment = (title: string, width: number): string => {
-    const visible = truncateCell(title, width, glyphs.ellipsis);
-    const styled = palette.chrome === "" ? visible : `${palette.chrome}${visible}${reset}`;
-    return `${styled}${glyphs.horizontal.repeat(Math.max(0, width - terminalCellWidth(visible)))}`;
-  };
-  const junction = glyphs === ASCII_GLYPHS ? "+" : "┬";
-  return `${glyphs.topLeft}${segment(scopeTitle, scopeWidth)}${junction}` +
-    `${segment(boardTitle, boardWidth)}${glyphs.topRight}`;
-}
-
-function sharedDeckBottom(scopeWidth: number, boardWidth: number, glyphs: Glyphs): string {
-  const junction = glyphs === ASCII_GLYPHS ? "+" : "┴";
-  return `${glyphs.bottomLeft}${glyphs.horizontal.repeat(scopeWidth)}${junction}` +
-    `${glyphs.horizontal.repeat(boardWidth)}${glyphs.bottomRight}`;
 }
 
 function scopeAxis(width: number, windowMs: number, glyphs: Glyphs): string {
@@ -1406,10 +1259,6 @@ function livenessCounts(
   return counts;
 }
 
-function scopeActivityScale(samples: readonly DashboardActivitySample[]): number {
-  return Math.max(8, ...samples.map((sample) => sample.sentRate));
-}
-
 function prioritizeDrones(
   capturedAt: string,
   drones: readonly DashboardDroneData[],
@@ -1430,35 +1279,10 @@ function prioritizeDrones(
 function attentionMarker(
   value: string,
   drone: DashboardDroneData,
-  palette: NightwatchPalette,
+  palette: CollectivePalette,
 ): string {
   if (palette.attention === "") return value;
-  return `${drone.attention.stale_directed > 0 ? palette.attention : palette.liveness}${value}${reset}`;
-}
-
-function activityCoverage(samples: readonly DashboardActivitySample[], capturedAt: string, windowMs: number): number {
-  const slots = activitySlots(samples, capturedAt, windowMs);
-  return slots.size / slots.total;
-}
-
-function activitySlots(samples: readonly DashboardActivitySample[], capturedAt: string, windowMs: number): (Map<number, DashboardActivitySample> & { total: number }) {
-  const end = Date.parse(capturedAt);
-  const start = end - windowMs;
-  const buckets = new Map<number, DashboardActivitySample>() as Map<number, DashboardActivitySample> & { total: number };
-  buckets.total = Math.max(1, Math.ceil(windowMs / 5_000));
-  for (const sample of samples) {
-    const timestamp = Date.parse(sample.capturedAt);
-    if (!Number.isFinite(timestamp) || timestamp < start || timestamp > end) continue;
-    const bucket = Math.min(buckets.total - 1, Math.floor((timestamp - start) / 5_000));
-    buckets.set(bucket, sample);
-  }
-  return buckets;
-}
-
-function graphMagnitude(level: number, maximumLevel: number, glyphs: Glyphs): string {
-  if (level <= 0 || maximumLevel <= 0) return glyphs.cube[0]!;
-  const index = Math.min(glyphs.cube.length - 1, Math.max(1, Math.ceil((level / maximumLevel) * (glyphs.cube.length - 1))));
-  return glyphs.cube[index]!;
+  return `${drone.attention.stale_directed > 0 ? palette.attention : palette.liveness}${value}${textReset}`;
 }
 
 function heatGlyph(posts: number, maximumPosts: number, glyphs: Glyphs): string {
@@ -1468,10 +1292,6 @@ function heatGlyph(posts: number, maximumPosts: number, glyphs: Glyphs): string 
     Math.max(1, Math.ceil((Math.log1p(posts) / Math.log1p(maximumPosts)) * (glyphs.cube.length - 1))),
   );
   return glyphs.cube[index]!;
-}
-
-function magnitudeGlyph(level: number, maximumLevel: number, glyphs: Glyphs): string {
-  return graphMagnitude(level, maximumLevel, glyphs);
 }
 
 function activityPulseMarker(phase: number): string {
@@ -1523,49 +1343,67 @@ export function normalizeInkFrame(
   const lines = withoutTrailingNewline.split("\n").slice(0, height);
   while (lines.length < height) lines.push("");
   return lines.map((line) => {
-    const padded = padInkRow(normalizeInkAnsi(line), width);
+    const padded = padInkRow(line, width);
     if (background === "") return padded;
     const base = `${background}${defaultForeground}`;
-    return `${base}${padded.replaceAll(reset, `${reset}${base}`)}${reset}`;
+    return `${base}${padded.replace(/\u001b\[(?:0|39|49)?m/gu, (sequence) => `${sequence}${sequence === "\u001b[39m" ? defaultForeground : base}`)}${reset}`;
   }).join("\n");
 }
 
-function nightwatchPalette(depth: DashboardColorDepth): NightwatchPalette {
+function collectivePalette(depth: DashboardColorDepth): CollectivePalette {
   if (depth === "none") {
-    return { background: "", backgroundColor: "", chrome: "", chromeColor: "", data: "", liveness: "", attention: "", muted: "", inactive: "" };
+    return { primary: "", identity: "", statusBand: "", attentionBand: "", panelColor: "", selectionColor: "", background: "", backgroundColor: "", chrome: "", chromeColor: "", data: "", liveness: "", attention: "", muted: "", inactive: "" };
   }
   if (depth === "truecolor") {
     return {
-      background: "\u001b[48;2;9;11;16m",
-      backgroundColor: "rgb(9, 11, 16)",
-      chrome: "\u001b[38;2;230;161;90m",
-      chromeColor: "rgb(230, 161, 90)",
-      data: "\u001b[38;2;184;199;255m",
-      liveness: "\u001b[38;2;121;214;159m",
-      attention: "\u001b[38;2;255;122;144m",
-      muted: "\u001b[38;2;155;167;184m",
-      inactive: "\u001b[38;2;88;98;115m",
+      primary: "\u001b[38;2;213;229;218m",
+      identity: "\u001b[48;2;162;245;110m\u001b[38;2;6;12;9m",
+      statusBand: "\u001b[48;2;81;188;160m\u001b[38;2;6;12;9m",
+      attentionBand: "\u001b[48;2;53;48;28m\u001b[38;2;255;202;130m",
+      panelColor: "rgb(13, 25, 18)",
+      selectionColor: "rgb(35, 60, 38)",
+      background: "\u001b[48;2;6;12;9m",
+      backgroundColor: "rgb(6, 12, 9)",
+      chrome: "\u001b[38;2;162;245;110m",
+      chromeColor: "rgb(162, 245, 110)",
+      data: "\u001b[38;2;81;188;160m",
+      liveness: "\u001b[38;2;81;188;160m",
+      attention: "\u001b[38;2;255;202;130m",
+      muted: "\u001b[38;2;148;173;156m",
+      inactive: "\u001b[38;2;41;65;50m",
     };
   }
   if (depth === "ansi256") {
     return {
+      primary: "\u001b[38;5;253m",
+      identity: "\u001b[48;5;155m\u001b[30m",
+      statusBand: "\u001b[48;5;72m\u001b[30m",
+      attentionBand: "\u001b[48;5;58m\u001b[38;5;223m",
+      panelColor: "ansi256(233)",
+      selectionColor: "ansi256(22)",
       background: "\u001b[48;5;232m",
       backgroundColor: "ansi256(232)",
-      chrome: "\u001b[38;5;215m",
-      chromeColor: "ansi256(215)",
-      data: "\u001b[38;5;147m",
-      liveness: "\u001b[38;5;115m",
-      attention: "\u001b[38;5;210m",
-      muted: "\u001b[38;5;245m",
-      inactive: "\u001b[38;5;60m",
+      chrome: "\u001b[38;5;155m",
+      chromeColor: "ansi256(155)",
+      data: "\u001b[38;5;72m",
+      liveness: "\u001b[38;5;72m",
+      attention: "\u001b[38;5;223m",
+      muted: "\u001b[38;5;108m",
+      inactive: "\u001b[38;5;237m",
     };
   }
   return {
-    background: "",
-    backgroundColor: "",
-    chrome: "\u001b[33m",
-    chromeColor: "yellow",
-    data: "",
+    primary: "\u001b[37m",
+    identity: "\u001b[102m\u001b[30m",
+    statusBand: "\u001b[46m\u001b[30m",
+    attentionBand: "\u001b[40m\u001b[93m",
+    panelColor: "black",
+    selectionColor: "black",
+    background: "\u001b[40m",
+    backgroundColor: "black",
+    chrome: "\u001b[92m",
+    chromeColor: "greenBright",
+    data: "\u001b[36m",
     liveness: "\u001b[32;1m",
     attention: "\u001b[33m",
     muted: "",
@@ -1601,15 +1439,6 @@ function padInkRow(line: string, width: number): string {
   const padding = " ".repeat(missing);
   if (suffix === undefined) return `${line}${padding}`;
   return `${line.slice(0, -suffix.length)}${padding}${suffix}`;
-}
-
-function normalizeInkAnsi(line: string): string {
-  return line
-    .replace(/\u001b\[32m\u001b\[1m/gu, "\u001b[32;1m")
-    .replace(/\u001b\[1m\u001b\[32m/gu, "\u001b[32;1m")
-    .replace(/\u001b\[22m\u001b\[39m/gu, "\u001b[0m")
-    .replace(/\u001b\[39m/gu, "\u001b[0m")
-    .replace(/\u001b\[22m/gu, "\u001b[0m");
 }
 
 function stripAnsi(value: string): string {

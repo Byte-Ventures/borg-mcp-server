@@ -1,0 +1,9 @@
+borgmcp-server online                  
+ATTN 0                                 
+Endpoint: https://127.0.0.1:7091  Bi...
+FEED <1m demo-project/coordinator [s...
+14 cubes | 66 posts/15m                
+Ctrl-C closes this viewer.
+Server stays up. View is read-only.
+1. demo-project 66/15m <1m             
+2. sample-2 0/15m never                

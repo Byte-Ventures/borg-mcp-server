@@ -83,6 +83,30 @@ export function createInkDashboardElement(
   return h(InkDashboard, { snapshot, width, height, view, options });
 }
 
+// Shared with the live frame projection so paging follows the rendered budget.
+export function dashboardBodyBudget(
+  snapshot: DashboardSnapshot,
+  focus: DashboardCubeSnapshot | undefined,
+  width: number,
+  height: number,
+  bodyRows: number,
+): { feedRows: number; listCap: number; panelRows: number; commandColumns: boolean } {
+  const commandColumns = width >= 100 && height >= 20;
+  const desiredFeedRows = Math.min(snapshot.recent_activity.length, bodyRows < 10 ? 1 : height >= 36 ? 4 : 3);
+  // Reserve the focused board and a readable scope before ancillary rows.
+  const desiredPanelRows = focus === undefined ? 3 : width < 64
+    ? focus.drones.length + 2
+    : 6 + focus.drones.length + 4 + (focus.attention.unacked_directed > 0 ? 1 : 0);
+  const desiredCommandBoardRows = Math.max(6, (focus?.drones.length ?? 0) + 5);
+  const reservedPanelRows = Math.min(bodyRows, commandColumns ? desiredCommandBoardRows : desiredPanelRows);
+  const feedRows = Math.min(desiredFeedRows, Math.max(0, bodyRows - reservedPanelRows - (commandColumns ? 1 : 0)));
+  const listCap = commandColumns
+    ? Math.max(1, Math.floor((bodyRows * 0.4 - 2) / 3))
+    : Math.max(0, bodyRows - reservedPanelRows - feedRows);
+  const panelRows = Math.max(1, bodyRows - Math.min(snapshot.cubes.length, listCap) - feedRows);
+  return { feedRows, listCap, panelRows, commandColumns };
+}
+
 function InkDashboard(input: {
   readonly snapshot: DashboardSnapshot;
   readonly width: number;
@@ -106,24 +130,10 @@ function InkDashboard(input: {
   const footerRows = lifecycleRows + 1;
   const chromeRows = 5 + footerRows;
   const bodyRows = Math.max(0, height - chromeRows);
-  const desiredFeedRows = snapshot.recent_activity.length === 0 ? 0 : Math.min(
-    snapshot.recent_activity.length,
-    bodyRows < 10 ? 1 : height >= 36 ? 4 : 3,
+  const { feedRows, listCap, panelRows, commandColumns } = dashboardBodyBudget(
+    snapshot, focus, width, height, bodyRows,
   );
-  const feedRows = Math.min(desiredFeedRows, Math.max(0, bodyRows - 1));
-  const listSpace = Math.max(1, bodyRows - feedRows);
-  const minimumPanelRows = Math.min(4, Math.max(1, bodyRows - feedRows));
-  const listLimit = Math.max(0, bodyRows - feedRows - minimumPanelRows);
-  const desiredListCap = Math.max(
-    snapshot.cubes.length > 1 && listSpace >= 4 ? 2 : 1,
-    Math.floor(listSpace * 0.42),
-  );
-  const commandColumns = width >= 100 && height >= 20;
-  const listCap = commandColumns
-    ? Math.max(1, Math.floor((bodyRows * 0.4 - 2) / 3))
-    : Math.min(listLimit, desiredListCap);
   const listRows = Math.min(snapshot.cubes.length, listCap);
-  const panelRows = Math.max(1, bodyRows - listRows - feedRows);
   const pageCount = listCap === 0 ? 1 : Math.max(1, Math.ceil(snapshot.cubes.length / listCap));
   const page = Math.max(0, view.page ?? 0) % pageCount;
   const pageStart = page * listCap;
@@ -141,7 +151,7 @@ function InkDashboard(input: {
     const scopeRows = Math.max(9, bodyRows - Math.min(listRows * 3 + 1 + omittedCubeRow, Math.floor(bodyRows * 0.4)));
     const cubeRows = Math.max(0, bodyRows - scopeRows - 1 - omittedCubeRow);
     const visibleCubes = snapshot.cubes.slice(pageStart, pageStart + Math.floor(cubeRows / 3));
-    const boardRows = Math.min(bodyRows - feedRows, Math.max(6, focus.drones.length + 5));
+    const boardRows = Math.min(bodyRows, Math.max(6, focus.drones.length + 5));
     const left: ReactNode[] = [h(InkSensorScope, {
       key: "scope", snapshot, cube: focus, width: leftWidth, rows: scopeRows, glyphs, view, palette,
     }), h(InkPanelTitle, { key: "cubes-title", title: ` CUBES ${snapshot.cubes.length} `,
@@ -164,8 +174,11 @@ function InkDashboard(input: {
     const right: ReactNode[] = [h(InkDroneBoard, {
       key: "board", snapshot, cube: focus, width: rightWidth, rows: boardRows,
       glyphs, palette, twoColumns: false,
-    }), h(InkPanelTitle, { key: "feed-title", title: " ACTIVITY FEED ", width: rightWidth, glyphs, palette })];
-    snapshot.recent_activity.slice(0, Math.min(4, bodyRows - boardRows - 1)).forEach((activity, index) => right.push(
+    })];
+    if (bodyRows > boardRows) right.push(h(InkPanelTitle, {
+      key: "feed-title", title: " ACTIVITY FEED ", width: rightWidth, glyphs, palette,
+    }));
+    snapshot.recent_activity.slice(0, feedRows).forEach((activity, index) => right.push(
       h(InkFeedRow, { key: activity.id, snapshot, activity, width: rightWidth, glyphs, palette,
         showClass: true, first: index === 0 }),
     ));
@@ -477,7 +490,9 @@ function InkFocusPanel(input: {
   if (rows < 6 || width < 64) {
     return h(InkCompactDeck, { snapshot, cube, width, rows, glyphs, view, palette });
   }
-  const scopeRows = Math.max(3, Math.min(rows - 3, Math.max(6, Math.floor(rows * 0.5))));
+  const desiredBoardRows = cube.drones.length + 4 + (cube.attention.unacked_directed > 0 ? 1 : 0);
+  const scopeRows = Math.max(3, Math.min(rows - 3,
+    Math.max(6, Math.min(Math.floor(rows * 0.5), rows - desiredBoardRows))));
   return h(Box, { width, height: rows, flexDirection: "column", overflow: "hidden" }, [
     h(InkSensorScope, { key: "scope", snapshot, cube, width, rows: scopeRows, glyphs, view, palette }),
     h(InkDroneBoard, {
@@ -531,8 +546,12 @@ function InkSensorScope(input: {
     inner, input.glyphs.ellipsis), { sequence: input.palette.muted }))];
   for (let row = 0; row < graphRows; row += 1) {
     const cells = buckets.map((bucket) => {
-      if (bucket.count > 0 && Math.ceil(bucket.count / maximum * graphRows) >= graphRows - row) {
-        return styledText(input.glyphs.cube.at(-1)!.repeat(2), { sequence: input.palette.chrome });
+      const fill = Math.min(1, Math.max(0, bucket.count / maximum * graphRows - (graphRows - row - 1)));
+      if (fill > 0) {
+        // Fractional cells preserve count-height differences even in a one-row
+        // plot; ASCII uses its ordered magnitude levels instead of full blocks.
+        const level = Math.ceil(fill * (input.glyphs.cube.length - 1));
+        return styledText(input.glyphs.cube[level]!.repeat(2), { sequence: input.palette.chrome });
       }
       return bucket.coverage === 0 ? styledText(unknown.repeat(2), { sequence: input.palette.inactive }) : "  ";
     }).join("");

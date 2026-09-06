@@ -105,6 +105,39 @@ describe("Command scope", () => {
     expect(presence.indexOf("■■")).toBeGreaterThanOrEqual(axis.indexOf("15m"));
   });
 
+  it.each(["box", "ascii"] as const)("distinguishes one and five messages at 80×30 in %s mode", (glyphMode) => {
+    const snapshot = rankDashboardSnapshot(data, server);
+    const cube = snapshot.cubes[0]!;
+    const frame = createDashboardRenderer({ glyphMode, color: false, motionMode: "off",
+      footer: STANDALONE_DASHBOARD_FOOTER })({ ...snapshot, cubes: [{ ...cube, scope: {
+        observed_from: start, messages: [
+          { created_at: "2026-09-06T11:45:01.000Z", drone_id: "sender-0" },
+          ...Array.from({ length: 5 }, () => ({ created_at: "2026-09-06T11:45:31.000Z", drone_id: "sender-1" })),
+        ],
+      } }, ...snapshot.cubes.slice(1)] }, 80, 30);
+    const volume = frame.split("\n").find((line) => line.includes("5 msgs"))!;
+    // The first two buckets share the axis and retain a 1:5 magnitude contrast.
+    expect(volume.slice(17, 21)).toBe(glyphMode === "box" ? "▂▂██" : "::##");
+    expect(frame).toMatch(/15m.*now/u);
+  });
+
+  it("reserves priority drone rows before feed and cube summaries at constrained heights", () => {
+    const snapshot = rankDashboardSnapshot(data, server);
+    const frame = mono(snapshot, 80, 30);
+    const boardRows = frame.split("\n").filter((line) => /LIVE\s+\d+ [a-z]/u.test(line));
+    expect(boardRows).toHaveLength(11);
+    expect(frame).not.toContain("more drones");
+    expect(frame).not.toContain("sample-2");
+    const shorter = mono(snapshot, 80, 24);
+    expect(shorter.split("\n").filter((line) => /LIVE\s+\d+ [a-z]/u.test(line)).length).toBeGreaterThan(2);
+    expect(shorter).not.toContain("FEED");
+    expect(shorter).not.toContain("sample-2");
+    expect(shorter).toMatch(/\+\d+ more drones/u);
+    const wideShort = mono(snapshot, 120, 20);
+    expect(wideShort.split("\n").filter((line) => /LIVE\s+\d+ [a-z]/u.test(line)).length).toBeGreaterThan(2);
+    expect(wideShort).not.toContain("FEED");
+  });
+
   it("restores dark cells after explicit background reset and full reset", () => {
     const background = "\u001b[48;2;6;12;9m";
     const source = "\u001b[48;2;13;25;18mtext\u001b[49m pad\u001b[0m tail";

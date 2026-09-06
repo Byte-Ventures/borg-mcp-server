@@ -198,7 +198,10 @@ state.
 At 100 columns and wider, with at least 20 rows, the scope/cube-list column and
 drone-board/feed column render side by side, using approximately 30% and 70%
 of the width. At narrower or shorter sizes they stack, and decorative framing
-and sender rows yield before priority drone information. Below 12 rows, the
+and sender rows yield before priority drone information. The stacked layout
+reserves the focused board before spending remaining rows on feed and cube
+summaries. Volume uses fractional block heights even in a single-row plot;
+ASCII uses the ordered magnitude levels `:`, `+`, `*`, and `#`. Below 12 rows, the
 endpoint/bind row, feed, and cube list yield to a compact deck with an inline scope ramp and the highest
 priority drone status cells. Stale and then unacknowledged attention targets
 precede liveness ordering, so exact 40-by-10 terminals retain ATTN plus the

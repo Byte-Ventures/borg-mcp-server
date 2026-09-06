@@ -1,4 +1,4 @@
-import { createInkDashboardElement, renderInkDashboardFrame } from "./dashboard-ink.js";
+import { createInkDashboardElement, dashboardBodyBudget, renderInkDashboardFrame } from "./dashboard-ink.js";
 import { renderPlainDashboard } from "./dashboard-plain.js";
 import { render as renderInk, type Instance as InkInstance } from "ink";
 import { Writable } from "node:stream";
@@ -779,27 +779,15 @@ function dashboardFrameKey(
     : 0;
   const footerRows = lifecycleRows + 1;
   const bodyRows = compact ? Math.max(1, height - 5) : Math.max(0, height - (5 + footerRows));
-  const desiredFeedRows = compact || snapshot.recent_activity.length === 0 ? 0 : Math.min(
-    snapshot.recent_activity.length,
-    bodyRows < 10 ? 1 : height >= 36 ? 4 : 3,
-  );
-  const feedRows = Math.min(desiredFeedRows, Math.max(0, bodyRows - 1));
-  const listSpace = Math.max(1, bodyRows - feedRows);
-  const minimumPanelRows = Math.min(4, Math.max(1, bodyRows - feedRows));
-  const listLimit = Math.max(0, bodyRows - feedRows - minimumPanelRows);
-  const desiredListCap = Math.max(
-    snapshot.cubes.length > 1 && listSpace >= 4 ? 2 : 1,
-    Math.floor(listSpace * 0.42),
-  );
-  const listCap = compact ? 0 : width >= 100 && height >= 20
-    ? Math.max(1, Math.floor((bodyRows * 0.4 - 2) / 3))
-    : Math.min(listLimit, desiredListCap);
-  const pageCount = listCap === 0 ? 1 : Math.max(1, Math.ceil(snapshot.cubes.length / listCap));
-  const page = Math.max(0, view.page ?? 0) % pageCount;
-  const summaryCubes = snapshot.cubes.slice(page * listCap, page * listCap + Math.min(snapshot.cubes.length, listCap));
   const focus = view.autoFollow || view.focusedCubeId === null
     ? snapshot.cubes[0]
     : snapshot.cubes.find((cube) => cube.id === view.focusedCubeId) ?? snapshot.cubes[0];
+  const budget = dashboardBodyBudget(snapshot, focus, width, height, bodyRows);
+  const feedRows = compact ? 0 : budget.feedRows;
+  const listCap = compact ? 0 : budget.listCap;
+  const pageCount = listCap === 0 ? 1 : Math.max(1, Math.ceil(snapshot.cubes.length / listCap));
+  const page = Math.max(0, view.page ?? 0) % pageCount;
+  const summaryCubes = snapshot.cubes.slice(page * listCap, page * listCap + Math.min(snapshot.cubes.length, listCap));
   const visiblePulseCubeIds = summaryCubes
     .filter((cube) => view.pulseCubeIds.has(cube.id))
     .map((cube) => cube.id)

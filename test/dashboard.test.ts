@@ -225,7 +225,7 @@ describe("dashboard renderer", () => {
     expect(crowded.split("\n").length).toBeLessThanOrEqual(24);
   });
 
-  it("keeps scope rows disjoint and retains the bounded feed at 80x24", () => {
+  it("keeps scope rows disjoint and yields the feed to drones at 80x24", () => {
     const data = snapshotData(3);
     const focus = data.cubes[0]!;
     const drones = Array.from({ length: 11 }, (_unused, index) => ({
@@ -270,8 +270,8 @@ describe("dashboard renderer", () => {
     expect(scope.some((line) => line.includes("cov 0%"))).toBe(true);
     expect(scope.filter((line) => line.startsWith("|")).every((line) => line.endsWith("|"))).toBe(true);
     expect(boardTitle).toBeGreaterThan(scopeTitle);
-    expect(frame.match(/^FEED /gmu)).toHaveLength(1);
-    expect(frame.match(/^\s{5}\d/gmu)).toHaveLength(2);
+    expect(frame).not.toContain("FEED");
+    expect(frame.match(/RECENT\s+\d+ drone/gmu)!.length).toBeGreaterThan(2);
   });
 
   it("uses one layout with a strict ASCII glyph map and an honest tiny fallback", () => {
@@ -524,7 +524,7 @@ describe("dashboard renderer", () => {
     const frame = createDashboardRenderer({ glyphMode: "ascii", color: false })(
       snapshot,
       80,
-      14,
+      24,
       {
         autoFollow: true,
         focusedCubeId: null,
@@ -1182,7 +1182,7 @@ describe("foreground dashboard lifecycle", () => {
   it("pulses on snapshot deltas and supports pinned navigation with explicit auto return", async () => {
     vi.useFakeTimers();
     const harness = terminalHarness();
-    harness.setDimensions(80, 16);
+    harness.setDimensions(80, 24);
     const source = sourceHarness(snapshotData(3));
     const renderer = vi.fn(createDashboardRenderer({
       glyphMode: "ascii",
@@ -1197,28 +1197,28 @@ describe("foreground dashboard lifecycle", () => {
       pulseFrameMs: 100,
     });
 
-    expect(harness.output.at(-1)).toContain("SCOPE cube-01 . (auto)");
+    expect(harness.output.at(-1)).toMatch(/SCOPE cube-01[\s\S]*\(auto\)/u);
     harness.input(">");
-    expect(harness.output.at(-1)).toContain("SCOPE cube-02 . (pinned)");
+    expect(harness.output.at(-1)).toMatch(/SCOPE cube-02[\s\S]*\(pinned\)/u);
     harness.input("<");
-    expect(harness.output.at(-1)).toContain("SCOPE cube-01 . (pinned)");
+    expect(harness.output.at(-1)).toMatch(/SCOPE cube-01[\s\S]*\(pinned\)/u);
     harness.input("a");
-    expect(harness.output.at(-1)).toContain("SCOPE cube-01 . (auto)");
+    expect(harness.output.at(-1)).toMatch(/SCOPE cube-01[\s\S]*\(auto\)/u);
     harness.input("<");
-    expect(harness.output.at(-1)).toContain("SCOPE cube-03 . (pinned)");
+    expect(harness.output.at(-1)).toMatch(/SCOPE cube-03[\s\S]*\(pinned\)/u);
     harness.input("a");
-    expect(harness.output.at(-1)).toContain("SCOPE cube-01 . (auto)");
+    expect(harness.output.at(-1)).toMatch(/SCOPE cube-01[\s\S]*\(auto\)/u);
 
     harness.input("w");
     expect(harness.output.at(-1)).toContain("w 60m");
     harness.input("w");
     expect(harness.output.at(-1)).toContain("w 5m");
-    harness.setDimensions(80, 13);
+    harness.setDimensions(80, 20);
     harness.resize();
     harness.input(" ");
     expect(harness.output.at(-1)).toContain("SPACE 2/3");
     harness.input(" ");
-    harness.setDimensions(80, 16);
+    harness.setDimensions(80, 24);
     harness.resize();
 
     const changed = snapshotData(3);

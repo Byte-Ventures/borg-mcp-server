@@ -55,7 +55,7 @@
     "@types/node": "22.20.1",
     "@types/react": "19.2.18",
     "typescript": "7.0.2",
-    "vitest": "4.1.10"
+    "vitest": "4.1.11"
   },
   "dependencies": {
     "borgmcp-shared": "2.2.0",

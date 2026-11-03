@@ -197,9 +197,9 @@ describe("Principal to ScopedStore isolation", () => {
       /choices between alternatives.*revisited.*cited by topic.*16,384 active bytes.*per cube/iu
         .test(layers.get("Decision registry (`borg_decide` / `borg_decisions`)") ?? "") &&
       /standing operating rules.*served every session.*not capped like the registry/iu
-        .test(layers.get("Cube directive (`borg_update-cube`)") ?? "") &&
+        .test(layers.get("Cube directive (`borg_update_cube`)") ?? "") &&
       /large or detailed material.*cited by id.*never inlined/iu
-        .test(layers.get("Cube documents (`borg_put-document` / `borg_get-document`)") ?? "") &&
+        .test(layers.get("Cube documents (`borg_put_document` / `borg_get_document`)") ?? "") &&
       /rules specific to one repository.*only by seats working there/iu
         .test(layers.get("Repository `AGENTS.md`") ?? "") &&
       /rule rather than a choice.*directive.*move it.*remove the registry copy/iu.test(rules) &&

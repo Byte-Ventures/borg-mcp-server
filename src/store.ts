@@ -2034,12 +2034,12 @@ class SqliteScopedStore implements ScopedStore {
       const maxActiveBytes = this.#storageLimits.maxActiveDocumentBytesPerCube!;
       if (requiredInteger(active, "count") >= 500) {
         throw new DocumentBudgetExceededError(
-          "The cube already has 500 active documents. Remove superseded revisions with borg_remove-document before retrying.",
+          "The cube already has 500 active documents. Remove superseded revisions with borg_remove_document before retrying.",
         );
       }
       if (total + sizeBytes > maxActiveBytes) {
         throw new DocumentBudgetExceededError(
-          `The cube has ${total} active document bytes; adding ${sizeBytes} bytes exceeds the ${maxActiveBytes}-byte budget. Remove superseded revisions with borg_remove-document before retrying.`,
+          `The cube has ${total} active document bytes; adding ${sizeBytes} bytes exceeds the ${maxActiveBytes}-byte budget. Remove superseded revisions with borg_remove_document before retrying.`,
         );
       }
       if (request.supersedes !== undefined) {
@@ -2528,7 +2528,7 @@ class SqliteScopedStore implements ScopedStore {
           `registry for revisitable choices, the cube directive for standing rules, cube ` +
           `documents for detail cited by id, and repository AGENTS.md for repository-specific ` +
           `rules. Relocate rules to the cube directive and remove the registry copy, supersede ` +
-          `stale choices, then remove obsolete entries with borg_remove-decision; move detail ` +
+          `stale choices, then remove obsolete entries with borg_remove_decision; move detail ` +
           `to a cube document and cite its id.`,
         );
       }

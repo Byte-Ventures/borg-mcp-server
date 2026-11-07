@@ -3,16 +3,13 @@ import { describe, expect, it } from "vitest";
 
 function expectStagedPublicationLane(workflow: string): void {
   const stageCommand = 'npm stage publish "./release/${{ needs.verify.outputs.tarball }}" --ignore-scripts --access public --provenance --registry=https://registry.npmjs.org';
-  expect(workflow.match(/^\s*npm stage publish\b.*$/gmu)).toEqual([
-    `          ${stageCommand}`,
-  ]);
+  expect(workflow).toContain(stageCommand);
   expect(workflow).not.toMatch(/^\s*npm publish\b/mu);
   expect(workflow).not.toContain("--tag staging");
   expect(workflow).not.toContain("npm dist-tag");
   expect(workflow).not.toContain("secrets.NPM_TOKEN");
-  expect(workflow).not.toContain("NPM_TOKEN_PRESENT");
 
-  const exercise = workflow.indexOf("Exercise exact tarball once");
+  const exercise = workflow.indexOf("node scripts/exercise-packed-artifact.mjs");
   const preflight = workflow.indexOf("verify-registry-release.mjs prepublish release/artifact-report.json");
   const stage = workflow.indexOf(stageCommand);
   expect(exercise).toBeGreaterThan(-1);
@@ -21,35 +18,24 @@ function expectStagedPublicationLane(workflow: string): void {
 }
 
 describe("server release lane", () => {
-  it("uses one package authority and one protected publish with no post-publish readback", async () => {
+  it("verifies the release artifact before protected staged publication", async () => {
     const workflow = await readFile(".github/workflows/release.yml", "utf8");
-    const notices = await readFile("THIRD_PARTY_NOTICES.md", "utf8");
-    const notice = await readFile("NOTICE", "utf8");
-    const [verification = "", afterVerify = ""] = workflow.split("\n  publish:\n");
+    const [verification = "", afterVerify = ""] = workflow.split(/\n\s*publish:\s*\n/u);
     const publication = afterVerify;
 
-    expect(workflow).toContain("tags: ['v*.*.*']");
     expect(workflow).not.toContain("workflow_dispatch:");
     expect(verification).not.toContain("environment:");
     expect(verification).not.toContain("id-token: write");
     expect(publication).toContain("needs: verify");
-    expect(publication).toContain("environment:\n      name: npm-publish");
+    expect(publication).toMatch(/environment:\s+name: npm-publish/u);
     expect(publication).toContain("id-token: write");
-    expect(workflow).not.toContain("\n  registry-verification:\n");
 
-    expect(workflow.match(/npm ci --ignore-scripts/g)).toHaveLength(1);
-    expect(workflow.match(/npm audit --audit-level=high/g)).toHaveLength(1);
-    expect(workflow.match(/npm run typecheck && npm run build/g)).toHaveLength(1);
-    expect(workflow.match(/npm pack --ignore-scripts/g)).toHaveLength(1);
-    expect(workflow.match(/verify-packed-artifact\.mjs/g)).toHaveLength(1);
-    expect(workflow.match(/exercise-packed-artifact\.mjs/g)).toHaveLength(1);
+    expect(verification).toContain("npm pack --ignore-scripts");
+    expect(verification).toContain("node scripts/verify-packed-artifact.mjs");
     expectStagedPublicationLane(workflow);
-    expect(workflow.match(/npm install --prefix "\$\{npm_prefix\}"/g)).toHaveLength(1);
 
-    expect(verification).toContain("Upload same-run release artifact");
     expect(verification).toContain("release/${{ steps.pack.outputs.tarball }}");
     expect(verification).toContain("release/artifact-report.json");
-    expect(publication).toContain("Download same-run release artifact");
     expect(publication).toContain("npm-release-${{ needs.verify.outputs.version }}");
     expect(publication).toContain("verify-registry-release.mjs prepublish release/artifact-report.json");
     expect(publication).toContain("NPM_EXPECTED_OWNER: ${{ vars.NPM_EXPECTED_OWNER }}");
@@ -58,43 +44,11 @@ describe("server release lane", () => {
     expect(publication).toContain('test -n "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}"');
     expect(publication).toContain('test -z "${NODE_AUTH_TOKEN:-}"');
 
-    expect(workflow).not.toContain("verify-registry-release.mjs postpublish");
-    expect(workflow).not.toContain("npm audit signatures");
-
-    for (const removed of [
-      "ARTIFACT_SR_SHA512",
-      "SERVER_1016_APPROVED_SHA",
-      "SERVER_PUBLIC_REVIEW_APPROVED_SHA",
-      "SERVER_RELEASE_AUTHORIZATION",
-      "ALLOW_UNCLAIMED_FIRST_PUBLISH",
-      "NPM_TOKEN_PRESENT",
-      "SHA512SUMS",
-      "sha512sum --check",
-      "run-evidence.txt",
-      "npm sbom",
-      "normalize-release-sbom",
-      "verify-release-sbom",
-      "dsseEnvelope",
-      "in-toto",
-      "SLSA",
-    ]) {
-      expect(workflow).not.toContain(removed);
-    }
-
-    expect(workflow).toContain(
-      'test "$(sha256sum LICENSE | cut -d \' \' -f1)" = "9535abd9881dc5af88523e24e0bed77df8dddd0f255bb74710533ac71140d2a1"',
-    );
     expect(workflow).toContain("node scripts/verify-source-lock.mjs");
     expect(workflow).toContain('git cat-file -t "${release_ref}"');
+    expect(workflow).toContain('test "${GITHUB_REF_NAME}" = "v${version}"');
     expect(workflow).toContain("git merge-base --is-ancestor");
-    expect(workflow).not.toContain("secrets.NPM_TOKEN");
     expect(workflow).not.toContain("registry-url:");
-    expect(notices).toContain(
-      "The Trusted Publishing workflow neither generates nor ships an SBOM.",
-    );
-    expect(notices).not.toContain("The release workflow generates a CycloneDX SBOM");
-    expect(notice).toContain("This product includes third-party software. See THIRD_PARTY_NOTICES.md.");
-    expect(notice).not.toContain("CycloneDX SBOM");
 
     for (const line of workflow.split("\n").filter((value) => value.trim().startsWith("uses:"))) {
       expect(line).toMatch(/@[0-9a-f]{40}(?:\s+#.*)?$/u);

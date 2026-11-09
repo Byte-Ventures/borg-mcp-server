@@ -1,5 +1,6 @@
 {
   "versionPins": [
+    "test/__snapshots__/dashboard.test.ts.snap",
     "test/cli.test.ts",
     "test/dashboard.test.ts",
     "test/https-server.test.ts",

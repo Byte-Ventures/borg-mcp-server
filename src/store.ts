@@ -2643,7 +2643,9 @@ class SqliteScopedStore implements ScopedStore {
       const operation = this.#attachmentOperation(input.receipt);
       if (operation !== undefined) {
         if (requiredText(operation, "cube_id") !== input.cubeId ||
-            requiredText(operation, "role_id") !== input.roleId) {
+            requiredText(operation, "role_id") !== input.roleId ||
+            (input.priorDroneId !== undefined && input.priorDroneId !==
+              (nullableText(operation, "drone_id") ?? nullableText(operation, "prior_drone_id")))) {
           throw new AttachSessionRejectedError();
         }
         if (requiredText(operation, "disposition") === "retired") throw new AttachmentRetiredError();

@@ -566,6 +566,8 @@ describe("pending attachment reconciliation", () => {
     expect(await reconcile(bearer, "finalize")).toMatchObject({ status: 409, error: { code: "ATTACHMENT_RETIRED" } });
     expect(await attach(clientA.credential, ids.cubeA, ids.roleA, bearer, "retirement-late"))
       .toMatchObject({ status: 409, error: { code: "ATTACHMENT_RETIRED" } });
+    expect(await attach(clientA.credential, ids.cubeA, ids.roleA, bearer, "retirement-wrong-prior", randomUUID()))
+      .toMatchObject({ status: 401, error: { code: "SESSION_REJECTED" } });
     expect(authority.authenticate(`Bearer ${bearer}`)).toBeNull();
     expect(count("drone_sessions")).toBe(accepted ? 1 : 0);
   });

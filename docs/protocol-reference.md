@@ -24,6 +24,17 @@ a delayed attach. Repeated retirement or finalization is idempotent, subject to
 current authorization and terminal-state checks. Revoked, evicted, superseded
 and foreign sessions remain refused.
 
+Cancellation fences are parent-scoped. Another parent's cancellation of an
+absent operation cannot block the original parent's inspection, cancellation
+or delayed attach. An actual foreign attachment remains inaccessible.
+
+An existing bearer-bound session without an operation record is conservatively
+registered as `finalized` on successful ordinary reuse. It is not assumed to
+have a failed pending bind, so pending recovery cannot retire it. This protects
+established sessions retained across a database upgrade without changing their
+bearer, drone, session or initial cursor. Newly created operations alone start
+as `accepted` in the same transaction as their session.
+
 Finalized operations cannot be retired through pending recovery
 (`409 ATTACHMENT_FINALIZED`); retired operations cannot attach or finalize
 (`409 ATTACHMENT_RETIRED`). General eviction still requires cube management

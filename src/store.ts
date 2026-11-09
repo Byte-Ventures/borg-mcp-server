@@ -2688,7 +2688,8 @@ class SqliteScopedStore implements ScopedStore {
         }
         const droneId = requiredText(bound, "drone_id");
         const sessionId = requiredText(bound, "session_id");
-        if (operation === undefined) this.#recordAttachment(input, droneId, sessionId, now);
+        // An existing untracked session has no proof of failed pending binding.
+        if (operation === undefined) this.#recordAttachment(input, droneId, sessionId, now, "finalized");
         const initialCursorId = optionalText(bound, "initial_log_cursor_id");
         const initialCursorCreatedAt = optionalText(bound, "initial_log_cursor_created_at");
         const initialLogCursor: LogCursor | null = initialCursorId === null || initialCursorCreatedAt === null
@@ -2836,7 +2837,7 @@ class SqliteScopedStore implements ScopedStore {
         SET initial_log_cursor_id = ?, initial_log_cursor_created_at = ?
         WHERE id = ?
       `).run(initialLogCursor?.id ?? null, initialLogCursor?.created_at ?? null, input.sessionId);
-      this.#recordAttachment(input, droneId, input.sessionId, now);
+      this.#recordAttachment(input, droneId, input.sessionId, now, "accepted");
       this.#database.exec("COMMIT");
       return {
         cube: {
@@ -2874,7 +2875,7 @@ class SqliteScopedStore implements ScopedStore {
       const operation = this.#attachmentOperation(request.receipt);
       if (operation === undefined) {
         const foreign = this.#database.prepare(
-          "SELECT 1 FROM attachment_operations WHERE receipt = ? LIMIT 1",
+          "SELECT 1 FROM attachment_operations WHERE receipt = ? AND drone_id IS NOT NULL AND session_id IS NOT NULL LIMIT 1",
         ).get(request.receipt);
         if (foreign !== undefined || request.action === "finalize") throw new ScopedStoreError();
         if (request.action === "inspect") {
@@ -2946,14 +2947,17 @@ class SqliteScopedStore implements ScopedStore {
     `).get(this.#principal.id, receipt);
   }
 
-  #recordAttachment(input: SeatAttachInput, droneId: string, sessionId: string, now: string): void {
+  #recordAttachment(
+    input: SeatAttachInput, droneId: string, sessionId: string, now: string,
+    disposition: "accepted" | "finalized",
+  ): void {
     this.#database.prepare(`
       INSERT INTO attachment_operations
         (client_id, receipt, cube_id, role_id, prior_drone_id, disposition,
          drone_id, session_id, credential_lookup, created_at)
-      VALUES (?, ?, ?, ?, ?, 'accepted', ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(this.#principal.id, input.receipt, input.cubeId, input.roleId,
-      input.priorDroneId ?? null, droneId, sessionId, input.credentialDigest.lookup, now);
+      input.priorDroneId ?? null, disposition, droneId, sessionId, input.credentialDigest.lookup, now);
   }
 
   #assertAttachmentCurrent(operation: Record<string, unknown>): void {

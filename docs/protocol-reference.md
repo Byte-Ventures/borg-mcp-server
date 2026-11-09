@@ -1,5 +1,36 @@
 # Server protocol reference
 
+## Pending attachment reconciliation
+
+This source uses protocol **15** exclusively, through `borgmcp-shared@3.0.0`.
+Clients must use the matching contract; older protocol tags fail closed. The
+authenticated attach request and response shapes are unchanged. Retrying the
+original bearer reuses the same drone, session and initial log cursor; it never
+replaces an existing session with a new bearer.
+
+`POST /api/client/attach/reconcile` accepts `receipt`, `cube_id`, `role_id`,
+`action` (`inspect`, `finalize` or `retire`), and optional `prior_drone_id` in the
+standard protocol envelope. Omitted prior means the original request had no
+prior, not a wildcard. The shared receipt helper derives an internal locator
+from the original bearer. The locator is not authentication or a recovery
+credential, and is not returned in responses or diagnostics.
+
+Only the enrolled parent with current cube access may reconcile its own exact
+operation. An accepted operation can be finalized after durable local binding,
+or explicitly retired while still pending. Retirement revokes only the original
+current session and evicts its drone; it never touches a replacement. Retiring
+an operation that has not arrived records a durable cancellation fence against
+a delayed attach. Repeated retirement or finalization is idempotent, subject to
+current authorization and terminal-state checks. Revoked, evicted, superseded
+and foreign sessions remain refused.
+
+Finalized operations cannot be retired through pending recovery
+(`409 ATTACHMENT_FINALIZED`); retired operations cannot attach or finalize
+(`409 ATTACHMENT_RETIRED`). General eviction still requires cube management
+access. No response restores a bearer. Lost local credentials after a completed
+bind/reset require explicit operator cleanup, not automatic replacement or
+re-enrollment. Whole-store loss still requires operator-consented re-enrollment.
+
 ## Advisory runtime metadata
 
 Protocol v8 attach requests may include the complete shared

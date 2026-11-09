@@ -271,7 +271,7 @@ describe("credential authority", () => {
       runtime.maintenance.grantClientCube({ clientId, cubeId, access: "manage" });
       const parent = clientPrincipal(clientId);
       const sessionCredential = generateSecret();
-      const attached = authority.attachSeat(runtime.forPrincipal(parent), {
+      const attached = await authority.attachSeat(runtime.forPrincipal(parent), {
         cubeId, roleId, sessionCredential,
       });
       const live = authority.registerLiveSession(droneSessionPrincipal({
@@ -282,7 +282,7 @@ describe("credential authority", () => {
       }));
 
       now = new Date("2126-07-14T12:00:00.000Z");
-      const renewed = authority.attachSeat(runtime.forPrincipal(parent), {
+      const renewed = await authority.attachSeat(runtime.forPrincipal(parent), {
         cubeId,
         roleId,
         sessionCredential,

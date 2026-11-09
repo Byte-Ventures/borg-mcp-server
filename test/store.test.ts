@@ -420,7 +420,7 @@ describe("Principal to ScopedStore isolation", () => {
     let digester = new CredentialDigester(key);
     let authority = new CredentialAuthority(runtime.credentials, digester);
     const revokedCredential = generateSecret();
-    const revoked = authority.attachSeat(runtime.forPrincipal(clientPrincipal(ids.clientB)), {
+    const revoked = await authority.attachSeat(runtime.forPrincipal(clientPrincipal(ids.clientB)), {
       cubeId: ids.cubeB,
       roleId: roleB,
       sessionCredential: revokedCredential,
@@ -428,7 +428,7 @@ describe("Principal to ScopedStore isolation", () => {
     runtime.maintenance.revokeDroneSession(revoked.sessionId);
     expect(authority.authenticateStatus(`Bearer ${revokedCredential}`)).toBe("revoked");
     const sessionCredential = generateSecret();
-    authority.attachSeat(runtime.forPrincipal(clientPrincipal(ids.clientB)), {
+    await authority.attachSeat(runtime.forPrincipal(clientPrincipal(ids.clientB)), {
       cubeId: ids.cubeB,
       roleId: roleB,
       sessionCredential,
@@ -1530,6 +1530,7 @@ describe("Principal to ScopedStore isolation", () => {
         action: "replace", heading: "Workflow", body: "blocked section",
       }),
       () => client.attachSeat({
+        receipt: "a".repeat(64),
         cubeId: ids.cubeA,
         roleId: ids.roleA,
         droneId: "00000000-0000-4000-8000-000000000032",

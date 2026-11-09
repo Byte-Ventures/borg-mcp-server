@@ -11,6 +11,7 @@ import {
 } from "borgmcp-shared/conformance";
 import {
   ATTACH_PATH,
+  ATTACH_RECONCILE_PATH,
   REPOSITORY_CUBE_ASSOCIATION_PATH,
   REPOSITORY_CUBE_RESOLVE_PATH,
   type CreateCubeResponse,
@@ -49,7 +50,7 @@ describe("borgmcp-shared server adapter", () => {
       });
 
       expect(report.results.filter((result) => !result.ok)).toEqual([]);
-      expect(report.results).toHaveLength(34);
+      expect(report.results.some((result) => result.id === "attachment.reconciliation" && result.ok)).toBe(true);
     } finally {
       await fixture.server.close();
       fixture.digester.destroy();
@@ -176,7 +177,7 @@ async function conformanceEnvironment(): Promise<{
         const authenticated = authority.authenticate(`Bearer ${credential}`);
         if (authenticated === null) throw new Error("Principal credential is invalid.");
         const sessionCredential = generateSecret();
-        const attachment = authority.attachSeat(runtime.forPrincipal(authenticated), {
+        const attachment = await authority.attachSeat(runtime.forPrincipal(authenticated), {
           cubeId: cube.id,
           roleId: role.id,
           sessionCredential,
@@ -189,13 +190,37 @@ async function conformanceEnvironment(): Promise<{
       },
       issueManagedDroneSession: async (drone) => {
         const session = managedSessions.get(drone.id);
-        if (session === undefined) throw new Error("Managed drone session is unavailable.");
-        return session.credential;
+        if (session !== undefined) return session.credential;
+        // The reconciliation fixture asks for an externally superseding session.
+        const database = new DatabaseSync(databasePath);
+        try {
+          const original = database.prepare("SELECT client_id, cube_id FROM drones WHERE id = ?").get(drone.id);
+          if (original === undefined) throw new Error("Managed drone is unavailable.");
+          const credential = generateSecret();
+          const digest = digester.digest(credential, "drone-session");
+          const sessionId = randomUUID();
+          database.exec("BEGIN IMMEDIATE");
+          database.prepare("UPDATE drone_sessions SET superseded_at = ? WHERE drone_id = ? AND superseded_at IS NULL")
+            .run(new Date().toISOString(), drone.id);
+          database.prepare("INSERT INTO drone_sessions (id, client_id, cube_id, drone_id, created_at) VALUES (?, ?, ?, ?, ?)")
+            .run(sessionId, original["client_id"] as string, original["cube_id"] as string, drone.id, new Date().toISOString());
+          database.prepare("INSERT INTO drone_session_credentials (id, session_id, lookup_digest, verifier_digest, created_at) VALUES (?, ?, ?, ?, ?)")
+            .run(randomUUID(), sessionId, digest.lookup, digest.verifier, new Date().toISOString());
+          database.exec("COMMIT");
+          managedSessions.set(drone.id, { sessionId, credential });
+          return credential;
+        } finally { database.close(); }
       },
       revokeManagedDroneSession: async (drone) => {
         const session = managedSessions.get(drone.id);
-        if (session === undefined) throw new Error("Managed drone session is unavailable.");
-        runtime.maintenance.revokeDroneSession(session.sessionId);
+        if (session !== undefined) runtime.maintenance.revokeDroneSession(session.sessionId);
+        else {
+          const database = new DatabaseSync(databasePath);
+          try {
+            database.prepare("UPDATE drone_sessions SET revoked_at = ? WHERE drone_id = ? AND superseded_at IS NULL")
+              .run(new Date().toISOString(), drone.id);
+          } finally { database.close(); }
+        }
       },
       grantCreateCubeCapability: async (principal) => {
         const clientId = enrolledClients.get(principal.id);
@@ -232,7 +257,7 @@ async function conformanceEnvironment(): Promise<{
         }
         runtime.maintenance.createRole({ id: roleId, cubeId, name: `Session ${roleId.slice(-8)}` });
         const sessionCredential = generateSecret();
-        authority.attachSeat(runtime.forPrincipal(authority.authenticate(
+        await authority.attachSeat(runtime.forPrincipal(authority.authenticate(
           `Bearer ${principalCredentials.get(principal.id) ?? ""}`,
         )!), {
           cubeId,
@@ -279,6 +304,8 @@ async function conformanceEnvironment(): Promise<{
       protocol: async () => transport.request("GET", "/api/protocol"),
       attach: async (credential, request) =>
         transport.request("POST", ATTACH_PATH, JSON.stringify(request), credential),
+      reconcileAttachment: async (credential, request) =>
+        transport.request("POST", ATTACH_RECONCILE_PATH, JSON.stringify(request), credential),
       selfMetadataUpdate: async (credential, cube, request) => transport.request(
         "PATCH",
         `/api/cubes/${cube.id}/drones/self/metadata`,

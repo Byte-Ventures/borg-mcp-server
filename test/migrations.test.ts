@@ -125,7 +125,7 @@ describe("SQLite migrations", () => {
     expect(first.diagnostics()).toEqual({
       journalMode: "wal",
       foreignKeys: true,
-      schemaVersions: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29],
+      schemaVersions: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30],
     });
     expect((await stat(join(directory, "data"))).mode & 0o777).toBe(0o700);
     expect((await stat(databasePath)).mode & 0o777).toBe(0o600);
@@ -135,7 +135,7 @@ describe("SQLite migrations", () => {
 
     const second = await openStore({ path: databasePath });
     expect(second.diagnostics().schemaVersions)
-      .toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29]);
+      .toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30]);
     second.close();
     await expect(access(databasePath)).resolves.toBeUndefined();
   });
@@ -156,6 +156,40 @@ describe("SQLite migrations", () => {
         "      ON activity_log (cube_id, created_at, id) WHERE visibility = 'direct'",
     });
     database.close();
+  });
+
+  it("upgrades v29 without rewriting identities and permits parent-scoped cancellation without a session", () => {
+    const database = new DatabaseSync(":memory:");
+    try {
+      database.exec("PRAGMA foreign_keys = ON");
+      applyMigrations(database, STORE_MIGRATIONS.slice(0, 29));
+      const parent = randomUUID();
+      const other = randomUUID();
+      const cube = randomUUID();
+      const role = randomUUID();
+      const timestamp = new Date().toISOString();
+      database.prepare("INSERT INTO clients (id, name, created_at) VALUES (?, 'Parent', ?)").run(parent, timestamp);
+      database.prepare("INSERT INTO clients (id, name, created_at) VALUES (?, 'Other', ?)").run(other, timestamp);
+      database.prepare("INSERT INTO cubes (id, name, directive, owner_id, created_at, updated_at) VALUES (?, 'Cube', '', ?, ?, ?)")
+        .run(cube, parent, timestamp, timestamp);
+      database.prepare("INSERT INTO roles (id, cube_id, name, created_at) VALUES (?, ?, 'Worker', ?)").run(role, cube, timestamp);
+      applyMigrations(database);
+      const insert = database.prepare(`INSERT INTO attachment_operations
+        (client_id, receipt, cube_id, role_id, disposition, created_at) VALUES (?, ?, ?, ?, ?, ?)`);
+      const receipt = "a".repeat(64);
+      insert.run(parent, receipt, cube, role, "retired", timestamp);
+      insert.run(other, receipt, cube, role, "retired", timestamp);
+      expect(() => insert.run(parent, receipt, cube, role, "retired", timestamp)).toThrow();
+      expect(() => insert.run(parent, "b".repeat(64), cube, role, "accepted", timestamp)).toThrow();
+      expect(() => database.prepare(`INSERT INTO attachment_operations
+        (client_id, receipt, cube_id, role_id, disposition, drone_id, session_id, created_at)
+        VALUES (?, ?, ?, ?, 'accepted', ?, ?, ?)`)
+        .run(parent, "c".repeat(64), cube, role, randomUUID(), randomUUID(), timestamp)).toThrow();
+      database.prepare("DELETE FROM roles WHERE id = ?").run(role);
+      expect(database.prepare("SELECT client_id, disposition FROM attachment_operations ORDER BY client_id").all())
+        .toEqual([parent, other].sort().map((client_id) => ({ client_id, disposition: "retired" })));
+      expect(database.prepare("SELECT owner_id FROM cubes WHERE id = ?").get(cube)).toEqual({ owner_id: parent });
+    } finally { database.close(); }
   });
 
   it("adds the expired-cursor ordering index when upgrading a v26 database", () => {
@@ -930,7 +964,7 @@ describe("SQLite migrations", () => {
     ).get()).toBeUndefined();
     expect(database.prepare(
       "SELECT version, name FROM schema_migrations ORDER BY version DESC LIMIT 1",
-    ).get()).toEqual({ version: 29, name: "case_insensitive_cube_role_names" });
+    ).get()).toEqual({ version: 30, name: "attachment_reconciliation" });
     database.close();
   });
 
@@ -1125,7 +1159,7 @@ Structured message routing:
     }).toEqual(historyBefore);
     expect(database.prepare(
       "SELECT version, name FROM schema_migrations ORDER BY version DESC LIMIT 1",
-    ).get()).toEqual({ version: 29, name: "case_insensitive_cube_role_names" });
+    ).get()).toEqual({ version: 30, name: "attachment_reconciliation" });
     database.close();
   });
 

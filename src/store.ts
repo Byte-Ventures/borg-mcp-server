@@ -15,6 +15,8 @@ import type {
   DocumentContentType,
   DroneRuntimeMetadata,
   DroneRuntimeMetadataPatch,
+  ReconcileAttachmentRequest,
+  ReconcileAttachmentResponse,
 } from "borgmcp-shared/protocol";
 import {
   DOCUMENT_DEFAULT_MAX_ACTIVE_BYTES_PER_CUBE,
@@ -22,6 +24,10 @@ import {
   DEFAULT_LOG_ENTRY_ADVISORY_BYTES,
   DEFAULT_MAX_LOG_ENTRY_BYTES,
   decodeAssociateRepositoryCubeRequest,
+  decodeAttachmentReceipt,
+  decodeReconcileAttachmentRequest,
+  ATTACHMENT_RETIRED_MESSAGE,
+  ATTACHMENT_FINALIZED_MESSAGE,
   decodeCreateCubeRequest,
   decodePutDocumentRequest,
   decodeResolveRepositoryCubeRequest,
@@ -431,6 +437,7 @@ export interface ScopedStore {
     onCubeDeleted?: () => void,
   ) => (() => void);
   readonly attachSeat: (input: SeatAttachInput) => SeatAttachRecord;
+  readonly reconcileAttachment: (input: ReconcileAttachmentRequest) => ReconcileAttachmentResponse;
   readonly updateOwnRuntimeMetadata: (
     cubeId: string,
     patch: DroneRuntimeMetadataPatch,
@@ -500,6 +507,7 @@ export interface CreateCubeRecord extends RepositoryCubeRecord {
 }
 
 export interface SeatAttachInput {
+  readonly receipt: string;
   readonly cubeId: string;
   readonly roleId: string;
   readonly priorDroneId?: string;
@@ -856,6 +864,16 @@ export class LogEntryTooLargeError extends Error {
     super(`Activity messages may contain at most ${maximumBytes} bytes. Store the detail as a document and cite it from a shorter entry.`);
     this.name = "LogEntryTooLargeError";
   }
+}
+
+export class AttachmentRetiredError extends Error {
+  readonly code = "ATTACHMENT_RETIRED";
+  constructor() { super(ATTACHMENT_RETIRED_MESSAGE); }
+}
+
+export class AttachmentFinalizedError extends Error {
+  readonly code = "ATTACHMENT_FINALIZED";
+  constructor() { super(ATTACHMENT_FINALIZED_MESSAGE); }
 }
 
 export class AttachSessionRejectedError extends Error {
@@ -2604,6 +2622,7 @@ class SqliteScopedStore implements ScopedStore {
     assertCanonicalUuid(input.sessionId, "Drone session id");
     assertCanonicalUuid(input.credentialId, "Drone session credential id");
     validateDigest(input.credentialDigest);
+    decodeAttachmentReceipt(input.receipt);
     const scope = this.#scope("read");
     const authorizedRole = this.#database.prepare(`
       SELECT 1 FROM cubes AS c JOIN roles AS role ON role.cube_id = c.id
@@ -2621,6 +2640,19 @@ class SqliteScopedStore implements ScopedStore {
         WHERE c.id = ? AND role.id = ? AND ${scope.sql}
       `).get(input.cubeId, input.roleId, ...scope.parameters);
       if (roleRow === undefined) throw new ScopedStoreError();
+      const operation = this.#attachmentOperation(input.receipt);
+      if (operation !== undefined) {
+        if (requiredText(operation, "cube_id") !== input.cubeId ||
+            requiredText(operation, "role_id") !== input.roleId) {
+          throw new AttachSessionRejectedError();
+        }
+        if (requiredText(operation, "disposition") === "retired") throw new AttachmentRetiredError();
+        if (!timingSafeEqual(requiredBuffer(operation, "credential_lookup"), input.credentialDigest.lookup)) {
+          throw new AttachSessionRejectedError();
+        }
+        // Ordinary bearer retries retain their existing optional-current-prior semantics.
+        this.#assertAttachmentCurrent(operation);
+      }
       const bound = this.#database.prepare(`
         SELECT credential.verifier_digest, credential.revoked_at AS credential_revoked_at,
                session.id AS session_id, session.client_id, session.cube_id, session.drone_id,
@@ -2654,6 +2686,7 @@ class SqliteScopedStore implements ScopedStore {
         }
         const droneId = requiredText(bound, "drone_id");
         const sessionId = requiredText(bound, "session_id");
+        if (operation === undefined) this.#recordAttachment(input, droneId, sessionId, now);
         const initialCursorId = optionalText(bound, "initial_log_cursor_id");
         const initialCursorCreatedAt = optionalText(bound, "initial_log_cursor_created_at");
         const initialLogCursor: LogCursor | null = initialCursorId === null || initialCursorCreatedAt === null
@@ -2801,6 +2834,7 @@ class SqliteScopedStore implements ScopedStore {
         SET initial_log_cursor_id = ?, initial_log_cursor_created_at = ?
         WHERE id = ?
       `).run(initialLogCursor?.id ?? null, initialLogCursor?.created_at ?? null, input.sessionId);
+      this.#recordAttachment(input, droneId, input.sessionId, now);
       this.#database.exec("COMMIT");
       return {
         cube: {
@@ -2823,6 +2857,129 @@ class SqliteScopedStore implements ScopedStore {
         result: "created",
       };
     });
+  }
+
+  reconcileAttachment(input: ReconcileAttachmentRequest): ReconcileAttachmentResponse {
+    const request = decodeReconcileAttachmentRequest(input);
+    if (this.#principal.kind !== "client") throw new ScopedStoreError();
+    const scope = this.#scope("read");
+    return withImmediateTransaction(this.#database, () => {
+      const authorized = this.#database.prepare(`
+        SELECT 1 FROM cubes AS c JOIN roles AS role ON role.cube_id = c.id
+        WHERE c.id = ? AND role.id = ? AND ${scope.sql}
+      `).get(request.cube_id, request.role_id, ...scope.parameters);
+      if (authorized === undefined) throw new ScopedStoreError();
+      const operation = this.#attachmentOperation(request.receipt);
+      if (operation === undefined) {
+        const foreign = this.#database.prepare(
+          "SELECT 1 FROM attachment_operations WHERE receipt = ? LIMIT 1",
+        ).get(request.receipt);
+        if (foreign !== undefined || request.action === "finalize") throw new ScopedStoreError();
+        if (request.action === "inspect") {
+          this.#database.exec("COMMIT");
+          return { disposition: "absent" };
+        }
+        this.#capacityGuard.assertCanGrow(1_024);
+        this.#database.prepare(`
+          INSERT INTO attachment_operations
+            (client_id, receipt, cube_id, role_id, prior_drone_id, disposition, created_at)
+          VALUES (?, ?, ?, ?, ?, 'retired', ?)
+        `).run(this.#principal.id, request.receipt, request.cube_id, request.role_id,
+          request.prior_drone_id ?? null, this.#now());
+        this.#database.exec("COMMIT");
+        return { disposition: "retired" };
+      }
+      if (requiredText(operation, "cube_id") !== request.cube_id ||
+          requiredText(operation, "role_id") !== request.role_id ||
+          optionalText(operation, "prior_drone_id") !== (request.prior_drone_id ?? null)) {
+        throw new AttachSessionRejectedError();
+      }
+      const disposition = requiredText(operation, "disposition");
+      if (disposition === "retired") {
+        if (request.action === "finalize") throw new AttachmentRetiredError();
+        // A cancelled operation never becomes an authority over a later session.
+        const droneId = nullableText(operation, "drone_id");
+        if (droneId !== null && this.#database.prepare(`
+          SELECT 1 FROM drone_sessions WHERE drone_id = ?
+            AND (id <> ? OR superseded_at IS NOT NULL)
+        `).get(droneId, requiredText(operation, "session_id")) !== undefined) {
+          throw new AttachSessionRejectedError();
+        }
+        this.#database.exec("COMMIT");
+        return { disposition: "retired" };
+      }
+      this.#assertAttachmentCurrent(operation);
+      const droneId = requiredText(operation, "drone_id");
+      const sessionId = requiredText(operation, "session_id");
+      if (request.action === "retire") {
+        if (disposition === "finalized") throw new AttachmentFinalizedError();
+        const now = this.#now();
+        this.#database.prepare("UPDATE drone_session_credentials SET revoked_at = ? WHERE session_id = ?")
+          .run(now, sessionId);
+        this.#database.prepare("UPDATE drone_sessions SET revoked_at = ? WHERE id = ?").run(now, sessionId);
+        this.#database.prepare("UPDATE drones SET evicted_at = ? WHERE id = ?").run(now, droneId);
+        this.#database.prepare(`
+          UPDATE attachment_operations SET disposition = 'retired' WHERE client_id = ? AND receipt = ?
+        `).run(this.#principal.id, request.receipt);
+        this.#database.exec("COMMIT");
+        return { disposition: "retired" };
+      }
+      if (request.action === "finalize") {
+        this.#database.prepare(`
+          UPDATE attachment_operations SET disposition = 'finalized' WHERE client_id = ? AND receipt = ?
+        `).run(this.#principal.id, request.receipt);
+      }
+      this.#database.exec("COMMIT");
+      return {
+        disposition: request.action === "finalize" || disposition === "finalized" ? "finalized" : "accepted",
+        drone_id: droneId,
+        session_id: sessionId,
+      };
+    });
+  }
+
+  #attachmentOperation(receipt: string): Record<string, unknown> | undefined {
+    return this.#database.prepare(`
+      SELECT * FROM attachment_operations WHERE client_id = ? AND receipt = ?
+    `).get(this.#principal.id, receipt);
+  }
+
+  #recordAttachment(input: SeatAttachInput, droneId: string, sessionId: string, now: string): void {
+    this.#database.prepare(`
+      INSERT INTO attachment_operations
+        (client_id, receipt, cube_id, role_id, prior_drone_id, disposition,
+         drone_id, session_id, credential_lookup, created_at)
+      VALUES (?, ?, ?, ?, ?, 'accepted', ?, ?, ?, ?)
+    `).run(this.#principal.id, input.receipt, input.cubeId, input.roleId,
+      input.priorDroneId ?? null, droneId, sessionId, input.credentialDigest.lookup, now);
+  }
+
+  #assertAttachmentCurrent(operation: Record<string, unknown>): void {
+    const session = this.#database.prepare(`
+      SELECT session.client_id, session.cube_id, session.drone_id, session.superseded_at,
+             session.revoked_at, credential.revoked_at AS credential_revoked_at,
+             drone.evicted_at, drone.role_id
+      FROM drone_sessions AS session
+      JOIN drone_session_credentials AS credential ON credential.session_id = session.id
+      JOIN drones AS drone ON drone.id = session.drone_id
+        AND drone.client_id = session.client_id AND drone.cube_id = session.cube_id
+      WHERE session.id = ? AND credential.lookup_digest = ?
+    `).get(requiredText(operation, "session_id"), requiredBuffer(operation, "credential_lookup"));
+    if (session === undefined || requiredText(session, "client_id") !== this.#principal.id ||
+        requiredText(session, "cube_id") !== requiredText(operation, "cube_id") ||
+        requiredText(session, "drone_id") !== requiredText(operation, "drone_id") ||
+        requiredText(session, "role_id") !== requiredText(operation, "role_id")) {
+      throw new AttachSessionRejectedError();
+    }
+    if (optionalText(session, "evicted_at") !== null) throw new AttachDroneEvictedError();
+    if (optionalText(session, "revoked_at") !== null ||
+        optionalText(session, "credential_revoked_at") !== null) throw new AttachSessionRevokedError();
+    if (optionalText(session, "superseded_at") !== null || this.#database.prepare(`
+      SELECT 1 FROM drone_sessions WHERE drone_id = ? AND id <> ?
+        AND revoked_at IS NULL AND superseded_at IS NULL
+    `).get(requiredText(operation, "drone_id"), requiredText(operation, "session_id")) !== undefined) {
+      throw new AttachSessionRejectedError();
+    }
   }
 
   #cubeHeadCursor(cubeId: string): LogCursor | null {
@@ -3398,7 +3555,7 @@ class SqliteMaintenanceStore implements MaintenanceStore {
         "deleted_cube_session_credentials", "deleted_cube_client_grants", "deleted_cubes",
         "repository_associations", "cube_create_bindings",
         "activity_acks", "activity_log_recipients", "activity_log",
-        "decisions", "expired_activity_cursors", "drone_session_credentials", "drone_sessions",
+        "decisions", "expired_activity_cursors", "attachment_operations", "drone_session_credentials", "drone_sessions",
         "drones", "roles", "client_cube_grants", "cubes", "client_server_capabilities",
         "enrollment_claims", "client_credentials", "owner_enrollment_state", "clients",
         "enrollment_invitations",

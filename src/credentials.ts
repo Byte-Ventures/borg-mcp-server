@@ -18,6 +18,7 @@ import type {
 } from "./store.js";
 import {
   decodeInvitationArtifact,
+  deriveAttachmentReceipt,
   encodeInvitationArtifact,
   getInvitationArtifactIntegrityInput,
   type DroneRuntimeMetadata,
@@ -308,7 +309,7 @@ export class CredentialAuthority {
     return "invalid";
   }
 
-  attachSeat(
+  async attachSeat(
     store: ScopedStore,
     request: {
       readonly cubeId: string;
@@ -317,8 +318,10 @@ export class CredentialAuthority {
       readonly priorDroneId?: string;
       readonly runtimeMetadata?: DroneRuntimeMetadata;
     },
-  ): SeatAttachResponse {
+  ): Promise<SeatAttachResponse> {
+    const receipt = await deriveAttachmentReceipt(request.sessionCredential);
     const record = store.attachSeat({
+      receipt,
       cubeId: request.cubeId,
       roleId: request.roleId,
       ...(request.priorDroneId === undefined ? {} : { priorDroneId: request.priorDroneId }),

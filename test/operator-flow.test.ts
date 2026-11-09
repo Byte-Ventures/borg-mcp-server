@@ -55,7 +55,7 @@ describe("offline operator flow", () => {
     runtime.maintenance.grantClientCube({ clientId: enrolled.clientId, cubeId, access: "manage" });
     runtime.maintenance.createRole({ id: roleId, cubeId, name: "Builder" });
     const principal = authority.authenticate(`Bearer ${credential}`)!;
-    const attached = authority.attachSeat(runtime.forPrincipal(principal), {
+    const attached = await authority.attachSeat(runtime.forPrincipal(principal), {
       cubeId, roleId, sessionCredential,
     });
     const coordination = new CoordinationApi(runtime, authority);
@@ -467,10 +467,10 @@ describe("offline operator flow", () => {
     runtime.maintenance.grantClientCube({ clientId: enrolled.clientId, cubeId, access: "manage" });
     runtime.maintenance.createRole({ id: roleId, cubeId, name: "Builder" });
     const principal = authority.authenticate(`Bearer ${credential}`)!;
-    const issued = authority.attachSeat(runtime.forPrincipal(principal), {
+    const issued = await authority.attachSeat(runtime.forPrincipal(principal), {
       cubeId, roleId, sessionCredential,
     });
-    const reissued = authority.attachSeat(runtime.forPrincipal(principal), {
+    const reissued = await authority.attachSeat(runtime.forPrincipal(principal), {
       cubeId, roleId, sessionCredential,
     });
     expect(issued.result).toBe("created");
@@ -593,7 +593,7 @@ describe("offline operator flow", () => {
         await readFile(bootstrap.paths.caCertificate),
         "/api/enrollment/exchange",
         JSON.stringify({
-          protocol_version: "14",
+          protocol_version: "15",
           request_id: "request-1234",
           payload: {
             invitation,
@@ -615,7 +615,7 @@ describe("offline operator flow", () => {
         await readFile(bootstrap.paths.caCertificate),
         "/api/cubes",
         JSON.stringify({
-          protocol_version: "14",
+          protocol_version: "15",
           request_id: "create-1234",
           payload: {
             retry_key: "00000000-0000-4000-8000-000000000102",
@@ -651,7 +651,7 @@ describe("offline operator flow", () => {
         await readFile(bootstrap.paths.caCertificate),
         "/api/client/attach",
         JSON.stringify({
-          protocol_version: "14",
+          protocol_version: "15",
           request_id: "attach-1234",
           payload: {
             cube_id: cubeId,
@@ -695,7 +695,7 @@ describe("offline operator flow", () => {
         await readFile(bootstrap.paths.caCertificate),
         `/api/cubes/${cubeId}/logs`,
         JSON.stringify({
-          protocol_version: "14",
+          protocol_version: "15",
           request_id: "append-1234",
           payload: { post_id: randomUUID(), message: "offline coordination", to: "broadcast" },
         }),
@@ -707,7 +707,7 @@ describe("offline operator flow", () => {
         await readFile(bootstrap.paths.caCertificate),
         `/api/cubes/${cubeId}/logs`,
         JSON.stringify({
-          protocol_version: "14",
+          protocol_version: "15",
           request_id: "read-12345",
           payload: { cursor: null, limit: 10 },
         }),

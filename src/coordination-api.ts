@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import {
   ATTACH_PATH,
+  ATTACH_RECONCILE_PATH,
   ErrorCode,
   PROTOCOL_VERSION,
   ProtocolContractError,
@@ -9,6 +10,7 @@ import {
   createProtocolEnvelope,
   decodeAssociateRepositoryCubeRequestEnvelope,
   decodeAttachRequestEnvelope,
+  decodeReconcileAttachmentRequestEnvelope,
   decodeAckStatusRequestEnvelope,
   decodeAckStatusResult,
   decodeCreateCubeRequestEnvelope,
@@ -42,6 +44,8 @@ import {
   AttachDroneEvictedError,
   AttachSessionRejectedError,
   AttachSessionRevokedError,
+  AttachmentRetiredError,
+  AttachmentFinalizedError,
   AccessDeniedError,
   CreateCubeConflictError,
   RepositoryAssociationConflictError,
@@ -143,12 +147,17 @@ export class CoordinationApi {
     assertServerDerivedPrincipal(request.principal);
     const authentication = request.principal;
 
-    if (request.path === ATTACH_PATH && request.method === "POST") {
+    if ((request.path === ATTACH_PATH || request.path === ATTACH_RECONCILE_PATH) && request.method === "POST") {
       const requestId = safeRequestId(request.body);
       try {
+        if (request.path === ATTACH_RECONCILE_PATH) {
+          const envelope = decodeReconcileAttachmentRequestEnvelope(request.body);
+          const result = this.#runtime.forPrincipal(authentication).reconcileAttachment(envelope.payload);
+          return success(200, envelope.request_id, result);
+        }
         const envelope = decodeAttachRequestEnvelope(request.body);
         const priorDroneId = envelope.payload.prior_drone_id;
-        const attachment = this.#authority.attachSeat(
+        const attachment = await this.#authority.attachSeat(
           this.#runtime.forPrincipal(authentication),
           {
             cubeId: envelope.payload.cube_id,
@@ -175,6 +184,9 @@ export class CoordinationApi {
           return error.code === ErrorCode.UNSUPPORTED_PROTOCOL_VERSION
             ? failure(426, error.code, "Unsupported protocol version.", requestId)
             : failure(400, "INVALID_INPUT", "Invalid protocol request.", requestId);
+        }
+        if (error instanceof AttachmentRetiredError || error instanceof AttachmentFinalizedError) {
+          return failure(409, error.code, error.message, requestId);
         }
         if (error instanceof AttachDroneEvictedError) {
           return failure(410, ErrorCode.DRONE_EVICTED, error.message, requestId);

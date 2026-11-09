@@ -870,6 +870,30 @@ Structured message routing:
         ON roles (cube_id, name COLLATE NOCASE);
     `,
   },
+  {
+    version: 30,
+    name: "attachment_reconciliation",
+    sql: `
+      CREATE TABLE attachment_operations (
+        client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+        receipt TEXT NOT NULL CHECK (length(receipt) = 64 AND receipt NOT GLOB '*[^0-9a-f]*'),
+        cube_id TEXT NOT NULL REFERENCES cubes(id) ON DELETE CASCADE,
+        role_id TEXT NOT NULL,
+        prior_drone_id TEXT,
+        disposition TEXT NOT NULL CHECK (disposition IN ('accepted', 'finalized', 'retired')),
+        drone_id TEXT,
+        session_id TEXT,
+        credential_lookup BLOB,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (client_id, receipt),
+        CHECK ((drone_id IS NULL AND session_id IS NULL AND credential_lookup IS NULL
+                AND disposition = 'retired') OR
+               (drone_id IS NOT NULL AND session_id IS NOT NULL
+                AND credential_lookup IS NOT NULL AND length(credential_lookup) = 16))
+      ) STRICT, WITHOUT ROWID;
+      CREATE INDEX attachment_operations_receipt_idx ON attachment_operations(receipt);
+    `,
+  },
 ]);
 
 interface AppliedMigrationRow {

@@ -4,6 +4,7 @@ import type { AddressInfo, Socket } from "node:net";
 import { createHash, X509Certificate } from "node:crypto";
 import {
   ATTACH_PATH,
+  ATTACH_RECONCILE_PATH,
   CUBES_PATH,
   ENROLLMENT_EXCHANGE_PATH,
   ErrorCode,
@@ -527,6 +528,7 @@ function debugRoute(rawUrl: string | undefined): DebugRoute {
   if (path === RUNTIME_INFO_PATH) return "runtime";
   if (path === ENROLLMENT_EXCHANGE_PATH) return "enrollment_exchange";
   if (path === ATTACH_PATH) return "client_attach";
+  if (path === ATTACH_RECONCILE_PATH) return "client_attach_reconcile";
   if (path === REPOSITORY_CUBE_RESOLVE_PATH) return "repository_cube_resolve";
   if (path === REPOSITORY_CUBE_ASSOCIATION_PATH) return "repository_cube_association";
   if (path === "/api/cubes") return "cubes";
@@ -560,6 +562,7 @@ function runtimeRequestPath(route: DebugRoute): RuntimeRequestPath {
     case "runtime": return "/api/runtime";
     case "enrollment_exchange": return "/api/enrollment/exchange";
     case "client_attach": return "/api/client/attach";
+    case "client_attach_reconcile": return "/api/client/attach/reconcile";
     case "repository_cube_resolve": return "/api/repository-cubes/resolve";
     case "repository_cube_association": return "/api/repository-cubes/association";
     case "cubes": return "/api/cubes";
@@ -775,7 +778,7 @@ export function coordinationQueryErrorMessage(error: CoordinationQueryError): st
 }
 
 function isCoordinationPath(path: string | null): path is string {
-  return path === ATTACH_PATH || path === CUBES_PATH ||
+  return path === ATTACH_PATH || path === ATTACH_RECONCILE_PATH || path === CUBES_PATH ||
     path === REPOSITORY_CUBE_RESOLVE_PATH ||
     path === REPOSITORY_CUBE_ASSOCIATION_PATH ||
     path?.startsWith("/api/cubes/") === true;

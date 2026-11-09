@@ -6,6 +6,7 @@ export type RuntimeRequestPath =
   | "/api/runtime"
   | "/api/enrollment/exchange"
   | "/api/client/attach"
+  | "/api/client/attach/reconcile"
   | "/api/repository-cubes/resolve"
   | "/api/repository-cubes/association"
   | "/api/cubes"

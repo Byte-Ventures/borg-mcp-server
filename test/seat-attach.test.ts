@@ -3,8 +3,15 @@ import { mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { Worker } from "node:worker_threads";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { decodeAttachResponseEnvelope } from "borgmcp-shared/protocol";
+import {
+  ATTACH_RECONCILE_PATH,
+  decodeAttachResponseEnvelope,
+  decodeReconcileAttachmentResponseEnvelope,
+  deriveAttachmentReceipt,
+  type ReconcileAttachmentAction,
+} from "borgmcp-shared/protocol";
 
 import { CoordinationApi } from "../src/coordination-api.js";
 import {
@@ -13,6 +20,7 @@ import {
   generateSecret,
 } from "../src/credentials.js";
 import { openStore, type StoreRuntime } from "../src/store.js";
+import { applyMigrations, STORE_MIGRATIONS } from "../src/migrations.js";
 
 const ids = {
   cubeA: "00000000-0000-4000-8000-000000000101",
@@ -500,7 +508,7 @@ describe("client seat attach", () => {
       path: "/api/client/attach",
       principal: authenticatedPrincipal(clientA.credential),
       body: {
-        protocol_version: "5",
+        protocol_version: "14",
         request_id: "attach-version-old",
         payload: {
           cube_id: ids.cubeA,
@@ -513,7 +521,7 @@ describe("client seat attach", () => {
     expect(response).toMatchObject({
       status: 426,
       body: {
-        protocol_version: "14",
+        protocol_version: "15",
         request_id: "attach-version-old",
         error: {
           code: "UNSUPPORTED_PROTOCOL_VERSION",
@@ -525,6 +533,285 @@ describe("client seat attach", () => {
     expect(count("drone_sessions")).toBe(0);
   });
 });
+
+describe("pending attachment reconciliation", () => {
+  it("keeps another parent's absent cancellation independent of our inspect and cancellation", async () => {
+    const bearer = generateSecret();
+    runtime.maintenance.grantClientCube({ clientId: clientB.clientId, cubeId: ids.cubeA, access: "read" });
+    expect(await reconcile(bearer, "retire", { credential: clientB.credential }))
+      .toMatchObject({ status: 200, payload: { disposition: "retired" } });
+    const inspection = await reconcile(bearer, "inspect");
+    const cancellation = await reconcile(bearer, "retire");
+    const delayed = await attach(clientA.credential, ids.cubeA, ids.roleA, bearer, "independent-original-late");
+    expect({ inspection, cancellation, delayed }).toMatchObject({
+      inspection: { status: 200, payload: { disposition: "absent" } },
+      cancellation: { status: 200, payload: { disposition: "retired" } },
+      delayed: { status: 409, error: { code: "ATTACHMENT_RETIRED" } },
+    });
+    expect(await reconcile(bearer, "inspect", { credential: clientB.credential }))
+      .toMatchObject({ status: 200, payload: { disposition: "retired" } });
+    for (const credential of [clientA.credential, clientB.credential]) {
+      expect(await attach(credential, ids.cubeA, ids.roleA, bearer, "independent-late"))
+        .toMatchObject({ status: 409, error: { code: "ATTACHMENT_RETIRED" } });
+    }
+    expect(count("drones")).toBe(0);
+    expect(count("drone_sessions")).toBe(0);
+  });
+
+  it.each(["revoked", "evicted", "superseded"] as const)("protects an established v29 session on reuse and preserves subsequent %s refusal", async (terminal) => {
+    // Synthetic previous-schema state, not an executed old-client binding journey.
+    const previousPath = join(directory, "previous.db");
+    const previous = new DatabaseSync(previousPath);
+    const bearer = generateSecret();
+    const sessionId = randomUUID();
+    const droneId = randomUUID();
+    const cursor = { id: randomUUID(), created_at: now.toISOString() };
+    const parentDigest = digester.digest(clientA.credential, "client");
+    const sessionDigest = digester.digest(bearer, "drone-session");
+    try {
+      previous.exec("PRAGMA foreign_keys = ON");
+      applyMigrations(previous, STORE_MIGRATIONS.slice(0, 29));
+      previous.prepare("INSERT INTO clients (id, name, created_at) VALUES (?, 'Previous parent', ?)")
+        .run(clientA.clientId, now.toISOString());
+      previous.prepare("INSERT INTO client_credentials (id, client_id, lookup_digest, verifier_digest, created_at) VALUES (?, ?, ?, ?, ?)")
+        .run(randomUUID(), clientA.clientId, parentDigest.lookup, parentDigest.verifier, now.toISOString());
+      previous.prepare("INSERT INTO cubes (id, name, directive, owner_id, created_at, updated_at) VALUES (?, 'Previous cube', '', ?, ?, ?)")
+        .run(ids.cubeA, clientA.clientId, now.toISOString(), now.toISOString());
+      previous.prepare("INSERT INTO roles (id, cube_id, name, created_at) VALUES (?, ?, 'Previous worker', ?)")
+        .run(ids.roleA, ids.cubeA, now.toISOString());
+      previous.prepare("INSERT INTO client_cube_grants (client_id, cube_id, access, created_at) VALUES (?, ?, 'manage', ?)")
+        .run(clientA.clientId, ids.cubeA, now.toISOString());
+      previous.prepare("INSERT INTO drones (id, client_id, cube_id, role_id, label, created_at) VALUES (?, ?, ?, ?, 'previous-worker', ?)")
+        .run(droneId, clientA.clientId, ids.cubeA, ids.roleA, now.toISOString());
+      previous.prepare(`INSERT INTO drone_sessions
+        (id, client_id, cube_id, drone_id, initial_log_cursor_id, initial_log_cursor_created_at, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)`)
+        .run(sessionId, clientA.clientId, ids.cubeA, droneId, cursor.id, cursor.created_at, now.toISOString());
+      previous.prepare("INSERT INTO drone_session_credentials (id, session_id, lookup_digest, verifier_digest, created_at) VALUES (?, ?, ?, ?, ?)")
+        .run(randomUUID(), sessionId, sessionDigest.lookup, sessionDigest.verifier, now.toISOString());
+      expect(previous.prepare("SELECT 1 FROM sqlite_master WHERE name = 'attachment_operations'").get()).toBeUndefined();
+    } finally { previous.close(); }
+    runtime.close();
+    digester.destroy();
+    databasePath = previousPath;
+    runtime = await openStore({ path: databasePath, clock: () => new Date(now) });
+    ({ digester, authority, api } = authorityRuntime(runtime));
+    runtime.maintenance.grantClientCube({ clientId: clientA.clientId, cubeId: ids.cubeA, access: "read" });
+    expect(() => runtime.forPrincipal(authenticatedPrincipal(clientA.credential)).evictDrone(ids.cubeA, droneId)).toThrow();
+    expect(await attach(clientA.credential, ids.cubeA, ids.roleA, bearer, "previous-wrong-prior", randomUUID()))
+      .toMatchObject({ status: 401, error: { code: "SESSION_REJECTED" } });
+    for (const prior of [droneId, undefined]) {
+      expect(await attach(clientA.credential, ids.cubeA, ids.roleA, bearer, "previous-reuse", prior))
+        .toMatchObject({ status: 200, payload: { result: "reused", drone: { id: droneId }, session: { id: sessionId }, initial_log_cursor: cursor } });
+    }
+    const inspection = await reconcile(bearer, "inspect", { prior: droneId });
+    const retirement = await reconcile(bearer, "retire", { prior: droneId });
+    expect({ inspection, retirement, usable: authority.authenticate(`Bearer ${bearer}`) !== null }).toMatchObject({
+      inspection: { status: 200, payload: { disposition: "finalized", drone_id: droneId, session_id: sessionId } },
+      retirement: { status: 409, error: { code: "ATTACHMENT_FINALIZED" } },
+      usable: true,
+    });
+    expect(count("drones")).toBe(1);
+    expect(count("drone_sessions")).toBe(1);
+    if (terminal === "revoked") runtime.maintenance.revokeDroneSession(sessionId);
+    else if (terminal === "evicted") withDatabase((db) => db.prepare("UPDATE drones SET evicted_at = ? WHERE id = ?").run(now.toISOString(), droneId));
+    else withDatabase((db) => db.prepare("UPDATE drone_sessions SET superseded_at = ? WHERE id = ?").run(now.toISOString(), sessionId));
+    const code = terminal === "evicted" ? "DRONE_EVICTED" : terminal === "revoked" ? "SESSION_REVOKED" : "SESSION_REJECTED";
+    expect(await attach(clientA.credential, ids.cubeA, ids.roleA, bearer, "previous-terminal", droneId))
+      .toMatchObject({ error: { code } });
+    for (const action of ["inspect", "finalize", "retire"] as const) {
+      expect(await reconcile(bearer, action, { prior: droneId })).toMatchObject({ error: { code } });
+    }
+  });
+
+  it("persists exact session/cursor through restart, finalize retry and ordinary bearer reuse", async () => {
+    const bearer = generateSecret();
+    const created = await attach(clientA.credential, ids.cubeA, ids.roleA, bearer, "receipt-created");
+    const expected = { disposition: "accepted", drone_id: created.payload.drone.id, session_id: created.payload.session.id };
+    expect(await reconcile(bearer, "inspect")).toMatchObject({ status: 200, payload: expected });
+    runtime.close();
+    digester.destroy();
+    runtime = await openStore({ path: databasePath, clock: () => new Date(now) });
+    ({ digester, authority, api } = authorityRuntime(runtime));
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      expect(await reconcile(bearer, "finalize")).toMatchObject({ status: 200, payload: { ...expected, disposition: "finalized" } });
+    }
+    expect(await reconcile(bearer, "retire")).toMatchObject({ status: 409, error: { code: "ATTACHMENT_FINALIZED" } });
+    const reused = await attach(clientA.credential, ids.cubeA, ids.roleA, bearer, "receipt-reuse", created.payload.drone.id);
+    expect(reused.payload).toEqual({ ...created.payload, result: "reused" });
+    expect(count("drone_sessions")).toBe(1);
+  });
+
+  it.each([false, true])("retirement survives restart and fences a delayed attach (accepted=%s)", async (accepted) => {
+    const bearer = generateSecret();
+    if (accepted) await attach(clientA.credential, ids.cubeA, ids.roleA, bearer, "retirement-created");
+    else expect(await reconcile(bearer, "inspect")).toMatchObject({ status: 200, payload: { disposition: "absent" } });
+    expect(await reconcile(bearer, "retire")).toMatchObject({ status: 200, payload: { disposition: "retired" } });
+    runtime.close();
+    digester.destroy();
+    runtime = await openStore({ path: databasePath, clock: () => new Date(now) });
+    ({ digester, authority, api } = authorityRuntime(runtime));
+    expect(await reconcile(bearer, "retire")).toMatchObject({ status: 200, payload: { disposition: "retired" } });
+    expect(await reconcile(bearer, "inspect")).toMatchObject({ status: 200, payload: { disposition: "retired" } });
+    expect(await reconcile(bearer, "finalize")).toMatchObject({ status: 409, error: { code: "ATTACHMENT_RETIRED" } });
+    expect(await attach(clientA.credential, ids.cubeA, ids.roleA, bearer, "retirement-late"))
+      .toMatchObject({ status: 409, error: { code: "ATTACHMENT_RETIRED" } });
+    expect(await attach(clientA.credential, ids.cubeA, ids.roleA, bearer, "retirement-wrong-prior", randomUUID()))
+      .toMatchObject({ status: 401, error: { code: "SESSION_REJECTED" } });
+    expect(authority.authenticate(`Bearer ${bearer}`)).toBeNull();
+    expect(count("drone_sessions")).toBe(accepted ? 1 : 0);
+  });
+
+  it("isolates foreign receipts and cancellation fences by authenticated parent", async () => {
+    const bearer = generateSecret();
+    runtime.maintenance.grantClientCube({ clientId: clientB.clientId, cubeId: ids.cubeA, access: "read" });
+    // A different parent's pre-admission cancellation must not fence the original parent's POST.
+    expect(await reconcile(bearer, "retire", { credential: clientB.credential })).toMatchObject({ status: 200 });
+    const created = await attach(clientA.credential, ids.cubeA, ids.roleA, bearer, "foreign-created");
+    expect(created.status).toBe(200);
+    expect(await reconcile(bearer, "retire", { credential: clientB.credential })).toMatchObject({ status: 200 });
+    expect(authority.authenticate(`Bearer ${bearer}`)).not.toBeNull();
+    const other = generateSecret();
+    await attach(clientA.credential, ids.cubeA, ids.roleA, other, "foreign-known");
+    for (const action of ["inspect", "finalize", "retire"] as const) {
+      expect(await reconcile(other, action, { credential: clientB.credential })).toMatchObject({ status: 404 });
+    }
+    expect(await reconcile(other, "inspect")).toMatchObject({ status: 200, payload: { disposition: "accepted" } });
+  });
+
+  it("checks original prior absence and current grant for every action without changing state", async () => {
+    const bearer = generateSecret();
+    const created = await attach(clientA.credential, ids.cubeA, ids.roleA, bearer, "tuple-created");
+    for (const action of ["inspect", "finalize", "retire"] as const) {
+      expect(await reconcile(bearer, action, { prior: created.payload.drone.id }))
+        .toMatchObject({ status: 401, error: { code: "SESSION_REJECTED" } });
+    }
+    const principal = authenticatedPrincipal(clientA.credential);
+    const store = runtime.forPrincipal(principal);
+    const receipt = await deriveAttachmentReceipt(bearer);
+    runtime.maintenance.removeClientCubeGrant(clientA.clientId, ids.cubeA);
+    for (const action of ["inspect", "finalize", "retire"] as const) {
+      expect(() => store.reconcileAttachment({ receipt, cube_id: ids.cubeA, role_id: ids.roleA, action })).toThrow();
+    }
+    runtime.maintenance.grantClientCube({ clientId: clientA.clientId, cubeId: ids.cubeA, access: "read" });
+    expect(await reconcile(bearer, "inspect")).toMatchObject({ payload: { disposition: "accepted" } });
+    // Pending retirement is deliberately available to the owning read-granted parent, not general eviction.
+    expect(() => store.evictDrone(ids.cubeA, created.payload.drone.id)).toThrow();
+    expect(await reconcile(bearer, "retire")).toMatchObject({ status: 200 });
+  });
+
+  it.each(["revoked", "evicted", "superseded"] as const)("refuses externally %s sessions, including repeated finalized ACK", async (terminal) => {
+    const bearer = generateSecret();
+    const created = await attach(clientA.credential, ids.cubeA, ids.roleA, bearer, "terminal-created");
+    await reconcile(bearer, "finalize");
+    const sessionId = created.payload.session.id;
+    if (terminal === "revoked") runtime.maintenance.revokeDroneSession(sessionId);
+    else if (terminal === "evicted") runtime.forPrincipal(authenticatedPrincipal(clientA.credential)).evictDrone(ids.cubeA, created.payload.drone.id);
+    else withDatabase((db) => db.prepare("UPDATE drone_sessions SET superseded_at = ? WHERE id = ?").run(now.toISOString(), sessionId));
+    const expected = terminal === "evicted" ? "DRONE_EVICTED" : terminal === "revoked" ? "SESSION_REVOKED" : "SESSION_REJECTED";
+    for (const action of ["inspect", "finalize", "retire"] as const) {
+      expect(await reconcile(bearer, action)).toMatchObject({ error: { code: expected } });
+    }
+    expect(await attach(clientA.credential, ids.cubeA, ids.roleA, bearer, "terminal-retry"))
+      .toMatchObject({ error: { code: expected } });
+  });
+
+  it("rolls back attachment and retirement when SQLite fails partway through either transaction", async () => {
+    const bearer = generateSecret();
+    withDatabase((db) => db.exec(`CREATE TRIGGER fail_attachment BEFORE INSERT ON attachment_operations
+      BEGIN SELECT RAISE(ABORT, 'fixture failure'); END`));
+    await expect(attach(clientA.credential, ids.cubeA, ids.roleA, bearer, "rollback-create")).rejects.toThrow("fixture failure");
+    expect(count("drones")).toBe(0);
+    expect(count("drone_sessions")).toBe(0);
+    expect(count("drone_session_credentials")).toBe(0);
+    withDatabase((db) => db.exec("DROP TRIGGER fail_attachment"));
+    const created = await attach(clientA.credential, ids.cubeA, ids.roleA, bearer, "rollback-positive");
+    withDatabase((db) => db.exec(`CREATE TRIGGER fail_retirement BEFORE UPDATE OF disposition ON attachment_operations
+      WHEN NEW.disposition = 'retired' BEGIN SELECT RAISE(ABORT, 'fixture failure'); END`));
+    await expect(reconcile(bearer, "retire")).rejects.toThrow("fixture failure");
+    expect(authority.authenticate(`Bearer ${bearer}`)).not.toBeNull();
+    expect(await reconcile(bearer, "inspect")).toMatchObject({ payload: { disposition: "accepted", session_id: created.payload.session.id } });
+    withDatabase((db) => db.exec("DROP TRIGGER fail_retirement"));
+    expect(await reconcile(bearer, "retire")).toMatchObject({ status: 200 });
+  });
+
+  it.each(["finalize", "retire"] as const)("serializes %s first against the conflicting transition", async (first) => {
+    const bearer = generateSecret();
+    await attach(clientA.credential, ids.cubeA, ids.roleA, bearer, "race-created");
+    const second = first === "finalize" ? "retire" : "finalize";
+    const results = await Promise.all([reconcile(bearer, first), reconcile(bearer, second)]);
+    expect(results.map((result) => result.status).sort()).toEqual([200, 409]);
+    const finalized = results[0]!.status === 200 ? first === "finalize" : second === "finalize";
+    expect(results.find((result) => result.status === 409)).toMatchObject({
+      error: { code: finalized ? "ATTACHMENT_FINALIZED" : "ATTACHMENT_RETIRED" },
+    });
+    expect(authority.authenticate(`Bearer ${bearer}`) !== null).toBe(finalized);
+  });
+
+  it("rechecks parent revocation after async receipt derivation before creating state", async () => {
+    const bearer = generateSecret();
+    const pending = attach(clientA.credential, ids.cubeA, ids.roleA, bearer, "auth-race");
+    authority.revokeClient(clientA.clientId);
+    expect(await pending).toMatchObject({ status: 404 });
+    expect(count("drones")).toBe(0);
+  });
+
+  it("serializes competing real SQLite connections without partial revocation or a replacement", async () => {
+    const bearer = generateSecret();
+    const attached = await attach(clientA.credential, ids.cubeA, ids.roleA, bearer, "connections-created");
+    const receipt = await deriveAttachmentReceipt(bearer);
+    const workers = (["finalize", "retire"] as const).map((action) => new Worker(
+      new URL("./fixtures/attachment-transaction-worker.mjs", import.meta.url),
+      { workerData: { path: databasePath, clientId: clientA.clientId,
+        request: { receipt, cube_id: ids.cubeA, role_id: ids.roleA, action } } },
+    ));
+    try {
+      await Promise.all(workers.map((worker) => new Promise<void>((resolve, reject) => {
+        worker.once("message", (message) => { expect(message).toEqual({ ready: true }); resolve(); });
+        worker.once("error", reject);
+      })));
+      const results = await Promise.all(workers.map((worker) => new Promise<{ result?: { disposition: string }; code?: string }>((resolve, reject) => {
+        worker.once("message", resolve);
+        worker.once("error", reject);
+        worker.postMessage("go");
+      })));
+      const finalized = results[0]!.result?.disposition === "finalized";
+      expect(results).toEqual(finalized
+        ? [{ result: { disposition: "finalized", drone_id: attached.payload.drone.id, session_id: attached.payload.session.id } }, { code: "ATTACHMENT_FINALIZED" }]
+        : [{ code: "ATTACHMENT_RETIRED" }, { result: { disposition: "retired" } }]);
+      expect(authority.authenticate(`Bearer ${bearer}`) !== null).toBe(finalized);
+      expect(count("drone_sessions")).toBe(1);
+    } finally { await Promise.all(workers.map((worker) => worker.terminate())); }
+  });
+
+  it("returns static malformed/tag diagnostics without echoing request secrets", async () => {
+    const secret = generateSecret();
+    for (const tag of ["14", "15"]) {
+      const response = await api.handle({ method: "POST", path: ATTACH_RECONCILE_PATH,
+        principal: authenticatedPrincipal(clientA.credential),
+        body: { protocol_version: tag, request_id: "receipt-malformed", payload: { [secret]: secret } },
+        signal: new AbortController().signal });
+      expect(response.status).toBe(tag === "14" ? 426 : 400);
+      expect(JSON.stringify(response.body)).not.toContain(secret);
+    }
+  });
+});
+
+async function reconcile(bearer: string, action: ReconcileAttachmentAction, options: { credential?: string; prior?: string } = {}) {
+  const response = await api.handle({ method: "POST", path: ATTACH_RECONCILE_PATH,
+    principal: authenticatedPrincipal(options.credential ?? clientA.credential),
+    body: envelope(`reconcile-${action}`, { receipt: await deriveAttachmentReceipt(bearer), cube_id: ids.cubeA,
+      role_id: ids.roleA, action, ...(options.prior === undefined ? {} : { prior_drone_id: options.prior }) }),
+    signal: new AbortController().signal });
+  const body = response.body as { error?: { code: string } };
+  return { status: response.status,
+    ...(response.status === 200 ? { payload: decodeReconcileAttachmentResponseEnvelope(response.body, action).payload } : { error: body.error }) };
+}
+
+function withDatabase<T>(op: (database: DatabaseSync) => T): T {
+  const database = new DatabaseSync(databasePath);
+  try { return op(database); } finally { database.close(); }
+}
 
 function authorityRuntime(store: StoreRuntime) {
   const nextDigester = new CredentialDigester(Buffer.alloc(32, 6));
@@ -601,7 +888,7 @@ function authenticatedPrincipal(credential: string) {
 }
 
 function envelope(requestId: string, payload: Record<string, unknown>) {
-  return { protocol_version: "14", request_id: requestId, payload };
+  return { protocol_version: "15", request_id: requestId, payload };
 }
 
 function count(table: "drones" | "drone_sessions" | "drone_session_credentials"): number {

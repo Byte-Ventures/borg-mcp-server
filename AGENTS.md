@@ -17,6 +17,11 @@
 - `src/index.ts` is the public library surface. Export changes affect the packed API even when the CLI is unchanged.
 - Portable protocol decoders, paths, templates, and conformance live in the separately released `borgmcp-shared` dependency. Change that contract there first, then consume an exact published version here.
 
+## Code Contracts (EGM.md)
+
+- Each code directory has an `EGM.md` contract that states its interface, invariants, side effects, and verification command. Start at the root [`EGM.md`](EGM.md).
+- When a change alters a documented interface, invariant, or side effect, update the matching contract in the same PR. Contracts are orientation summaries; the code is authoritative.
+
 ## Invariants
 
 - Preserve loopback-only defaults. Private-LAN binding requires both an explicit non-loopback host and `--lan`; HTTPS is TLS 1.3.
